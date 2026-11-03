@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import stat
 import time
 import uuid
@@ -112,6 +113,12 @@ class ReferenceStore:
                   request_id TEXT PRIMARY KEY, job_id TEXT UNIQUE NOT NULL REFERENCES reference_jobs(job_id),
                   node_id TEXT NOT NULL, worker_id TEXT NOT NULL, instance_id TEXT NOT NULL,
                   token TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE IF NOT EXISTS reference_viewer_activation (
+                  job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id),
+                  activation_id TEXT UNIQUE NOT NULL, principal_id TEXT NOT NULL,
+                  environment TEXT NOT NULL, viewer_attempt_id TEXT NOT NULL,
+                  binding_json TEXT NOT NULL, binding_sha256 TEXT NOT NULL,
+                  UNIQUE(principal_id, environment, viewer_attempt_id));
                 CREATE TABLE IF NOT EXISTS reference_worker_receipts (
                   outbox_id TEXT PRIMARY KEY, payload_sha TEXT NOT NULL,
                   job_id TEXT NOT NULL, receipt_json TEXT NOT NULL);
@@ -128,7 +135,7 @@ class ReferenceStore:
         has_failure = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_worker_failures'").fetchone()
         failure_columns = 'f.failure_json AS terminal_failure_json,f.delivery_state AS failure_delivery_state' if has_failure else 'NULL AS terminal_failure_json,NULL AS failure_delivery_state'
         failure_join = 'LEFT JOIN reference_worker_failures f ON f.job_id=r.job_id AND f.generation=r.generation' if has_failure else ''
-        row = db.execute(f"""SELECT r.*,j.status,j.result AS queue_result,j.claim_hash,j.held_reason,c.token AS private_claim_token,
+        row = db.execute(f"""SELECT r.*,j.status,j.environment AS queue_environment,j.result AS queue_result,j.claim_hash,j.held_reason,c.token AS private_claim_token,
           {failure_columns},
           g.grant_json AS private_grant_json
           FROM reference_jobs r JOIN jobs j ON j.id=r.job_id
@@ -172,6 +179,7 @@ class ReferenceStore:
         used = db.execute("""SELECT COALESCE(SUM(length(CAST(input_json AS BLOB))+
           COALESCE(length(CAST(transfer_json AS BLOB)),0)+COALESCE(length(CAST(result_json AS BLOB)),0)),0)
           FROM reference_jobs""").fetchone()[0]
+        used += db.execute("SELECT COALESCE(SUM(length(CAST(binding_json AS BLOB))+length(binding_sha256)),0) FROM reference_viewer_activation").fetchone()[0]
         for table, column in (("reference_acceptances", "receipt_json"), ("reference_outbox", "payload_json"),
                               ("reference_viewer_receipts", "receipt_json"),
                               ("reference_viewer_transfers", "acceptance_json"),
@@ -259,6 +267,81 @@ class ReferenceStore:
             or submission['manifest']['totalBytes'] > self.local_max_input_bytes)
         return self.main_node_id if requires_main else 'cluster'
 
+    @staticmethod
+    def _activation_binding(value):
+        fields = ('schemaVersion', 'protocol', 'activationId', 'principalId', 'submissionId',
+                  'jobId', 'generation', 'environment', 'viewerTaskId', 'viewerAttemptId',
+                  'requestDigest', 'manifestSha256', 'pipelineDigest')
+        protocol._closed(value, fields, 'Viewer activation')
+        if type(value['schemaVersion']) is not int or value['schemaVersion'] != 1 or value['protocol'] != 'ltds-viewer-activation-v1':
+            raise ValueError('unsupported Viewer activation')
+        for key in ('activationId', 'submissionId', 'jobId', 'viewerTaskId', 'viewerAttemptId'):
+            protocol._uuid(value[key], key)
+        protocol._slug(value['principalId'], 'Viewer principal')
+        protocol._integer(value['generation'], 'generation')
+        protocol._environment(value['environment'])
+        for key in ('requestDigest', 'manifestSha256', 'pipelineDigest'):
+            protocol._hash(value[key], key)
+        return json.loads(protocol.canonical_json(value))
+
+    def _activation(self, db, row):
+        stored = db.execute('SELECT * FROM reference_viewer_activation WHERE job_id=?', (row['job_id'],)).fetchone()
+        if stored is None:
+            return None
+        try:
+            binding = self._activation_binding(json.loads(stored['binding_json']))
+            if (_json(binding) != stored['binding_json'] or protocol.digest(binding) != stored['binding_sha256']
+                    or (stored['activation_id'], stored['principal_id'], stored['environment'], stored['viewer_attempt_id'])
+                    != (binding['activationId'], binding['principalId'], binding['environment'], binding['viewerAttemptId'])
+                    or (binding['jobId'], binding['submissionId'], binding['generation'], binding['environment'],
+                        binding['requestDigest'], binding['manifestSha256'], binding['pipelineDigest'])
+                    != (row['job_id'], row['submission_id'], row['generation'], row['environment'],
+                        row['request_digest'], row['manifest_sha'], row['pipeline_digest'])
+                    or row['queue_environment'] != row['environment']):
+                raise ValueError('activation binding changed')
+            return binding
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+            raise Conflict('Viewer activation evidence invalid') from None
+
+    def activate_viewer_binding(self, value, *, authenticated_principal, authenticated_environment):
+        """Internal candidate only: caller must authenticate a distinct Viewer principal.
+
+        No network route is mounted. An environment bearer alone is not a
+        principal. A future boundary must authenticate this argument itself.
+        """
+        binding = self._activation_binding(value)
+        protocol._slug(authenticated_principal, 'authenticated Viewer principal')
+        protocol._environment(authenticated_environment)
+        if (authenticated_principal, authenticated_environment) != (binding['principalId'], binding['environment']):
+            raise Conflict('Viewer principal or environment differs')
+        encoded = _json(binding)
+        digest = protocol.digest(binding)
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, binding['jobId'])
+            existing = self._activation(db, row)
+            if existing is not None:
+                if _json(existing) != encoded:
+                    raise Conflict('Viewer activation differs')
+                return {'activationId': binding['activationId'], 'bindingSha256': digest}
+            if (row['status'] != 'queued' or row['phase'] not in ('queued', 'waiting_capacity')
+                    or row['queue_environment'] != row['environment']
+                    or db.execute('SELECT 1 FROM reference_claims WHERE job_id=?', (binding['jobId'],)).fetchone()):
+                raise Conflict('legacy or active job cannot be activated')
+            if (binding['submissionId'], binding['generation'], binding['environment'], binding['requestDigest'],
+                    binding['manifestSha256'], binding['pipelineDigest']) != (
+                    row['submission_id'], row['generation'], row['environment'], row['request_digest'],
+                    row['manifest_sha'], row['pipeline_digest']):
+                raise Conflict('Viewer activation job binding differs')
+            self._quota(db, len(encoded.encode('utf-8')) + len(digest))
+            try:
+                db.execute('INSERT INTO reference_viewer_activation VALUES(?,?,?,?,?,?,?)',
+                    (binding['jobId'], binding['activationId'], binding['principalId'], binding['environment'],
+                     binding['viewerAttemptId'], encoded, digest))
+            except sqlite3.IntegrityError:
+                raise Conflict('Viewer activation identity already bound') from None
+            return {'activationId': binding['activationId'], 'bindingSha256': digest}
+
     def next_for_node(self, node_id):
         """PRIVATE worker discovery; advisory only, claim remains atomic."""
         self.queue._known_node(node_id)
@@ -272,6 +355,8 @@ class ReferenceStore:
             if not head or head['profile'] != PROFILE or PROFILE not in self.queue.node_profiles(node_id):
                 return None
             row = self._row(db, head['id'])
+            if self._activation(db, row) is None:
+                return None
             submission = json.loads(row['input_json'])
             if self._required_node(submission) != node_id:
                 return None
@@ -294,6 +379,8 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._row(db, job_id)
+            if self._activation(db, row) is None:
+                return None
             old = db.execute("SELECT * FROM reference_claims WHERE request_id=?", (claim_request_id,)).fetchone()
             if old:
                 if (old["job_id"], old["node_id"], old["worker_id"], old["instance_id"]) != (
@@ -358,6 +445,8 @@ class ReferenceStore:
             FROM reference_jobs r JOIN jobs j ON j.id=r.job_id
             JOIN reference_claims c ON c.job_id=r.job_id WHERE r.job_id=? AND j.profile=?''',
             (job_id, PROFILE)).fetchone()
+        if row is not None and self._activation(db, row) is None:
+            raise Conflict('Viewer activation required for recovery')
         if (not authority or authority['authority_id'] != self.queue.authority_id or row is None
                 or (row['node_id'], row['queue_node'], row['claim_node']) != (node_id,) * 3
                 or (row['queue_worker'], row['claim_worker']) != (worker_id,) * 2
@@ -402,6 +491,8 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._row(db, job_id)
+            if phase in ('awaiting_transfer', 'fetching', 'processing') and self._activation(db, row) is None:
+                raise Conflict('Viewer activation required')
             self._transition(row, phase, expected_phase)
             if phase in ("fetching", "processing") and row["status"] != "running":
                 raise Conflict("execution requires a running shared queue claim")
@@ -447,6 +538,8 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._row(db, job_id)
+            if self._activation(db, row) is None:
+                raise Conflict('Viewer activation required')
             if row["status"] != "running" or row["node_id"] != node_id or not row["private_claim_token"]:
                 raise Conflict("reservation requires a running reference claim on this node")
             if row["transfer_json"] == encoded and row["node_id"] == node_id:
@@ -481,6 +574,8 @@ class ReferenceStore:
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, job_id)
+            if self._activation(db, row) is None:
+                raise Conflict('Viewer activation required')
             encoded, digest = _json(grant), protocol.digest(grant)
             old = db.execute('SELECT digest FROM reference_transfer_grants WHERE job_id=?', (job_id,)).fetchone()
             if old:
@@ -511,7 +606,10 @@ class ReferenceStore:
     def private_transfer_grant(self, job_id):
         """PRIVATE worker boundary; never serialize as part of public status."""
         with self.queue._db() as db:
-            self._row(db, job_id)
+            db.execute('BEGIN')
+            reference = self._row(db, job_id)
+            if self._activation(db, reference) is None:
+                raise Conflict('Viewer activation required')
             row = db.execute('SELECT grant_json FROM reference_transfer_grants WHERE job_id=?', (job_id,)).fetchone()
             return json.loads(row[0]) if row else None
 

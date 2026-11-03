@@ -71,6 +71,10 @@ class ReferenceWorkerAPI:
     def _owned_job(self, job_id, identity, claim_token):
         job = self.store.get(job_id, private=True)
         with self.store.queue._db() as db:
+            db.execute('BEGIN')
+            row = self.store._row(db, job_id)
+            if self.store._activation(db, row) is None:
+                raise Conflict('Viewer activation required')
             claim = db.execute("SELECT * FROM reference_claims WHERE job_id=?", (job_id,)).fetchone()
         if (not claim or (claim["node_id"], claim["worker_id"], claim["instance_id"]) !=
                 (identity["node_id"], identity["worker_id"], identity["worker_instance_id"])

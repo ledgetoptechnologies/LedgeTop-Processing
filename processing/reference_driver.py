@@ -422,6 +422,12 @@ class ReferenceDriver:
                 raise DriverHeld('execution_advice_pipeline_changed')
             self.execution_router.bind(claim)
 
+    def _require_activation_bound_grant(self):
+        # The current v1 source grant does not bind the coordinator authority,
+        # execution epoch or immutable Viewer activation digest. A fresh
+        # claim-state response alone cannot fence a sealed, reusable grant.
+        raise DriverHeld('activation_bound_grant_unavailable')
+
     def _fetch_provenance(self, claim, grant):
         try:
             client = self.provenance_client
@@ -734,6 +740,7 @@ class ReferenceDriver:
             self._save(job_id, 'awaiting_grant', data)
             return {'state': 'awaiting_grant', 'jobId': job_id}
         if stage == 'awaiting_grant':
+            self._require_activation_bound_grant()
             status, grant = self._request('GET', suffix + '/transfer-grant', claim_token=token)
             if status == 409:
                 return {'state': 'awaiting_grant', 'jobId': job_id}
@@ -744,6 +751,7 @@ class ReferenceDriver:
             self._save(job_id, 'fetching_pending', data)
             return {'state': 'fetching_pending', 'jobId': job_id}
         if stage in ('fetching_pending', 'processing_pending'):
+            self._require_activation_bound_grant()
             phase = 'fetching' if stage == 'fetching_pending' else 'processing'
             status, public = self._request('POST', suffix + '/phase', {'claimToken': token, 'phase': phase})
             if status == 409:
@@ -752,6 +760,7 @@ class ReferenceDriver:
             self._save(job_id, 'fetching' if phase == 'fetching' else 'execution_pending', data)
             return {'state': 'fetching' if phase == 'fetching' else 'execution_pending', 'jobId': job_id}
         if stage == 'fetching':
+            self._require_activation_bound_grant()
             grant = validate_grant(data['grant'], job=claim, clock=self.clock)
             reservation = data['reservation']['reservationId']
             directory = self.ledger.root / 'jobs' / reservation
@@ -782,6 +791,7 @@ class ReferenceDriver:
             self._save(job_id, 'processing_pending', data)
             return {'state': 'processing_pending', 'jobId': job_id}
         if stage in ('execution_pending','combined_prepared_held') and self._kind(job_id)=='combined':
+            self._require_activation_bound_grant()
             result=self.combined_preparation.prepare(job_id,lease=self._active_step)
             self._save(job_id,'combined_prepared_held',data);return result
         if stage == 'execution_pending':
@@ -798,6 +808,7 @@ class ReferenceDriver:
             except (WorkerHeld, TreeDarHeld):
                 pass
             if not exists:
+                self._require_activation_bound_grant()
                 status, fresh = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
                 if status == 409 or fresh['status'] != 'running':
                     raise DriverHeld('unstarted_claim_requires_reconciliation')
