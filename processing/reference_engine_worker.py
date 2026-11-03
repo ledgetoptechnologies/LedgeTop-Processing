@@ -342,7 +342,11 @@ class ReferenceEngineWorker:
             job_ack = dict(id=job_id, workerId=self.worker_id, nodeId=self.node_id,
                 authorityId=self.authority_id, status='succeeded',
                 result={'resultManifestSha256': json.loads(row['result'])['resultManifestSha256']})
-            if row['host_guarded'] and gate.snapshot()['reservation'] is not None:
+            if gate.completion_acknowledged(row['receipt'], job_ack):
+                # An earlier attempt released this job, potentially before a
+                # different reservation arrived. Never mutate the new owner.
+                pass
+            elif row['host_guarded'] and gate.snapshot()['reservation'] is not None:
                 journal = HostMutationJournal(gate, row['receipt']).open()
                 try:
                     journal.acknowledge_completion(outbox_id=row['outbox_id'], job_ack=job_ack)

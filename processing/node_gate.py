@@ -308,6 +308,18 @@ class NodeGate:
         state['lastAcknowledgment'] = tombstone
         self._save(state)
 
+    def completion_acknowledged(self, receipt_id, job_ack):
+        """Read-only replay check even if another job now holds the node.
+
+        A later acknowledgment may replace the single tombstone; in that case
+        replay fails closed and the old worker must reconcile independently.
+        """
+        state = self.snapshot()
+        identity, digest = self._job(state, job_ack), _digest(job_ack)
+        expected = {'receiptId': receipt_id, 'job': identity, 'completionDigest': digest,
+                    'generation': state['generation'], 'kind': 'completion'}
+        return state.get('lastAcknowledgment') == expected
+
     def release_empty(self, receipt_id, response):
         state = self.snapshot()
         self._journal_blocks_lifecycle(state)

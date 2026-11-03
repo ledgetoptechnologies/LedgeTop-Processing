@@ -71,10 +71,19 @@ class GuardedWorkerTests(ReferenceEngineWorkerTests):
                 raise OSError('synthetic crash after durable release')
         with patch.object(NodeGate, '_save', crash_after_release):
             with self.assertRaises(OSError): self.worker.acknowledge_delivery(self.job['jobId'])
+        # A different job may acquire the node before the old worker's local
+        # journal records its already-durable release.
+        with NodeGate('physical-engine') as gate:
+            gate.reserve('cluster', 'http://127.0.0.1:8000', self.authority, 1, 'b' * 32)
+            gate.bind('b' * 32, dict(id=str(uuid.uuid4()), workerId='worker',
+                nodeId='cluster', authorityId=self.authority))
+            other = HostMutationJournal(gate, 'b' * 32).create()
+            other.close()
+            before = gate.snapshot()
         self.worker = self.make_worker()
         self.worker.acknowledge_delivery(self.job['jobId'])
         with NodeGate('physical-engine') as gate:
-            self.assertIsNone(gate.snapshot()['reservation'])
+            self.assertEqual(gate.snapshot(), before)
         self.assertTrue((self.scratch / 'jobs/reservation-1/all.zip').exists())
 
     def test_nonterminal_or_mismatched_task_never_checkpoints(self):
