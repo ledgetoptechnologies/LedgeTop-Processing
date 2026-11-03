@@ -76,3 +76,13 @@ The pure function validates the supplied current policy even on an exact
 canonical replay. It does not establish whether an already accepted request
 should replay against its original durable policy or a changed current policy;
 policy freshness and authenticated recovery must be agreed before integration.
+
+The isolated combined candidate adds an unmounted principal-scoped v3 POST
+and recovery adapter plus durable canonical envelope evidence in the existing
+shared prepared-identity table. It keeps legacy/v2 digest formats and stores
+JCS-normalized v3 data before deriving the existing Processing v1 request and
+pipeline digests. Exact same-owner replay is a recovery read and survives
+policy changes, but activation and source execution stay held. The endpoint,
+principal registry, trusted dynamic option policy and numeric canonicalization
+still require Viewer agreement and independent review; no runtime image mounts
+this API or installs the optional dependency.

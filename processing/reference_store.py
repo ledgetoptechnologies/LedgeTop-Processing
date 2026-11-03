@@ -346,7 +346,42 @@ class ReferenceStore:
             allowed_odm_options=set(options))
         return self._submit(validated, owner=(authenticated_principal, authenticated_environment), envelope=(wire,envelope_hash,envelope['activationId'],envelope['viewerTaskId'],envelope['viewerAttemptId']))
 
-    def _submit(self, validated, *, owner, envelope=None):
+    def prepare_viewer_envelope_jcs_v3(self, raw, *, authenticated_principal, authenticated_environment, trusted_policy):
+        """Unmounted v3. Exact authenticated replay reads durable evidence first."""
+        import rfc8785
+        from . import prepared_envelope_jcs_candidate as jcs
+        protocol._slug(authenticated_principal, 'authenticated Viewer principal')
+        protocol._environment(authenticated_environment)
+        value = jcs._parse(raw)
+        try: canonical = rfc8785.dumps(value)
+        except (ValueError, TypeError, UnicodeError): raise ValueError('invalid JCS data') from None
+        value = jcs._parse(canonical)
+        protocol._closed(value, ('schemaVersion','protocol','submission','viewerTaskId','viewerAttemptId','activationId'), 'envelope')
+        if type(value['schemaVersion']) is not int or value['schemaVersion'] != 3 or value['protocol'] != jcs.PROTOCOL:
+            raise ValueError('unsupported envelope')
+        for key in ('viewerTaskId','viewerAttemptId','activationId'): protocol._uuid(value[key], key)
+        if type(value['submission']) is not dict: raise ValueError('invalid submission')
+        protocol._uuid(value['submission'].get('submissionId'), 'submission ID')
+        wire = canonical.decode('utf-8')
+        digest = hashlib.sha256(jcs.DOMAIN + canonical).hexdigest()
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            existing = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=?', (value['submission']['submissionId'],)).fetchone()
+            if existing is not None:
+                row = self._row(db, existing['job_id'])
+                owner = self._submission_owner(db, row)
+                prior = db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?', (row['job_id'],)).fetchone()
+                if (owner is None or owner['protocol'] != jcs.PROTOCOL or prior is None or
+                    (owner['principal_id'],owner['environment'],prior['envelope_json'],prior['envelope_sha256']) !=
+                    (authenticated_principal,authenticated_environment,wire,digest)):
+                    raise Conflict('prepared envelope differs')
+                return self._public(row), False
+        canonical2, digest2, normalized = jcs.validate(raw, trusted_policy=trusted_policy, environment=authenticated_environment)
+        if canonical2 != canonical or digest2 != digest: raise Conflict('JCS identity changed')
+        return self._submit(normalized, owner=(authenticated_principal,authenticated_environment),
+            envelope=(wire,digest,value['activationId'],value['viewerTaskId'],value['viewerAttemptId']), envelope_protocol=jcs.PROTOCOL)
+
+    def _submit(self, validated, *, owner, envelope=None, envelope_protocol='ltds-viewer-prepared-envelope-v2'):
         if type(validated) is not dict or set(validated) != _NORMALIZED:
             raise ValueError("expected a normalized reference submission")
         raw = {k: v for k, v in validated.items() if k not in
@@ -369,6 +404,7 @@ class ReferenceStore:
                         (recorded['principal_id'], recorded['environment']) != owner):
                     raise Conflict('submission ownership differs')
                 prior = db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?', (old['job_id'],)).fetchone()
+                if prior is not None and recorded['protocol'] != envelope_protocol: raise Conflict('prepared protocol differs')
                 if (prior is None) != (envelope is None) or (prior is not None and
                         (prior['principal_id'],prior['environment'],prior['envelope_json'],prior['envelope_sha256'],prior['activation_id'],prior['viewer_task_id'],prior['viewer_attempt_id']) !=
                         (owner[0],owner[1],*envelope)):
@@ -389,7 +425,7 @@ class ReferenceStore:
                checked["manifestSha256"], checked["pipelineDigest"]))
             if owner is not None:
                 db.execute('INSERT INTO reference_viewer_submission_owners VALUES(?,?,?,?,?)',
-                    (job_id, owner[0], owner[1], checked['requestDigest'], 'ltds-viewer-prepared-envelope-v2' if envelope is not None else _PREPARED_PROTOCOL))
+                    (job_id, owner[0], owner[1], checked['requestDigest'], envelope_protocol if envelope is not None else _PREPARED_PROTOCOL))
             if envelope is not None:
                 collision = db.execute('SELECT 1 FROM reference_viewer_activation WHERE activation_id=? OR (principal_id=? AND environment=? AND viewer_attempt_id=?)',
                     (envelope[2],owner[0],owner[1],envelope[4])).fetchone()
@@ -434,7 +470,7 @@ class ReferenceStore:
                 return None
             return dict(self._public(job), submissionId=job['submission_id'], requestDigest=job['request_digest'])
 
-    def find_viewer_envelope_v2(self, submission_id, *, authenticated_principal, authenticated_environment):
+    def find_viewer_envelope_v2(self, submission_id, *, authenticated_principal, authenticated_environment, expected_protocol='ltds-viewer-prepared-envelope-v2'):
         """Unmounted authenticated-boundary candidate, no secrets in response."""
         protocol._uuid(submission_id, 'submission ID')
         protocol._slug(authenticated_principal, 'authenticated Viewer principal')
@@ -445,7 +481,7 @@ class ReferenceStore:
             if found is None: return None
             row = self._row(db, found['job_id'])
             owner = self._submission_owner(db, row)
-            if owner is None or (owner['principal_id'],owner['environment']) != (authenticated_principal,authenticated_environment):
+            if owner is None or owner['protocol'] != expected_protocol or (owner['principal_id'],owner['environment']) != (authenticated_principal,authenticated_environment):
                 return None
             record = db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?', (row['job_id'],)).fetchone()
             if record is None: return None
@@ -472,23 +508,32 @@ class ReferenceStore:
             return None
         try:
             protocol._slug(owner['principal_id'], 'Viewer principal')
-            if (owner['protocol'] not in (_PREPARED_PROTOCOL, 'ltds-viewer-prepared-envelope-v2') or owner['environment'] != row['environment']
+            if (owner['protocol'] not in (_PREPARED_PROTOCOL, 'ltds-viewer-prepared-envelope-v2', 'ltds-viewer-prepared-envelope-jcs-v3') or owner['environment'] != row['environment']
                     or owner['environment'] != row['queue_environment'] or owner['request_digest'] != row['request_digest']):
                 raise ValueError('submission owner binding changed')
         except (ValueError, TypeError, KeyError):
             raise Conflict('Viewer submission provenance invalid') from None
         prepared = db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?', (row['job_id'],)).fetchone()
-        if (prepared is not None) != (owner['protocol'] == 'ltds-viewer-prepared-envelope-v2'):
+        if (prepared is not None) != (owner['protocol'] in ('ltds-viewer-prepared-envelope-v2', 'ltds-viewer-prepared-envelope-jcs-v3')):
             raise Conflict('Viewer prepared envelope provenance missing')
         if prepared is not None:
             try:
                 value = json.loads(prepared['envelope_json'])
-                if (_json(value) != prepared['envelope_json'] or
-                    hashlib.sha256(_ENVELOPE_V2_DOMAIN + prepared['envelope_json'].encode('utf-8')).hexdigest() != prepared['envelope_sha256'] or
+                if owner['protocol'] == 'ltds-viewer-prepared-envelope-jcs-v3':
+                    import rfc8785
+                    from .prepared_envelope_jcs_candidate import DOMAIN
+                    canonical = rfc8785.dumps(value)
+                    version = 3
+                else:
+                    canonical = _json(value).encode('utf-8')
+                    DOMAIN = _ENVELOPE_V2_DOMAIN
+                    version = 2
+                if (canonical != prepared['envelope_json'].encode('utf-8') or
+                    hashlib.sha256(DOMAIN + canonical).hexdigest() != prepared['envelope_sha256'] or
                     (prepared['principal_id'],prepared['environment'],prepared['activation_id'],prepared['viewer_task_id'],prepared['viewer_attempt_id']) !=
                     (owner['principal_id'],owner['environment'],value['activationId'],value['viewerTaskId'],value['viewerAttemptId']) or
                     value['submission']['submissionId'] != row['submission_id'] or
-                    value['protocol'] != 'ltds-viewer-prepared-envelope-v2' or value['schemaVersion'] != 2 or
+                    value['protocol'] != owner['protocol'] or value['schemaVersion'] != version or
                     value['submission'] != {k:v for k,v in json.loads(row['input_json']).items() if k not in ('environment','requestDigest','manifestSha256','pipelineDigest')}):
                     raise ValueError('prepared evidence changed')
             except (ValueError, TypeError, KeyError, json.JSONDecodeError):
@@ -554,7 +599,7 @@ class ReferenceStore:
                         row['request_digest'], row['manifest_sha'], row['pipeline_digest'])
                     or row['queue_environment'] != row['environment']
                     or binding['principalId'] != owner['principal_id']
-                    or (owner['protocol'] == 'ltds-viewer-prepared-envelope-v2' and
+                    or (owner['protocol'] in ('ltds-viewer-prepared-envelope-v2', 'ltds-viewer-prepared-envelope-jcs-v3') and
                         (lambda e: e is None or (e['activation_id'],e['viewer_task_id'],e['viewer_attempt_id']) !=
                           (binding['activationId'],binding['viewerTaskId'],binding['viewerAttemptId']))(
                             db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?', (row['job_id'],)).fetchone()))):

@@ -20,7 +20,7 @@ def _token(token):
 
 
 class PreparedSubmissionAPI:
-    def __init__(self, store, *, credentials, legacy_bearer_tokens, policies):
+    def __init__(self, store, *, credentials, legacy_bearer_tokens, policies, jcs_policies=None):
         # Sequence rather than dict ensures duplicate credentials cannot be hidden.
         if type(credentials) not in (tuple, list) or not credentials or type(legacy_bearer_tokens) not in (tuple, list):
             raise ValueError('explicit credential inventories required')
@@ -45,6 +45,21 @@ class PreparedSubmissionAPI:
                 or len(set(opts)) != len(opts) or type(engines) not in (list,tuple)
                 or any(type(x) is not str or x not in ('odm','treedar') for x in engines) or len(set(engines)) != len(engines)):
                 raise ValueError('invalid server policy')
+        if jcs_policies is not None:
+            from .prepared_envelope_jcs_candidate import _validate_definition
+            p._closed(jcs_policies, ('production','staging'), 'JCS server policies')
+            for policy in jcs_policies.values():
+                p._closed(policy, ('capabilityFingerprint','optionsFingerprint','availableEngines','optionDefinitions'), 'JCS server policy')
+                p._hash(policy['capabilityFingerprint'], 'capability fingerprint')
+                p._hash(policy['optionsFingerprint'], 'options fingerprint')
+                engines, definitions = policy['availableEngines'], policy['optionDefinitions']
+                if (type(engines) not in (list,tuple) or any(type(e) is not str or e not in ('odm','treedar') for e in engines)
+                    or len(set(engines)) != len(engines) or type(definitions) is not dict):
+                    raise ValueError('invalid JCS server policy')
+                for name, definition in definitions.items():
+                    if type(name) is not str or not re.fullmatch(r'[a-z][a-z0-9-]{0,79}',name): raise ValueError('invalid option')
+                    _validate_definition(definition)
+        self._jcs_policies = copy.deepcopy(jcs_policies)
         self.store = store
         self._credentials = tuple(configured)
         self._policies = copy.deepcopy(policies)
@@ -67,6 +82,16 @@ class PreparedSubmissionAPI:
         if identity is None: return Response(401, {'error':'unauthorized'})
         principal, environment = identity
         try:
+            if method == 'POST' and path == '/ltds/prepared/v3/submissions' and self._jcs_policies is not None:
+                job, created = self.store.prepare_viewer_envelope_jcs_v3(body, authenticated_principal=principal,
+                    authenticated_environment=environment, trusted_policy=self._jcs_policies[environment])
+                return Response(201 if created else 200, job)
+            v3 = re.fullmatch(r'/ltds/prepared/v3/submissions/([0-9a-f-]{36})', path) if type(path) is str else None
+            if method == 'GET' and v3 and self._jcs_policies is not None:
+                if body: raise ValueError('GET body forbidden')
+                result = self.store.find_viewer_envelope_v2(v3[1], authenticated_principal=principal,
+                    authenticated_environment=environment, expected_protocol='ltds-viewer-prepared-envelope-jcs-v3')
+                return Response(200, result) if result is not None else Response(404, {'error':'not_found'})
             if method == 'POST' and path == PREFIX + '/submissions':
                 envelope = p.decode_submission(body)
                 job, created = self.store.prepare_viewer_envelope_v2(envelope, authenticated_principal=principal,
