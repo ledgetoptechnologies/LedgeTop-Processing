@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "vectors": [
+    {
+      "name": "empty_inventory",
+      "files": [],
+      "canonicalJson": "[]",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "accepted": false
+    },
+    {
+      "name": "single_empty_file",
+      "files": [
+        {
+          "relativePath": "alpha.txt",
+          "byteSize": 0,
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "canonicalJson": "[{\"relativePath\":\"alpha.txt\",\"byteSize\":0,\"sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\"}]",
+      "sha256": "f77b668c0a61974c906f763d473c516feaeeab9608e861013ea98d57c1a0fd42",
+      "accepted": true
+    },
+    {
+      "name": "utf16_order_and_json_escaping",
+      "files": [
+        {
+          "relativePath": "tree/.txt",
+          "byteSize": 4,
+          "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        {
+          "relativePath": "tree/😀.txt",
+          "byteSize": 3,
+          "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+        },
+        {
+          "relativePath": "sub/ .txt",
+          "byteSize": 2,
+          "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        {
+          "relativePath": "a\"quote.txt",
+          "byteSize": 17,
+          "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      ],
+      "canonicalJson": "[{\"relativePath\":\"a\\\"quote.txt\",\"byteSize\":17,\"sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\"},{\"relativePath\":\"sub/ .txt\",\"byteSize\":2,\"sha256\":\"2222222222222222222222222222222222222222222222222222222222222222\"},{\"relativePath\":\"tree/😀.txt\",\"byteSize\":3,\"sha256\":\"3333333333333333333333333333333333333333333333333333333333333333\"},{\"relativePath\":\"tree/.txt\",\"byteSize\":4,\"sha256\":\"4444444444444444444444444444444444444444444444444444444444444444\"}]",
+      "sha256": "bfba2135f9191d3fd57be4c4cdf99fc819978b4a8a27058057839d9f8c0c4f3c",
+      "accepted": true
+    }
+  ]
+}
