@@ -116,7 +116,7 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
                                  'sha256': '0' * 64})
         self.assertTrue(bridge.server.wait_drained(5))
         self.assertEqual(self.native_fixture.counts()['upload'], 0)
-        self.assertEqual(list(bridge.spool.iterdir()), [])
+        self.assertEqual(list(bridge.spool.glob('incoming-*')), [])
         self.assertEqual(self.journal_state()[1], [('init', 'done')])
 
     @unittest.skipIf(os.name == 'nt', 'secure remote spool requires POSIX')
@@ -134,12 +134,15 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
             client.upload(task, item)
             self.assertEqual(self.native_fixture.counts()['upload'], 1)
             self.assertEqual(self.journal_state()[1], [('init', 'done'), ('upload', 'done')])
-            original = list(bridge.spool.iterdir())
+            original = list(bridge.spool.glob('incoming-*'))
             self.assertEqual(len(original), 1)
             with self.assertRaises(EngineUnavailable): client.upload(task, item)
             self.assertTrue(bridge.server.wait_drained(5))
-            self.assertEqual(list(bridge.spool.iterdir()), original)
+            self.assertEqual(list(bridge.spool.glob('incoming-*')), original)
             self.assertEqual(original[0].read_bytes(), content)
+            reservations = bridge.server.spool_budget.inspect()['reservations']
+            self.assertEqual(len(reservations), 1)
+            self.assertEqual((reservations[0]['stage'], reservations[0]['bytes']), ('mutation_started', 3))
         self.assertEqual(self.native_fixture.counts()['upload'], 1)
 
     @unittest.skipIf(os.name == 'nt', 'secure remote spool requires POSIX')
@@ -167,7 +170,7 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
             self.assertFalse(thread.is_alive())
         self.assertTrue(bridge.server.wait_drained(5))
         self.assertCountEqual(outcomes, ['ok', 'held'])
-        files = list(bridge.spool.iterdir())
+        files = list(bridge.spool.glob('incoming-*'))
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0].read_bytes(), b'abc')
         self.assertEqual(self.native_fixture.counts()['upload'], 1)
@@ -217,13 +220,13 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
                 response = conn.getresponse()
                 self.assertEqual(response.status, 409); response.read()
                 # The one remaining file belongs to the in-flight first upload.
-                files = list(bridge.spool.iterdir())
+                files = list(bridge.spool.glob('incoming-*'))
                 self.assertEqual(len(files), 1)
                 self.assertEqual(files[0].read_bytes(), b'abc')
                 release.set(); first.join(10)
                 self.assertFalse(first.is_alive())
                 self.assertEqual(outcomes, ['ok'])
-                self.assertEqual(list(bridge.spool.iterdir()), files)
+                self.assertEqual(list(bridge.spool.glob('incoming-*')), files)
                 self.assertEqual(self.native_fixture.counts()['upload'], 1)
         finally:
             release.set(); conn.close()
@@ -247,14 +250,17 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
         client = GuardedNativeClient('127.0.0.1', bridge.server.server_port, bridge.context, TOKEN, timeout=10)
         with self.assertRaises(EngineUnavailable): client.upload(task, item)
         self.assertTrue(bridge.server.wait_drained(5))
-        files = list(bridge.spool.iterdir())
+        files = list(bridge.spool.glob('incoming-*'))
         self.assertEqual(len(files), 1)
         self.assertEqual(self.journal_state()[1], [('init', 'done'), ('upload', 'pending')])
         with self.assertRaises(EngineUnavailable): client.upload(task, item)
         self.assertTrue(bridge.server.wait_drained(5))
-        self.assertEqual(list(bridge.spool.iterdir()), files)
+        self.assertEqual(list(bridge.spool.glob('incoming-*')), files)
         self.assertEqual(files[0].read_bytes(), b'abc')
         self.assertEqual(self.native_fixture.counts()['upload'], 1)
+        reservations = bridge.server.spool_budget.inspect()['reservations']
+        self.assertEqual(len(reservations), 1)
+        self.assertEqual(reservations[0]['stage'], 'mutation_started')
 
     @unittest.skipIf(os.name == 'nt', 'secure remote spool requires POSIX')
     def test_backend_gate_busy_like_error_cannot_delete_uncertain_spool(self):
@@ -269,7 +275,7 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
         with patch.object(self.proxy.engine, 'upload', side_effect=GuardedUploadGateBusy('backend')):
             with self.assertRaises(EngineUnavailable): client.upload(task, item)
         self.assertTrue(bridge.server.wait_drained(5))
-        files = list(bridge.spool.iterdir())
+        files = list(bridge.spool.glob('incoming-*'))
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0].read_bytes(), b'abc')
         self.assertEqual(self.journal_state()[1], [('init', 'done'), ('upload', 'pending')])
@@ -286,7 +292,7 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
             client = GuardedNativeClient('127.0.0.1', bridge.server.server_port, bridge.context, token, timeout=10)
             with self.assertRaises(EngineUnavailable): client.upload(identifier, item)
         self.assertTrue(bridge.server.wait_drained(5))
-        self.assertEqual(list(bridge.spool.iterdir()), [])
+        self.assertEqual(list(bridge.spool.glob('incoming-*')), [])
         self.assertEqual(self.native_fixture.counts()['upload'], 0)
 
     def test_authenticated_wrong_engine_uuid_cannot_mutate_bound_task(self):

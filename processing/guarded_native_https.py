@@ -18,6 +18,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from .guarded_native_proxy import UnissuedGuardedUpload
+from .guarded_spool_budget import GuardedSpoolBudget
 
 MAX_BODY = 65536
 MAX_UPLOAD = 20 * 1024 ** 3
@@ -25,7 +26,8 @@ MAX_UPLOAD = 20 * 1024 ** 3
 
 def create_guarded_https_server(adapter, *, bind_host, port, certificate, private_key,
                                 client_ca, client_fingerprint, enabled=False,
-                                request_deadline=5, upload_deadline=3600):
+                                request_deadline=5, upload_deadline=3600,
+                                spool_cap=20 * 1024 ** 3):
     if enabled is not True:
         raise ValueError('guarded listener is disabled')
     # Until an operational ingress policy exists, do not expose this prototype
@@ -43,6 +45,9 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
     tls.load_cert_chain(certificate, private_key)
     tls.load_verify_locations(cafile=client_ca)
     tls.verify_mode = ssl.CERT_REQUIRED
+    # Durable reservations survive a listener restart. Creating this ledger
+    # does not authorize cleanup of any existing or uncertain input.
+    budget = GuardedSpoolBudget(adapter.root, cap=spool_cap)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
@@ -145,14 +150,14 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                 fd = None
                 retain = False
                 file_identity = None
+                stage = None
                 try:
                     root_stat = os.fstat(root_fd)
                     path_stat = os.stat(adapter.root, follow_symlinks=False)
                     if (root_stat.st_dev, root_stat.st_ino) != (path_stat.st_dev, path_stat.st_ino):
                         raise ValueError()
-                    free = os.fstatvfs(root_fd)
-                    if free.f_bavail * free.f_frsize - size < 1024 ** 3:
-                        raise ValueError('insufficient spool headroom')
+                    budget.reserve(filename, size)
+                    stage = 'receiving'
                     fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                                  0o600, dir_fd=root_fd)
                     created = os.fstat(fd)
@@ -172,11 +177,13 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                     os.fsync(fd)
                     os.close(fd); fd = None
                     os.fsync(root_fd)
+                    budget.transition(filename, stage, 'spooled'); stage = 'spooled'
                     if not hmac.compare_digest(digest.hexdigest(), expected):
                         raise ValueError('input digest mismatch')
                     if not self.server.input_complete(self.connection):
                         raise ValueError('upload expired')
                     # Keep the file even on a lost/ambiguous engine response.
+                    budget.transition(filename, stage, 'mutation_started'); stage = 'mutation_started'
                     retain = True
                     try:
                         adapter.upload(task, {'path': str(adapter.root / filename), 'name': name,
@@ -189,13 +196,21 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                         raise
                 finally:
                     if fd is not None: os.close(fd)
-                    if not retain and file_identity is not None:
+                    if not retain and stage is not None:
                         try:
-                            current = os.stat(filename, dir_fd=root_fd, follow_symlinks=False)
-                            if (current.st_dev, current.st_ino) == file_identity:
-                                os.unlink(filename, dir_fd=root_fd)
-                                os.fsync(root_fd)
-                        except FileNotFoundError:
+                            budget.transition(filename, stage, 'discardable')
+                            if file_identity is not None:
+                                try:
+                                    current = os.stat(filename, dir_fd=root_fd, follow_symlinks=False)
+                                    if (current.st_dev, current.st_ino) == file_identity:
+                                        os.unlink(filename, dir_fd=root_fd)
+                                        os.fsync(root_fd)
+                                except FileNotFoundError:
+                                    pass
+                            budget.release_discarded(filename, root_fd)
+                        except Exception:
+                            # Preserve both charge and any uncertain file for
+                            # inspection if ownership or durability is unclear.
                             pass
                     os.close(root_fd)
                 return self._reply(200, {'accepted': True})
@@ -210,6 +225,7 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
 
         def __init__(self, *args):
             self.slots = threading.BoundedSemaphore(4)
+            self.spool_budget = budget
             self.entries = {}
             self.entries_lock = threading.Lock()
             self.drained = threading.Event()
