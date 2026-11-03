@@ -6,6 +6,7 @@ caller, proxy HTTP, attest a Docker identity, or prevent access around NodeGate.
 Pending mutations are uncertain after any interruption and are never replayed.
 """
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import re
 import sqlite3
@@ -101,6 +102,17 @@ class HostMutationJournal:
         self._current()
         if self.db is None: raise GateError('guard journal not open')
 
+    @contextmanager
+    def _transaction(self):
+        # Serialize reads as well as writes across separate journal connections.
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+
     def begin(self, op_id, kind, request_digest):
         """Record intent before mutation. A done replay returns its ack hash.
 
@@ -112,7 +124,7 @@ class HostMutationJournal:
         except (ValueError, TypeError, AttributeError): valid_id = False
         if not valid_id or kind not in ('init', 'upload', 'commit') or not isinstance(request_digest, str) or not _HASH.fullmatch(request_digest):
             raise GateError('invalid operation identity')
-        with self.db:
+        with self._transaction():
             prior = self.db.execute('SELECT seq,op_id,kind,request_digest,ack_digest,state FROM operations WHERE op_id=?', (op_id,)).fetchone()
             if prior:
                 if (prior[2], prior[3]) != (kind, request_digest): raise GateError('operation identity conflict')
@@ -131,7 +143,7 @@ class HostMutationJournal:
         self._ready()
         if not isinstance(ack_digest, str) or not _HASH.fullmatch(ack_digest):
             raise GateError('invalid acknowledgment digest')
-        with self.db:
+        with self._transaction():
             row = self.db.execute('SELECT ack_digest,state FROM operations WHERE op_id=?', (op_id,)).fetchone()
             if row is None: raise GateError('unknown mutation')
             if row[1] == 'done':

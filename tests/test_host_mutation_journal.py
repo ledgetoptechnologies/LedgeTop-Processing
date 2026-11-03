@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import uuid
 from unittest.mock import patch
@@ -59,6 +60,59 @@ class HostMutationJournalTests(unittest.TestCase):
         with NodeGate(self.engine) as gate:
             journal = HostMutationJournal(gate, self.receipt).open()
             with self.assertRaises(MutationHeld): journal.begin(op, 'upload', 'e' * 64)
+            self.assertIsNotNone(gate.snapshot()['reservation'])
+            journal.close()
+
+    def test_connections_serialize_checks_and_intent_insert(self):
+        first_in_check = threading.Event()
+        second_started = threading.Event()
+        release = threading.Event()
+        results = []
+        with NodeGate(self.engine) as gate:
+            def submit(first):
+                journal = HostMutationJournal(gate, self.receipt).open()
+                if first:
+                    def trace(sql):
+                        if sql.startswith('SELECT seq,op_id'):
+                            first_in_check.set()
+                            if not release.wait(5):
+                                raise RuntimeError('test release timed out')
+                    journal.db.set_trace_callback(trace)
+                else:
+                    journal.db.set_trace_callback(
+                        lambda sql: second_started.set() if sql == 'BEGIN IMMEDIATE' else None)
+                try:
+                    journal.begin(str(uuid.uuid4()), 'upload', 'e' * 64)
+                    results.append('started')
+                except MutationHeld:
+                    results.append('held')
+                except BaseException as exc:
+                    results.append(repr(exc))
+                finally:
+                    journal.close()
+            first = threading.Thread(target=submit, args=(True,))
+            second = threading.Thread(target=submit, args=(False,))
+            first.start()
+            self.assertTrue(first_in_check.wait(5))
+            second.start()
+            self.assertTrue(second_started.wait(5))
+            release.set()
+            first.join(10)
+            second.join(10)
+            self.assertFalse(first.is_alive() or second.is_alive())
+            self.assertCountEqual(results, ['started', 'held'])
+
+    def test_marker_blocks_completion_and_operator_release(self):
+        with NodeGate(self.engine) as gate:
+            journal = HostMutationJournal(gate, self.receipt).open()
+            journal.begin(str(uuid.uuid4()), 'upload', 'e' * 64)
+            job = gate.snapshot()['reservation']['job']
+            with self.assertRaises(GateError): gate.prepare_completion(self.receipt, job)
+            with self.assertRaises(GateError): gate.acknowledge(self.receipt, job)
+            with self.assertRaises(GateError): gate.release_empty(self.receipt, {'job': None})
+            with self.assertRaises(GateError):
+                gate.resolve(self.receipt, 1, old_worker_stopped=True,
+                             coordinator_resolved=True, note='test')
             self.assertIsNotNone(gate.snapshot()['reservation'])
             journal.close()
 
