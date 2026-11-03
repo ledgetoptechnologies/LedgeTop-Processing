@@ -1,6 +1,7 @@
 """Strict startup configuration for the private routing prototype."""
 
 from dataclasses import dataclass, field
+import ipaddress
 import os
 import re
 from urllib.parse import urlsplit
@@ -35,6 +36,26 @@ class Config:
     authority_lease_dir: str = ''
     viewer_production_held: bool = False
     per_node_slots: bool = False
+
+
+def require_distinct_node_hosts(local_url: str, main_url: str):
+    """Reject obvious same-host aliases, not a physical identity attestation."""
+    def host(origin):
+        value = _node_origin(origin)
+        if not value:
+            raise ValueError('per-node slots require two node origins')
+        name = urlsplit(value).hostname.rstrip('.').lower()
+        if name == 'localhost':
+            return '127.0.0.1'
+        try:
+            ip = ipaddress.ip_address(name)
+            if getattr(ip, 'ipv4_mapped', None):
+                ip = ip.ipv4_mapped
+            return str(ip)
+        except ValueError:
+            return name
+    if host(local_url) == host(main_url):
+        raise ValueError('per-node slots require distinct node hosts')
 
 
 def _node_origin(value: str) -> str:

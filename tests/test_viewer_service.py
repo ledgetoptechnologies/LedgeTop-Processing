@@ -450,12 +450,41 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.task(first)['job']['status'], 'succeeded')
         self.assertIn(self.task(second)['job']['status'], ('running', 'held'))
 
+    def test_reconciliation_failure_holds_one_job_but_polls_other(self):
+        self.queue.per_node_slots = True
+        first = self.submit()
+        second = self.submit()
+        self.service.tick()
+        self.service.tick()
+        self.finish(second)
+        original_poll = self.service._poll
+        def sometimes_broken(task):
+            if task['uuid'] == first:
+                raise ValueError('synthetic corrupt task')
+            return original_poll(task)
+        with patch.object(self.service, '_poll', side_effect=sometimes_broken):
+            with self.assertRaisesRegex(Conflict, 'reconciliation requires inspection'):
+                self.service.tick()
+        self.assertEqual(self.task(first)['job']['status'], 'held')
+        self.assertEqual(self.task(second)['job']['status'], 'succeeded')
+
     def test_opt_in_does_not_fallback_for_unavailable_cluster(self):
         self.queue.per_node_slots = True
         self.unavailable.add('cluster')
         first = self.submit()
         self.service.tick()
         self.assertIsNone(self.task(first)['node_id'])
+
+    def test_per_node_configuration_rejects_obvious_same_host_aliases(self):
+        from processing.config import require_distinct_node_hosts
+        for local, main in (('http://localhost:3001', 'http://127.0.0.1:3004'),
+                            ('http://[::ffff:192.0.2.1]:3001', 'http://192.0.2.1:3004'),
+                            ('http://NODE.example.:3001', 'http://node.example:3004'),
+                            ('', 'http://192.0.2.2:3000')):
+            with self.subTest(local=local, main=main):
+                with self.assertRaises(ValueError):
+                    require_distinct_node_hosts(local, main)
+        require_distinct_node_hosts('http://192.0.2.1:3001', 'http://192.0.2.2:3004')
 
     def test_opt_in_atomic_node_slot_blocks_simultaneous_claims(self):
         self.queue.per_node_slots = True

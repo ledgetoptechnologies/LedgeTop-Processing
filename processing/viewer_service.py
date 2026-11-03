@@ -1,13 +1,14 @@
-"""Native Viewer facade service and cooperative, single-slot engine dispatcher.
+"""Native Viewer facade service and cooperative engine dispatcher.
 
 Only fixed configured engines are contacted. Mutation intent is durable before
-HTTP; uncertain mutations hold the shared slot instead of replaying a job.
+HTTP; uncertain mutations hold the applicable slot instead of replaying a job.
 Completed engine tasks and downloaded archives remain until operator cleanup.
 """
 
 import http.client
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -596,36 +597,55 @@ class ViewerService:
         with self._lock:
             jobs = self.queue.list()
             split_jobs = self.store.incomplete_terminal_job_ids()
+            reconciliation_errors = []
             # Older coordinators could commit the job before the Viewer row.
             # Only replay a terminal result when every persisted identity agrees.
             for job in jobs:
                 if job['id'] not in split_jobs:
                     continue
-                task = self.store.task_for_job(job['id'])
-                if task['phase'] == 'complete':
-                    continue
-                expected = {'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
-                            'environment': task['environment'], 'cancelled': False}
-                if (job['status'] == 'failed' and isinstance(job['result'], dict)
-                        and job['result'].get('operatorAction') == 'resolve'):
-                    # The operator attested the worker stopped; finish the hold.
-                    self.store.settle_operator_resolution(task)
-                    continue
-                if (not task['engine_uuid'] or not task['node_id'] or not task['claim_token']
-                        or job['result'] != expected):
-                    raise Conflict('terminal Viewer identity requires inspection')
-                self.store.complete_engine_task(task, job['status'], expected)
+                try:
+                    task = self.store.task_for_job(job['id'])
+                    if task['phase'] == 'complete':
+                        continue
+                    expected = {'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
+                                'environment': task['environment'], 'cancelled': False}
+                    if (job['status'] == 'failed' and isinstance(job['result'], dict)
+                            and job['result'].get('operatorAction') == 'resolve'):
+                        self.store.settle_operator_resolution(task)
+                        continue
+                    if (not task['engine_uuid'] or not task['node_id'] or not task['claim_token']
+                            or job['result'] != expected):
+                        raise Conflict('terminal Viewer identity requires inspection')
+                    self.store.complete_engine_task(task, job['status'], expected)
+                except Exception as exc:
+                    if not self.queue.per_node_slots:
+                        raise
+                    reconciliation_errors.append(exc)
             for job in jobs:
                 if job['profile'] != VIEWER_PROFILE or job['status'] not in ('running', 'held'):
                     continue
                 if job['status'] == 'held' and job['heldReason'] != 'coordinator_restart':
                     continue
-                task = self.store.task_for_job(job['id'])
-                if (task['phase'] in ('processing', 'commit_pending', 'cancel_pending')
-                        and task['engine_uuid'] and task['node_id'] and task['claim_token']):
-                    self._poll(task)
-                else:
-                    self._hold(task, 'submission_interrupted')
+                try:
+                    task = self.store.task_for_job(job['id'])
+                    if (task['phase'] in ('processing', 'commit_pending', 'cancel_pending')
+                            and task['engine_uuid'] and task['node_id'] and task['claim_token']):
+                        self._poll(task)
+                    else:
+                        self._hold(task, 'submission_interrupted')
+                except Exception as exc:
+                    if not self.queue.per_node_slots:
+                        raise
+                    reconciliation_errors.append(exc)
+                    if job['status'] == 'running':
+                        try:
+                            current = self.queue.get(job['id'])
+                            if current and current['status'] == 'running':
+                                self.queue.operator(job['id'], 'hold', {'note': 'reconciliation_error'})
+                        except Exception as hold_error:
+                            reconciliation_errors.append(hold_error)
+            if reconciliation_errors:
+                raise Conflict('Viewer reconciliation requires inspection') from reconciliation_errors[0]
             jobs = self.queue.list()
             if not self.queue.per_node_slots and any(j['status'] in ('running', 'held') for j in jobs):
                 return
@@ -695,13 +715,17 @@ class ViewerService:
         self._thread.start()
 
     def _run(self):
+        reported_error = False
         while not self._stop.is_set():
             try:
                 self.tick()
+                reported_error = False
             except Exception:
                 # No replay of mutations. Intents/claims remain durable; a
                 # restart retains their slot for reconciliation or inspection.
-                pass
+                if not reported_error:
+                    logging.getLogger(__name__).error('Viewer scheduler iteration failed; inspection required')
+                    reported_error = True
             self._stop.wait(2)
 
     def close(self):

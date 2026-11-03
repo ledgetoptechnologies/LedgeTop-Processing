@@ -18,6 +18,9 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    if config.per_node_slots:
+        from .config import require_distinct_node_hosts
+        require_distinct_node_hosts(config.local_node_url, config.main_node_url)
     reference_settings = None
     if config.reference_config_path:
         from .reference_runtime import load_reference_settings
