@@ -78,6 +78,28 @@ class PrototypeHTTPTests(unittest.TestCase):
                                                         'nodeId': 'main', 'profiles': [PROFILE]})
         self.assertEqual(allowed['job']['nodeId'], 'main')
 
+    def test_inventory_claim_rejects_odm_on_treedar_only_node(self):
+        self.server.shutdown(); self.server.server_close(); self.handler.prototype_queue.close()
+        inventory = (
+            {'id':'tree', 'physicalHostId':'host-tree', 'origin':'http://192.0.2.1:3000', 'token':'', 'maxPhotos':None, 'capabilities':('treedar',)},
+            {'id':'photo', 'physicalHostId':'host-photo', 'origin':'http://192.0.2.2:3000', 'token':'', 'maxPhotos':1000, 'capabilities':('odm',)},
+        )
+        self.handler = make_handler(Config(TOKEN, '', '', 1000, 20000,
+            prototype_state_dir=self.directory.name, photo_smoke_enabled=True,
+            prototype_node_ids=('tree','photo'), treedar_node_ids=('tree',),
+            per_node_slots=True, node_inventory=inventory))
+        self.server = start_server(self.handler)
+        self.origin = f'http://127.0.0.1:{self.server.server_port}'
+        self.request('/v1/prototype/jobs', {'requestId':'odm', 'environment':'staging', 'profile':PHOTO_PROFILE})
+        _, denied = self.request('/v1/prototype/claim', {'workerId':'tree-worker', 'nodeId':'tree', 'profiles':[PHOTO_PROFILE]})
+        self.assertIsNone(denied['job'])
+        _, allowed = self.request('/v1/prototype/claim', {'workerId':'photo-worker', 'nodeId':'photo', 'profiles':[PHOTO_PROFILE]})
+        self.assertEqual(allowed['job']['nodeId'], 'photo')
+        for path, body in (('/v1/options', None), ('/v1/nodes', None), ('/v1/plan', {'engine':'odm','photoCount':1,'inputBytes':1})):
+            with self.assertRaises(HTTPError) as caught:
+                self.request(path, body)
+            self.assertEqual(caught.exception.code, 503)
+
     def test_default_probe_has_no_job_queue(self):
         disabled = start_server(make_handler(Config(TOKEN, "", "", 800, 20000)))
         try:

@@ -82,7 +82,7 @@ def _require_idle_state(path):
 class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
                  treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
-                 require_idle_existing=False, per_node_slots=False):
+                 require_idle_existing=False, per_node_slots=False, node_capabilities=None):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or ('cluster' not in node_ids and not per_node_slots)):
@@ -94,6 +94,14 @@ class Queue(Maintenance):
         if type(per_node_slots) is not bool:
             raise ValueError("per_node_slots must be boolean")
         self.per_node_slots = per_node_slots
+        if node_capabilities is not None:
+            if (not isinstance(node_capabilities, dict) or set(node_capabilities) != set(self.node_ids)
+                    or any(not isinstance(caps, (tuple, list)) or not caps
+                           or any(c not in ('odm', 'treedar') for c in caps) for caps in node_capabilities.values())):
+                raise ValueError('invalid node capabilities')
+            self.node_capabilities = {node: frozenset(caps) for node, caps in node_capabilities.items()}
+        else:
+            self.node_capabilities = None
         if treedar_node_ids is None:
             # Isolated legacy fixtures retain their original node capabilities.
             treedar_node_ids = self.node_ids
@@ -102,6 +110,9 @@ class Queue(Maintenance):
                 or len(set(treedar_node_ids)) != len(treedar_node_ids)):
             raise ValueError("treedar_node_ids must be unique configured node IDs")
         self.treedar_node_ids = tuple(treedar_node_ids)
+        if self.node_capabilities is not None and set(self.treedar_node_ids) != {
+                node for node, caps in self.node_capabilities.items() if 'treedar' in caps}:
+            raise ValueError('TreeDar nodes must match inventory capabilities')
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.allowed_profiles = {PROFILE, PHOTO_PROFILE} if photo_smoke_enabled else {PROFILE}
         if viewer_enabled:
@@ -171,7 +182,9 @@ class Queue(Maintenance):
 
     def node_profiles(self, node_id):
         return sorted(profile for profile in self.allowed_profiles
-                      if profile != PROFILE or node_id in self.treedar_node_ids)
+                      if (profile != PROFILE or node_id in self.treedar_node_ids)
+                      and (self.node_capabilities is None or profile not in (PHOTO_PROFILE, VIEWER_PROFILE)
+                           or 'odm' in self.node_capabilities.get(node_id, ())))
 
     def _node_public(self, row):
         return {**super()._node_public(row), "allowedProfiles": self.node_profiles(row['id'])}
@@ -304,6 +317,9 @@ class Queue(Maintenance):
                 if barrier:
                     return None
                 row = candidate
+            if (row['environment'] == 'staging' and db.execute(
+                    "SELECT 1 FROM jobs WHERE environment='production' AND status IN ('queued','running','held') LIMIT 1").fetchone()):
+                return None
             if row['profile'] == REFERENCE_PROFILE:
                 # Reference claims also persist an idempotent private envelope
                 # and enforce input-dependent routing in ReferenceStore.claim.

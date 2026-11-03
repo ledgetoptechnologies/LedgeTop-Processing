@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import os
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -24,6 +25,19 @@ class NodeRoleTests(unittest.TestCase):
     def submit(self, name, profile, environment='staging'):
         return self.queue.submit({'requestId': name, 'profile': profile,
                                   'environment': environment})[0]
+
+    def test_inventory_migration_preserves_legacy_local_photo_limit(self):
+        node = {'id':'small', 'physicalHostId':'cluster-pc', 'origin':'http://192.0.2.1:3000',
+                'tokenEnv':'SMALL_TOKEN', 'maxPhotos':1000, 'capabilities':['odm']}
+        env = {'PROCESSING_API_TOKEN':TOKEN, 'PROCESSING_PER_NODE_SLOTS':'1',
+               'LOCAL_NODE_URL':'http://192.0.2.1:3001', 'LOCAL_MAX_PHOTOS':'1000'}
+        with patch.dict(os.environ, env, clear=True):
+            for limit in (None, 1001):
+                with self.subTest(limit=limit), patch.dict(os.environ, {'PROCESSING_NODE_INVENTORY':json.dumps([{**node, 'maxPhotos':limit}])}):
+                    with self.assertRaisesRegex(ValueError, 'preserve existing local photo limit'):
+                        from_environment()
+            with patch.dict(os.environ, {'PROCESSING_NODE_INVENTORY':json.dumps([node])}):
+                self.assertEqual(from_environment().node_inventory[0]['maxPhotos'], 1000)
 
     def claim(self, node, profile):
         return self.queue.claim({'workerId': node + '-worker', 'nodeId': node,

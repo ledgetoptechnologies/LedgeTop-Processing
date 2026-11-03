@@ -135,6 +135,15 @@ def from_environment() -> Config:
         raise ValueError("prototype observer token must be a separate printable credential of at least 32 characters")
     inventory_raw = os.environ.get('PROCESSING_NODE_INVENTORY', '')
     inventory = parse_node_inventory(inventory_raw, os.environ) if inventory_raw else ()
+    legacy_local = os.environ.get('LOCAL_NODE_URL', '')
+    if inventory and legacy_local:
+        legacy_limit = _positive_int(os.environ.get('LOCAL_MAX_PHOTOS', '1000'), 'LOCAL_MAX_PHOTOS', 1_000_000)
+        for node in inventory:
+            try:
+                require_distinct_node_hosts(legacy_local, node['origin'])
+            except ValueError:
+                if node['maxPhotos'] is None or node['maxPhotos'] > legacy_limit:
+                    raise ValueError('inventory must preserve existing local photo limit') from None
     node_ids = tuple(v['id'] for v in inventory) if inventory else tuple(os.environ.get("PROCESSING_PROTOTYPE_NODE_IDS", "cluster").split(","))
     if (not 1 <= len(node_ids) <= 8 or (not inventory and 'cluster' not in node_ids) or len(set(node_ids)) != len(node_ids)
             or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", node) for node in node_ids)):

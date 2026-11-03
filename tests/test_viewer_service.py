@@ -384,6 +384,9 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.fleet.max_active, 2)
         self.finish(first)
         self.service.tick()
+        self.assertIsNone(self.task(third)['node_id'])
+        self.finish(second)
+        self.service.tick()
         self.assertEqual(self.task(third)['node_id'], 'cluster')
 
     def test_opt_in_held_treedar_blocks_its_host_only(self):
@@ -408,6 +411,17 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.task(running)['node_id'], 'cluster')
         self.assertEqual(self.task(production)['node_id'], 'main')
         self.assertIsNone(self.task(waiting)['node_id'])
+
+    def test_opt_in_staging_waits_while_production_is_running_or_held(self):
+        self.queue.per_node_slots = True
+        production = self.submit(environment='production')
+        self.service.tick()
+        staging = self.submit(environment='staging')
+        self.service.tick()
+        self.assertIsNone(self.task(staging)['node_id'])
+        self.queue.operator(self.task(production)['job_id'], 'hold', {'note':'inspect'})
+        self.service.tick()
+        self.assertIsNone(self.task(staging)['node_id'])
 
     def test_opt_in_tree_cannot_claim_photo_busy_main(self):
         self.queue.per_node_slots = True
@@ -525,9 +539,10 @@ class ViewerServiceTests(unittest.TestCase):
         self.finish(second); self.service.tick()
         self.assertEqual(self.task(production)['node_id'], 'tiny')
         self.assertIsNone(self.task(staging)['node_id'])
+        self.finish(production); self.finish(blocked)
         self.service.tick()
-        self.assertEqual(self.task(staging)['node_id'], 'medium')
-        self.finish(staging); self.finish(blocked); self.finish(production)
+        self.assertEqual(self.task(staging)['node_id'], 'tiny')
+        self.finish(staging)
         self.service.tick()
         self.unavailable.add('tiny')
         now = datetime.now(timezone.utc).isoformat()

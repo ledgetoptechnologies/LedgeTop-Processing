@@ -45,7 +45,8 @@ def make_handler(config: Config):
                       viewer_enabled=config.viewer_enabled,
                       reference_enabled=reference_settings is not None,
                       require_idle_existing=config.viewer_production_held,
-                      per_node_slots=config.per_node_slots) if config.prototype_state_dir else None
+                      per_node_slots=config.per_node_slots,
+                      node_capabilities={n['id']: n['capabilities'] for n in config.node_inventory} if config.node_inventory else None) if config.prototype_state_dir else None
     except BaseException:
         if lease is not None:
             lease.close()
@@ -193,6 +194,8 @@ def make_handler(config: Config):
                                   "viewerEnabled": config.viewer_enabled})
             elif self.path == '/v1/options':
                 if self._authorized(observer=True):
+                    if config.node_inventory:
+                        self._reply(503, {'error': 'inventory_diagnostic_unavailable'}); return
                     snapshot = catalog([
                         ('local', config.local_node_url, config.local_node_token),
                         ('main', config.main_node_url, config.main_node_token)])
@@ -202,6 +205,8 @@ def make_handler(config: Config):
                         'snapshotConsistency': 'best_effort_read_only', **snapshot})
             elif self.path == "/v1/nodes":
                 if self._authorized():
+                    if config.node_inventory:
+                        self._reply(503, {'error': 'inventory_diagnostic_unavailable'}); return
                     self._reply(200, {"nodes": self._nodes()})
             else:
                 self._reply(404, {"error": "not_found"})
@@ -217,6 +222,8 @@ def make_handler(config: Config):
                                       or self.path.startswith("/v1/prototype/nodes/"))
             if not self._authorized(operator=operator):
                 return
+            if self.path == '/v1/plan' and config.node_inventory:
+                self._reply(503, {'error': 'inventory_diagnostic_unavailable'}); return
             if prototype and queue is None:
                 self._reply(404, {"error": "prototype_disabled"})
                 return

@@ -667,6 +667,9 @@ class ViewerService:
                             key=lambda j: (j['environment'] != 'production', jobs.index(j)))
             if not queued or queued[0]['profile'] != VIEWER_PROFILE:
                 return
+            if queued[0]['environment'] == 'staging' and any(
+                    j['environment'] == 'production' and j['status'] in ('queued', 'running', 'held') for j in jobs):
+                return
             task = self.store.task_for_job(queued[0]['id'])
             nodes = {}
             if self.inventory:
