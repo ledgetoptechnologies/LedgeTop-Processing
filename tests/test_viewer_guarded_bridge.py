@@ -133,7 +133,11 @@ class ViewerGuardedBridgeTests(unittest.TestCase):
         self.service.close()
         self.service.config.viewer_require_guard = True
         self.service = ViewerService(self.queue, self.service.config, engines=self.service.engines,
-                                     probe=self.service.probe, guard_probe=reader)
+                                     probe=self.service.probe, guard_probe=reader,
+                                     guarded_engine_factory=lambda _: None)
+        # Test-only in-process bridge exercises scheduling; production must
+        # resolve an authenticated task-bound client, covered separately.
+        self.service._task_engine = lambda task: self.service.engines[task['node_id']]
         self.addCleanup(self.service.close)
         self.service._catalog = lambda: {'ready': True, 'commonOptions': []}
         self.service._selected_options = lambda _: []

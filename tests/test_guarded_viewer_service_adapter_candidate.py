@@ -57,16 +57,23 @@ class GuardedViewerAdapterTests(BoundJobTests):
             guard_probe=lambda _: True, guarded_engine_factory=factory)
         coordinator.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(x) for x in OPTIONS]}
         coordinator.service._selected_options = lambda _: [dict(x) for x in OPTIONS]
-        def submit():
+        def submit(*, lose_factory=False):
             identifier = coordinator.initialize(options=[])
             coordinator.upload(identifier, name='photo.jpg', content=b'abc')
             coordinator.service.commit(identifier)
+            if lose_factory:
+                coordinator.service._guarded_engine_factory = None
+                coordinator.service.tick()
+                self.assertEqual(coordinator.service.info(identifier)['status']['code'], 10)
+                self.assertIsNone(coordinator.task(identifier)['node_id'])
+                self.assertEqual(self.backend.counts()['initialize'], 0)
+                coordinator.service._guarded_engine_factory = factory
             coordinator.service.tick()  # actual Viewer scheduler claims and dispatches
             self.assertEqual(coordinator.task(identifier)['phase'], 'processing')
             coordinator.service.tick()  # observe synthetic node completion
             self.assertEqual(coordinator.service.info(identifier)['status']['code'], 40)
             return identifier
-        first = submit()
+        first = submit(lose_factory=True)
         first_task = coordinator.task(first)
         old_client = coordinator.service._task_engine(first_task)
         detached_claim = old_client.job_claim

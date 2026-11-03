@@ -188,6 +188,8 @@ class ViewerService:
         self._require_guard = require_guard
         if self._require_guard and not callable(guard_probe):
             raise ValueError('guard readiness reader required')
+        if self._require_guard and not callable(guarded_engine_factory):
+            raise ValueError('guarded task client factory required')
         if guarded_engine_factory is not None and (not self._require_guard or not callable(guarded_engine_factory)):
             raise ValueError('guarded task clients require guard readiness and a callable factory')
         self._guarded_engine_factory = guarded_engine_factory
@@ -221,6 +223,8 @@ class ViewerService:
         adapter does not provision keys or establish node ingress isolation.
         """
         if self._guarded_engine_factory is None:
+            if self._require_guard:
+                raise EngineUnavailable('guarded task client unavailable')
             engine = self.engines[task['node_id']]
             if task.get('node_guarded') == 1 and getattr(engine, 'node_guarded', False) is not True:
                 raise EngineUnavailable('guarded task client unavailable')
@@ -925,6 +929,10 @@ class ViewerService:
         """One bounded scheduler turn; public for deterministic synthetic tests."""
         with self._lock:
             if self._stop.is_set():
+                return
+            # Do not claim queued work if guarded mode lost its configured
+            # task client factory. A probe alone is not a mutation boundary.
+            if self._require_guard and not callable(self._guarded_engine_factory):
                 return
             jobs = self.queue.list()
             split_jobs = self.store.incomplete_terminal_job_ids()

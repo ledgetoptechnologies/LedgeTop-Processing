@@ -877,23 +877,14 @@ class ViewerServiceTests(unittest.TestCase):
                     require_distinct_node_hosts(local, main)
         require_distinct_node_hosts('http://192.0.2.1:3001', 'http://192.0.2.2:3004')
 
-    def test_guard_readiness_alone_does_not_enforce_node_mutation_boundary(self):
-        # This regression captures a limitation, not a deployable guarantee:
-        # a True snapshot with an unguarded engine still sends native writes.
-        # Activation requires a separately verified, authenticated node-local
-        # mutation transport; the reader itself cannot prove that property.
-        self.service.close()
+    def test_guard_readiness_alone_cannot_start_or_send_native_mutations(self):
+        # A readiness snapshot is not a guarded mutation transport.
         self.config.viewer_require_guard = True
-        self.service = ViewerService(self.queue, self.config, engines=self.engines,
-            probe=self.probe, guard_probe=lambda _: True)
-        self.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(item) for item in OPTIONS]}
-        self.service._selected_options = lambda _: [dict(item) for item in OPTIONS]
-        identifier = self.submit()
-        self.service.tick()
-        task = self.task(identifier)
-        self.assertEqual(task['node_id'], 'cluster')
-        self.assertIn(('initialize', task['engine_uuid']), self.engines['cluster'].calls)
-        self.assertIn(('commit', task['engine_uuid']), self.engines['cluster'].calls)
+        with self.assertRaisesRegex(ValueError, 'factory required'):
+            ViewerService(self.queue, self.config, engines=self.engines,
+                probe=self.probe, guard_probe=lambda _: True)
+        self.assertEqual(self.engines['cluster'].calls, [])
+        self.assertEqual(self.engines['main'].calls, [])
 
     def test_guarded_inventory_skips_guard_unavailable_then_recovers(self):
         from processing.config import parse_node_inventory
@@ -910,7 +901,10 @@ class ViewerServiceTests(unittest.TestCase):
         guard = {'tiny': False, 'large': True}
         self.service = ViewerService(self.queue, self.config, engines=self.engines,
             probe=lambda role, origin, token: {'ready': True, 'maxImages': None, 'taskQueueCount': 0},
-            guard_probe=lambda node: guard[node])
+            guard_probe=lambda node: guard[node], guarded_engine_factory=lambda _: None)
+        # Scheduling-only fixture; real mutation boundary is exercised by
+        # the separate mTLS guarded factory integration test.
+        self.service._task_engine = lambda task: self.engines[task['node_id']]
         self.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(item) for item in OPTIONS]}
         self.service._selected_options = lambda _: [dict(item) for item in OPTIONS]
         first = self.submit(); self.service.tick()
