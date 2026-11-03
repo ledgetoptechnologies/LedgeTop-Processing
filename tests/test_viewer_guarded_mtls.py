@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import unittest
+from unittest.mock import patch
 import uuid
 
 from processing.guarded_native_https import create_guarded_https_server
@@ -229,6 +230,7 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_): pass
             def do_POST(self): facade.handle(self)
+            def do_GET(self): facade.handle(self)
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=.01))
         thread.start()
@@ -245,6 +247,16 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
                 finally:
                     connection.close()
                 self.assertEqual(self.service.store.task(identifier), task_before)
+            directory_before = sorted(p.name for p in (self.root / 'state').rglob('*'))
+            connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
+            try:
+                connection.request('GET', '/task/' + identifier + '/download/all.zip?' + urlencode({'token': TOKEN}))
+                response = connection.getresponse()
+                self.assertEqual(response.status, 409)
+                response.read()
+            finally:
+                connection.close()
+            self.assertEqual(sorted(p.name for p in (self.root / 'state').rglob('*')), directory_before)
         finally:
             server.shutdown(); thread.join(3); server.server_close()
             self.assertFalse(thread.is_alive())
@@ -266,6 +278,27 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
 
     def test_guarded_terminal_split_init_pending_never_recovers_as_failure(self):
         self.assert_guarded_terminal_split_holds('init_pending', 'failed')
+
+    def test_download_rechecks_guard_after_acquiring_lock(self):
+        identifier = self.submit()
+        self.service.tick()
+        task = self.service.store.task(identifier)
+        result = {'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
+                  'environment': task['environment'], 'cancelled': False}
+        self.queue.complete(task['job_id'], {'claimToken': task['claim_token'], 'status': 'succeeded', 'result': result})
+        original = self.service.store.task
+        calls = [0]
+        def change_before_second_check(current):
+            calls[0] += 1
+            if calls[0] == 2:
+                self.service.store.update(identifier, phase='commit_pending')
+            return original(current)
+        before = self.native_fixture.counts()
+        directory_before = sorted(p.name for p in (self.root / 'state').rglob('*'))
+        with patch.object(self.service.store, 'task', side_effect=change_before_second_check):
+            with self.assertRaises(Conflict): self.service.download(identifier)
+        self.assertEqual(self.native_fixture.counts(), before)
+        self.assertEqual(sorted(p.name for p in (self.root / 'state').rglob('*')), directory_before)
 
     @unittest.skipIf(os.name == 'nt', 'coordinator restart fixture requires Linux gate locking')
     def test_new_process_holds_guarded_commit_before_observing_engine(self):

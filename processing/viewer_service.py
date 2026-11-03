@@ -546,12 +546,14 @@ class ViewerService:
 
     def download(self, identifier):
         task = self.store.task(identifier)
-        if not task['job'] or task['job']['status'] != 'succeeded':
-            raise Conflict('task is not complete')
+        self._require_downloadable(task)
         with self._lock:
             lock = self._downloads.setdefault(identifier, threading.Lock())
         with lock:
             task = self.store.task(identifier)
+            # State may have changed while waiting on the per-task lock. Check
+            # again before touching either local archives or the engine.
+            self._require_downloadable(task)
             path = Path(task['archive_path']) if task['archive_path'] else Path(task['directory']) / 'all.zip'
             if not task['archive_path']:
                 partial = path.with_suffix('.zip.partial')
@@ -647,6 +649,7 @@ class ViewerService:
                 sync_directory(path.parent)
                 self.store.update(identifier, archive_path=str(path))
                 return self._verify_archive(path, receipt), receipt['bytes']
+
             receipt_path = path.with_suffix('.zip.receipt')
             if receipt_path.exists() or receipt_path.is_symlink():
                 receipt = self._archive_receipt(task, receipt_path)
@@ -657,6 +660,14 @@ class ViewerService:
             if path.is_symlink() or not path.is_file():
                 raise Conflict('retained archive unavailable')
             return path.open('rb'), path.stat().st_size
+
+    @staticmethod
+    def _require_downloadable(task):
+        if (task['node_guarded'] == 1 and
+                task['phase'] in ('init_pending', 'upload_pending', 'commit_pending')):
+            raise Conflict('guarded mutation requires reconciliation')
+        if not task['job'] or task['job']['status'] != 'succeeded':
+            raise Conflict('task is not complete')
 
     def cancel(self, identifier):
         with self._lock:
