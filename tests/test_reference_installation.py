@@ -47,11 +47,12 @@ class ReferenceInstallationTests(unittest.TestCase):
             self.assertEqual(args[:4], ("exec", "--user", "10001:10001", self.install.NAME))
             self.assertIn("mode=ro", args[-1])
             self.assertNotIn("SELECT *", args[-1])
-            return json.dumps({"nativeViewerTasks": 0})
+            return json.dumps({"incompleteViewerTasks": 0, "viewerTaskCount": 5})
         with patch.object(self.install, "environment", return_value={"PROCESSING_VIEWER_TOKEN": "synthetic"}), \
                 patch.object(self.install, "Client", return_value=Facade()), patch.object(self.install, "docker", docker):
             result = self.install.activity(self.activity_api())
         self.assertEqual(result["count"], 0)
+        self.assertEqual(result["nativeViewerTasks"], 5)
         self.assertEqual(routes, [("GET", "/info")])
         self.assertEqual(len(aggregate_calls), 1)
 
@@ -61,7 +62,7 @@ class ReferenceInstallationTests(unittest.TestCase):
                 return {"taskQueueCount": 0}
         with patch.object(self.install, "environment", return_value={"PROCESSING_VIEWER_TOKEN": "synthetic"}), \
                 patch.object(self.install, "Client", return_value=Facade()), \
-                patch.object(self.install, "docker", return_value=json.dumps({"nativeViewerTasks": 1})):
+                patch.object(self.install, "docker", return_value=json.dumps({"incompleteViewerTasks": 1, "viewerTaskCount": 1})):
             with self.assertRaises(self.install.CutoverStopped):
                 self.install.activity(self.activity_api())
 
@@ -96,6 +97,53 @@ class ReferenceInstallationTests(unittest.TestCase):
         self.assertIs(type(observed[0][2]), int)
         self.assertEqual(stat.S_IMODE((self.root / "original-state-backup").stat().st_mode), 0o700)
 
+    def test_backup_script_verifies_completed_viewer_task_copy_byte_for_byte(self):
+        import sqlite3
+        source, target = self.root / "volume", self.root / "backup"
+        source.mkdir(mode=0o700); source.chmod(0o700)
+        target.mkdir(mode=0o700); target.chmod(0o700)
+        artifact = source / "viewer-tasks" / "synthetic-task" / "retained.bin"
+        artifact.parent.mkdir(parents=True, mode=0o700)
+        artifact.write_bytes(b"synthetic retained artifact")
+        artifact.chmod(0o600)
+        large=artifact.parent/'large-synthetic.bin'
+        with large.open('wb') as output:output.truncate(64*1024*1024+1)
+        large.chmod(0o600)
+        database = source / "jobs.sqlite3"
+        with sqlite3.connect(database) as db:
+            db.executescript("""
+                CREATE TABLE jobs(seq INTEGER PRIMARY KEY);
+                CREATE TABLE coordinator_identity(singleton INTEGER PRIMARY KEY, authority_id TEXT NOT NULL);
+                INSERT INTO coordinator_identity VALUES(1,'7131882e-38ce-4d3e-99cc-4ba5a94d2ee8');
+                CREATE TABLE viewer_tasks(removed INTEGER NOT NULL, phase TEXT NOT NULL, stage TEXT NOT NULL);
+                INSERT INTO viewer_tasks VALUES(0,'complete','succeeded');
+            """)
+
+        original_lstat, original_stat, original_fstat = Path.lstat, Path.stat, os.fstat
+        def remap(result):
+            fields = list(result); fields[4] = 10001; fields[5] = 10001
+            return os.stat_result(fields)
+        def mapped_path_stat(path, *args, **kwargs):
+            result = original_stat(path, *args, **kwargs)
+            return remap(result) if path == target else result
+        def mapped_lstat(path, *args, **kwargs):
+            result = original_lstat(path, *args, **kwargs)
+            return remap(result) if source == path or source in path.parents or target == path or target in path.parents else result
+        def mapped_fstat(fd):
+            return remap(original_fstat(fd))
+        script = self.install.BACKUP.replace("Path('/source'),Path('/backup')",
+            f"Path({str(source)!r}),Path({str(target)!r})")
+        output = io.StringIO()
+        with patch.object(Path, "lstat", mapped_lstat), patch.object(Path, "stat", mapped_path_stat), \
+                patch("os.fstat", mapped_fstat), redirect_stdout(output):
+            exec(compile(script, "<synthetic-viewer-backup>", "exec"), {"__name__": "__main__"})
+        census = json.loads(output.getvalue())
+        self.assertEqual(census["databaseHistory"]["nativeViewerTasks"], 1)
+        self.assertEqual((target / "viewer-tasks" / "synthetic-task" / "retained.bin").read_bytes(),
+            b"synthetic retained artifact")
+        self.assertEqual((target / 'viewer-tasks' / 'synthetic-task' / 'large-synthetic.bin').stat().st_size,large.stat().st_size)
+        self.assertEqual(census["bytes"], database.stat().st_size + len(b"synthetic retained artifact") + large.stat().st_size)
+
     def migration_fixture(self):
         """Real maintenance CAS state, synthetic Docker control/HTTP transport."""
         from processing.prototype import Queue
@@ -111,6 +159,7 @@ class ReferenceInstallationTests(unittest.TestCase):
             old={"containerId": old_id, "image": old_image}, history={"count": 0, "sha256": "baseline"},
             engineImages={"cluster": "sha256:" + "e"*64, "main": install.MAIN_IMAGE},
             plans={}, rollbackName=install.NAME + "-retained", failedName=install.NAME + "-failed")
+        state["history"]["nativeViewerTasks"] = 0
         containers, calls = {old_id: old}, []
         class API:
             origin = "http://127.0.0.1:18080"
@@ -176,7 +225,7 @@ class ReferenceInstallationTests(unittest.TestCase):
                     raise OSError("synthetic offline census unavailable")
                 return json.dumps(dict(authorityId=fixture.get("offline_authority", install.AUTHORITY),
                     history=fixture.get("offline_history", state["history"]),
-                    nativeViewerTasks=fixture.get("offline_native_tasks", 0),
+                    nativeViewerTasks=fixture.get("offline_native_tasks", state["history"]["nativeViewerTasks"]),
                     referenceJobs=fixture.get("offline_reference_jobs", 0)))
             if action == "create":
                 containers[new_id] = dict(Id=new_id, Name="/" + install.NAME, Image=new_image,
@@ -199,7 +248,7 @@ class ReferenceInstallationTests(unittest.TestCase):
                     # The online precheck has passed; a request commits while
                     # shutdown is draining, before the offline immutable census.
                     fixture["offline_reference_jobs"] = 1
-                    fixture["offline_history"] = {"count": 1, "sha256": "admitted-during-drain"}
+                    fixture["offline_history"] = {"count": 1, "sha256": "admitted-during-drain", "nativeViewerTasks": 0}
                 return item["Id"]
             raise AssertionError("unexpected Docker operation")
         fixture["inspected"], fixture["docker"] = inspected, docker
@@ -432,7 +481,8 @@ class ReferenceInstallationTests(unittest.TestCase):
         claim = queue.claim({"workerId": "synthetic-worker", "profiles": [PROFILE]})
         queue.complete(job["id"], {"claimToken": claim["claimToken"], "status": "succeeded", "result": {"synthetic": True}})
         with queue._db() as db:
-            db.execute("CREATE TABLE viewer_tasks (removed INTEGER NOT NULL DEFAULT 0)")
+            db.execute("CREATE TABLE viewer_tasks (removed INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL, stage TEXT NOT NULL)")
+            db.execute("INSERT INTO viewer_tasks VALUES(0,'complete','succeeded')")
             db.execute("CREATE TABLE reference_jobs (job_id TEXT PRIMARY KEY)")
             db.execute("INSERT INTO reference_jobs VALUES('synthetic-retained-reference')")
         class API:
@@ -445,7 +495,7 @@ class ReferenceInstallationTests(unittest.TestCase):
                 raise AssertionError("unexpected census route")
         with patch.object(self.install, "AUTHORITY", queue.authority_id), \
                 patch.object(self.install, "environment", return_value={}), \
-                patch.object(self.install, "docker", return_value=json.dumps({"nativeViewerTasks": 0})):
+                patch.object(self.install, "docker", return_value=json.dumps({"incompleteViewerTasks": 0, "viewerTaskCount": 1})):
             expected = self.install.activity(API())
         queue.close()
         original_lstat = Path.lstat
@@ -466,7 +516,7 @@ class ReferenceInstallationTests(unittest.TestCase):
         self.assertEqual(census["authorityId"], queue.authority_id)
         self.assertEqual(census["history"], expected)
         self.assertEqual(census["referenceJobs"], 1)
-        self.assertEqual(census["nativeViewerTasks"], 0)
+        self.assertEqual(census["nativeViewerTasks"], 1)
         def docker(action, *args, **kwargs):
             if action == "ps":
                 return ""

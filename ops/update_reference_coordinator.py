@@ -57,6 +57,17 @@ class Stopped(ValueError):pass
 def canonical(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
 def digest(value):return hashlib.sha256(canonical(value)).hexdigest()
 
+def explicit_guard_source(source):
+    """Keep generated helper guard checks active under python -O."""
+    import ast
+    class ReplaceAssertions(ast.NodeTransformer):
+        def visit_Assert(self,node):
+            return ast.copy_location(ast.If(test=ast.UnaryOp(op=ast.Not(),operand=self.visit(node.test)),
+                body=[ast.Raise(exc=ast.Call(func=ast.Name(id='AssertionError',ctx=ast.Load()),
+                    args=[] if node.msg is None else [self.visit(node.msg)],keywords=[]),cause=None)],orelse=[]),node)
+    tree=ast.fix_missing_locations(ReplaceAssertions().visit(ast.parse(source)))
+    return ast.unparse(tree)
+
 
 def cluster_http_json(route,token,deadline,limit=65536):
     """Fixed private NodeODM reads with one absolute header/body deadline."""
@@ -138,7 +149,7 @@ def volume_census(root, *, uid=10001, offline=False):
     from pathlib import Path
     root=Path(root)
     root_info=root.lstat()
-    assert stat.S_ISDIR(root_info.st_mode) and root_info.st_uid==uid and root_info.st_gid==uid
+    if not (stat.S_ISDIR(root_info.st_mode) and root_info.st_uid==uid and root_info.st_gid==uid):raise AssertionError('invalid root')
     def encode(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
     def sha(value):return hashlib.sha256(encode(value)).hexdigest()
     allowed={'jobs','sqlite_sequence','coordinator_identity','nodes','viewer_tasks','viewer_files','viewer_incarnations',
@@ -148,33 +159,36 @@ def volume_census(root, *, uid=10001, offline=False):
     files=[]
     for path in sorted(root.rglob('*')):
         relative=path.relative_to(root).as_posix();info=path.lstat()
-        assert info.st_uid==uid and info.st_gid==uid and not stat.S_ISLNK(info.st_mode)
+        if not (info.st_uid==uid and info.st_gid==uid and not stat.S_ISLNK(info.st_mode)):raise AssertionError('invalid owner or symlink')
         # The reviewed baseline contains system metadata, an empty spool, and
         # retained terminal Viewer task directories. Those are client inputs
         # and results: every byte is hashed so update and rollback preserve them.
         retained=relative.startswith('viewer-tasks/')
-        assert relative in ('jobs.sqlite3','coordinator.lock','viewer-tasks','viewer-spool') or retained
+        if not (relative in ('jobs.sqlite3','coordinator.lock','viewer-tasks','viewer-spool') or retained):raise AssertionError('unexpected path')
         if stat.S_ISDIR(info.st_mode):files.append(dict(path=relative,kind='directory',mode=stat.S_IMODE(info.st_mode)))
         else:
-            assert stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size<=(21474836480 if retained else 67108864)
+            if not (stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size<=(21474836480 if retained else 67108864)):raise AssertionError('unsafe file')
             fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
             try:
-                before=os.fstat(fd);assert (before.st_dev,before.st_ino)==(info.st_dev,info.st_ino)
+                before=os.fstat(fd)
+                if (before.st_dev,before.st_ino)!=(info.st_dev,info.st_ino):raise AssertionError('file identity changed')
                 h=hashlib.sha256();size=0
                 while True:
                     data=os.read(fd,1048576)
                     if not data:break
-                    size+=len(data);assert size<=info.st_size;h.update(data)
+                    size+=len(data)
+                    if size>info.st_size:raise AssertionError('file grew')
+                    h.update(data)
                 after=path.lstat()
-                assert size==info.st_size and (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)==(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)
+                if not (size==info.st_size and (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)==(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)):raise AssertionError('file changed')
             finally:os.close(fd)
             files.append(dict(path=relative,kind='file',mode=stat.S_IMODE(info.st_mode),bytes=size,sha256=h.hexdigest()))
-    assert any(item['path']=='jobs.sqlite3' for item in files)
+    if not any(item['path']=='jobs.sqlite3' for item in files):raise AssertionError('database missing')
     uri='file:'+str(root/'jobs.sqlite3')+'?mode=ro'+('&immutable=1' if offline else '')
     db=sqlite3.connect(uri,uri=True,timeout=3)
     try:
         db.execute('BEGIN')
-        assert db.execute('PRAGMA quick_check').fetchone()[0]=='ok'
+        if db.execute('PRAGMA quick_check').fetchone()[0]!='ok':raise AssertionError('database corrupt')
         objects=[list(row) for row in db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")]
         names={row[1] for row in objects if row[0]=='table'}
         if names-allowed or not {'jobs','coordinator_identity','nodes','reference_jobs','viewer_tasks'}<=names:
@@ -200,7 +214,7 @@ def volume_census(root, *, uid=10001, offline=False):
         if not all(row[0]!='index' or row[1].startswith('sqlite_autoindex_') or row[1]=='viewer_engine_uuid' for row in objects):raise AssertionError('unreviewed database index')
         tables={}
         for name in sorted(names):
-            assert name in allowed
+            if name not in allowed:raise AssertionError('unreviewed table')
             columns=[list(row) for row in db.execute('PRAGMA table_info("'+name+'")')]
             rows=[]
             for row in db.execute('SELECT * FROM "'+name+'"'):
@@ -209,7 +223,7 @@ def volume_census(root, *, uid=10001, offline=False):
             tables[name]=dict(count=len(rows),sha256=sha(rows),columns=columns)
         authority=db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
         active=db.execute("SELECT COUNT(*) FROM jobs WHERE status NOT IN ('succeeded','failed')").fetchone()[0]
-        assert active==0
+        if active!=0:raise AssertionError('active job')
         # Terminal Viewer tasks are retained, never removed for an update. Any
         # nonterminal task, reservation or orphaned task row holds instead.
         retained_viewer={'viewer_tasks','viewer_files','viewer_incarnations','viewer_option_evidence'}
@@ -344,12 +358,12 @@ print(json.dumps(counts))
     script=legacy.BACKUP.replace('print(json.dumps(counts))',extra)
     # The historical installer requires empty Viewer tables. Here the census
     # above already requires every retained task to be terminal and binds it.
-    empty_viewer="""  for table in ('viewer_tasks','viewer_files','viewer_incarnations'):
-   if table in tables:assert db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]==0
+    empty_viewer="""  if 'viewer_tasks' in tables:
+   assert db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE NOT (phase='complete' AND stage='succeeded')").fetchone()[0]==0
 """
     if script.count(empty_viewer)!=1:raise Stopped('reviewed_backup_script_changed')
-    return script.replace(empty_viewer,"""  if 'viewer_tasks' in tables:assert db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE stage NOT IN ('succeeded','failed','cancelled') OR phase!='complete'").fetchone()[0]==0
-""")
+    return explicit_guard_source(script.replace(empty_viewer,"""  if 'viewer_tasks' in tables:assert db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE stage NOT IN ('succeeded','failed','cancelled') OR phase!='complete'").fetchone()[0]==0
+"""))
 
 
 def copy_backup(transport,root,state):
@@ -363,7 +377,7 @@ s=p.parent.stat();assert s.st_uid==1000 and not stat.S_IMODE(s.st_mode)&0o077
 os.mkdir(p,0o700);os.chown(p,10001,10001)
 fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
 '''
-    transport.command(['sudo','-n','python3','-c',installer,str(destination)])
+    transport.command(['sudo','-n','python3','-c',explicit_guard_source(installer),str(destination)])
     info=destination.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=10001 or info.st_gid!=10001 or stat.S_IMODE(info.st_mode)!=0o700):
         raise Stopped('private_numeric_uid_backup_required')
@@ -423,7 +437,7 @@ class ReferenceCoordinatorUpdate:
         raw=self.t.docker('run','--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
             '--cap-drop','ALL','--security-opt','no-new-privileges','--mount',
             'type=bind,src='+str(legacy.TLS_MOUNT)+',dst=/run/processing-reference,readonly',
-            '--entrypoint','python',state['image'],'-c',TLS_CENSUS)
+            '--entrypoint','python',state['image'],'-c',explicit_guard_source(TLS_CENSUS))
         return json.loads(raw)
 
     def cluster_idle(self,state):
