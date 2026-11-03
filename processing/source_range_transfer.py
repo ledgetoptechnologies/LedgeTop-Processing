@@ -630,7 +630,13 @@ class SourceRangeClient:
                     with os.fdopen(fd, "r+b", buffering=0) as stream:
                         fd = None
                         stream.seek(committed)
-                        stream.write(data)
+                        view = memoryview(data)
+                        written = 0
+                        while written < len(view):
+                            count = stream.write(view[written:])
+                            if type(count) is not int or count <= 0 or count > len(view) - written:
+                                raise TransferError("source range partial disk write")
+                            written += count
                         stream.flush()
                         os.fsync(stream.fileno())
                 finally:
