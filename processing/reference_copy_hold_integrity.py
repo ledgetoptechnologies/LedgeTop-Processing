@@ -28,7 +28,13 @@ def bounded_json(text):
     if type(text) is not str: raise ValueError('invalid JSON text')
     data=text.encode('utf-8')
     _preflight_stored_json(data)
-    try: return json.loads(text)
+    def pairs(values):
+        obj={}
+        for key,value in values:
+            if key in obj: raise ValueError('duplicate JSON key')
+            obj[key]=value
+        return obj
+    try: return json.loads(text,object_pairs_hook=pairs,parse_constant=lambda _: (_ for _ in ()).throw(ValueError('nonfinite JSON')))
     except (ValueError,TypeError,RecursionError): raise ValueError('invalid bounded JSON') from None
 
 
@@ -110,6 +116,25 @@ def _held_copy_ids_bounded(db, *, exclude_job=None):
     return result
 
 
+def _legacy_acceptance_ids(table_id, obj):
+    """Validate the closed legacy shape and its unambiguous stored identity.
+
+    This structural check does not independently authenticate result custody.
+    """
+    p._closed(obj, ('schemaVersion','receiptId','storageReceiptId','jobId','generation','environment',
+        'inputManifestSha256','pipelineDigest','resultManifestSha256','acceptedObjectIds','acceptedAt','validationVersion'), 'legacy acceptance')
+    p._slug(table_id,'legacy row receipt ID')
+    p._environment(obj['environment'])
+    if table_id!=obj['receiptId'] or obj['receiptId']==obj['storageReceiptId']:
+        raise ValueError('ambiguous legacy receipt identity')
+    ids=obj['acceptedObjectIds']
+    if type(ids) is not list: raise ValueError('invalid accepted objects')
+    expected={key:obj[key] for key in ('jobId','generation','environment','pipelineDigest','resultManifestSha256')}
+    expected['objects']=[{'id':value} for value in ids]
+    checked=p.validate_acceptance(obj,result_manifest=expected,input_manifest_sha256=obj['inputManifestSha256'])
+    return (checked['receiptId'],checked['storageReceiptId'])
+
+
 def legacy_reserved_ids(db):
     """Bound and stream same-database legacy ID namespaces under one transaction."""
     specs=(('reference_acceptances',('receipt_id','receipt_json')),
@@ -132,11 +157,9 @@ def legacy_reserved_ids(db):
                 remaining_bytes-=sum(sizes)
                 if remaining_bytes<0: raise ValueError('legacy namespace byte limit')
             for row in db.execute('SELECT '+','.join(fields)+' FROM '+table):
-                for index,value in enumerate(row):
-                    if fields[index]=='receipt_json':
-                        obj=bounded_json(value)
-                        for key in ('receiptId','storageReceiptId'):
-                            p._slug(obj[key],'legacy receipt ID');result.add(obj[key])
-                    else:
+                if table=='reference_acceptances':
+                    result.update(_legacy_acceptance_ids(row[0],bounded_json(row[1])))
+                else:
+                    for value in row:
                         p._slug(value,'legacy receipt ID');result.add(value)
     return result
