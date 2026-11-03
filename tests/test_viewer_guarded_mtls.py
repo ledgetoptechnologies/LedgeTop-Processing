@@ -22,6 +22,7 @@ from tests.test_viewer_guarded_bridge import ViewerGuardedBridgeTests, TOKEN
 
 class SyntheticMTLSBridge:
     """Fixture only: source transfer uses a local copy, not a network upload."""
+    node_guarded = True
     def __init__(self, server, context, native, spool, token=TOKEN):
         self.server, self.context, self.native, self.spool, self.token = server, context, native, spool, token
 
@@ -109,6 +110,51 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
         self.assertEqual(self.native_fixture.counts(), before_counts)
         self.assertEqual(self.journal_state()[0]['reservation'], before['reservation'])
         self.assertEqual(before['reservation']['job']['id'], task['engine_uuid'])
+
+    def test_engine_running_progress_and_log_cursor_forwarding(self):
+        job = self.submit()
+        self.service.tick()
+        task = self.service.store.task(job)
+        with self.native_fixture._db() as db:
+            db.execute('UPDATE tasks SET status=20 WHERE uuid=?', (task['engine_uuid'],))
+        self.service.tick()
+        info = self.service.info(job)
+        self.assertEqual(info['status']['code'], 20)
+        self.assertEqual(info['progress'], 37)
+        self.assertEqual(info['ledgetopNodeId'], 'cluster')
+        self.assertEqual(self.service.output(job, 1), ['', 'synthetic phase two'])
+
+    def test_ambiguous_success_commit_is_held_without_replay(self):
+        original = self.native_fixture._dispatch
+        def ambiguous(method, path, headers, body):
+            status, response, binary = original(method, path, headers, body)
+            if method == 'POST' and '/task/new/commit/' in path and status == 200:
+                response = {'success': True}
+            return status, response, binary
+        self.native_fixture._dispatch = ambiguous
+        job = self.submit()
+        self.service.tick()
+        self.assertTrue(self.service.info(job).get('ledgetopHeld'))
+        snapshot, ops = self.journal_state()
+        self.assertEqual(ops[-1], ('commit', 'pending'))
+        self.service.tick()
+        self.assertEqual(self.native_fixture.counts()['commit'], 1)
+        self.assertEqual(self.journal_state()[0]['reservation'], snapshot['reservation'])
+
+    def test_mismatched_uuid_commit_is_held_without_replay(self):
+        original = self.native_fixture._dispatch
+        def mismatched(method, path, headers, body):
+            status, response, binary = original(method, path, headers, body)
+            if method == 'POST' and '/task/new/commit/' in path and status == 200:
+                response = {'uuid': str(uuid.uuid4())}
+            return status, response, binary
+        self.native_fixture._dispatch = mismatched
+        job = self.submit()
+        self.service.tick()
+        self.assertTrue(self.service.info(job).get('ledgetopHeld'))
+        self.assertEqual(self.journal_state()[1][-1], ('commit', 'pending'))
+        self.service.tick()
+        self.assertEqual(self.native_fixture.counts()['commit'], 1)
 
 
 if __name__ == '__main__': unittest.main()

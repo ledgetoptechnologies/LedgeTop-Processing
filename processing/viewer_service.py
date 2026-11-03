@@ -723,7 +723,13 @@ class ViewerService:
         except Exception:
             current = self.store.task(identifier)
             if current['phase'] == 'commit_pending':
-                self.store.update(identifier, error='commit_ack_uncertain')
+                if getattr(self.engines[current['node_id']], 'node_guarded', False) is True:
+                    # A guarded node may have committed without a verifiable
+                    # response, leaving its durable intent unresolved. Native
+                    # status alone does not acknowledge that journal entry.
+                    self._hold(current, 'commit_ack_uncertain')
+                else:
+                    self.store.update(identifier, error='commit_ack_uncertain')
             else:
                 self._hold(current, 'engine_submission_uncertain')
         finally:

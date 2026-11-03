@@ -64,10 +64,8 @@ class ViewerGuardedBridgeTests(unittest.TestCase):
         original = self.native_fixture._dispatch
         def node(method, path, headers, body):
             status, response, binary = original(method, path, headers, body)
-            if method == 'POST' and path.startswith('/task/new/commit/') and status == 200:
-                response = {'uuid': path.rsplit('/', 1)[-1]}
             if method == 'GET' and path.endswith('/info') and status == 200:
-                response['progress'] = 100 if response['status']['code'] == 40 else 0
+                response['progress'] = {40: 100, 20: 37}.get(response['status']['code'], 0)
             return status, response, binary
         self.native_fixture._dispatch = node
         spool = self.root / 'node-spool'; spool.mkdir(mode=0o700)
