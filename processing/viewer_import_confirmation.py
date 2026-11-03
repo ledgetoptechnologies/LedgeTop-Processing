@@ -152,6 +152,13 @@ def verify_import_confirmation(confirmation, *, trusted_import_keys,
     envelopes are authenticated durable accepted-copy records. On replay the
     caller must supply the first atomically persisted confirmation digest as
     ``prior_confirmation_sha256``; omitting it is valid only for initial receipt.
+
+    At a trust boundary, invoke this function with the decoded confirmation and
+    independent trusted bindings. Never accept a caller-supplied
+    ``VerifiedImportConfirmation`` instance as proof: that type is publicly
+    constructible and its constructor does not verify a signature. A future
+    request handler must enforce a raw byte limit before JSON parsing; this
+    function's bounded object snapshot only applies after parsing.
     """
     (confirmation, trusted_import_keys, trusted_copy_keys, expected, result_manifest,
      accepted_envelopes, prior_confirmation_sha256) = _snapshot_inputs(

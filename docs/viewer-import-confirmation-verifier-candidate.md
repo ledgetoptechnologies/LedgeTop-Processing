@@ -52,7 +52,17 @@ The caller must obtain coherent trusted expected values from its own durable
 transaction; snapshotting cannot make separately read database rows atomic.
 The result type is a data container, not an unforgeable capability: callers
 must rely on the verification operation and durable binding, never on the
-presence of an instance of that type alone.
+presence of an instance of that type alone. At every trust boundary, invoke
+`verify_import_confirmation` on the decoded confirmation and independently
+trusted bindings; never accept a caller-supplied
+`VerifiedImportConfirmation` instance as authenticated proof. Its public
+constructor checks snapshot consistency but does not verify a signature.
+
+A future request handler must enforce an endpoint-specific raw body byte limit
+(no greater than 16 MiB) while reading, before JSON parsing, and reject invalid
+UTF-8 and duplicate JSON object keys. The verifier's bounded snapshot operates
+on already-parsed values and cannot prevent parser-time resource exhaustion or
+recover duplicate keys discarded by a JSON parser.
 
 On first receipt the caller must atomically bind and persist the verified
 confirmation digest before any action. Replays must supply that stored digest;
