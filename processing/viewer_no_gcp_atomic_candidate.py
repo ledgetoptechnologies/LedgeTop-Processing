@@ -5,6 +5,7 @@ from . import viewer_dual_digest_binding_candidate as binding
 from . import paged_frame_receiver_candidate as frames
 from .viewer_import_confirmation_store import _preflight_stored_json
 from .viewer_paged_frame_candidate import _pairs
+from .paged_snapshot_journal_candidate import _check_frame_schema
 
 class NoGcpHeld(ValueError):pass
 
@@ -31,7 +32,12 @@ def stage(store,submission_id,statement,*,principal,environment,configured_autho
    index+=1
   if not index:raise ValueError()
   with store.queue._db() as db:
-   db.execute('BEGIN IMMEDIATE')
+   db.execute('PRAGMA foreign_keys=ON')
+   if db.execute('PRAGMA foreign_keys').fetchone()[0]!=1:raise ValueError()
+   db.execute('BEGIN IMMEDIATE');_check_frame_schema(db)
+   fk=[tuple(r) for r in db.execute('PRAGMA foreign_key_list(candidate_frame_pages)')]
+   if fk!=[(0,0,'candidate_frame_receipts','stage_id','stage_id','NO ACTION','NO ACTION','NONE')]:raise ValueError()
+   if list(db.execute('PRAGMA foreign_key_list(candidate_frame_receipts)')) or list(db.execute('PRAGMA foreign_key_list(paged_snapshot_frame_marker_v1)')) or list(db.execute('PRAGMA index_list(paged_snapshot_frame_marker_v1)')):raise ValueError()
    result=binding._stage_owned(db,store,submission_id,statement,principal=principal,environment=environment,configured_authority=configured_authority,synthetic_viewer_provenance=synthetic_viewer_provenance)
    if result is None:return None
    if _fault:_fault('binding')

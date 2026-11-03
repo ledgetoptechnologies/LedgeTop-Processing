@@ -7,7 +7,7 @@ from processing.prepared_envelope_jcs_candidate import PROTOCOL
 from processing.viewer_selected_frames_candidate import binding_digest
 from processing.large_paged_manifest_candidate import build,_digest
 from processing.viewer_dual_digest_binding_candidate import initialize as init_binding,PROVENANCE_FIELDS,VERSION
-from processing.paged_frame_receiver_candidate import initialize as init_frames
+from processing.paged_snapshot_journal_candidate import initialize_frames as init_frames, FRAME_PAGES_DDL, FRAME_MARKER_DDL, SnapshotHeld
 from processing.viewer_no_gcp_atomic_candidate import stage,NoGcpHeld
 from tests.test_paged_snapshot_signature_candidate import PagedSnapshotSignatureTests
 
@@ -96,3 +96,27 @@ class NoGcpAtomic(unittest.TestCase):
    bad=copy.deepcopy(self.bundle);bad['selection']=wire
    with self.subTest(size=len(wire)),self.assertRaises(NoGcpHeld):self.call(bad)
    self.assertEqual(self.counts(),(0,0,0))
+
+ def test_schema_corruption_holds_before_binding_and_rolls_back(self):
+  for mode in ('trigger','index','marker_index','missing_marker','altered_table'):
+   with self.queue._db() as db:
+    if mode=='trigger':db.execute('CREATE TRIGGER bad_frame_trigger AFTER INSERT ON candidate_frame_pages BEGIN SELECT 1; END')
+    elif mode=='index':db.execute('CREATE INDEX bad_frame_index ON candidate_frame_pages(kind)')
+    elif mode=='marker_index':db.execute('CREATE INDEX bad_marker_index ON paged_snapshot_frame_marker_v1(version)')
+    elif mode=='missing_marker':db.execute('DROP TABLE paged_snapshot_frame_marker_v1')
+    else:db.execute('DROP TABLE candidate_frame_pages');db.execute('CREATE TABLE candidate_frame_pages(stage_id TEXT,kind TEXT,ordinal INTEGER,wire BLOB)')
+   with self.subTest(mode=mode),self.assertRaises(NoGcpHeld):self.call()
+   self.assertEqual(self.counts()[0],0)
+   with self.queue._db() as db:
+    if mode=='trigger':db.execute('DROP TRIGGER bad_frame_trigger')
+    elif mode=='index':db.execute('DROP INDEX bad_frame_index')
+    elif mode=='marker_index':db.execute('DROP INDEX bad_marker_index')
+    elif mode=='missing_marker':db.execute(FRAME_MARKER_DDL);db.execute('INSERT INTO paged_snapshot_frame_marker_v1 VALUES(1,1)')
+    else:db.execute('DROP TABLE candidate_frame_pages');db.execute(FRAME_PAGES_DDL)
+ def test_partial_schema_initialization_does_not_repair(self):
+  db=sqlite3.connect(':memory:');db.execute('CREATE TABLE candidate_frame_receipts(stage_id TEXT)');db.commit()
+  try:
+   with self.assertRaises(SnapshotHeld):init_frames(db)
+   names={x[0] for x in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+   self.assertEqual(names,{'candidate_frame_receipts'})
+  finally:db.close()
