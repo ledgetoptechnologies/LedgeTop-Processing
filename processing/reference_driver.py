@@ -21,12 +21,13 @@ import time
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from uuid import uuid4
 
 from . import reference_protocol as p
 from .reference_engine_worker import WorkerHeld
 from .reference_sender import ReferenceSender
 from .scratch_cleanup import ImportConfirmationUnavailable
-from .reference_transfer import BrokerClient, validate_grant
+from .reference_transfer import BrokerClient, _now, validate_grant
 from .viewer_service import NativeEngine
 from .node_gate import NodeGate
 from .reference_failure import FailureOutbox, make_failure
@@ -123,7 +124,8 @@ class ReferenceDriver:
                  *, state_path, ssl_context, output_budget, transfer_ttl, safety_floor,
                  failure_outbox, worker_instance_id, cleanup_executor=None, engine_cleanup=None,
                  allowed_environments=('production', 'staging'), clock=time.time,
-                 execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None):
+                 execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None,
+                 source_range_v2_enabled=False):
         self._combined_policy=combined_policy;self._combined_policy_initial=combined_policy;self.combined_preparation=None;self._combined_preparation_initial=None;self._active_step=None
         if combined_policy is not None:
             from .reference_combined_preparation import CombinedPreparationPolicy
@@ -183,6 +185,15 @@ class ReferenceDriver:
         self.node_id, self.worker_id, self.clock = node_id, worker_id, clock
         self._lock = threading.Lock()
         self.path = Path(state_path).absolute()
+        if type(source_range_v2_enabled) is not bool:
+            raise ValueError('explicit source-range-v2 enablement required')
+        self.source_range_v2_enabled = source_range_v2_enabled
+        self.source_range_client = None
+        if source_range_v2_enabled:
+            from .source_range_transfer import SourceRangeClient
+            self.source_range_client = SourceRangeClient(broker.origin,
+                self.path.parent / 'source-range-progress.sqlite',
+                ssl_context=broker.ssl_context, clock=clock)
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if any(path.is_symlink() for path in (self.path, *self.path.parents)):
             raise ValueError('private worker journal required')
@@ -224,6 +235,9 @@ class ReferenceDriver:
             if combined_policy is not None:
                 from dataclasses import asdict
                 settings['combinedPreparation']=dict(mode='combined-prepare-only-v1',policy=asdict(combined_policy))
+            if source_range_v2_enabled:
+                settings['sourceTransfer'] = dict(protocol='source-range-v2',
+                    progressPath=str(self.path.parent / 'source-range-progress.sqlite'))
             binding = p.canonical_json(settings).decode()
             old = db.execute('SELECT binding FROM driver_binding WHERE singleton=1').fetchone()
             if execution_router is not None and old is None and db.execute('SELECT 1 FROM driver_jobs LIMIT 1').fetchone():
@@ -301,6 +315,141 @@ class ReferenceDriver:
         with self._db() as db:
             db.execute('UPDATE driver_jobs SET stage=?,data=? WHERE job=?',
                        (stage, p.canonical_json(data).decode(), job_id))
+
+    def _source_range_grant(self, job_id, claim, data):
+        """Renew an expired v2 grant through a durable request/reply/ack journal."""
+        from .source_range_transfer import (MAX_RENEWAL_SEQUENCE, SourceRenewalInvalid,
+            SourceRenewalUnavailable, validate_source_grant)
+
+        sequence = data.get('sourceRenewalSequence', 0)
+        if type(sequence) is not int or not 0 <= sequence <= MAX_RENEWAL_SEQUENCE:
+            raise DriverHeld('source_renewal_sequence_invalid')
+        raw_grant = data.get('grant')
+        pending = data.get('sourceRenewal')
+        expected_pending_fields = {'renewalId', 'sequence', 'previousGrantSha256', 'request', 'phase'}
+        try:
+            previous = validate_source_grant(raw_grant, job=claim, clock=self.clock, allow_expired=True)
+        except Exception:
+            raise DriverHeld('source_transfer_grant_unavailable') from None
+        if pending is not None:
+            if (type(pending) is not dict or set(pending) not in
+                    (expected_pending_fields, expected_pending_fields | {'successorGrant', 'grantSha256', 'ackRequest'})
+                    or type(pending.get('sequence')) is not int or pending.get('sequence') != sequence + 1
+                    or type(pending.get('renewalId')) is not str
+                    or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', pending['renewalId'])
+                    or type(pending.get('previousGrantSha256')) is not str
+                    or not re.fullmatch(r'[a-f0-9]{64}', pending['previousGrantSha256'])):
+                raise DriverHeld('source_renewal_journal_invalid')
+            request = pending.get('request')
+            if (type(request) is not dict or set(request) !=
+                    {'protocol', 'renewalId', 'sequence', 'previousGrantSha256', 'previousGrant'}
+                    or request.get('protocol') != 'source-range-v2-renewal'
+                    or request.get('renewalId') != pending['renewalId']
+                    or request.get('sequence') != pending['sequence']
+                    or request.get('previousGrantSha256') != pending['previousGrantSha256']
+                    or request.get('previousGrant') != raw_grant
+                    or hashlib.sha256(p.canonical_json(raw_grant)).hexdigest() != pending['previousGrantSha256']):
+                raise DriverHeld('source_renewal_journal_invalid')
+        else:
+            if previous.expires > _now(self.clock):
+                return validate_source_grant(raw_grant, job=claim, clock=self.clock)
+            if sequence >= MAX_RENEWAL_SEQUENCE:
+                raise DriverHeld('source_renewal_sequence_exhausted')
+            previous_digest = hashlib.sha256(p.canonical_json(raw_grant)).hexdigest()
+            renewal_id = str(uuid4())
+            request = {'protocol': 'source-range-v2-renewal', 'renewalId': renewal_id,
+                'sequence': sequence + 1, 'previousGrantSha256': previous_digest,
+                'previousGrant': raw_grant}
+            pending = {'renewalId': renewal_id, 'sequence': sequence + 1,
+                'previousGrantSha256': previous_digest, 'request': request, 'phase': 'request_pending'}
+            data['sourceRenewal'] = pending
+            self._save(job_id, 'fetching', data)
+
+        if pending['phase'] == 'request_pending':
+            if set(pending) != expected_pending_fields:
+                raise DriverHeld('source_renewal_journal_invalid')
+            try:
+                status, response = self.source_range_client.renew_grant(request)
+            except SourceRenewalUnavailable:
+                raise DriverWait('source_renewal_endpoint_unavailable') from None
+            except SourceRenewalInvalid:
+                raise DriverHeld('source_renewal_response_invalid') from None
+            if status != 200:
+                code = response.get('error') if type(response) is dict else None
+                if status >= 500 or code in ('renewal_authority_unavailable', 'grant_not_expired'):
+                    raise DriverWait('source_renewal_not_ready')
+                raise DriverHeld('source_renewal_rejected')
+            if (type(response) is not dict or set(response) !=
+                    {'protocol', 'renewalId', 'sequence', 'previousGrantSha256', 'grant'}
+                    or response.get('protocol') != 'source-range-v2-renewal'
+                    or response.get('renewalId') != pending['renewalId']
+                    or response.get('sequence') != pending['sequence']
+                    or response.get('previousGrantSha256') != pending['previousGrantSha256']):
+                raise DriverHeld('source_renewal_response_invalid')
+            try:
+                validate_source_grant(response['grant'], job=claim, clock=self.clock)
+            except Exception:
+                raise DriverHeld('source_renewal_grant_invalid') from None
+            successor = response['grant']
+            previous = validate_source_grant(raw_grant, job=claim, clock=self.clock, allow_expired=True)
+            renewed = validate_source_grant(successor, job=claim, clock=self.clock)
+            if (renewed.expires <= previous.expires
+                    or (renewed.identity, renewed.objects, renewed.chunk_bytes, renewed.request_budget,
+                        renewed.byte_budget, renewed.attempt_budget) !=
+                       (previous.identity, previous.objects, previous.chunk_bytes, previous.request_budget,
+                        previous.byte_budget, previous.attempt_budget)):
+                raise DriverHeld('source_renewal_grant_invalid')
+            grant_digest = hashlib.sha256(p.canonical_json(successor)).hexdigest()
+            ack = {'protocol': 'source-range-v2-renewal-ack', 'renewalId': pending['renewalId'],
+                'sequence': pending['sequence'], 'grantSha256': grant_digest, 'token': successor['token']}
+            pending.update({'phase': 'ack_pending', 'successorGrant': successor,
+                'grantSha256': grant_digest, 'ackRequest': ack})
+            # Save the exact successor and ack before acknowledging it remotely.
+            self._save(job_id, 'fetching', data)
+
+        if pending.get('phase') != 'ack_pending' or set(pending) != expected_pending_fields | {'successorGrant', 'grantSha256', 'ackRequest'}:
+            raise DriverHeld('source_renewal_journal_invalid')
+        successor = pending['successorGrant']
+        if (type(successor) is not dict or type(pending['grantSha256']) is not str
+                or hashlib.sha256(p.canonical_json(successor)).hexdigest() != pending['grantSha256']
+                or pending['ackRequest'] != {'protocol': 'source-range-v2-renewal-ack',
+                    'renewalId': pending['renewalId'], 'sequence': pending['sequence'],
+                    'grantSha256': pending['grantSha256'], 'token': successor.get('token')}):
+            raise DriverHeld('source_renewal_journal_invalid')
+        try:
+            old = validate_source_grant(raw_grant, job=claim, clock=self.clock, allow_expired=True)
+            new = validate_source_grant(successor, job=claim, clock=self.clock)
+        except Exception:
+            raise DriverHeld('source_renewal_grant_invalid') from None
+        if (new.expires <= old.expires
+                or (new.identity, new.objects, new.chunk_bytes, new.request_budget, new.byte_budget,
+                    new.attempt_budget) !=
+                   (old.identity, old.objects, old.chunk_bytes, old.request_budget, old.byte_budget,
+                    old.attempt_budget)):
+            raise DriverHeld('source_renewal_grant_invalid')
+        try:
+            status, response = self.source_range_client.acknowledge_grant_renewal(pending['ackRequest'])
+        except SourceRenewalUnavailable:
+            raise DriverWait('source_renewal_ack_unavailable') from None
+        except SourceRenewalInvalid:
+            raise DriverHeld('source_renewal_ack_response_invalid') from None
+        if status != 200:
+            if status >= 500:
+                raise DriverWait('source_renewal_ack_unavailable')
+            raise DriverHeld('source_renewal_ack_rejected')
+        if (type(response) is not dict or set(response) != {'protocol', 'renewalId', 'sequence', 'grantSha256'}
+                or response != {'protocol': 'source-range-v2-renewal-ack',
+                    'renewalId': pending['renewalId'], 'sequence': pending['sequence'],
+                    'grantSha256': pending['grantSha256']}):
+            raise DriverHeld('source_renewal_ack_response_invalid')
+        data['grant'] = successor
+        data['sourceRenewalSequence'] = pending['sequence']
+        data.pop('sourceRenewal', None)
+        self._save(job_id, 'fetching', data)
+        try:
+            return validate_source_grant(data['grant'], job=claim, clock=self.clock)
+        except Exception:
+            raise DriverHeld('source_renewal_grant_invalid') from None
 
     def _request(self, method, suffix, payload=None, *, claim_token=None):
         url = self.origin + PREFIX + suffix
@@ -407,6 +556,18 @@ class ReferenceDriver:
     def _kind(self, job_id):
         if self.combined_preparation is not None and self.combined_preparation.is_combined(job_id):return 'combined'
         return self.execution_router.kind_for(job_id) if self.execution_router else 'odm'
+
+    def _new_transfer_request(self, claim):
+        reservation_id = 'driver-' + secrets.token_hex(16)
+        expires_at = datetime.fromtimestamp(self.clock() + self.transfer_ttl, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+        nonce = secrets.token_hex(16)
+        if self.source_range_v2_enabled:
+            from .source_range_transfer import build_source_transfer_request
+            return build_source_transfer_request(claim, reservation_id=reservation_id,
+                expires_at=expires_at, nonce=nonce, clock=self.clock)
+        return dict(reservationId=reservation_id, generation=claim['generation'],
+            expiresAt=expires_at, manifestSha256=claim['manifestSha256'],
+            byteBudget=min(p.MAX_SAFE_INTEGER, 3 * claim['submission']['manifest']['totalBytes']), nonce=nonce)
 
     def _apply_acceptance(self, job_id, receipts):
         source = self.execution_router if self.execution_router is not None else self.worker
@@ -710,7 +871,7 @@ class ReferenceDriver:
                 if 'originalCombinedClaim' in data and p.canonical_json(data['originalCombinedClaim'])!=p.canonical_json(original):raise DriverHeld('original_combined_claim_response_changed')
                 data['originalCombinedClaim']=original
                 if 'reservation' not in data:
-                    data['reservation']=dict(reservationId='driver-'+secrets.token_hex(16),generation=claim['generation'],expiresAt=datetime.fromtimestamp(self.clock()+self.transfer_ttl,timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z'),manifestSha256=claim['manifestSha256'],byteBudget=min(p.MAX_SAFE_INTEGER,3*claim['submission']['manifest']['totalBytes']),nonce=secrets.token_hex(16))
+                    data['reservation']=self._new_transfer_request(claim)
                     if len(p.canonical_json(data))>self._combined_policy.max_intent_bytes:raise DriverHeld('bounded_combined_claim_intent_required')
                     self._save(job_id,'claim_pending',data)
                 self.ledger.reserve(job_id=job_id,generation=claim['generation'],reservation_id=data['reservation']['reservationId'],manifest_sha256=claim['manifestSha256'],input_bytes=claim['submission']['manifest']['totalBytes'],output_budget=self.output_budget,environment=claim['environment'],ttl_seconds=self.transfer_ttl,worker_ready=True)
@@ -724,10 +885,7 @@ class ReferenceDriver:
         suffix = '/jobs/' + job_id
         if stage in ('claimed', 'reservation_pending'):
             if stage == 'claimed':
-                reservation = 'driver-' + secrets.token_hex(16)
-                data['reservation'] = dict(reservationId=reservation, generation=claim['generation'],
-                    expiresAt=datetime.fromtimestamp(self.clock() + self.transfer_ttl, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'),
-                    manifestSha256=claim['manifestSha256'], byteBudget=min(p.MAX_SAFE_INTEGER, 3 * claim['submission']['manifest']['totalBytes']), nonce=secrets.token_hex(16))
+                data['reservation'] = self._new_transfer_request(claim)
                 self._save(job_id, 'reservation_pending', data)
             request = data['reservation']
             self.ledger.reserve(job_id=job_id, generation=claim['generation'], reservation_id=request['reservationId'],
@@ -744,7 +902,13 @@ class ReferenceDriver:
             status, grant = self._request('GET', suffix + '/transfer-grant', claim_token=token)
             if status == 409:
                 return {'state': 'awaiting_grant', 'jobId': job_id}
-            validated = validate_grant(grant, job=claim, clock=self.clock)
+            if (claim.get('transferRequest') or {}).get('protocol') == 'source-range-v2':
+                if self.source_range_client is None:
+                    raise DriverHeld('source_range_client_not_enabled')
+                from .source_range_transfer import validate_source_grant
+                validated = validate_source_grant(grant, job=claim, clock=self.clock)
+            else:
+                validated = validate_grant(grant, job=claim, clock=self.clock)
             if self._kind(job_id) == 'treedar':
                 data['provenance'] = self._fetch_provenance(claim, validated)
             data['grant'] = grant
@@ -761,7 +925,13 @@ class ReferenceDriver:
             return {'state': 'fetching' if phase == 'fetching' else 'execution_pending', 'jobId': job_id}
         if stage == 'fetching':
             self._require_activation_bound_grant()
-            grant = validate_grant(data['grant'], job=claim, clock=self.clock)
+            source_range_v2 = (claim.get('transferRequest') or {}).get('protocol') == 'source-range-v2'
+            if source_range_v2:
+                if self.source_range_client is None:
+                    raise DriverHeld('source_range_client_not_enabled')
+                grant = None
+            else:
+                grant = validate_grant(data['grant'], job=claim, clock=self.clock)
             reservation = data['reservation']['reservationId']
             directory = self.ledger.root / 'jobs' / reservation
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -775,12 +945,30 @@ class ReferenceDriver:
                 if os.path.lexists(target):
                     self.worker._file(reservation, relative, obj['byteSize'], obj['sha256'])
                 else:
-                    attempts = data.setdefault('fetchAttempts', {}).get(obj['id'], 0)
-                    if attempts >= 3:
-                        raise DriverHeld('worker_fetch_attempt_budget_exhausted')
-                    data['fetchAttempts'][obj['id']] = attempts + 1
-                    self._save(job_id, stage, data)
-                    self.broker.download_object(grant, obj['id'], target)
+                    if source_range_v2:
+                        grant = self._source_range_grant(job_id, claim, data)
+                        from .source_range_transfer import SourceRenewalInvalid, SourceRenewalUnavailable
+                        def renew_during_transfer():
+                            try:
+                                return self._source_range_grant(job_id, claim, data)
+                            except DriverWait:
+                                raise SourceRenewalUnavailable('source renewal deferred') from None
+                            except DriverHeld:
+                                raise SourceRenewalInvalid('source renewal rejected') from None
+                        try:
+                            self.source_range_client.download_object(grant=grant, object_id=obj['id'],
+                                destination=target, grant_provider=renew_during_transfer)
+                        except SourceRenewalUnavailable:
+                            raise DriverWait('source_renewal_endpoint_unavailable') from None
+                        except SourceRenewalInvalid:
+                            raise DriverHeld('source_renewal_response_invalid') from None
+                    else:
+                        attempts = data.setdefault('fetchAttempts', {}).get(obj['id'], 0)
+                        if attempts >= 3:
+                            raise DriverHeld('worker_fetch_attempt_budget_exhausted')
+                        data['fetchAttempts'][obj['id']] = attempts + 1
+                        self._save(job_id, stage, data)
+                        self.broker.download_object(grant, obj['id'], target)
                 paths[obj['id']] = relative
                 data['inputPaths'] = paths
                 self.ledger.record_allocated(reservation, sum(item['byteSize'] for item in claim['submission']['manifest']['objects'] if item['id'] in paths))
