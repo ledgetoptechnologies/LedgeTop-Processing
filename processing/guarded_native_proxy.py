@@ -193,6 +193,37 @@ class GuardedNativeProxy:
             finally:
                 journal.close()
 
+    def inspect_mutation(self, claim, *, bearer, protected_transport):
+        """Return held-only node evidence, never permission to replay or resume.
+
+        The currently provisioned gate job ID is the engine task UUID.  It is
+        not a proven Viewer queue job ID; a different expected job fails closed.
+        mTLS and the fixed bearer authenticate a node peer, not a job claim.
+        """
+        self._auth(bearer, protected_transport)
+        required = {'jobId', 'nodeId', 'authorityId', 'generation', 'engineTask',
+                    'operationId', 'kind', 'requestDigest', 'nonce'}
+        if (type(claim) is not dict or set(claim) != required
+                or type(claim['generation']) is not int or claim['generation'] < 1
+                or type(claim['nonce']) is not str or not re.fullmatch(r'[0-9a-f]{64}', claim['nonce'])):
+            raise GateError('invalid proof request')
+        self._task(claim['engineTask'])
+        if (claim['nodeId'], claim['authorityId'], claim['generation']) != (self.node_id, self.authority_id, self.generation):
+            raise GateError('proof binding differs')
+        with NodeGate(self.engine_id) as gate:
+            receipt = self._owner(gate, claim['engineTask'])
+            state = gate.snapshot()
+            if state['reservation']['job']['id'] != claim['jobId']:
+                raise GateError('proof job binding differs')
+            journal = HostMutationJournal(gate, receipt).open()
+            try:
+                evidence = journal.inspect_operation(claim['operationId'], claim['kind'], claim['requestDigest'])
+            finally:
+                journal.close()
+            return {'schema': 'ledgetop-node-mutation-proof-v1', 'claim': dict(claim),
+                    'state': evidence['state'], 'ackDigest': evidence['ackDigest'],
+                    'held': True}
+
     def recover_acknowledged_spool(self, budget, name):
         """Reconcile one locally owned upload, never an uncertain mutation.
 

@@ -215,6 +215,22 @@ class HostMutationJournal:
             self._validate_operations()
             return self.db.execute('SELECT 1 FROM operations WHERE op_id=?', (op_id,)).fetchone() is not None
 
+    def inspect_operation(self, op_id, kind, request_digest):
+        """Read exact durable evidence; absence or disagreement is not proof."""
+        self._ready()
+        try:
+            if str(uuid.UUID(op_id)) != op_id: raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            raise GateError('invalid operation identity') from None
+        if kind not in ('init', 'upload', 'commit') or not isinstance(request_digest, str) or not _HASH.fullmatch(request_digest):
+            raise GateError('invalid operation identity')
+        with self._transaction():
+            self._validate_operations()
+            row = self.db.execute('SELECT kind,request_digest,ack_digest,state FROM operations WHERE op_id=?', (op_id,)).fetchone()
+            if row is None or row[:2] != (kind, request_digest):
+                raise MutationHeld('operation evidence unavailable')
+            return {'state': row[3], 'ackDigest': row[2]}
+
     def require_done(self, op_id, request_digest, ack_digest):
         """Confirm the exact durable operation before releasing its spool copy."""
         self._ready()

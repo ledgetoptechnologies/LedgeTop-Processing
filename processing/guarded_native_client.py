@@ -46,6 +46,20 @@ class GuardedNativeClient:
         if action != 'commit': raise EngineUnavailable('unsupported guarded operation')
         return self._json('commit', {'task': identifier})
 
+    def inspect_mutation(self, claim):
+        """Inspect only; returned evidence never authorizes replay or resume."""
+        value = self._json('inspect-mutation', {'claim': claim})
+        if (set(value) != {'schema', 'claim', 'state', 'ackDigest', 'held'}
+                or value['schema'] != 'ledgetop-node-mutation-proof-v1'
+                or value['claim'] != claim or value['held'] is not True
+                or value['state'] not in ('pending', 'done')
+                or (value['state'] == 'pending' and value['ackDigest'] is not None)
+                or (value['state'] == 'done' and (type(value['ackDigest']) is not str
+                    or len(value['ackDigest']) != 64
+                    or any(c not in '0123456789abcdef' for c in value['ackDigest'])))):
+            raise EngineUnavailable('guard proof unavailable')
+        return value
+
     def upload(self, identifier, item):
         path = Path(item['path'])
         conn = self._connection()

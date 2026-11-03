@@ -107,6 +107,8 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                     result = {'accepted': True}
                 elif self.path == '/v1/commit' and set(request) == {'task'}:
                     result = adapter.commit(request['task'], **args)
+                elif self.path == '/v1/inspect-mutation' and set(request) == {'claim'}:
+                    result = adapter.inspect_mutation(request['claim'], **args)
                 else:
                     return self._reply(404, {'error': 'unknown operation'})
                 return self._reply(200, result)

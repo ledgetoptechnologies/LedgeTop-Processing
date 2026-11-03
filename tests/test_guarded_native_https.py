@@ -73,6 +73,51 @@ class GuardedHTTPS(GuardedNativeProxyTests):
         self.assertEqual(self.request(server, '/v1/commit', {'task': self.job})[0], 409)
         self.assertEqual(self.backend.counts()['commit'], 1)
 
+    def test_exact_journal_inspection_requires_authenticated_bound_identity(self):
+        import uuid
+        from processing import reference_protocol as protocol
+        from processing.viewer_service import EngineUnavailable
+        server = self.start_listener()
+        self.assertEqual(self.request(server, '/v1/initialize', {'task': self.task})[0], 200)
+        request = dict(task=self.job, name=self.task['name'], outputs=None, options=[])
+        claim = dict(jobId=self.job, nodeId='main', authorityId=self.authority, generation=1,
+                     engineTask=self.job, operationId=self.proxy._op(self.job, 'init'), kind='init',
+                     requestDigest=protocol.digest(request), nonce='a' * 64)
+        context = ssl.create_default_context(cafile=str(self.root / 'server.pem'))
+        context.load_cert_chain(self.root / 'client.pem', self.root / 'client.key')
+        client = GuardedNativeClient('127.0.0.1', server.server_port, context, TOKEN, timeout=10)
+        proof = client.inspect_mutation(claim)
+        self.assertEqual((proof['state'], proof['held'], proof['claim']), ('done', True, claim))
+        self.assertEqual(len(proof['ackDigest']), 64)
+        for change in (dict(jobId=str(uuid.uuid4())), dict(nodeId='other'),
+                       dict(authorityId=str(uuid.uuid4())), dict(generation=2),
+                       dict(engineTask=str(uuid.uuid4())), dict(operationId=str(uuid.uuid4())),
+                       dict(requestDigest='b' * 64), dict(kind='commit'), dict(nonce='bad')):
+            with self.subTest(change=change), self.assertRaises(EngineUnavailable):
+                client.inspect_mutation({**claim, **change})
+        self.assertEqual(self.request(server, '/v1/inspect-mutation', {'claim': claim}, token='wrong')[0], 409)
+        with self.assertRaises((ssl.SSLError, ConnectionError)):
+            self.request(server, '/v1/inspect-mutation', {'claim': claim}, client=None)
+        self.assertEqual(self.backend.counts()['initialize'], 1)
+
+    def test_pending_journal_inspection_does_not_authorize_retry(self):
+        from processing import reference_protocol as protocol
+        self.commit_reply(False)
+        server = self.start_listener()
+        self.assertEqual(self.request(server, '/v1/initialize', {'task': self.task})[0], 200)
+        context = ssl.create_default_context(cafile=str(self.root / 'server.pem'))
+        context.load_cert_chain(self.root / 'client.pem', self.root / 'client.key')
+        GuardedNativeClient('127.0.0.1', server.server_port, context, TOKEN, timeout=10).upload(self.job, self.item)
+        self.assertEqual(self.request(server, '/v1/commit', {'task': self.job})[0], 409)
+        claim = dict(jobId=self.job, nodeId='main', authorityId=self.authority, generation=1,
+                     engineTask=self.job, operationId=self.proxy._op(self.job, 'commit'), kind='commit',
+                     requestDigest=protocol.digest(dict(task=self.job)), nonce='c' * 64)
+        status, proof = self.request(server, '/v1/inspect-mutation', {'claim': claim})
+        self.assertEqual(status, 200)
+        self.assertEqual((proof['state'], proof['ackDigest'], proof['held']), ('pending', None, True))
+        self.assertEqual(self.request(server, '/v1/commit', {'task': self.job})[0], 409)
+        self.assertEqual(self.backend.counts()['commit'], 1)
+
     def test_untrusted_clients_and_wrong_bearer_never_mutate(self):
         server = self.start_listener()
         for client in (None, 'other'):
