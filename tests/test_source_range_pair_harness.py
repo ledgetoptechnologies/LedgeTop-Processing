@@ -384,9 +384,11 @@ class SourceRangePairHarnessTests(unittest.TestCase):
         small = os.environ.get('SOURCE_RANGE_SMALL_TMPFS')
         if not small:
             self.skipTest('set SOURCE_RANGE_SMALL_TMPFS to a private tmpfs of about 12 MiB')
-        dest = Path(small) / 'dest'
+        work = Path(tempfile.mkdtemp(dir=small))
+        self.addCleanup(shutil.rmtree, work, True)
+        dest = work / 'dest'
         dest.mkdir(mode=0o700)
-        filler = Path(small) / 'filler'
+        filler = work / 'filler'
         broker = self.start()
         manifest = self.dataset([2 * CHUNK_BYTES + 5])
         _raw, grant = self.mint(broker, queued_job(manifest))
