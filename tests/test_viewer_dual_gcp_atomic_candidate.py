@@ -1,8 +1,10 @@
 import base64,copy,hashlib,json,sqlite3,subprocess,sys,unittest,uuid
+from contextlib import contextmanager
+from unittest.mock import patch
 from processing import reference_protocol as p
 from processing.prepared_envelope_jcs_candidate import PROTOCOL
 from processing.viewer_selected_frames_candidate import binding_digest
-from processing.viewer_dual_gcp_atomic_candidate import initialize,stage,AtomicHeld
+from processing.viewer_dual_gcp_atomic_candidate import initialize,stage,AtomicHeld,_strict_records
 from processing.viewer_dual_digest_binding_candidate import initialize as initialize_binding
 from processing.prototype import Queue
 from processing.reference_store import ReferenceStore,PROFILE
@@ -88,3 +90,17 @@ finally:q.close()
 '''
   result=subprocess.run([sys.executable,'-c',script],input=json.dumps(data),capture_output=True,text=True,check=True,timeout=20)
   self.assertFalse(json.loads(result.stdout)['created'])
+ def test_replay_performs_no_bundle_writes(self):
+  self.atomic();original=self.queue._db
+  @contextmanager
+  def guarded():
+   with original() as db:
+    db.set_authorizer(lambda action,name,*_:sqlite3.SQLITE_DENY if action in (sqlite3.SQLITE_INSERT,sqlite3.SQLITE_UPDATE,sqlite3.SQLITE_DELETE) and name=='synthetic_gcp_bundle' else sqlite3.SQLITE_OK)
+    try:yield db
+    finally:db.set_authorizer(None)
+  with patch.object(self.queue,'_db',side_effect=guarded):self.assertFalse(self.atomic()['created'])
+ def test_prescan_rejects_duplicate_and_deep_frames(self):
+  for value in (b'{"index":0,"index":0,"records":[{}],"version":"x"}\n',
+                b'{"index":0,"records":['+b'['*50+b'0'+b']'*50+b'],"version":"x"}\n',
+                b'{ "index":0,"records":[{}],"version":"x"}\n'):
+   with self.subTest(value=value[:60]),self.assertRaises(ValueError):list(_strict_records(value))

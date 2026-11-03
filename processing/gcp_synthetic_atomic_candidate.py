@@ -35,7 +35,7 @@ def _pages(wire, hashes, sizes, domain):
 def _decoded(wire):
  rows=wire.splitlines();return b''.join(base64.urlsafe_b64decode((obj['data']+'='*((-len(obj['data']))%4)).encode()) for obj in (json.loads(x) for x in rows[:-1]))
 
-def stage_owned(db,*,bundle_id,statement,streams,trusted_images,trusted_correspondences,trusted_binding,expected_binding_sha256,processing_closure,processing_pages,_fault=None):
+def stage_owned(db,*,bundle_id,statement,streams,trusted_images,trusted_correspondences,trusted_binding,expected_binding_sha256,processing_closure,processing_pages,_fault=None,_verify_only=False):
  """Caller owns transaction and MUST rollback on any error; not production code."""
  if not db.in_transaction:raise SyntheticHeld('owned transaction required')
  try:
@@ -52,8 +52,10 @@ def stage_owned(db,*,bundle_id,statement,streams,trusted_images,trusted_correspo
   validate_wire_quota(source_bytes=len(src),selected_bytes=len(sel),evidence_page_bytes=statement['gcpEvidencePageBytes'],file_page_bytes=statement['gcpFilePageBytes'])
   raw=p.canonical_json(statement)
   if len(raw)>65536:raise ValueError()
-  if db.execute('SELECT 1 FROM synthetic_gcp_bundle WHERE id=?',(bundle_id,)).fetchone():raise ValueError('replay must be handled by journal')
-  db.execute('INSERT INTO synthetic_gcp_bundle VALUES(?,?,?,?,NULL,NULL)',(bundle_id,raw,src,sel))
+  if type(_verify_only) is not bool:raise ValueError()
+  if not _verify_only:
+   if db.execute('SELECT 1 FROM synthetic_gcp_bundle WHERE id=?',(bundle_id,)).fetchone():raise ValueError('replay must be handled by journal')
+   db.execute('INSERT INTO synthetic_gcp_bundle VALUES(?,?,?,?,NULL,NULL)',(bundle_id,raw,src,sel))
   if _fault:_fault('source')
   source.verify_dataset_count_v2(io.BytesIO(src),expected_page_hashes=statement['sourcePageHashes'],expected_dataset_items=statement['sourceCount'])
   sources=_pages(src,statement['sourcePageHashes'],statement['sourcePageBytes'],source.DOMAIN)
@@ -65,10 +67,10 @@ def stage_owned(db,*,bundle_id,statement,streams,trusted_images,trusted_correspo
   selected.verify_dataset_count_v2(io.BytesIO(src),io.BytesIO(sel),source_hashes=statement['sourcePageHashes'],source_count=statement['sourceCount'],selected_hashes=statement['selectedPageHashes'],input_manifest_sha256=trusted_binding['inputManifestSha256'],processing_closure=processing_closure,processing_pages=processing_pages,closure_sha256=trusted_binding['processingClosureSha256'],trusted_binding=trusted_binding,expected_binding_sha256=expected_binding_sha256)
   if _fault:_fault('selection')
   evidence.verify(io.BytesIO(ev),attempt_id=statement['attemptId'],evidence_sha256=statement['gcpEvidenceSha256'],page_hashes=statement['gcpEvidencePageHashes'],page_bytes=statement['gcpEvidencePageBytes'],decoded_bytes=statement['gcpEvidenceByteCount'])
-  db.execute('UPDATE synthetic_gcp_bundle SET evidence=? WHERE id=?',(ev,bundle_id))
+  if not _verify_only:db.execute('UPDATE synthetic_gcp_bundle SET evidence=? WHERE id=?',(ev,bundle_id))
   if _fault:_fault('evidence')
   file.verify(io.BytesIO(fp),attempt_id=statement['attemptId'],evidence_sha256=statement['gcpEvidenceSha256'],file_sha256=statement['gcpFileSha256'],page_hashes=statement['gcpFilePageHashes'],page_bytes=statement['gcpFilePageBytes'],decoded_bytes=statement['gcpFileByteCount'])
-  db.execute('UPDATE synthetic_gcp_bundle SET file=? WHERE id=?',(fp,bundle_id))
+  if not _verify_only:db.execute('UPDATE synthetic_gcp_bundle SET file=? WHERE id=?',(fp,bundle_id))
   if _fault:_fault('file')
   evbytes=_decoded(ev);fbytes=_decoded(fp);parsed=_parse(evbytes)
   inspect(attempt_id=statement['attemptId'],evidence=parsed,evidence_bytes=evbytes,evidence_sha256=statement['gcpEvidenceSha256'],generated_bytes=fbytes,source_records=sources,selected_records=selections,trusted_images=trusted_images,trusted_correspondences=trusted_correspondences)

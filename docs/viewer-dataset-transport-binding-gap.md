@@ -54,8 +54,9 @@ Selected dataset object IDs must equal their dataset file IDs; generated GCP
 uses `gcp_<attemptId>` with `text/plain` and cannot collide with an original
 dataset file ID. Nested paths remain bound by the Viewer input-list digest,
 while transport objects carry basenames. These rules need independent review.
-Failure during any phase rolls back both synthetic rows; exact replay rechecks
-the retained bytes and validation. There is still no signature over this new
+Failure during any phase rolls back both synthetic rows; exact replay compares
+and revalidates retained bytes without deleting or rewriting the bundle. There
+is still no signature over this new
 binding, no authenticated loader or production trust, and no independently
 verified raw source custody, JS correspondence provenance, revocation/fencing,
 old-binary downgrade protection or production schema migration. It always

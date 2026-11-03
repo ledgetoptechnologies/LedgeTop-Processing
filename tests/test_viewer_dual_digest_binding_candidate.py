@@ -50,7 +50,7 @@ class ViewerDualDigestTests(unittest.TestCase):
   with self.queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM synthetic_viewer_dataset_transport_v1').fetchone()[0],0)
   self.assertTrue(self.call()['created'])
  def test_exact_replay_in_new_process(self):
-  self.call();arg=dict(root=self.temp.name,submission=self.submission,statement=self.statement,authority=self.queue.authority_id,provenance=self.provenance)
+  self.call();arg=dict(root=str(self.queue.path.parent),submission=self.submission,statement=self.statement,authority=self.queue.authority_id,provenance=self.provenance)
   self.queue.close()
   script='''import json,sys
 from processing.prototype import Queue
@@ -60,5 +60,6 @@ a=json.load(sys.stdin);q=Queue(a['root']);q.allowed_profiles.add(PROFILE)
 try:print(json.dumps(stage(ReferenceStore(q,jcs_runtime_enabled=True),a['submission'],a['statement'],principal='viewer-a',environment='staging',configured_authority=a['authority'],synthetic_viewer_provenance=a['provenance'])))
 finally:q.close()
 '''
-  result=subprocess.run([sys.executable,'-c',script],input=json.dumps(arg),capture_output=True,text=True,check=True,timeout=20)
+  result=subprocess.run([sys.executable,'-c',script],input=json.dumps(arg),capture_output=True,text=True,timeout=20)
+  self.assertEqual(result.returncode,0,msg=result.stderr)
   self.assertFalse(json.loads(result.stdout)['created'])
