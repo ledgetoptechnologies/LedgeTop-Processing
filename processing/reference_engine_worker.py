@@ -16,10 +16,12 @@ import re
 import sqlite3
 import stat
 import zipfile
+import uuid
 from urllib.parse import urlsplit
 
 from . import reference_protocol as p
 from .node_gate import NodeGate, GateError
+from .host_mutation_journal import HostMutationJournal
 from . import reference_native_archive as native_archive
 
 
@@ -30,7 +32,7 @@ class WorkerHeld(ValueError):
 class ReferenceEngineWorker:
     def __init__(self, path, *, ledger, outbox, engine, engine_id, node_id,
                  authority_id, coordinator_origin, gate_generation, worker_id,
-                 engine_version, allowed_odm_options=()):
+                 engine_version, allowed_odm_options=(), host_mutation_journal=False):
         self.path = Path(path).absolute()
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if any(x.is_symlink() for x in (self.path, *self.path.parents)):
@@ -70,11 +72,16 @@ class ReferenceEngineWorker:
         self.authority_id, self.origin = authority_id, coordinator_origin
         self.gate_generation, self.worker_id = gate_generation, worker_id
         self.version, self.allowed_options = engine_version, frozenset(allowed_odm_options)
+        if type(host_mutation_journal) is not bool:
+            raise ValueError('host mutation journal must be a boolean')
+        self.host_mutation_journal = host_mutation_journal
         with self._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS executions (
                 job TEXT PRIMARY KEY, identity TEXT NOT NULL, receipt TEXT NOT NULL,
                 phase TEXT NOT NULL, result TEXT, outbox_id TEXT)''')
             columns = {row['name'] for row in db.execute('PRAGMA table_info(executions)')}
+            if 'host_guarded' not in columns:
+                db.execute('ALTER TABLE executions ADD COLUMN host_guarded INTEGER NOT NULL DEFAULT 0')
             if 'archive_size' not in columns:
                 db.execute('ALTER TABLE executions ADD COLUMN archive_size INTEGER')
             if 'archive_sha' not in columns:
@@ -170,24 +177,55 @@ class ReferenceEngineWorker:
                     nodeId=self.node_id, authorityId=self.authority_id))
                 # Gate persistence precedes this commit. A crash between them
                 # leaves an orphan hold requiring operator reconciliation.
-                db.execute('INSERT INTO executions(job,identity,receipt,phase) VALUES(?,?,?,\'prepared\')',
-                           (job['jobId'], encoded, receipt))
-            self.ledger.set_engine_state(reservation_id, 'engine_started')
-            self._phase(job['jobId'], 'initialize_pending')
-            self.engine.initialize(dict(name=job['jobId'], engine_uuid=job['jobId'], outputs=None,
-                options=[dict(name=k, value=v) for k, v in pipeline['odm']['options'].items()]))
-            for item in inputs:
-                self._phase(job['jobId'], 'upload_pending')
-                self.engine.upload(job['jobId'], item)
-            self._phase(job['jobId'], 'commit_pending')
-            self.engine.action('commit', job['jobId'])
-            self._phase(job['jobId'], 'processing')
-            return 'processing'
+                db.execute('INSERT INTO executions(job,identity,receipt,phase,host_guarded) VALUES(?,?,?,\'prepared\',?)',
+                           (job['jobId'], encoded, receipt, int(self.host_mutation_journal)))
+            journal = None
+            try:
+                if self.host_mutation_journal:
+                    journal = HostMutationJournal(gate, receipt).create()
+                self.ledger.set_engine_state(reservation_id, 'engine_started')
+
+                def mutate(kind, request, call):
+                    # The digest binds task identity and logical payload, not the
+                    # nondeterministic multipart encoding or a raw HTTP receipt.
+                    digest = p.digest(request)
+                    op_id = str(uuid.uuid4())
+                    if journal is not None:
+                        journal.begin(op_id, kind, digest)
+                    result = call()
+                    if journal is not None and kind == 'commit' and (not isinstance(result, dict)
+                            or 'error' in result or result.get('success') is False
+                            or ('uuid' in result and result['uuid'] != job['jobId'])):
+                        raise WorkerHeld('engine commit acknowledgment uncertain')
+                    if journal is not None:
+                        journal.acknowledge(op_id, p.digest(dict(
+                            task=job['jobId'], kind=kind, requestDigest=digest,
+                            validation='native-engine-contract-passed')))
+
+                task = dict(name=job['jobId'], engine_uuid=job['jobId'], outputs=None,
+                    options=[dict(name=k, value=v) for k, v in pipeline['odm']['options'].items()])
+                self._phase(job['jobId'], 'initialize_pending')
+                mutate('init', task, lambda: self.engine.initialize(task))
+                for item in inputs:
+                    self._phase(job['jobId'], 'upload_pending')
+                    request = dict(task=job['jobId'], name=item['name'],
+                                   bytes=item['bytes'], sha256=item['sha256'])
+                    mutate('upload', request, lambda: self.engine.upload(job['jobId'], item))
+                self._phase(job['jobId'], 'commit_pending')
+                mutate('commit', dict(task=job['jobId']),
+                       lambda: self.engine.action('commit', job['jobId']))
+                self._phase(job['jobId'], 'processing')
+                return 'processing'
+            finally:
+                if journal is not None:
+                    journal.close()
 
     def poll(self, job_id):
         """Read-only engine reconciliation; terminal files stay until Viewer ACK."""
         with NodeGate(self.engine_id) as gate:
             row = self._row(job_id)
+            if row['host_guarded']:
+                raise WorkerHeld('host journal reconciliation is not implemented; execution remains held')
             if row['outbox_id']:
                 return row['outbox_id']
             if row['phase'] == 'downloading':
