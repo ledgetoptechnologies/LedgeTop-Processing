@@ -173,6 +173,63 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
         self.assertEqual(self.native_fixture.counts()['upload'], 1)
 
     @unittest.skipIf(os.name == 'nt', 'secure remote spool requires POSIX')
+    def test_second_spool_is_removed_when_first_holds_gate_in_backend(self):
+        bridge = self.service.engines['cluster']
+        task = str(uuid.uuid4())
+        bridge.initialize({'engine_uuid': task, 'name': 'synthetic', 'options': [], 'outputs': None})
+        source = self.root / 'source.jpg'; source.write_bytes(b'abc')
+        item = {'path': str(source), 'name': 'photo.jpg', 'bytes': 3,
+                'sha256': hashlib.sha256(b'abc').hexdigest()}
+        ready, backend_entered, release = threading.Event(), threading.Event(), threading.Event()
+        original_open, original_upload = os.open, self.proxy.engine.upload
+        def capture_open(path, *args, **kwargs):
+            result = original_open(path, *args, **kwargs)
+            if str(path).startswith('incoming-'): ready.set()
+            return result
+        def slow_upload(identifier, value):
+            backend_entered.set()
+            if not release.wait(10): raise RuntimeError('test timeout')
+            return original_upload(identifier, value)
+        outcomes = []
+        def first_upload():
+            try:
+                GuardedNativeClient('127.0.0.1', bridge.server.server_port, bridge.context, TOKEN,
+                                    timeout=10).upload(task, item)
+                outcomes.append('ok')
+            except Exception:
+                outcomes.append('error')
+        conn = http.client.HTTPSConnection('127.0.0.1', bridge.server.server_port,
+                                           context=bridge.context, timeout=10)
+        first = None
+        try:
+            with patch('processing.guarded_native_https.os.open', side_effect=capture_open), \
+                    patch.object(self.proxy.engine, 'upload', side_effect=slow_upload):
+                conn.putrequest('POST', '/v1/upload-stream')
+                for key, value in {'Authorization': 'Bearer ' + TOKEN, 'Content-Length': '3',
+                                   'X-Task-Id': task, 'X-File-Name': 'photo.jpg',
+                                   'X-File-Sha256': item['sha256']}.items():
+                    conn.putheader(key, value)
+                conn.endheaders(); conn.send(b'a')
+                self.assertTrue(ready.wait(5), 'second request did not open spool')
+                first = threading.Thread(target=first_upload); first.start()
+                self.assertTrue(backend_entered.wait(5), 'first request did not enter backend')
+                conn.send(b'bc')
+                response = conn.getresponse()
+                self.assertEqual(response.status, 409); response.read()
+                # The one remaining file belongs to the in-flight first upload.
+                files = list(bridge.spool.iterdir())
+                self.assertEqual(len(files), 1)
+                self.assertEqual(files[0].read_bytes(), b'abc')
+                release.set(); first.join(10)
+                self.assertFalse(first.is_alive())
+                self.assertEqual(outcomes, ['ok'])
+                self.assertEqual(list(bridge.spool.iterdir()), files)
+                self.assertEqual(self.native_fixture.counts()['upload'], 1)
+        finally:
+            release.set(); conn.close()
+            if first is not None: first.join(10)
+
+    @unittest.skipIf(os.name == 'nt', 'secure remote spool requires POSIX')
     def test_uncertain_upload_retains_owner_file_but_not_retry_copy(self):
         bridge = self.service.engines['cluster']
         task = str(uuid.uuid4())
@@ -198,6 +255,24 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
         self.assertEqual(list(bridge.spool.iterdir()), files)
         self.assertEqual(files[0].read_bytes(), b'abc')
         self.assertEqual(self.native_fixture.counts()['upload'], 1)
+
+    @unittest.skipIf(os.name == 'nt', 'secure remote spool requires POSIX')
+    def test_backend_gate_busy_like_error_cannot_delete_uncertain_spool(self):
+        from processing.guarded_native_proxy import GuardedUploadGateBusy
+        bridge = self.service.engines['cluster']
+        task = str(uuid.uuid4())
+        bridge.initialize({'engine_uuid': task, 'name': 'synthetic', 'options': [], 'outputs': None})
+        source = self.root / 'source.jpg'; source.write_bytes(b'abc')
+        item = {'path': str(source), 'name': 'photo.jpg', 'bytes': 3,
+                'sha256': hashlib.sha256(b'abc').hexdigest()}
+        client = GuardedNativeClient('127.0.0.1', bridge.server.server_port, bridge.context, TOKEN, timeout=10)
+        with patch.object(self.proxy.engine, 'upload', side_effect=GuardedUploadGateBusy('backend')):
+            with self.assertRaises(EngineUnavailable): client.upload(task, item)
+        self.assertTrue(bridge.server.wait_drained(5))
+        files = list(bridge.spool.iterdir())
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].read_bytes(), b'abc')
+        self.assertEqual(self.journal_state()[1], [('init', 'done'), ('upload', 'pending')])
 
     @unittest.skipIf(os.name == 'nt', 'secure remote spool requires POSIX')
     def test_stream_rejects_wrong_bearer_and_task_before_spooling(self):

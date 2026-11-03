@@ -8,6 +8,7 @@ network isolation. There is deliberately no cancellation or release path.
 import hashlib
 import hmac
 import os
+from contextlib import ExitStack
 from pathlib import Path
 import re
 import secrets
@@ -16,12 +17,20 @@ import uuid
 
 from . import reference_protocol as protocol
 from .host_mutation_journal import HostMutationJournal, MutationHeld
-from .node_gate import GateError, NodeGate
+from .node_gate import GateBusy, GateError, NodeGate
 from .viewer_tasks import TaskStore
 
 
-class DuplicateGuardedUpload(MutationHeld):
+class UnissuedGuardedUpload(MutationHeld):
+    """This call is known not to have issued any engine mutation."""
+
+
+class DuplicateGuardedUpload(UnissuedGuardedUpload):
     """This call did not issue a mutation; a durable prior intent owns it."""
+
+
+class GuardedUploadGateBusy(UnissuedGuardedUpload):
+    """This call failed while acquiring the gate, before journal access."""
 
 
 class GuardedNativeProxy:
@@ -141,7 +150,13 @@ class GuardedNativeProxy:
                 or (os.name != 'nt' and (file.st_uid != os.geteuid() or file.st_mode & 0o077))):
             raise GateError('invalid private spooled input')
         request = dict(task=task, name=item['name'], bytes=item['bytes'], sha256=item['sha256'])
-        with NodeGate(self.engine_id) as gate:
+        with ExitStack() as stack:
+            try:
+                gate = stack.enter_context(NodeGate(self.engine_id))
+            except GateBusy:
+                # Catch ONLY acquisition failure. A GateBusy raised later by a
+                # backend must remain ambiguous and preserve the spool.
+                raise GuardedUploadGateBusy('node gate busy before upload') from None
             journal = HostMutationJournal(gate, self._owner(gate, task)).open()
             try:
                 # Names are the native upload identities. A repeated name is
@@ -149,7 +164,12 @@ class GuardedNativeProxy:
                 op = self._op(task, 'upload', hashlib.sha256(name_key.encode('ascii')).hexdigest())
                 if journal.contains_operation(op):
                     raise DuplicateGuardedUpload('prior upload intent already exists')
-                self._mutate(journal, op, 'upload', request, lambda: self.engine.upload(task, item))
+                try:
+                    self._mutate(journal, op, 'upload', request, lambda: self.engine.upload(task, item))
+                except UnissuedGuardedUpload:
+                    # Once begin may have committed, no downstream exception
+                    # can establish that this request did not mutate NodeODM.
+                    raise MutationHeld('upload outcome requires inspection') from None
             finally:
                 journal.close()
 

@@ -17,7 +17,7 @@ import ssl
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from .guarded_native_proxy import DuplicateGuardedUpload
+from .guarded_native_proxy import UnissuedGuardedUpload
 
 MAX_BODY = 65536
 MAX_UPLOAD = 20 * 1024 ** 3
@@ -182,9 +182,9 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                         adapter.upload(task, {'path': str(adapter.root / filename), 'name': name,
                                               'bytes': size, 'sha256': expected},
                                        bearer=bearer, protected_transport=True)
-                    except DuplicateGuardedUpload:
-                        # This call is proved not to have issued a mutation; the
-                        # journal's pre-existing intent owns the earlier file.
+                    except UnissuedGuardedUpload:
+                        # This call is proved not to have issued a mutation:
+                        # either a prior intent exists or gate acquisition failed.
                         retain = False
                         raise
                 finally:
