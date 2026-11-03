@@ -33,13 +33,13 @@ def inspect(*, attempt_id, evidence, evidence_bytes, evidence_sha256, generated_
     sources[obj['datasetFileId']]=obj
    else:generated.append(obj)
   if len(generated)!=1 or generated[0]['attemptId']!=attempt_id or generated[0]['byteSize']!=len(generated_bytes) or generated[0]['sha256']!=snapshot['sha256']:raise ValueError()
-  selected_ids=[]; selected_gcp=0
+  selected_ids=[]; selected_id_set=set(); selected_gcp=0
   for ordinal,obj in enumerate(selected_records):
    if type(obj) is not dict or type(obj.get('ordinal')) is not int or obj['ordinal']!=ordinal:raise ValueError()
    if obj.get('type')=='dataset_file':
     p._closed(obj,('type','ordinal','pageObjectId','datasetFileId'),'selected');sid=obj['datasetFileId']
-    if sid not in sources or sid in selected_ids:raise ValueError()
-    selected_ids.append(sid)
+    if sid not in sources or sid in selected_id_set:raise ValueError()
+    selected_ids.append(sid);selected_id_set.add(sid)
    elif obj.get('type')=='attempt_generated_gcp':
     p._closed(obj,('type','ordinal','pageObjectId','attemptId','mediaType'),'selected gcp')
     if obj['attemptId']!=attempt_id or obj['mediaType']!='text/plain':raise ValueError()
@@ -51,7 +51,7 @@ def inspect(*, attempt_id, evidence, evidence_bytes, evidence_sha256, generated_
   for row in rows:
    p._closed(row,('correspondenceId','gcpPointId','gcpSetId','externalId','label','latitude','longitude','elevationM','sourceGcpDatasetFileId','sourceGcpSha256','sourceGcpRelativePath','imageDatasetFileId','imageRelativePath','imageWidth','imageHeight','pixelX','pixelY'),'correspondence')
    src=sources.get(row['sourceGcpDatasetFileId']); img=sources.get(row['imageDatasetFileId'])
-   if not src or src['processingRole']!='gcp_source' or src['relativePath']!=row['sourceGcpRelativePath'] or src['sha256']!=row['sourceGcpSha256'] or not img or img['kind']!='image' or img['relativePath']!=row['imageRelativePath'] or img['datasetFileId'] not in selected_ids:raise ValueError()
+   if not src or src['processingRole']!='gcp_source' or src['relativePath']!=row['sourceGcpRelativePath'] or src['sha256']!=row['sourceGcpSha256'] or not img or img['kind']!='image' or img['relativePath']!=row['imageRelativePath'] or img['datasetFileId'] not in selected_id_set:raise ValueError()
    raw_refs[src['datasetFileId']]={'datasetFileId':src['datasetFileId'],'relativePath':src['relativePath'],'sha256':src['sha256']};image_ids.add(img['datasetFileId'])
    reduced.append(dict(sourceGcpDatasetFileId=src['datasetFileId'],imageDatasetFileId=img['datasetFileId'],pointId=row['gcpPointId'],**{k:row[k] for k in ('longitude','latitude','elevationM','pixelX','pixelY')}))
   if sorted(raw_refs)!=snapshot['sourceGcpDatasetFileIds'] or sorted(image_ids)!=snapshot['imageDatasetFileIds'] or [raw_refs[x] for x in sorted(raw_refs)]!=generated[0]['sourceFiles']:raise ValueError()

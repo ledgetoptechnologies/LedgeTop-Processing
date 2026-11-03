@@ -27,3 +27,16 @@ class ActualViewerSemantics(unittest.TestCase):
     a=copy.deepcopy(v['source_records'][1]);a['datasetFileId']='photo-2';a['relativePath']='other/IMG_00001.jpg';v['source_records'].append(a);v['selected_records'].insert(1,dict(type='dataset_file',ordinal=1,pageObjectId='photo-2',datasetFileId='photo-2'))
     for i,x in enumerate(v['selected_records']):x['ordinal']=i
    with self.subTest(kind=kind),self.assertRaises(SemanticHeld):inspect(**v)
+
+class Scale(unittest.TestCase):
+ @classmethod
+ def setUpClass(cls):
+  ActualViewerSemantics.setUpClass();cls.args=ActualViewerSemantics.args
+ def test_16832_selected_objects(self):
+  v=copy.deepcopy(self.args); extra=[]
+  for i in range(16831):
+   sid=f'extra-{i}';extra.append(dict(type='dataset_file',datasetFileId=sid,relativePath=f'extra/{sid}.jpg',byteSize=1,sha256='e'*64,processingRole='image',mediaType='image/jpeg',kind='image'))
+  v['source_records'].extend(extra); gcp=v['selected_records'].pop()
+  for obj in extra:v['selected_records'].append(dict(type='dataset_file',ordinal=len(v['selected_records']),pageObjectId=obj['datasetFileId'],datasetFileId=obj['datasetFileId']))
+  gcp['ordinal']=len(v['selected_records']);v['selected_records'].append(gcp)
+  self.assertEqual(inspect(**v)['state'],'held_gcp_authority_correspondence_hash_unverified')
