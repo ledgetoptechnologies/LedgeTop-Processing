@@ -163,6 +163,46 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual([self.queue.get(job['jobId'])['nodeId'] for job in (first, second)],
                          ['cluster', 'node-2'])
 
+    def test_candidate_inventory_routes_the_three_photo_batch_example(self):
+        self.queue.per_node_slots = True
+        inventory = [dict(id='cluster', maxPhotos=1000, capabilities=['odm']),
+                     dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
+        report = {'ready': True, 'taskQueueCount': 0, 'maxImages': None,
+                  'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024}
+        store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda _: report)
+
+        def submit(count):
+            raw = copy.deepcopy(self.fixture['submission'])
+            raw['submissionId'] = str(uuid.uuid4())
+            manifest = raw['manifest']
+            manifest['objects'] = [{**manifest['objects'][0], 'id': f'image-{i}',
+                                    'name': f'image-{i}.jpg'} for i in range(count)]
+            manifest.update(objectCount=count, totalBytes=count * 3,
+                            inputCounts={'images': count, 'lidarObjects': 0, 'points': 0})
+            manifest['sha256'] = p.manifest_sha256(manifest)
+            return store.submit(p.validate_submission(raw, environment='production',
+                capability_fingerprint=raw['capabilityFingerprint']))[0]
+
+        def claim(job, node):
+            return store.claim(job['jobId'], node_id=node, worker_id=node,
+                worker_instance_id='instance', claim_request_id='claim-' + job['jobId'])
+
+        small, medium, large = (submit(count) for count in (100, 500, 5000))
+        self.assertEqual(store.next_for_node('cluster')['jobId'], small['jobId'])
+        first_claim = claim(small, 'cluster')
+        self.assertEqual(store.next_for_node('node-2')['jobId'], medium['jobId'])
+        second_claim = claim(medium, 'node-2')
+        self.assertEqual(self.queue.get(large['jobId'])['status'], 'queued')
+        # Synthetic queue completion models a free slot; it does not exercise
+        # the real engine or the durable result-acceptance pipeline.
+        self.queue.complete(small['jobId'], {'claimToken': first_claim['claimToken'],
+            'status': 'succeeded', 'result': {}})
+        self.assertIsNone(store.next_for_node('cluster'))
+        self.assertEqual(self.queue.get(large['jobId'])['status'], 'queued')
+        self.queue.complete(medium['jobId'], {'claimToken': second_claim['claimToken'],
+            'status': 'succeeded', 'result': {}})
+        self.assertEqual(store.next_for_node('node-2')['jobId'], large['jobId'])
+
     def test_candidate_inventory_racing_claims_do_not_share_a_slot(self):
         self.queue.per_node_slots = True
         inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
