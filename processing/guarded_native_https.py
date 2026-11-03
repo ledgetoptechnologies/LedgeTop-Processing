@@ -17,6 +17,7 @@ import ssl
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from .guarded_native_proxy import DuplicateGuardedUpload
 
 MAX_BODY = 65536
 MAX_UPLOAD = 20 * 1024 ** 3
@@ -143,6 +144,7 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                 filename = 'incoming-' + secrets.token_hex(24)
                 fd = None
                 retain = False
+                file_identity = None
                 try:
                     root_stat = os.fstat(root_fd)
                     path_stat = os.stat(adapter.root, follow_symlinks=False)
@@ -153,6 +155,8 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                         raise ValueError('insufficient spool headroom')
                     fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                                  0o600, dir_fd=root_fd)
+                    created = os.fstat(fd)
+                    file_identity = (created.st_dev, created.st_ino)
                     digest = hashlib.sha256()
                     remaining = size
                     while remaining:
@@ -174,15 +178,23 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                         raise ValueError('upload expired')
                     # Keep the file even on a lost/ambiguous engine response.
                     retain = True
-                    adapter.upload(task, {'path': str(adapter.root / filename), 'name': name,
-                                          'bytes': size, 'sha256': expected},
-                                   bearer=bearer, protected_transport=True)
+                    try:
+                        adapter.upload(task, {'path': str(adapter.root / filename), 'name': name,
+                                              'bytes': size, 'sha256': expected},
+                                       bearer=bearer, protected_transport=True)
+                    except DuplicateGuardedUpload:
+                        # This call is proved not to have issued a mutation; the
+                        # journal's pre-existing intent owns the earlier file.
+                        retain = False
+                        raise
                 finally:
                     if fd is not None: os.close(fd)
-                    if not retain:
+                    if not retain and file_identity is not None:
                         try:
-                            os.unlink(filename, dir_fd=root_fd)
-                            os.fsync(root_fd)
+                            current = os.stat(filename, dir_fd=root_fd, follow_symlinks=False)
+                            if (current.st_dev, current.st_ino) == file_identity:
+                                os.unlink(filename, dir_fd=root_fd)
+                                os.fsync(root_fd)
                         except FileNotFoundError:
                             pass
                     os.close(root_fd)

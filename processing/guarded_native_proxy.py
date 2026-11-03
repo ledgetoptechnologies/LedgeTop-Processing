@@ -20,6 +20,10 @@ from .node_gate import GateError, NodeGate
 from .viewer_tasks import TaskStore
 
 
+class DuplicateGuardedUpload(MutationHeld):
+    """This call did not issue a mutation; a durable prior intent owns it."""
+
+
 class GuardedNativeProxy:
     def __init__(self, *, engine, engine_id, node_id, worker_id, authority_id,
                  coordinator_origin, generation, bearer, spool_root):
@@ -143,6 +147,8 @@ class GuardedNativeProxy:
                 # Names are the native upload identities. A repeated name is
                 # held even when byte metadata differs.
                 op = self._op(task, 'upload', hashlib.sha256(name_key.encode('ascii')).hexdigest())
+                if journal.contains_operation(op):
+                    raise DuplicateGuardedUpload('prior upload intent already exists')
                 self._mutate(journal, op, 'upload', request, lambda: self.engine.upload(task, item))
             finally:
                 journal.close()
