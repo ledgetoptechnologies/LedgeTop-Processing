@@ -27,6 +27,7 @@ from . import reference_protocol as p
 from .reference_engine_worker import WorkerHeld
 from .reference_sender import ReferenceSender
 from .scratch_cleanup import ImportConfirmationUnavailable
+from .scratch_policy import PolicyConflict
 from .reference_transfer import BrokerClient, _now, validate_grant
 from .viewer_service import NativeEngine
 from .node_gate import NodeGate
@@ -895,8 +896,18 @@ class ReferenceDriver:
             request = data['reservation']
             # The deadline is fixed at mint and nothing renews or succeeds it yet, so an
             # unconfirmed reservation past it can never be admitted: hold, do not retry.
-            if stage == 'reservation_pending' and self._timestamp(request['expiresAt']) <= self.clock():
-                raise DriverHeld('transfer_reservation_expired')
+            # The clock high-water mark is journaled first, so a restart or a clock moved
+            # back cannot reopen a deadline this driver has already seen pass.
+            if stage == 'reservation_pending':
+                observed = data.get('reservationClockHighWater', 0)
+                if type(observed) not in (int, float) or not math.isfinite(observed) or observed < 0:
+                    raise DriverHeld('reservation_clock_journal_invalid')
+                now = max(self.clock(), observed)
+                if now > observed:
+                    data['reservationClockHighWater'] = now
+                    self._save(job_id, 'reservation_pending', data)
+                if self._timestamp(request['expiresAt']) <= now:
+                    raise DriverHeld('transfer_reservation_expired')
             self.ledger.reserve(job_id=job_id, generation=claim['generation'], reservation_id=request['reservationId'],
                 manifest_sha256=claim['manifestSha256'], input_bytes=claim['submission']['manifest']['totalBytes'], output_budget=self.output_budget,
                 environment=claim['environment'], ttl_seconds=self.transfer_ttl, worker_ready=True)
@@ -954,6 +965,12 @@ class ReferenceDriver:
                 if os.path.lexists(target):
                     self.worker._file(reservation, relative, obj['byteSize'], obj['sha256'])
                 else:
+                    # Fence the scratch lease before the first byte: partial or uncertain
+                    # bytes must keep the whole reservation budget past the lease expiry.
+                    try:
+                        self.ledger.begin_transfer(reservation)
+                    except PolicyConflict:
+                        raise DriverHeld('scratch_reservation_unavailable') from None
                     if source_range_v2:
                         grant = self._source_range_grant(job_id, claim, data)
                         from .source_range_transfer import SourceRenewalInvalid, SourceRenewalUnavailable

@@ -5,6 +5,7 @@ import hashlib
 import io
 import http.client
 import json
+import sqlite3
 from pathlib import Path
 import ssl
 import os
@@ -420,6 +421,100 @@ class ReferenceDriverTests(unittest.TestCase):
         with self.driver._db() as db:
             stage, = db.execute('SELECT stage FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
         self.assertEqual(stage, 'reservation_pending')
+        # A restarted driver on a clock moved back before the deadline stays held.
+        offset[0] = -3600
+        self.driver = self.make_driver(state_path=self.root / 'driver-expired-reservation.sqlite',
+                                       clock=lambda: time.time() + offset[0])
+        self.driver._request = lost_reservation
+        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'transfer_reservation_expired'})
+        self.assertEqual(len(posts), attempts)
+
+    def committed_reservation_with_lost_reply(self, name):
+        offset = [0]
+        state = self.root / ('driver-committed-reservation-' + name + '.sqlite')
+        self.driver = self.make_driver(state_path=state, clock=lambda: time.time() + offset[0])
+        job = self.submit(contents=(b'committed-reservation-photo-' + name.encode(),))
+        real, posts = self.request, []
+        def lost_reply(method, suffix, payload=None, **kwargs):
+            result = real(method, suffix, payload, **kwargs)
+            if suffix.endswith('/reservation'):
+                posts.append(payload['transferRequest'])
+                if len(posts) == 1:
+                    raise OSError('synthetic lost reservation reply')  # the coordinator committed
+            return result
+        self.driver._request = lost_reply
+        for _ in range(10):
+            result = self.driver.step()
+            if posts:
+                break
+        self.assertEqual(result['state'], 'retry_wait')
+        committed = [item for item in self.store.list(private=True) if item['jobId'] == job['jobId']][0]
+        self.assertEqual((committed['phase'], committed['transferRequest']), ('awaiting_transfer', posts[0]))
+        return job, state, offset, lost_reply, posts
+
+    def test_committed_reservation_with_lost_reply_replays_exactly_inside_its_deadline(self):
+        _job, _state, _offset, _lost, posts = self.committed_reservation_with_lost_reply('inside')
+        self.assertEqual(self.driver.step()['state'], 'awaiting_grant')
+        self.assertEqual(posts[1], posts[0])  # the coordinator accepts the exact replay idempotently
+
+    def test_committed_reservation_with_lost_reply_holds_after_its_deadline_across_clock_rollback(self):
+        job, state, offset, lost_reply, posts = self.committed_reservation_with_lost_reply('expired')
+        offset[0] = 241
+        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'transfer_reservation_expired'})
+        offset[0] = -3600  # restart on an earlier clock
+        self.driver = self.make_driver(state_path=state, clock=lambda: time.time() + offset[0])
+        self.driver._request = lost_reply
+        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'transfer_reservation_expired'})
+        self.assertEqual(len(posts), 1)  # nothing minted, re-posted or reset
+        after = [item for item in self.store.list(private=True) if item['jobId'] == job['jobId']][0]
+        self.assertEqual((after['phase'], after['transferRequest']), ('awaiting_transfer', posts[0]))
+
+    def test_partial_object_bytes_keep_scratch_budget_past_lease_expiry_and_restart(self):
+        from processing.scratch_policy import ScratchLedger
+        from processing.scratch_policy import PolicyConflict
+        now = [time.time()]
+        path = self.root / 'ledger-in-flight.sqlite'
+        content = b'in-flight-partial-photo' * 4
+        total = len(content) + 1024 * 1024  # input plus the driver's output budget
+        # Room for exactly one such reservation (plus the safety floor), so a second
+        # one fits only if the first's budget was released.
+        def ledger():
+            return ScratchLedger(path, self.scratch, capacity_probe=lambda _: 2 * total - 1 + 1024, clock=lambda: now[0],
+                                 safety_floor_bytes=1024, cleanup_grace_seconds=0)
+        self.ledger = ledger()
+        self.worker = ReferenceEngineWorker(self.root / 'worker-in-flight.sqlite', ledger=self.ledger,
+            outbox=self.outbox, engine=self.native, engine_id='engine', node_id='cluster',
+            authority_id=self.queue.authority_id, coordinator_origin=self.gate_origin,
+            gate_generation=1, worker_id='worker', engine_version='pinned-engine-1')
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-in-flight-scratch.sqlite')
+        job = self.submit(contents=(content,))
+        self.advance(job, 'fetching')
+        def partial(*, grant, object_id, destination, grant_provider):
+            Path(destination).parent.mkdir(parents=True, exist_ok=True)
+            (Path(destination).parent / '.source-range-synthetic.part').write_bytes(content[:7])
+            raise OSError('synthetic interrupted object')
+        with patch.object(self.driver, '_source_range_grant', return_value=None),              patch.object(self.driver.source_range_client, 'download_object', side_effect=partial):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        with self.driver._db() as db:
+            data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+        reservation = data['reservation']['reservationId']
+        def row():
+            with sqlite3.connect(path) as db:
+                return db.execute('SELECT state,allocated,remaining FROM reservations WHERE id=?', (reservation,)).fetchone()
+        before = row()
+        self.assertEqual(before, ('reserved', 0, total))  # whole budget held; nothing claimed as written yet
+        with sqlite3.connect(path) as db:
+            self.assertIsNotNone(db.execute('SELECT started_at FROM transfer_fences WHERE reservation=?', (reservation,)).fetchone())
+        # Past the scratch lease, a concurrent reservation and a ledger restart do not release it.
+        now[0] += 241 + 3600
+        self.ledger = ledger()
+        with self.assertRaisesRegex(PolicyConflict, 'insufficient unreserved scratch'):
+            self.ledger.reserve(job_id='synthetic-other-job', generation=1, reservation_id='synthetic-other',
+                manifest_sha256='a' * 64, input_bytes=len(content), output_budget=1024 * 1024, environment='staging',
+                ttl_seconds=60, worker_ready=True)  # the held budget still counts against free space
+        self.assertEqual(row(), before)
+        self.assertTrue((self.scratch / 'jobs' / reservation / '.source-range-synthetic.part').exists())
 
     def test_mid_transfer_renewal_wait_and_rejection_keep_driver_state(self):
         from processing.source_range_transfer import validate_source_grant
