@@ -576,6 +576,8 @@ class ScratchLedger:
                        "DO UPDATE SET state=excluded.state", (reservation_id, object_id, reference, kind, state))
 
     def _eligible(self, db, now):
+        if db.execute("SELECT 1 FROM metadata WHERE key='cleanup_census_hold'").fetchone():
+            raise PolicyConflict('cleanup census requires reconciliation')
         return db.execute("""SELECT o.*,r.generation FROM objects o JOIN reservations r
             ON r.id=o.reservation WHERE r.state='terminal' AND o.accepted IS NOT NULL
             AND o.cleaned IS NULL AND MAX(o.accepted,r.terminal_at)<=?
@@ -583,6 +585,22 @@ class ScratchLedger:
             AND NOT EXISTS(SELECT 1 FROM cleanup_intents c WHERE c.reservation=o.reservation AND c.object=o.id)
             AND NOT EXISTS(SELECT 1 FROM pins p WHERE p.reservation=o.reservation
               AND p.object=o.id AND p.state!='released') ORDER BY o.reservation,o.id""", (now-self.grace,))
+
+    def arm_cleanup_census(self):
+        """Durably close current cleanup entry points before an offline census.
+
+        An existing intent may already be executing outside SQLite; report it
+        without pretending the hold can recall that executor. Older software
+        does not honor this marker and must be excluded separately. No automatic
+        release is provided until a complete census contract is implemented.
+        """
+        with self._transaction() as db:
+            db.execute("INSERT OR IGNORE INTO metadata VALUES('cleanup_census_hold','pending')")
+            marker = db.execute("SELECT value FROM metadata WHERE key='cleanup_census_hold'").fetchone()
+            if marker is None or marker[0] != 'pending':
+                raise PolicyConflict('cleanup census marker invalid')
+            active = db.execute("SELECT COUNT(*) FROM cleanup_intents WHERE state IS NOT 'cleaned'").fetchone()[0]
+            return {'state': 'held', 'existing_intents': active}
 
     def hold_guarded_failure_cleanup(self, reservation_id, *, job_id, generation):
         """Persist a no-cleanup fence for a guarded, unverified failure.
@@ -644,6 +662,8 @@ class ScratchLedger:
         """Recover a persisted fence; expired leases report uncertainty and retain it."""
         with self._transaction() as db:
             now = self._now(db)
+            if db.execute("SELECT 1 FROM metadata WHERE key='cleanup_census_hold'").fetchone():
+                raise PolicyConflict('cleanup census requires reconciliation')
             if db.execute('SELECT 1 FROM cleanup_holds WHERE reservation=?', (reservation_id,)).fetchone():
                 raise PolicyConflict('cleanup is held for reconciliation')
             row = db.execute("""SELECT c.*,c.token AS intent_token,c.expires AS lease_expires,

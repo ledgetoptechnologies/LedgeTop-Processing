@@ -99,6 +99,47 @@ class ScratchCleanupTests(unittest.TestCase):
         self.assertEqual(self.first.read_bytes(), b'abc')
         self.assertEqual(self.ledger.cleanup_intent('r1', 'o1')['intent_token'], intent['intent_token'])
 
+    def test_startup_census_fences_real_executor_across_reopen(self):
+        self.assertEqual(self.ledger.arm_cleanup_census(), {'state': 'held', 'existing_intents': 0})
+        reopened = self.open_ledger()
+        with self.assertRaisesRegex(PolicyConflict, 'census'):
+            reopened.cleanup_candidates()
+        with self.assertRaisesRegex(PolicyConflict, 'census'):
+            ScratchCleanupExecutor(reopened).execute('r1', 'o1', generation=1,
+                sha256=self.sha, byte_size=3, relative_path='jobs/r1/o1.bin')
+        self.assertEqual(self.first.read_bytes(), b'abc')
+        self.assertEqual(reopened.arm_cleanup_census(), {'state': 'held', 'existing_intents': 0})
+
+    def test_census_persists_and_reports_preexisting_intent(self):
+        intent = self.ledger.begin_cleanup('r1', 'o1', generation=1, sha256=self.sha)
+        self.assertEqual(self.ledger.arm_cleanup_census(), {'state': 'held', 'existing_intents': 1})
+        reopened = self.open_ledger()
+        with self.assertRaisesRegex(PolicyConflict, 'census'):
+            reopened.cleanup_intent('r1', 'o1')
+        with self.assertRaisesRegex(PolicyConflict, 'census'):
+            ScratchCleanupExecutor(reopened).execute('r1', 'o1', generation=1,
+                sha256=self.sha, byte_size=3, relative_path='jobs/r1/o1.bin',
+                intent_token=intent['intent_token'])
+        self.assertEqual(self.first.read_bytes(), b'abc')
+
+    def test_census_and_new_intent_serialize_on_separate_ledger_connections(self):
+        other = self.open_ledger()
+        def arm():
+            return ('census', self.ledger.arm_cleanup_census())
+        def cleanup():
+            try:
+                return ('intent', other.begin_cleanup('r1', 'o1', generation=1, sha256=self.sha))
+            except PolicyConflict:
+                return ('blocked', None)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = [f.result() for f in (pool.submit(arm), pool.submit(cleanup))]
+        census = next(value for key, value in results if key == 'census')
+        other_result = next(key for key, _ in results if key != 'census')
+        self.assertEqual(census['existing_intents'], 1 if other_result == 'intent' else 0)
+        with self.assertRaisesRegex(PolicyConflict, 'census'):
+            other.cleanup_candidates()
+        self.assertEqual(self.first.read_bytes(), b'abc')
+
     def test_wrong_bytes_or_generation_refuses_without_unlink(self):
         with self.assertRaises(CleanupRefused):
             self.execute(byte_size=4)
