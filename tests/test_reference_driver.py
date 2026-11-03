@@ -937,6 +937,7 @@ class ReferenceDriverTests(unittest.TestCase):
         self.worker.viewer_receipt_keys = SyntheticViewerSigner().trusted_keys
         self.driver = self.make_driver()
         self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'completed_result_ledger_unavailable'})
+        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'completed_result_ledger_unavailable'})
         self.assertEqual(len(list(self.scratch.glob('jobs/*/all.zip'))), 1)
 
     def test_legacy_completion_scan_is_bounded_and_wraps(self):
