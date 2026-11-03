@@ -34,6 +34,11 @@ from . import reference_protocol as p
 from .reference_transfer import TransferError, _now
 
 CHUNK_BYTES = 8 * 1024 * 1024
+# Proposal (not yet agreed): the Viewer binds each source grant to the exact
+# Viewer processing attempt. When the submission carries one, it is echoed into
+# the queued transfer request and becomes part of the source identity, so every
+# range request ID and ledger key is bound to that attempt.
+VIEWER_ATTEMPT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", re.I)
 OBJECT_PREFIX = "/api/processing/source-range/v2/objects/"
 RENEWAL_PATH = "/api/processing/source-range/v2/grants/renew"
 RENEWAL_ACK_PATH = RENEWAL_PATH + "/ack"
@@ -107,8 +112,14 @@ def build_source_transfer_request(job, *, reservation_id, expires_at, nonce, clo
             raise ValueError()
         byte_budget = min(p.MAX_SAFE_INTEGER, total_bytes * 3)
         attempt_budget = min(p.MAX_SAFE_INTEGER, minimum_requests * 3)
+        attempt = {}
+        if 'viewerAttemptId' in job['submission']:
+            if (type(job['submission']['viewerAttemptId']) is not str
+                    or not VIEWER_ATTEMPT_ID.fullmatch(job['submission']['viewerAttemptId'])):
+                raise ValueError()
+            attempt = {'viewerAttemptId': job['submission']['viewerAttemptId']}
         return {
-            'protocol': 'source-range-v2', 'reservationId': reservation_id,
+            'protocol': 'source-range-v2', **attempt, 'reservationId': reservation_id,
             'generation': job['generation'], 'expiresAt': expires_at,
             'manifestSha256': manifest['sha256'], 'sourceVersion': source_version,
             'objectIds': [item['id'] for item in manifest['objects']], 'chunkBytes': CHUNK_BYTES,
@@ -127,6 +138,7 @@ class SourceIdentity:
     generation: int
     manifest_sha256: str
     source_version: str
+    viewer_attempt_id: str = None
 
     def canonical(self):
         values = {
@@ -134,6 +146,10 @@ class SourceIdentity:
             "reservationId": self.reservation_id, "generation": self.generation,
             "manifestSha256": self.manifest_sha256, "sourceVersion": self.source_version,
         }
+        if self.viewer_attempt_id is not None:
+            if type(self.viewer_attempt_id) is not str or not VIEWER_ATTEMPT_ID.fullmatch(self.viewer_attempt_id):
+                raise TransferError("invalid source identity")
+            values["viewerAttemptId"] = self.viewer_attempt_id
         if self.environment not in ("production", "staging"):
             raise TransferError("invalid source identity")
         for key in ("job_id", "reservation_id"):
@@ -181,18 +197,26 @@ def validate_source_grant(grant, *, job, clock=time.time, allow_expired=False):
     fields = ("protocol", "reservationId", "generation", "expiresAt", "manifestSha256",
               "sourceVersion", "jobId", "environment", "objectIds", "nonce", "token", "chunkBytes",
               "requestBudget", "byteBudget", "attemptBudget")
+    if type(grant) is dict and "viewerAttemptId" in grant:
+        fields = (*fields, "viewerAttemptId")
     if type(grant) is not dict or set(grant) != set(fields):
         raise TransferError("invalid source grant shape")
     if type(job) is not dict or grant["protocol"] != "source-range-v2":
         raise TransferError("invalid source grant protocol")
     try:
         identity = SourceIdentity(grant["environment"], grant["jobId"], grant["reservationId"],
-                                  grant["generation"], grant["manifestSha256"], grant["sourceVersion"])
+                                  grant["generation"], grant["manifestSha256"], grant["sourceVersion"],
+                                  grant.get("viewerAttemptId"))
         identity.canonical()
         transfer = job["transferRequest"]
         transfer_fields = ("protocol", "reservationId", "generation", "expiresAt", "manifestSha256",
                            "sourceVersion", "objectIds", "chunkBytes", "requestBudget", "byteBudget", "nonce")
         transfer_fields = (*transfer_fields, "attemptBudget")
+        # The attempt binding must be present on both or neither, and equal.
+        if ("viewerAttemptId" in transfer) != ("viewerAttemptId" in grant):
+            raise TransferError("source grant attempt binding differs from queued transfer request")
+        if "viewerAttemptId" in transfer:
+            transfer_fields = (*transfer_fields, "viewerAttemptId")
         p._closed(transfer, transfer_fields, "source transfer request")
         if transfer["protocol"] != "source-range-v2":
             raise TransferError("unsupported queued source transfer protocol")

@@ -7,9 +7,9 @@ against real data, or deployed.
 
 The Viewer source-grant dispatch candidate (c92deb5) adds ``viewerAttemptId`` to
 the queued transfer request, the grant, and the broker's canonical source
-identity. Each test below states the property both sides must share; the ones
-that do not hold yet are marked as expected failures with the observed gap, so
-they turn into regressions once the contract is aligned.
+identity. This commit carries the matching Processing proposal: a submission's
+``viewerAttemptId`` is echoed into the transfer request and bound into the
+source identity. Each test states a property both sides must share.
 """
 import hashlib
 import json
@@ -60,7 +60,8 @@ class ViewerAttemptBindingContractTests(unittest.TestCase):
     def setUp(self):
         self.manifest = manifest()
         self.job = {'jobId': 'job-1', 'generation': 1, 'environment': 'staging',
-                    'manifestSha256': self.manifest['sha256'], 'submission': {'manifest': self.manifest}}
+                    'manifestSha256': self.manifest['sha256'],
+                    'submission': {'manifest': self.manifest, 'viewerAttemptId': ATTEMPT}}
         expires = time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime(time.time() + 3600))
         self.transfer = build_source_transfer_request(self.job, reservation_id='reservation-1', expires_at=expires,
                                                       nonce='nonce-1')
@@ -79,18 +80,16 @@ class ViewerAttemptBindingContractTests(unittest.TestCase):
                 'sourceVersion': self.source_version, 'viewerAttemptId': ATTEMPT}
 
     def processing_identity_json(self):
-        identity = SourceIdentity('staging', 'job-1', 'reservation-1', 1, self.manifest['sha256'], self.source_version)
+        identity = SourceIdentity('staging', 'job-1', 'reservation-1', 1, self.manifest['sha256'], self.source_version,
+                                  ATTEMPT)
         return json.dumps(identity.canonical(), sort_keys=True, separators=(',', ':'))
 
     def viewer_grant(self):
-        return {**self.transfer, 'viewerAttemptId': ATTEMPT, 'jobId': 'job-1', 'environment': 'staging',
-                'token': 'A' * 43}
+        return {**self.transfer, 'jobId': 'job-1', 'environment': 'staging', 'token': 'A' * 43}
 
-    @unittest.expectedFailure
     def test_range_request_ids_agree(self):
-        # Gap at c92deb5 vs ed5b508: the Viewer's canonical identity now includes
-        # viewerAttemptId, Processing's does not, so every range request ID differs
-        # and the broker answers INVALID_REQUEST_ID (HTTP 400).
+        # Without the attempt in Processing's identity, every range request ID
+        # differs and the broker answers INVALID_REQUEST_ID (HTTP 400).
         obj = self.manifest['objects'][0]
         start, length = 0, obj['byteSize']
         viewer = self.node(identity=self.viewer_identity(), transferRequest=self.transfer, start=start, length=length,
@@ -99,31 +98,37 @@ class ViewerAttemptBindingContractTests(unittest.TestCase):
                                  SourceObject(obj['id'], obj['byteSize'], obj['sha256']), start, length)
         self.assertEqual(viewer['requestId'], processing)
 
-    @unittest.expectedFailure
     def test_viewer_accepts_the_transfer_request_processing_queues(self):
-        # Gap: Processing builds the queued transferRequest without viewerAttemptId;
-        # the Viewer reference provider requires it in its closed field set.
+        # The Viewer reference provider requires viewerAttemptId in its closed field set.
         obj = self.manifest['objects'][0]
         verdict = self.node(identity=self.viewer_identity(), transferRequest=self.transfer, start=0, length=1,
                             object={'id': obj['id'], 'byteSize': obj['byteSize'], 'sha256': obj['sha256']})
         self.assertEqual(verdict['transferRequest'], 'accepted')
 
-    @unittest.expectedFailure
     def test_processing_accepts_the_grant_viewer_mints(self):
-        # Gap: the Viewer grant carries viewerAttemptId; Processing's closed grant
-        # shape rejects it before any fetch or renewal.
-        transfer = {**self.transfer, 'viewerAttemptId': ATTEMPT}
-        job = {**self.job, 'transferRequest': transfer}
-        validate_source_grant(self.viewer_grant(), job=job)
+        grant = validate_source_grant(self.viewer_grant(), job=self.job)
+        self.assertEqual(grant.identity.viewer_attempt_id, ATTEMPT)
 
-    def test_both_sides_keep_the_same_chunk_and_budget_identity(self):
-        # Shared today: everything except the attempt binding.
+    def test_attempt_binding_must_match_on_both_sides(self):
+        for grant in ({**self.viewer_grant(), 'viewerAttemptId': '00000000-0000-4000-8000-000000000002'},
+                      {k: v for k, v in self.viewer_grant().items() if k != 'viewerAttemptId'}):
+            with self.subTest(grant=grant.get('viewerAttemptId')), self.assertRaises(TransferError):
+                validate_source_grant(grant, job=self.job)
+        legacy = {**self.job, 'submission': {'manifest': self.manifest}}
+        expires = self.transfer['expiresAt']
+        legacy['transferRequest'] = build_source_transfer_request(legacy, reservation_id='reservation-1',
+                                                                  expires_at=expires, nonce='nonce-1')
+        self.assertNotIn('viewerAttemptId', legacy['transferRequest'])
+        with self.assertRaises(TransferError):  # an attempt-bound grant cannot satisfy an unbound job
+            validate_source_grant(self.viewer_grant(), job=legacy)
+
+    def test_both_sides_keep_the_same_chunk_and_identity(self):
         self.assertEqual(self.transfer['chunkBytes'], CHUNK_BYTES)
-        identity = json.loads(self.processing_identity_json())
-        viewer = self.viewer_identity()
-        self.assertEqual({k: v for k, v in viewer.items() if k != 'viewerAttemptId'}, identity)
-        with self.assertRaises(TransferError):  # current Processing behavior, recorded for the alignment change
-            validate_source_grant(self.viewer_grant(), job=self.job)
+        self.assertEqual(json.loads(self.processing_identity_json()), self.viewer_identity())
+        obj = self.manifest['objects'][0]
+        viewer = self.node(identity=self.viewer_identity(), transferRequest=self.transfer, start=0, length=1,
+                           object={'id': obj['id'], 'byteSize': obj['byteSize'], 'sha256': obj['sha256']})
+        self.assertEqual(viewer['identityJson'], self.processing_identity_json())
 
 
 if __name__ == '__main__':
