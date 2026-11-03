@@ -40,3 +40,12 @@ durable request and its verified signed receipt. A prior lone signed partial
 receipt does not prove that coverage. Pre-existing completed transfer rows
 without that new evidence are held for reconciliation; a later environment
 configuration change does not silently convert an explicitly non-Viewer job.
+
+Completed transfer evidence is rechecked using configured public key pins,
+the persisted digest, exact transfer and job bindings, and the complete object
+manifest. Earlier signed partial receipts are also reverified before their
+objects count toward a later acceptance. Completed evidence is audited in
+bounded pages when no transfer is claimed; an in-memory cursor advances the
+audit and resets on restart. A busy transfer stream or repeated restarts may
+delay this audit. It is not an independent cleanup fence or an atomic snapshot
+of all future modifications, and historical signing keys must remain pinned.

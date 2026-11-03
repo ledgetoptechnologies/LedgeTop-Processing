@@ -26,6 +26,7 @@ class ReferenceViewerTransferWorker:
         self.clock, self.lease_seconds = clock, lease_seconds
         self._discovery_after = None
         self._discovery_conflicts = False
+        self._audit_after = None
 
     @staticmethod
     def _reason(error):
@@ -70,7 +71,13 @@ class ReferenceViewerTransferWorker:
             if discovery_conflict:
                 return {'state': 'held', 'reason': 'viewer_transfer_jobs_need_reconciliation'}
             try:
-                if self.store.has_viewer_acceptance_reconciliation():
+                audit = self.store.audit_viewer_acceptance_page(trusted_keys=self.trusted_receipt_keys,
+                                                                after_job=self._audit_after)
+                if audit['state'] == 'more':
+                    self._audit_after = audit['after']
+                    return {'state': 'held', 'reason': 'viewer_acceptance_audit_in_progress'}
+                self._audit_after = None
+                if audit['state'] != 'clean':
                     return {'state': 'held', 'reason': 'viewer_acceptance_policy_requires_reconciliation'}
             except Exception:
                 return {'state': 'held', 'reason': 'viewer_transfer_state_unavailable'}

@@ -671,11 +671,32 @@ class ReferenceStore:
                          job_id, viewer_digest, viewer_encoded))
             accepted = set()
             require_viewer = row['viewer_receipt_required'] == 1 or transfer is not None
-            sql = ("SELECT a.receipt_json FROM reference_acceptances a JOIN reference_viewer_receipts v "
-                   "ON v.acceptance_receipt_id=a.receipt_id WHERE a.job_id=? AND v.job_id=a.job_id"
-                   if require_viewer else "SELECT receipt_json FROM reference_acceptances WHERE job_id=?")
-            for item in db.execute(sql, (job_id,)):
-                accepted.update(json.loads(item[0])["acceptedObjectIds"])
+            if require_viewer:
+                from .viewer_acceptance_receipt import verify_viewer_acceptance_receipt
+                prior_rows = db.execute("SELECT a.receipt_json,a.digest,v.receipt_json,v.digest,v.receipt_id,v.storage_receipt_id "
+                    "FROM reference_acceptances a JOIN reference_viewer_receipts v "
+                    "ON v.acceptance_receipt_id=a.receipt_id WHERE a.job_id=? AND v.job_id=a.job_id", (job_id,))
+                for prior_json, prior_digest, signed_json, signed_digest, signed_id, signed_storage_id in prior_rows:
+                    try:
+                        prior = validate_viewer_acceptance(json.loads(prior_json), result_manifest=accepted_manifest,
+                            input_manifest_sha256=row['manifest_sha'])
+                        signed = json.loads(signed_json)
+                        expected = dict(jobId=job_id, generation=row['generation'], environment=row['environment'],
+                            inputManifestSha256=row['manifest_sha'], pipelineDigest=row['pipeline_digest'],
+                            resultManifestSha256=accepted_manifest['resultManifestSha256'])
+                        verified = verify_viewer_acceptance_receipt(signed, trusted_keys=trusted_viewer_receipt_keys,
+                            expected=expected, result_manifest=accepted_manifest,
+                            accepted_object_ids=prior['acceptedObjectIds']).receipt
+                        if (prior_digest != protocol.receipt_tombstone_digest(prior)
+                                or signed_digest != protocol.digest(verified)
+                                or signed_id != verified['receiptId'] or signed_storage_id != verified['storageReceiptId']):
+                            raise ValueError('persisted Viewer receipt identity mismatch')
+                    except (TypeError, ValueError, KeyError, OverflowError):
+                        raise Conflict('persisted Viewer acceptance evidence is invalid') from None
+                    accepted.update(prior['acceptedObjectIds'])
+            else:
+                for item in db.execute("SELECT receipt_json FROM reference_acceptances WHERE job_id=?", (job_id,)):
+                    accepted.update(json.loads(item[0])["acceptedObjectIds"])
             fully = accepted == {obj["id"] for obj in result["objects"]}
             if fully:
                 db.execute("UPDATE reference_jobs SET phase='completed',updated_at=CURRENT_TIMESTAMP WHERE job_id=?", (job_id,))
@@ -783,16 +804,65 @@ class ReferenceStore:
                 "JOIN reference_viewer_receipts v ON v.job_id=t.job_id AND v.acceptance_receipt_id=a.receipt_id "
                 "WHERE t.job_id=r.job_id AND t.completed_at IS NOT NULL AND t.verified_full_coverage=1)")
 
-    def has_viewer_acceptance_reconciliation(self):
-        """Surface ambiguous legacy policies and unsigned completed transfers."""
+    def has_viewer_acceptance_reconciliation(self, *, trusted_keys=None):
+        """Conservative one-page answer; unchecked pages require further audit."""
+        return self.audit_viewer_acceptance_page(trusted_keys=trusted_keys)['state'] != 'clean'
+
+    def audit_viewer_acceptance_page(self, *, trusted_keys=None, after_job=None):
+        """Reverify a bounded page and identify whether more evidence remains."""
+        if after_job is not None and (type(after_job) is not str or not after_job or len(after_job) > 128):
+            raise ValueError('invalid Viewer acceptance audit cursor')
         with self.queue._db() as db:
-            return db.execute('''SELECT 1 FROM reference_jobs r
+            ambiguous = db.execute('''SELECT 1 FROM reference_jobs r
                 WHERE r.result_json IS NOT NULL AND r.phase IN ('awaiting_acceptance','completed')
                 AND ((r.viewer_receipt_required IS NULL OR r.viewer_receipt_required NOT IN (0,1))
                   OR (r.viewer_receipt_required=1 AND EXISTS
                       (SELECT 1 FROM reference_viewer_transfers t WHERE t.job_id=r.job_id
                        AND t.completed_at IS NOT NULL) AND NOT ''' + self._viewer_full_coverage_sql() + '''))
-                LIMIT 1''').fetchone() is not None
+                LIMIT 1''').fetchone()
+            if ambiguous:
+                return {'state': 'reconcile'}
+            rows = db.execute('''SELECT r.job_id,r.generation,r.environment,r.manifest_sha,r.pipeline_digest,r.result_json,
+                t.receipt_id AS transfer_id,t.acceptance_json,t.viewer_manifest_json,
+                a.receipt_json AS acceptance_json_stored,a.digest AS acceptance_digest,
+                v.receipt_id AS viewer_id,v.storage_receipt_id AS viewer_storage_id,
+                v.receipt_json AS viewer_json,v.digest AS viewer_digest
+                FROM reference_jobs r JOIN reference_viewer_transfers t ON t.job_id=r.job_id
+                LEFT JOIN reference_acceptances a ON a.job_id=r.job_id AND a.receipt_id=t.receipt_id
+                LEFT JOIN reference_viewer_receipts v ON v.job_id=r.job_id AND v.acceptance_receipt_id=a.receipt_id
+                WHERE r.viewer_receipt_required=1 AND t.completed_at IS NOT NULL
+                AND (? IS NULL OR r.job_id > ?)
+                ORDER BY r.job_id LIMIT 101''', (after_job, after_job)).fetchall()
+            from .viewer_acceptance_receipt import verify_viewer_acceptance_receipt
+            for row in rows[:100]:
+                try:
+                    result = json.loads(row['result_json'])
+                    manifest = derive_viewer_result_manifest(result, job_id=row['job_id'],
+                        generation=row['generation'], environment=row['environment'], pipeline_digest=row['pipeline_digest'])
+                    if json.loads(row['viewer_manifest_json']) != manifest:
+                        return {'state': 'reconcile'}
+                    checked = validate_viewer_acceptance(json.loads(row['acceptance_json']), result_manifest=manifest,
+                        input_manifest_sha256=row['manifest_sha'])
+                    if (row['acceptance_json_stored'] != row['acceptance_json']
+                            or row['transfer_id'] != checked['receiptId']
+                            or row['acceptance_digest'] != protocol.receipt_tombstone_digest(checked)
+                            or set(checked['acceptedObjectIds']) != {item['id'] for item in manifest['objects']}):
+                        return {'state': 'reconcile'}
+                    receipt = json.loads(row['viewer_json'])
+                    expected = dict(jobId=row['job_id'], generation=row['generation'], environment=row['environment'],
+                        inputManifestSha256=row['manifest_sha'], pipelineDigest=row['pipeline_digest'],
+                        resultManifestSha256=manifest['resultManifestSha256'])
+                    verified = verify_viewer_acceptance_receipt(receipt, trusted_keys=trusted_keys,
+                        expected=expected, result_manifest=manifest, accepted_object_ids=checked['acceptedObjectIds']).receipt
+                    if (row['viewer_id'] != verified['receiptId']
+                            or row['viewer_storage_id'] != verified['storageReceiptId']
+                            or row['viewer_digest'] != protocol.digest(verified)):
+                        return {'state': 'reconcile'}
+                except (ValueError, TypeError, KeyError, OverflowError):
+                    return {'state': 'reconcile'}
+            if len(rows) > 100:
+                return {'state': 'more', 'after': rows[99]['job_id']}
+            return {'state': 'clean'}
 
     def pending_viewer_transfer_page(self, *, limit=20, after=None):
         """Return a bounded keyset page; callers may wrap after reaching its end."""

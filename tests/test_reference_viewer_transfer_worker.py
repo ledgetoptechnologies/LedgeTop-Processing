@@ -1,12 +1,14 @@
 """Durable retry/lease integration for the Viewer acceptance outbox."""
 import copy
 import hashlib
+import json
 import unittest
 import uuid
 from unittest.mock import patch
 
 from processing.maintenance import Conflict
 from processing.reference_store import ReferenceStore, ViewerTransferJobConflict
+from processing import reference_protocol as protocol
 from processing.reference_viewer_transfer_worker import ReferenceViewerTransferWorker
 from processing.viewer_acceptance_transfer import ViewerTransferUnavailable
 from tests.test_reference_api import ReferenceAPITests
@@ -27,10 +29,11 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
     def setUp(self):
         self.fixture = ReferenceAPITests()
         self.fixture.setUp()
+        self.signer = SyntheticViewerSigner()
+        self.fixture.viewer_signer = self.signer
         self.fixture.store = ReferenceStore(self.fixture.queue, viewer_required_environments=('staging',))
         self.fixture.api = self.fixture.make_api()
         self.job, self.result, _ = self.fixture.ready()
-        self.signer = SyntheticViewerSigner()
         self.clock_value = 100.0
         self.sender = FakeSender(self.signer)
         self.sender.fail = True
@@ -186,7 +189,7 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
         self.sender.fail = False
         self.assertEqual(self.worker.run_once(), {'state': 'accepted', 'jobId': self.job['jobId']})
         self.assertTrue(self.store.viewer_transfer_status(self.job['jobId'])['completed'])
-        self.assertFalse(self.store.has_viewer_acceptance_reconciliation())
+        self.assertFalse(self.store.has_viewer_acceptance_reconciliation(trusted_keys=self.signer.trusted_keys))
 
     def test_missing_matching_signed_row_invalidates_full_coverage_marker(self):
         self.sender.fail = False
@@ -194,6 +197,64 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
         with self.fixture.queue._db() as db:
             db.execute('DELETE FROM reference_viewer_receipts WHERE job_id=?', (self.job['jobId'],))
         self.assertEqual(self.worker.run_once(), {'state': 'held', 'reason': 'viewer_acceptance_policy_requires_reconciliation'})
+
+    def test_completed_evidence_is_reverified_before_idle(self):
+        self.sender.fail = False
+        self.assertEqual(self.worker.run_once()['state'], 'accepted')
+        self.assertEqual(self.worker.run_once(), {'state': 'idle'})
+        with self.fixture.queue._db() as db:
+            original = db.execute('SELECT receipt_json,digest FROM reference_viewer_receipts WHERE job_id=?',
+                                  (self.job['jobId'],)).fetchone()
+            original_json, original_digest = original['receipt_json'], original['digest']
+        altered_signature = json.loads(original_json)
+        signature = altered_signature['signature']
+        altered_signature['signature'] = ('A' if signature[0] != 'A' else 'B') + signature[1:]
+        altered_binding = json.loads(original_json)
+        altered_binding['jobId'] = str(uuid.uuid4())
+        variants = [('invalid_json', '{}', original_digest),
+                    ('digest', original_json, '0' * 64),
+                    ('signature', json.dumps(altered_signature), protocol.digest(altered_signature)),
+                    ('binding', json.dumps(altered_binding), protocol.digest(altered_binding))]
+        for name, body, digest in variants:
+            with self.subTest(name=name):
+                with self.fixture.queue._db() as db:
+                    db.execute('UPDATE reference_viewer_receipts SET receipt_json=?,digest=? WHERE job_id=?',
+                               (body, digest, self.job['jobId']))
+                self.assertEqual(self.worker.run_once(), {'state': 'held', 'reason': 'viewer_acceptance_policy_requires_reconciliation'})
+        with self.fixture.queue._db() as db:
+            db.execute('UPDATE reference_viewer_receipts SET receipt_json=?,digest=? WHERE job_id=?',
+                       (original_json, original_digest, self.job['jobId']))
+            db.execute('UPDATE reference_acceptances SET digest=? WHERE job_id=?', ('0' * 64, self.job['jobId']))
+        self.assertEqual(self.worker.run_once(), {'state': 'held', 'reason': 'viewer_acceptance_policy_requires_reconciliation'})
+
+    def test_corrupt_prior_signed_partial_cannot_complete_on_later_receipt(self):
+        first = self._full_acceptance()
+        first['acceptedObjectIds'] = ['result-1']
+        route = '/jobs/' + self.job['jobId'] + '/acceptance'
+        first_signed = self.fixture.viewer_signer.receipt(first, self.result)
+        response = self.fixture.request('POST', route, {'acceptance': first, 'viewerReceipt': first_signed})
+        self.assertEqual(response.status, 200)
+        self.assertFalse(response.body['fullyAccepted'])
+        with self.fixture.queue._db() as db:
+            db.execute("UPDATE reference_viewer_receipts SET receipt_json='{}' WHERE job_id=?", (self.job['jobId'],))
+        second = self._full_acceptance()
+        second.update(receiptId=str(uuid.uuid4()), storageReceiptId=str(uuid.uuid4()), acceptedObjectIds=['result-2'])
+        second_signed = self.fixture.viewer_signer.receipt(second, self.result)
+        response = self.fixture.request('POST', route, {'acceptance': second, 'viewerReceipt': second_signed})
+        self.assertEqual(response.status, 409)
+        self.assertEqual(self.store.get(self.job['jobId'])['phase'], 'awaiting_acceptance')
+        with self.fixture.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_acceptances WHERE job_id=?', (self.job['jobId'],)).fetchone()[0], 1)
+
+    def test_multi_page_audit_never_reports_idle_before_last_page(self):
+        self.sender.fail = False
+        self.assertEqual(self.worker.run_once()['state'], 'accepted')
+        with patch.object(self.store, 'audit_viewer_acceptance_page',
+                          side_effect=[{'state': 'more', 'after': 'cursor-1'}, {'state': 'clean'}]) as audit:
+            self.assertEqual(self.worker.run_once(), {'state': 'held', 'reason': 'viewer_acceptance_audit_in_progress'})
+            self.assertEqual(self.worker.run_once(), {'state': 'idle'})
+            self.assertIsNone(audit.call_args_list[0].kwargs['after_job'])
+            self.assertEqual(audit.call_args_list[1].kwargs['after_job'], 'cursor-1')
 
     def test_non_viewer_policy_is_not_reinterpreted_after_config_enable(self):
         with self.fixture.queue._db() as db:
