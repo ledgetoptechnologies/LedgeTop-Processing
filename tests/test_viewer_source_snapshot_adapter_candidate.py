@@ -65,6 +65,45 @@ class ViewerSnapshotAdapterTests(unittest.TestCase):
         self.sub['sourceFilesSha256']=p.digest(self.sub['sourceFiles'])
         with self.assertRaisesRegex(ValueError,'generated GCP shadows selected source'):self.run_adapter()
 
+    def test_v2_explicit_gcp_substitution_preserves_raw_role_and_custody(self):
+        from processing import source_inventory_candidate as inv
+        for role in ('provider_input','auto'):
+            with self.subTest(role=role):
+                self.setUp(); f=self.fixture
+                f.inv.update(protocol=inv.SUBSTITUTION_PROTOCOL,schemaVersion=2)
+                raw=dict(datasetFileId='raw-1',relativePath='legacy/GCP_LIST.TXT',byteSize=1,sha256='f'*64,
+                         processingRole=role,contentType='text/plain')
+                f.inv['retained'].append(raw)
+                f.inv['substitutions']=[dict(sourceDatasetFileId='raw-1',sourceRelativePath=raw['relativePath'],
+                    sourceSha256=raw['sha256'],sourceProcessingRole=role,generatedSnapshotId=f.expected['viewerAttemptId'])]
+                f.authoritative['files'].append({k:raw[k] for k in ('datasetFileId','relativePath','byteSize','sha256','contentType')} |
+                    dict(mimeType='text/plain',imageWidth=None,imageHeight=None))
+                f.selection['files'].append(dict(datasetFileId='raw-1',processingRole=role,disposition='retained'))
+                self.sub['sourceFiles'].append(dict(relativePath=raw['relativePath'],byteSize=1,sha256='f'*64,processingRole=role))
+                self.sub['sourceFilesSha256']=p.digest(self.sub['sourceFiles'])
+                self.assertEqual(self.run_adapter()[2],'held_authenticated_source_authority_unavailable')
+                # Multiple retained originals with the same provider basename
+                # are ambiguous even if Viewer would drop both before upload.
+                second=dict(raw,datasetFileId='raw-2',relativePath='other/gcp_list.txt')
+                f.inv['retained'].append(second)
+                with self.assertRaisesRegex(ValueError,'ambiguous generated GCP substitution'):self.run_adapter()
+                f.inv['retained'].pop()
+                source=os.environ.get('VIEWER_PROCESSING_PROVENANCE_JS')
+                if source:
+                    path=Path(source).resolve(strict=True);data=path.read_bytes().replace(b'\r\n',b'\n')
+                    self.assertEqual(hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest(),'f9adb05b62e1ffec2a90dc06038f77199f0c3436')
+                    script="const f=require(process.argv[1]).inputInventory;let s='';process.stdin.setEncoding('utf8');process.stdin.on('data',x=>s+=x);process.stdin.on('end',()=>{let x=JSON.parse(s);console.log(JSON.stringify(f(x.files,x.gcp)))})"
+                    value=dict(files=self.sub['sourceFiles'],gcp=dict(content=f.gcp.decode(),sha256=f.inv['generated'][0]['sha256']))
+                    result=json.loads(subprocess.run(['node','-e',script,str(path)],input=json.dumps(value),text=True,encoding='utf8',capture_output=True,check=True).stdout)
+                    self.assertEqual(result['inputFiles'],self.sub['inputFiles'])
+                    self.assertEqual(result['sourceFilesSha256'],self.sub['sourceFilesSha256'])
+                    self.assertEqual(result['inputManifestSha256'],self.sub['inputManifestSha256'])
+                original=f.inv['substitutions'][0]['sourceSha256'];f.inv['substitutions'][0]['sourceSha256']='0'*64
+                with self.assertRaises(ValueError):self.run_adapter()
+                f.inv['substitutions'][0]['sourceSha256']=original
+                self.sub['sourceFiles'][-1]['processingRole']='administrative';self.sub['sourceFilesSha256']=p.digest(self.sub['sourceFiles'])
+                with self.assertRaises(ValueError):self.run_adapter()
+
     def test_actual_viewer_input_inventory_matches(self):
         source=os.environ.get('VIEWER_PROCESSING_PROVENANCE_JS')
         if not source:self.skipTest('pinned Viewer processingProvenance.js required')

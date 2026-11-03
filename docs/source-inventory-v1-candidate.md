@@ -6,6 +6,12 @@ RFC 8785 JCS bytes prefixed with ASCII `ltds-source-inventory-v1` and NUL.
 It uses the separately pinned optional `rfc8785` candidate dependency; no
 production image or runtime is changed.
 
+The isolated successor also accepts a separately domain-versioned v2 wire
+form with an explicit `substitutions` array for one original raw GCP file
+replaced or excluded when an attempt-generated snapshot is sent. Its source
+ID/path/hash/original role and generated attempt ID are explicit; the source
+stays in retained custody. This does not change the v1 interpretation.
+
 The closed root has `protocol`, `schemaVersion`, `dataset`, `binding`,
 `processing`, `retained`, and `generated`. Dataset contains `id` and
 `manifestSha256`; binding contains `viewerTaskId`, `viewerAttemptId`, and the

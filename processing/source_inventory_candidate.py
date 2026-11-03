@@ -9,6 +9,8 @@ from . import reference_protocol as p
 
 PROTOCOL = 'ltds-source-inventory-v1'
 DOMAIN = b'ltds-source-inventory-v1\0'
+SUBSTITUTION_PROTOCOL = 'ltds-source-inventory-v2'
+SUBSTITUTION_DOMAIN = b'ltds-source-inventory-v2\0'
 MAX_PHOTOS = 10000
 MAX_ENGINE_OBJECTS = 10000
 MAX_SOURCES = 20000
@@ -122,8 +124,9 @@ def validate(raw, *, expected, authoritative_dataset, trusted_selection, trusted
     """
     import rfc8785
     value = _parse(raw)
-    p._closed(value, ('protocol','schemaVersion','dataset','binding','processing','retained','generated'), 'inventory')
-    if value['protocol'] != PROTOCOL or type(value['schemaVersion']) is not int or value['schemaVersion'] != 1:
+    v2=type(value) is dict and value.get('protocol') == SUBSTITUTION_PROTOCOL
+    p._closed(value, ('protocol','schemaVersion','dataset','binding','processing','retained','generated') + (('substitutions',) if v2 else ()), 'inventory')
+    if type(value['schemaVersion']) is not int or (value['protocol'],value['schemaVersion']) not in ((PROTOCOL,1),(SUBSTITUTION_PROTOCOL,2)):
         raise ValueError('unsupported source inventory')
     p._closed(expected, ('datasetId','manifestSha256','viewerTaskId','viewerAttemptId','pipelineDigest'), 'trusted binding')
     p._closed(value['dataset'], ('id','manifestSha256'), 'dataset')
@@ -140,7 +143,19 @@ def validate(raw, *, expected, authoritative_dataset, trusted_selection, trusted
         raise ValueError('invalid file closure')
     for obj in processing+retained: _descriptor(obj)
     if any(obj['processingRole'] not in ('image','provider_input') for obj in processing): raise ValueError('unresolved processing role')
-    if any(obj['processingRole'] not in ('gcp_source','administrative') for obj in retained): raise ValueError('unresolved retained role')
+    if any(obj['processingRole'] not in ('gcp_source','administrative') and not (
+            v2 and generated and obj['processingRole'] in ('auto','provider_input')
+            and obj['relativePath'].split('/')[-1].lower()=='gcp_list.txt') for obj in retained):
+        raise ValueError('unresolved retained role')
+    if v2:
+        raw_shadow=[obj for obj in retained if obj['processingRole'] in ('auto','provider_input')
+                    and obj['relativePath'].split('/')[-1].lower()=='gcp_list.txt']
+        if len(raw_shadow)>1 or (raw_shadow and not generated):raise ValueError('ambiguous generated GCP substitution')
+        expected_substitutions=[dict(sourceDatasetFileId=obj['datasetFileId'],sourceRelativePath=obj['relativePath'],
+            sourceSha256=obj['sha256'],sourceProcessingRole=obj['processingRole'],
+            generatedSnapshotId=value['binding']['viewerAttemptId']) for obj in raw_shadow]
+        if p.canonical_json(value['substitutions']) != p.canonical_json(expected_substitutions):
+            raise ValueError('generated GCP substitution differs')
     photos=sum(obj['processingRole']=='image' for obj in processing)
     if not photos or photos>MAX_PHOTOS or len(processing)+len(retained)-photos>MAX_AUXILIARY:
         raise ValueError('source inventory capacity exceeded')
@@ -229,4 +244,4 @@ def validate(raw, *, expected, authoritative_dataset, trusted_selection, trusted
     # Structural validity and a byte hash are not semantic source evidence.
     # There is intentionally no ready/authorized return state in this candidate.
     hold = 'held_gcp_correspondence_unverified' if generated else 'held_source_authority_unverified'
-    return canonical, hashlib.sha256(DOMAIN+canonical).hexdigest(), hold
+    return canonical, hashlib.sha256((SUBSTITUTION_DOMAIN if v2 else DOMAIN)+canonical).hexdigest(), hold

@@ -35,12 +35,17 @@ safe-integer maximum. Other retry budgets remain held until a versioned broker
 contract explicitly supports them.
 
 This proposal holds historical or absent evidence, nonrepresentable paths,
-unsupported source role/extension combinations, and the case where a raw
-`gcp_list.txt` is replaced by a generated snapshot unless the independently
-resolved inventory can represent its retained original without silently
-changing the original role. Viewer and Processing must agree on that
-disposition. No path is normalized or flattened. Future materialization must
-also preflight provider-specific basename collisions before writes.
+and unsupported source role/extension combinations. A versioned
+`ltds-source-inventory-v2` substitution records a retained original
+`gcp_list.txt` ID/path/hash/original role and its generated attempt snapshot
+ID. It never relabels or deletes the raw file. Viewer currently filters a
+`provider_input` raw GCP before appending generated GCP; an `auto` non-photo
+is excluded earlier by its extension rule. Both cases are explicit in v2;
+ambiguous multiple raw GCP basenames hold. The v1 inventory has no such
+substitution and remains held for these cases. Viewer agreement and durable
+snapshot provenance are still required. No path is normalized or flattened.
+Future materialization must also preflight provider-specific basename
+collisions before writes.
 
 Synthetic tests call the real Viewer `processingProvenance.inputInventory`
 from commit `5513f92b6cf45221475a3c38347e3ca1dbf0c32d` (Git blob
