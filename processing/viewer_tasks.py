@@ -338,7 +338,7 @@ class TaskStore:
             raise ValueError('safe supported input basename required')
         return name.casefold()
 
-    def upload(self, identifier, filename, stream, length, environment=None, capability=None):
+    def upload(self, identifier, filename, stream, length, environment=None, capability=None, *, expected_generation=None, expected_sha256=None):
         key = self._filename(filename)
         if type(length) is not int or length <= 0:
             raise ValueError('invalid input length')
@@ -348,7 +348,7 @@ class TaskStore:
             with self.queue._db() as db:
                 self._reservation(db,identifier,environment,capability)
                 row = self._row(db, identifier)
-                if row['stage'] != 'uploading' or row['job_id']:
+                if row['stage'] != 'uploading' or row['job_id'] or (expected_generation is not None and row['generation'] != expected_generation):
                     raise Conflict('task is no longer accepting uploads')
                 directory = self._directory(row)
                 existing = db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',
@@ -380,11 +380,13 @@ class TaskStore:
                     output.flush()
                     os.fsync(output.fileno())
                 value = digest.hexdigest()
+                if expected_sha256 is not None and value != expected_sha256:
+                    raise Conflict('batch source digest differs')
                 with self.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE')
                     self._reservation(db,identifier,environment,capability)
                     row = self._row(db, identifier)
-                    if row['stage'] != 'uploading' or row['job_id']:
+                    if row['stage'] != 'uploading' or row['job_id'] or (expected_generation is not None and row['generation'] != expected_generation):
                         raise Conflict('task is no longer accepting uploads')
                     existing = db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',
                                           (identifier, key)).fetchone()
