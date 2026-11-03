@@ -17,11 +17,41 @@ import ssl
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlsplit
 from .guarded_native_proxy import UnissuedGuardedUpload
 from .guarded_spool_budget import GuardedSpoolBudget
 
 MAX_BODY = 65536
 MAX_UPLOAD = 20 * 1024 ** 3
+
+
+def _check_local_node_binding(adapter):
+    """Reject an obvious remote/wrong-node deployment before opening a socket.
+
+    A loopback URL and a matching cooperative gate do not establish Docker
+    identity or prevent other local processes from accessing the engine. Those
+    remain separate deployment prerequisites.
+    """
+    from .guarded_native_proxy import GuardedNativeProxy
+    from .node_gate import NodeGate
+    from .viewer_service import NativeEngine
+    if type(adapter) is not GuardedNativeProxy or type(adapter.engine) is not NativeEngine:
+        raise ValueError('fixed native node adapter required')
+    origin = adapter.engine.origin
+    try:
+        parsed = urlsplit(origin)
+        if (parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', '::1')
+                or parsed.username or parsed.password or parsed.path not in ('', '/')
+                or parsed.query or parsed.fragment or parsed.port is None
+                or adapter.engine.client.origin != origin.rstrip('/')):
+            raise ValueError()
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError('fixed loopback native engine required') from None
+    with NodeGate(adapter.engine_id) as gate:
+        state = gate.snapshot()
+        if (state['nodeId'], state['authorityId'], state['coordinatorOrigin'], state['generation']) != (
+                adapter.node_id, adapter.authority_id, adapter.origin, adapter.generation):
+            raise ValueError('local node gate binding differs')
 
 
 def create_guarded_https_server(adapter, *, bind_host, port, certificate, private_key,
@@ -40,6 +70,9 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
         raise ValueError('bounded request deadline required')
     if type(upload_deadline) not in (int, float) or not 1 <= upload_deadline <= 7200:
         raise ValueError('bounded upload deadline required')
+    # Do this before allocating a spool ledger or binding a listener. The
+    # gate is checked again for every mutation; it may change after startup.
+    _check_local_node_binding(adapter)
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.minimum_version = ssl.TLSVersion.TLSv1_2
     tls.load_cert_chain(certificate, private_key)

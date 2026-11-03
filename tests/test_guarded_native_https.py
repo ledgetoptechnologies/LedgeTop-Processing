@@ -7,9 +7,12 @@ import subprocess
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from processing.guarded_native_https import create_guarded_https_server
 from processing.guarded_native_client import GuardedNativeClient
+from processing.node_gate import GateError
+from processing.viewer_service import NativeEngine
 from tests.test_guarded_native_proxy import GuardedNativeProxyTests, TOKEN
 
 
@@ -56,6 +59,20 @@ class GuardedHTTPS(GuardedNativeProxyTests):
     def test_disabled_and_loopback_only(self):
         with self.assertRaises(ValueError): self.start_listener(enabled=False)
         with self.assertRaises(ValueError): self.start_listener(bind_host='0.0.0.0')
+
+    def test_listener_refuses_remote_engine_before_allocating_spool(self):
+        for origin in ('http://192.0.2.1:3000', 'http://localhost:3000',
+                       'https://127.0.0.1:3000'):
+            with self.subTest(origin=origin), patch.object(self.proxy, 'engine', NativeEngine(origin)):
+                with self.assertRaises(ValueError): self.start_listener()
+                self.assertFalse((self.spool / '.guarded-spool.sqlite3').exists())
+
+    def test_listener_refuses_stale_or_unprovisioned_node_before_allocating_spool(self):
+        for name, value in (('node_id', 'other'), ('authority_id', '00000000-0000-4000-8000-000000000000'),
+                            ('generation', 2), ('engine_id', 'unprovisioned-engine')):
+            with self.subTest(field=name), patch.object(self.proxy, name, value):
+                with self.assertRaises((ValueError, GateError)): self.start_listener()
+                self.assertFalse((self.spool / '.guarded-spool.sqlite3').exists())
 
     def test_real_mutual_tls_and_private_engine_http(self):
         server = self.start_listener()
