@@ -84,5 +84,41 @@ class OperationClaimTests(BoundJobTests):
             self.proxy.commit(self.job, **self.auth)
         self.assertEqual(self.backend.counts()['commit'], 0)
 
+    def test_expiry_during_tls_body_discards_only_unissued_spool_and_retry_works(self):
+        self.proxy._require_job_claim = True
+        server, job = self.start_listener(), self.envelope()
+        client = self.client(server, job, lambda kind, request: self.signed_operation(job, kind, request))
+        client.initialize(self.task)
+        now = int(time.time())
+        # Preflight is still valid; final authorization occurs only after the
+        # TLS body is received, synced and accounted for, before journal.begin.
+        with patch('processing.node_operation_claim._now', side_effect=[now, now + 400]):
+            with self.assertRaises(EngineUnavailable):
+                client.upload(self.job, self.item)
+        self.assertTrue(server.wait_drained(5))
+        self.assertEqual(self.backend.counts()['upload'], 0)
+        self.assertEqual(list(self.spool.glob('incoming-*')), [])
+        self.assertEqual(server.spool_budget.inspect()['reservations'], [])
+        client.upload(self.job, self.item)
+        self.assertEqual(self.backend.counts()['upload'], 1)
+
+    def test_expiry_after_upload_intent_retains_spool_and_blocks_retry(self):
+        self.proxy._require_job_claim = True
+        server, job = self.start_listener(), self.envelope()
+        client = self.client(server, job, lambda kind, request: self.signed_operation(job, kind, request))
+        client.initialize(self.task)
+        now = int(time.time())
+        with patch('processing.node_operation_claim._now', side_effect=[now, now, now + 400]):
+            with self.assertRaises(EngineUnavailable):
+                client.upload(self.job, self.item)
+        self.assertTrue(server.wait_drained(5))
+        self.assertEqual(self.backend.counts()['upload'], 0)
+        self.assertEqual(len(list(self.spool.glob('incoming-*'))), 1)
+        self.assertEqual(len(server.spool_budget.inspect()['reservations']), 1)
+        with self.assertRaises(EngineUnavailable): client.upload(self.job, self.item)
+        self.assertTrue(server.wait_drained(5))
+        self.assertEqual(len(list(self.spool.glob('incoming-*'))), 1)
+        self.assertEqual(self.backend.counts()['upload'], 0)
+
 
 if __name__ == '__main__': unittest.main()

@@ -222,7 +222,13 @@ class GuardedNativeProxy:
                 # Names are the native upload identities. A repeated name is
                 # held even when byte metadata differs.
                 op = self._op(task, 'upload', hashlib.sha256(name_key.encode('ascii')).hexdigest())
-                self._authorize_operation(journal, task, op, 'upload', request, operation_claim)
+                try:
+                    self._authorize_operation(journal, task, op, 'upload', request, operation_claim)
+                except GateError:
+                    # No journal intent has been attempted for this call and
+                    # this request has not handed its spool inode to NodeODM.
+                    # The HTTP receiver may discard only its own inode.
+                    raise UnissuedGuardedUpload('authorization failed before upload intent') from None
                 if journal.contains_operation(op):
                     raise DuplicateGuardedUpload('prior upload intent already exists')
                 try:
