@@ -43,6 +43,17 @@ class GuardOptimizationTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             exec(compile(module.explicit_guard_source('assert False'),'<guard>','exec',optimize=2),{})
 
+    def test_direct_script_invocation_from_an_unrelated_directory(self):
+        # The operator runs the file by absolute path; ops/ must not need the
+        # repository root on PYTHONPATH or as the working directory.
+        script=Path(module.__file__).resolve()
+        environment={key:value for key,value in os.environ.items() if key not in ('PYTHONPATH','PYTHONHOME','PYTHONSTARTUP')}
+        with tempfile.TemporaryDirectory() as unrelated:
+            result=subprocess.run([sys.executable,'-I',str(script),'--help'],cwd=unrelated,env=environment,
+                capture_output=True,text=True,timeout=60)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('--receipt-dir',result.stdout)
+
 
 class Gates:
     binding={'cluster':{'generation':1},'main':{'generation':1}}

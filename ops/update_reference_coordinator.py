@@ -16,10 +16,14 @@ import re
 import select
 import socket
 import stat
+import sys
 import time
 import uuid
 from urllib.parse import urlencode
 
+# Direct `python /path/ops/update_reference_coordinator.py` puts ops/, not the
+# repository root, on sys.path; the installer bootstraps the same way.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ops.guarded_script import explicit_guard_source
 
 class _HistoricalTransport:
