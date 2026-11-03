@@ -107,12 +107,16 @@ class ReferenceWorkerViewerV2AcceptanceTests(unittest.TestCase):
         ids = [obj['id'] for obj in self.result['objects']]
         driver = object.__new__(ReferenceDriver)
         driver.worker, driver.ledger, driver.execution_router = self.worker, self.ledger, None
+        driver._save = lambda *_args: None
+        state = {}
         unsigned = self.acceptance(self.result, ids, suffix='legacy')
-        self.assertFalse(driver._apply_acceptance(self.job['jobId'], [unsigned])['fullyAccepted'])
+        self.assertFalse(driver._apply_acceptance(self.job['jobId'], {'receipts': [unsigned],
+            'viewerCopyRequired': True}, state)['fullyAccepted'])
         self.assertEqual(self.ledger.cleanup_candidates(), [])
         signed = self.acceptance(self.viewer, ids, suffix='signed')
         envelope = self.signer.envelope(signed, self.viewer)
-        self.assertTrue(driver._apply_acceptance(self.job['jobId'], [envelope])['fullyAccepted'])
+        self.assertTrue(driver._apply_acceptance(self.job['jobId'], {'receipts': [envelope],
+            'viewerCopyRequired': True}, state)['fullyAccepted'])
 
     def test_initialized_driver_waits_for_signed_treedar_v2_receipt(self):
         self.treedar()
