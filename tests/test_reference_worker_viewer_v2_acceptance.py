@@ -16,6 +16,7 @@ import uuid
 from processing import reference_protocol as p
 from processing.node_gate import NodeGate
 from processing.reference_engine_worker import ReferenceEngineWorker, WorkerHeld
+from processing.reference_driver import ReferenceDriver
 from processing.reference_protocol import validate_submission
 from processing.scratch_cleanup import ScratchCleanupExecutor
 from processing.scratch_policy import ScratchLedger, PolicyConflict
@@ -96,6 +97,18 @@ class ReferenceWorkerViewerV2AcceptanceTests(unittest.TestCase):
 
     def treedar(self):
         return self.terminal({'treedar': '0.0.1'}, sorted(TREEDAR_REQUIRED_ROLES))
+
+    def test_driver_verified_coverage_with_late_signed_treedar_v2_receipt(self):
+        self.treedar()
+        ids = [obj['id'] for obj in self.result['objects']]
+        driver = object.__new__(ReferenceDriver)
+        driver.worker, driver.ledger, driver.execution_router = self.worker, self.ledger, None
+        unsigned = self.acceptance(self.result, ids, suffix='legacy')
+        self.assertFalse(driver._apply_acceptance(self.job['jobId'], [unsigned])['fullyAccepted'])
+        self.assertEqual(self.ledger.cleanup_candidates(), [])
+        signed = self.acceptance(self.viewer, ids, suffix='signed')
+        envelope = self.signer.envelope(signed, self.viewer)
+        self.assertTrue(driver._apply_acceptance(self.job['jobId'], [envelope])['fullyAccepted'])
 
     def acceptance(self, manifest, ids, suffix='1'):
         return dict(schemaVersion=1, receiptId='accept-' + suffix, storageReceiptId='storage-' + suffix,
