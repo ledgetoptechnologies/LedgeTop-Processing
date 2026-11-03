@@ -20,6 +20,11 @@ class IdentityTest(unittest.TestCase):
      with self.assertRaises(sqlite3.IntegrityError):db.execute('INSERT OR REPLACE INTO held_viewer_owner_v1 VALUES(?,?,?,?)',(task,'b','production',q.authority_id))
     s.initialize(task,'x',[],None,'production',cap)
     files=[{'name':'a.jpg','bytes':3,'sha256':hashlib.sha256(b'abc').hexdigest()}]
+    with q._db() as db:db.execute('DROP TRIGGER held_owner_no_update')
+    with self.assertRaises(Conflict):i.prepare(task,cap,'a'*32,True,1,'batch',files)
+    with q._db() as db:
+     self.assertEqual(db.execute('SELECT count(*) FROM held_batch_intent_v1').fetchone()[0],0)
+     db.execute("CREATE TRIGGER held_owner_no_update BEFORE UPDATE ON held_viewer_owner_v1 BEGIN SELECT RAISE(ABORT,'immutable'); END")
     i.prepare(task,cap,'a'*32,True,1,'batch',files)
     for token in ('b'*32,'c'*32,'z'*32):
      with self.assertRaises(Conflict):i.prepare(task,cap,token,True,1,'batch',files)
