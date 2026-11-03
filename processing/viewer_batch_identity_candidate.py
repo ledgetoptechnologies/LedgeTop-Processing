@@ -45,7 +45,7 @@ class Identity:
    attest_owner(db)
    a=db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()
    if a is None or a[0]!=self.authority or self.store.queue.authority_id!=self.authority:raise Conflict('authority unavailable')
-   old=db.execute('SELECT * FROM held_viewer_owner_v1 WHERE task_id=?',(task,)).fetchone()
+   old=bounded_owner(db,task)
    if old:
     if (old['principal'],old['environment'],old['authority'])!=(principal,environment,self.authority):raise Conflict('identity unavailable')
     self.store._reservation(db,task,environment,capability);return
@@ -63,9 +63,15 @@ class Identity:
   principal,environment=self.authenticate(token,protected_transport)
   return upload_held(self.store,task,environment,capability,generation,batch_id,name,stream,length,identity=(principal,self.authority))
 
+def bounded_owner(db,task):
+ for column,limit in (('task_id',36),('principal',80),('environment',10),('authority',36)):
+  if db.execute(f"SELECT 1 FROM held_viewer_owner_v1 WHERE task_id=? AND (typeof({column})!='text' OR length({column})>? OR instr({column},char(0))!=0)",(task,limit)).fetchone():raise Conflict('owner corrupt')
+  if db.execute(f"SELECT 1 FROM held_viewer_owner_v1 WHERE task_id=? AND length(CAST({column} AS BLOB))>?",(task,limit)).fetchone():raise Conflict('owner corrupt')
+ return db.execute('SELECT * FROM held_viewer_owner_v1 WHERE task_id=?',(task,)).fetchone()
+
 def check_owner(db,queue,task,environment,identity):
  principal,authority=identity
  attest_owner(db)
- owner=db.execute('SELECT principal,environment,authority FROM held_viewer_owner_v1 WHERE task_id=?',(task,)).fetchone()
+ owner=bounded_owner(db,task)
  actual=db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()
- if owner is None or actual is None or tuple(owner)!=(principal,environment,authority) or actual[0]!=authority or queue.authority_id!=authority:raise Conflict('identity unavailable')
+ if owner is None or actual is None or (owner['principal'],owner['environment'],owner['authority'])!=(principal,environment,authority) or actual[0]!=authority or queue.authority_id!=authority:raise Conflict('identity unavailable')

@@ -1,4 +1,4 @@
-import hashlib, io, tempfile, unittest
+import hashlib, io, sqlite3, tempfile, unittest
 from pathlib import Path
 from processing.prototype import Queue
 from processing.viewer_tasks import TaskStore
@@ -14,7 +14,11 @@ class IdentityTest(unittest.TestCase):
     s=TaskStore(q,Path(root)/'in');i=Identity(s,[{'token':'a'*32,'principalId':'a','environment':'production'},{'token':'b'*32,'principalId':'b','environment':'production'},{'token':'c'*32,'principalId':'a','environment':'staging'}],['z'*32],q.authority_id);i.initialize();initialize(s)
     task='11111111-2222-4333-8444-555555555555';cap='A'*43
     with self.assertRaises(Conflict):i.reserve_fresh(task,cap,'a'*32,False)
-    i.reserve_fresh(task,cap,'a'*32,True);s.initialize(task,'x',[],None,'production',cap)
+    i.reserve_fresh(task,cap,'a'*32,True);i.reserve_fresh(task,cap,'a'*32,True)
+    with q._db() as db:
+     db.execute('PRAGMA recursive_triggers=OFF')
+     with self.assertRaises(sqlite3.IntegrityError):db.execute('INSERT OR REPLACE INTO held_viewer_owner_v1 VALUES(?,?,?,?)',(task,'b','production',q.authority_id))
+    s.initialize(task,'x',[],None,'production',cap)
     files=[{'name':'a.jpg','bytes':3,'sha256':hashlib.sha256(b'abc').hexdigest()}]
     i.prepare(task,cap,'a'*32,True,1,'batch',files)
     for token in ('b'*32,'c'*32,'z'*32):
