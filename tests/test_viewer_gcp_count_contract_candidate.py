@@ -14,6 +14,8 @@ from processing.viewer_paged_frame_candidate import verify, verify_dataset_count
 from processing.gcp_evidence_stream_candidate import verify as verify_evidence
 from processing.gcp_file_stream_candidate import verify as verify_file
 from processing.held_viewer_snapshot_verifier_candidate import verify_snapshot
+from processing import reference_protocol as protocol
+from processing.viewer_selected_frames_candidate import DOMAIN as SELECTED_DOMAIN
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +30,7 @@ class ViewerGcpCountContract(unittest.TestCase):
             self.skipTest('pinned Viewer checkout required')
         root = Path(root)
         expected = {'viewerPagedSourceExport.js': '87b20bc1e188228054add2aa41871410ab412b48d299f87c7a52ffbc23ba3a17',
-                    'processingRepository.js': 'ee27e7dd3fee9e2df16efb7574d09c4114cb88d40fc4e19ebf2c172a99141a71'}
+                    'processingRepository.js': 'ebec3246b9944fb57da842ce5e29ca05354483c7844f2ba29d24f7199d89c773'}
         for name, digest in expected.items():
             self.assertEqual(hashlib.sha256((root / 'apps/viewer/server' / name).read_bytes()).hexdigest(), digest)
         run = subprocess.run(['node', str(ROOT / 'tests/support/viewer_gcp_export_pair.cjs'), 'mixed'],
@@ -91,6 +93,30 @@ class ViewerGcpCountContract(unittest.TestCase):
                          {'file_frames': arguments['file_frames'][:-1]}):
             with self.subTest(mutation=list(mutation)), self.assertRaises(ValueError):
                 verify_snapshot(**{**arguments, **mutation})
+        # A valid signature over internally inconsistent data must still fail.
+        # Use a synthetic signer so the malformed frame and its hash are signed.
+        attacker = Ed25519PrivateKey.generate()
+        original_frame = json.loads(arguments['selected_frames'].splitlines()[0])
+        for mutation in ('wrong_source', 'reordered', 'missing', 'duplicate_page_id', 'bad_input_hash'):
+            altered = json.loads(json.dumps(original_frame))
+            changed_intent = json.loads(json.dumps(intent))
+            if mutation == 'wrong_source': altered['records'][0]['datasetFileId'] = 'other-source'
+            elif mutation == 'reordered':
+                altered['records'][0], altered['records'][1] = altered['records'][1], altered['records'][0]
+                altered['records'][0]['ordinal'], altered['records'][1]['ordinal'] = 0, 1
+            elif mutation == 'missing':
+                altered['records'].pop()
+                changed_intent['selectedCount'] -= 1
+            elif mutation == 'duplicate_page_id': altered['records'][1]['pageObjectId'] = altered['records'][0]['pageObjectId']
+            elif mutation == 'bad_input_hash': changed_intent['inputManifestSha256'] = '0' * 64
+            frame_bytes = protocol.canonical_json(altered)
+            changed_intent['selectedPageHashes'][0] = hashlib.sha256(SELECTED_DOMAIN + frame_bytes).hexdigest()
+            changed_intent['selectedFrameBytes'] = len(frame_bytes) + 1
+            changed = protocol.canonical_json(changed_intent)
+            with self.subTest(inconsistent=mutation), self.assertRaises(ValueError):
+                verify_snapshot(**{**arguments, 'public_key': attacker.public_key(),
+                    'intent_bytes': changed, 'signature': attacker.sign(b'ltds-viewer-held-source-snapshot-v1\0' + changed),
+                    'selected_frames': frame_bytes + b'\n'})
 
 
 if __name__ == '__main__':

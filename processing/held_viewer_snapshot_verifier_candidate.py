@@ -43,8 +43,8 @@ def verify_snapshot(*, intent_bytes, signature, public_key, issuer_id, key_id,
                 or len(source_frames) != intent['sourceFrameBytes'] or len(selected_frames) != intent['selectedFrameBytes']
                 or len(selected_frames) > MAX_TOTAL_BYTES):
             raise ValueError()
-        checked = verify_source(io.BytesIO(source_frames), expected_page_hashes=intent['sourcePageHashes'],
-                                expected_items=intent['sourceCount'])
+        checked, selected = verify_source(io.BytesIO(source_frames), expected_page_hashes=intent['sourcePageHashes'],
+                                          expected_items=intent['sourceCount'], _capture_selection=True)
         generated = checked['generatedGcp']
         if intent['sourceCount'] != intent['datasetFileCount'] + generated:
             raise ValueError()
@@ -52,6 +52,8 @@ def verify_snapshot(*, intent_bytes, signature, public_key, issuer_id, key_id,
         hashes = intent['selectedPageHashes']
         if type(hashes) is not list or not 0 < len(hashes) <= 64 or len(lines) != len(hashes): raise ValueError()
         count = 0
+        seen = set()
+        input_digest = hashlib.sha256(b'[')
         for index, (line, pin) in enumerate(zip(lines, hashes)):
             if not line.endswith(b'\n') or len(line) > MAX_FRAME_BYTES + 1: raise ValueError()
             raw = line[:-1]; frame = json.loads(raw.decode('utf8'), object_pairs_hook=_pairs)
@@ -60,8 +62,31 @@ def verify_snapshot(*, intent_bytes, signature, public_key, issuer_id, key_id,
                     or type(frame['records']) is not list or not 0 < len(frame['records']) <= 512
                     or p.canonical_json(frame) != raw or hashlib.sha256(SELECTED_DOMAIN + raw).hexdigest() != pin):
                 raise ValueError()
-            count += len(frame['records'])
-        if count != intent['selectedCount']: raise ValueError()
+            for record in frame['records']:
+                if count >= len(selected): raise ValueError()
+                source = selected[count]
+                if record.get('type') == 'dataset_file':
+                    p._closed(record, ('type', 'ordinal', 'pageObjectId', 'datasetFileId'), 'selected dataset')
+                    if source['type'] != 'dataset_file' or record['datasetFileId'] != source['datasetFileId']:
+                        raise ValueError()
+                elif record.get('type') == 'attempt_generated_gcp':
+                    p._closed(record, ('type', 'ordinal', 'pageObjectId', 'attemptId', 'mediaType'), 'selected GCP')
+                    if (source['type'] != 'attempt_generated_gcp' or record['attemptId'] != attempt_id
+                            or record['attemptId'] != source['attemptId']): raise ValueError()
+                    p._string(record['mediaType'], 'generated media type', 127)
+                else:
+                    raise ValueError()
+                p._slug(record['pageObjectId'], 'page object ID')
+                if type(record['ordinal']) is not int or record['ordinal'] != count or record['pageObjectId'] in seen:
+                    raise ValueError()
+                seen.add(record['pageObjectId'])
+                entry = {'relativePath': source['relativePath'], 'byteSize': source['byteSize'], 'sha256': source['sha256']}
+                if count: input_digest.update(b',')
+                input_digest.update(json.dumps(entry, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf8'))
+                count += 1
+        input_digest.update(b']')
+        if (count != intent['selectedCount'] or count != len(selected)
+                or input_digest.hexdigest() != intent['inputManifestSha256']): raise ValueError()
         gcp = intent['gcp']
         if generated:
             if type(gcp) is not dict or type(evidence_frames) is not bytes or type(file_frames) is not bytes: raise ValueError()
