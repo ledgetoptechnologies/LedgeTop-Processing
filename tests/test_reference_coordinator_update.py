@@ -62,10 +62,11 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         with self.queue._db() as db:
             db.execute('UPDATE coordinator_identity SET authority_id=?',(module.AUTHORITY,))
             db.execute('DROP TABLE owned_maintenance_schedules')
-            for index in range(12):
+            for index in range(module.REVIEWED_JOB_COUNT):
                 db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,'staging','treedar-synthetic-v1',?)",
                     (str(__import__('uuid').uuid4()),'synthetic-'+str(index),'failed' if index<2 else 'succeeded'))
         self.queue.authority_id=module.AUTHORITY
+        self.retain_viewer_tasks()
         self.server=start_server(self.handler);self.addCleanup(self.server.server_close);self.addCleanup(self.server.shutdown)
         origin='http://127.0.0.1:'+str(self.server.server_port)
         self.api,self.operator=Client(origin,TOKEN),Client(origin,OPERATOR)
@@ -77,6 +78,93 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.probe=patch.object(module,'owned_api_probe',return_value={'operatorLookupVerified':True})
         self.probe.start();self.addCleanup(self.probe.stop)
         self.state=self.updater.prepare(TARGET,SOURCE,MAIN)
+
+    def retain_viewer_tasks(self):
+        """Two completed Viewer tasks with nested inputs and results (client deliverables)."""
+        self.retained={}
+        for index in range(2):
+            identifier=str(__import__('uuid').uuid4());directory='task-'+str(index)
+            base=self.volume/'viewer-tasks'/directory;(base/'images').mkdir(parents=True,mode=0o700)
+            for relative,content in (('images/IMG_0001.JPG',b'synthetic photo '*64+bytes([index])),
+                                     ('all.zip',b'PK\x03\x04synthetic result '+bytes([index])),('.archive.json',b'{}')):
+                (base/relative).write_bytes(content);(base/relative).chmod(0o600)
+                self.retained['viewer-tasks/'+directory+'/'+relative]=content
+            with self.queue._db() as db:
+                db.execute("""INSERT INTO viewer_tasks(uuid,directory,name,options,outputs,environment,stage,phase,archive_path)
+                    VALUES(?,?,?,'[]','[]','production','succeeded','complete',?)""",(identifier,directory,'retained-'+str(index),str(base/'all.zip')))
+                db.execute("INSERT INTO viewer_files VALUES(?,'img_0001.jpg','IMG_0001.JPG',?,1024,?,1)",(identifier,str(base/'images/IMG_0001.JPG'),'a'*64))
+                db.execute("INSERT INTO viewer_incarnations VALUES(?,1,NULL,'{}','[]')",(identifier,))
+
+    def assert_retained_viewer_bytes(self):
+        observed={path.relative_to(self.volume).as_posix():path.read_bytes()
+                  for path in (self.volume/'viewer-tasks').rglob('*') if path.is_file()}
+        self.assertEqual(observed,self.retained)
+
+    def test_retained_terminal_viewer_tasks_are_hashed_and_survive_update(self):
+        census=self.state['baseline']
+        self.assertEqual(census['tables']['viewer_tasks']['count'],2)
+        files={item['path']:item for item in census['files']}
+        for relative,content in self.retained.items():
+            self.assertEqual((files[relative]['kind'],files[relative]['mode'],files[relative]['bytes'],files[relative]['sha256']),
+                             ('file',0o600,len(content),__import__('hashlib').sha256(content).hexdigest()))
+        self.assertEqual(files['viewer-tasks/task-0/images']['kind'],'directory')
+        self.assertEqual(self.activate()['phase'],'completed')
+        self.assert_retained_viewer_bytes()
+
+    def test_retained_viewer_bytes_survive_rollback(self):
+        self.transport.loss='start'
+        with self.assertRaises(OSError):self.activate()
+        self.assertEqual(self.updater.rollback(self.state)['phase'],'rolled_back')
+        self.assert_retained_viewer_bytes()
+        # Nodes are reopened after rollback; every other row and file equals the baseline.
+        module.compatible(module.volume_census(self.volume,uid=os.geteuid()),self.state['baseline'],allow_owned=True,ignore_nodes=True)
+
+    def test_retained_viewer_file_changed_during_drain_blocks_before_stop(self):
+        target=self.volume/'viewer-tasks/task-1/all.zip'
+        original=self.operator.json
+        def mutate(method,route,payload=None,**kwargs):
+            value=original(method,route,payload,**kwargs)
+            if route.endswith('/schedule'):target.write_bytes(target.read_bytes()+b'x')
+            return value
+        with patch.object(self.operator,'json',side_effect=mutate):
+            with self.assertRaisesRegex(module.Stopped,'full_census_changed'):self.activate()
+        self.assertFalse(any(call[0]=='stop' for call in self.transport.calls))
+        self.assertTrue(self.transport.containers[module.OLD_ID]['State']['Running'])
+
+    def test_retained_viewer_census_refusals(self):
+        census=lambda:module.volume_census(self.volume,uid=os.geteuid())
+        base=self.volume/'viewer-tasks/task-0'
+        cases=[]
+        def symlink():(base/'link').symlink_to(base/'all.zip');return lambda:(base/'link').unlink()
+        def hardlink():os.link(base/'all.zip',base/'second');return lambda:(base/'second').unlink()
+        def oversize():
+            with open(base/'huge','wb') as stream:stream.truncate(21474836481)
+            return lambda:(base/'huge').unlink()
+        def nonterminal():
+            with self.queue._db() as db:db.execute("UPDATE viewer_tasks SET stage='running',phase='processing' WHERE directory='task-0'")
+            def undo():
+                with self.queue._db() as db:db.execute("UPDATE viewer_tasks SET stage='succeeded',phase='complete' WHERE directory='task-0'")
+            return undo
+        def orphan():
+            with self.queue._db() as db:db.execute("INSERT INTO viewer_files VALUES('orphan','x','x','x',1,'b',1)")
+            def undo():
+                with self.queue._db() as db:db.execute("DELETE FROM viewer_files WHERE uuid='orphan'")
+            return undo
+        def spool():(self.volume/'viewer-spool'/'stray').write_bytes(b'x');return lambda:(self.volume/'viewer-spool'/'stray').unlink()
+        for make in (symlink,hardlink,oversize,nonterminal,orphan,spool):
+            with self.subTest(case=make.__name__):
+                undo=make()
+                try:
+                    with self.assertRaises(AssertionError):census()
+                finally:undo()
+                census()
+
+    def test_nonterminal_viewer_task_refuses_fresh_prepare(self):
+        with self.queue._db() as db:db.execute("UPDATE viewer_tasks SET phase='processing' WHERE directory='task-1'")
+        operation=self.root/'second-operation';operation.mkdir(mode=0o700)
+        updater=module.ReferenceCoordinatorUpdate(operation,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda state:None)
+        with self.assertRaises(AssertionError):updater.prepare(TARGET,SOURCE,MAIN)
+        self.assertEqual(self.transport.calls,[])
 
     def test_viewer_extra_tables_exact_empty_upgrade_and_copy(self):
         with self.queue._db() as db:
@@ -170,7 +258,8 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
             def local_clients(self):return self.environment(),owner.api,owner.operator
             def sole_owner(self,identifier):
                 if [item['Id'] for item in self.containers.values() if item['State']['Running']]!=[identifier]:raise module.Stopped('synthetic_other_owner')
-            def activity(self,api):
+            def activity(self,api,*,retained_viewer=False):
+                assert retained_viewer
                 assert api.json('GET','/v1/prototype/authority')['authorityId']==module.AUTHORITY
                 jobs=api.json('GET','/v1/prototype/jobs')['jobs']
                 assert all(job['status'] in ('succeeded','failed') for job in jobs)
@@ -195,6 +284,8 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                 if self.hook:self.hook(action)
                 if action=='create':
                     item=self.container(NEW_ID,TARGET,module.NAME,False)
+                    mounts=[args[index+1] for index,value in enumerate(args) if value=='--tmpfs']
+                    if mounts:item['HostConfig']['Tmpfs']=dict(mount.split(':',1) for mount in mounts)
                     item['Config']['Labels'][module.LABEL]=owner.state['operation'];self.containers[NEW_ID]=item
                     result=NEW_ID
                 elif action=='rename':self.containers[args[1]]['Name']='/'+args[2];result=''
@@ -224,12 +315,45 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         current=self.transport.inspected(module.NAME)
         self.assertEqual(current['Id'],NEW_ID)
         self.assertEqual(current['HostConfig']['PortBindings'],module.legacy.REFERENCE_PORTS)
+        self.assertEqual(current['HostConfig']['Tmpfs'],module.TMPFS)
+        self.assertNotIn('Tmpfs',self.transport.inspected(self.state['rollbackName'])['HostConfig'])
         self.assertEqual(current['Mounts'],self.transport.old['Mounts'])
         self.assertIn('PATH=/new/default',current['Config']['Env'])
         self.assertEqual(sum(call[0]=='create' for call in self.transport.calls),1)
         self.assertFalse(any('6'*64 in call for call in self.transport.calls))
         self.assertEqual({self.queue.get_node(node)['state'] for node in ('cluster','main')}, {'active'})
         self.assertFalse(self.state['databaseRestored'])
+
+    def test_create_adds_only_the_reviewed_private_tmp_within_unchanged_limits(self):
+        self.assertFalse(module.ACTIVATION_REVIEWED)
+        self.assertEqual(module.TMPFS,{'/tmp':'rw,nosuid,nodev,noexec,size=64m,mode=1777'})
+        args=self.updater.create_args(self.state)
+        self.assertEqual([args[index+1] for index,value in enumerate(args) if value=='--tmpfs'],
+                         ['/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777'])
+        for flag,value in (('--memory','256m'),('--memory-swap','512m'),('--shm-size','64m'),('--pids-limit','64')):
+            self.assertEqual(args[args.index(flag)+1],value)
+        self.assertIn('--read-only',args)
+
+    def test_candidate_without_exact_tmpfs_is_refused_before_start_and_held(self):
+        real_docker=self.transport.docker
+        def create_with_wrong_tmpfs(*args,**kwargs):
+            result=real_docker(*args,**kwargs)
+            if args[0]=='create':self.transport.containers[NEW_ID]['HostConfig']['Tmpfs']={'/tmp':'rw,size=1g'}
+            return result
+        with patch.object(self.transport,'docker',side_effect=create_with_wrong_tmpfs):
+            with self.assertRaisesRegex(module.Stopped,'candidate_tmpfs_changed'):self.activate()
+        self.assertEqual(self.state['phase'],'needs_inspection')
+        self.assertFalse(any(call[0]=='start' for call in self.transport.calls))
+        before=len(self.transport.calls)
+        with self.assertRaisesRegex(module.Stopped,'candidate_tmpfs_changed'):self.updater.rollback(self.state)
+        self.assertEqual(len(self.transport.calls),before)
+        self.assert_retained_viewer_bytes()
+
+    def test_predecessor_with_tmpfs_is_not_the_reviewed_primary(self):
+        self.transport.containers[module.OLD_ID]['HostConfig']['Tmpfs']=dict(module.TMPFS)
+        before=len(self.transport.calls)
+        with self.assertRaisesRegex(module.Stopped,'exact_current_reference_primary_required'):self.activate()
+        self.assertEqual(len(self.transport.calls),before)
 
     def test_lost_legacy_schedule_ack_holds_no_adoption_or_repost(self):
         original=self.operator.json;posts=[]
@@ -487,7 +611,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
             return value
         with patch.object(self.operator,'json',side_effect=admit):self.assertEqual(self.activate()['phase'],'completed')
         self.assertEqual(self.queue.get_node('main')['state'],'active')
-        self.assertEqual(len(self.queue.list()),13)
+        self.assertEqual(len(self.queue.list()),module.REVIEWED_JOB_COUNT+1)
         self.assertEqual(self.queue.list()[-1]['status'],'queued')
         calls=len(self.transport.calls)
         with self.assertRaises(module.Stopped):self.updater.rollback(self.state)
