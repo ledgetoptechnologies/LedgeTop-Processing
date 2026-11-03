@@ -175,6 +175,57 @@ class ReferenceStoreTests(unittest.TestCase):
             claims = list(pool.map(claim, range(2)))
         self.assertEqual(sum(value is not None for value in claims), 1)
 
+    def test_candidate_inventory_skips_ineligible_head_without_bypassing_production(self):
+        self.queue.per_node_slots = True
+        inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
+                     dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
+        ready = {node['id']: {'ready': True, 'taskQueueCount': 0, 'maxImages': None}
+                 for node in inventory}
+        store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda n: ready[n])
+        def submission(images, environment):
+            raw = copy.deepcopy(self.fixture['submission'])
+            raw['submissionId'] = str(uuid.uuid4())
+            m = raw['manifest']
+            m['objects'] = [{**m['objects'][0], 'id': 'image-' + str(i),
+                             'name': 'image-' + str(i) + '.jpg'} for i in range(images)]
+            m['objectCount'] = images
+            m['totalBytes'] = images * 3
+            m['inputCounts']['images'] = images
+            m['sha256'] = p.manifest_sha256(m)
+            return p.validate_submission(raw, environment=environment,
+                capability_fingerprint=raw['capabilityFingerprint'])
+        def claim(job, node):
+            return store.claim(job['jobId'], node_id=node, worker_id=node,
+                worker_instance_id='instance', claim_request_id='claim-' + job['jobId'])
+        running, _ = store.submit(submission(2, 'production'))
+        self.assertIsNotNone(claim(running, 'node-2'))
+        large, _ = store.submit(submission(2, 'production'))
+        staging, _ = store.submit(submission(1, 'staging'))
+        small, _ = store.submit(submission(1, 'production'))
+        self.assertEqual(store.next_for_node('cluster')['jobId'], small['jobId'])
+        self.assertIsNone(claim(staging, 'cluster'))
+        self.assertIsNotNone(claim(small, 'cluster'))
+        self.assertEqual(self.queue.get(large['jobId'])['status'], 'queued')
+        self.assertEqual(self.queue.get(staging['jobId'])['status'], 'queued')
+
+    def test_candidate_inventory_rechecks_node_readiness_on_claim(self):
+        self.queue.per_node_slots = True
+        inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
+                     dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
+        ready = {n['id']: {'ready': True, 'taskQueueCount': 0, 'maxImages': None}
+                 for n in inventory}
+        store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda n: ready[n])
+        job, _ = store.submit(self.new_submission())
+        self.assertEqual(store.next_for_node('cluster')['jobId'], job['jobId'])
+        ready['cluster'] = {'ready': False, 'taskQueueCount': 0, 'maxImages': None}
+        def claim(node):
+            return store.claim(job['jobId'], node_id=node, worker_id=node,
+                worker_instance_id='instance', claim_request_id='claim-' + node)
+        self.assertIsNone(claim('cluster'))
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'queued')
+        self.assertEqual(store.next_for_node('node-2')['jobId'], job['jobId'])
+        self.assertIsNotNone(claim('node-2'))
+
     def test_metadata_quota_rolls_back_both_tables(self):
         store = ReferenceStore(self.queue, max_metadata_bytes=1)
         with self.assertRaises(Conflict):
