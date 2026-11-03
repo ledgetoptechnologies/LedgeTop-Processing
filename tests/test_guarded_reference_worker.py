@@ -1,11 +1,15 @@
 import os
 import unittest
+import uuid
 from unittest.mock import patch
 
 from processing.host_mutation_journal import HostMutationJournal, MutationHeld
 from processing.node_gate import GateError, NodeGate
 from processing.reference_engine_worker import WorkerHeld
 from processing import reference_protocol as protocol
+from processing.odx_smoke_worker import SmokeError
+from processing.viewer_service import NativeEngine
+from ops.native_node_fixture import NativeNodeFixture
 from tests.test_reference_engine_worker import ReferenceEngineWorkerTests
 
 
@@ -67,7 +71,7 @@ class GuardedWorkerTests(ReferenceEngineWorkerTests):
     def test_invalid_commit_response_remains_pending(self):
         self.worker = self.make_guarded()
         self.engine.action = lambda action, identifier: {'uuid': 'wrong'}
-        with self.assertRaises(WorkerHeld): self.start()
+        with self.assertRaises((WorkerHeld, SmokeError)): self.start()
         row = self.worker._row(self.job['jobId'])
         with NodeGate('physical-engine') as gate:
             journal = HostMutationJournal(gate, row['receipt']).open()
@@ -76,4 +80,47 @@ class GuardedWorkerTests(ReferenceEngineWorkerTests):
         self.worker = self.make_worker()
         self.assertEqual(self.start(), 'commit_pending')
         with self.assertRaises(WorkerHeld): self.worker.poll(self.job['jobId'])
+
+
+
+class GuardedActualHTTPTests(ReferenceEngineWorkerTests):
+    def exercise_response(self, response, valid):
+        fixture = NativeNodeFixture(self.root / 'fixture.sqlite', synthetic_enabled=True).start()
+        self.addCleanup(fixture.close)
+        original = fixture._dispatch
+        def respond(method, path, headers, body):
+            status, value, binary = original(method, path, headers, body)
+            if method == 'POST' and path.startswith('/task/new/commit/') and status == 200:
+                value = response(self.job['jobId'])
+            return status, value, binary
+        fixture._dispatch = respond
+        self.engine = NativeEngine(fixture.origin)
+        self.worker = self.make_worker(host_mutation_journal=True)
+        if valid:
+            self.assertEqual(self.start(), 'processing')
+        else:
+            with self.assertRaises((WorkerHeld, SmokeError)): self.start()
+        self.assertEqual(fixture.counts(), dict(initialize=1, upload=1, commit=1, download=0))
+        row = self.worker._row(self.job['jobId'])
+        with NodeGate('physical-engine') as gate:
+            journal = HostMutationJournal(gate, row['receipt']).open()
+            self.assertEqual(journal.db.execute('SELECT kind,state FROM operations ORDER BY seq DESC LIMIT 1').fetchone(),
+                             ('commit', 'done' if valid else 'pending'))
+            journal.close()
+        self.worker = self.make_worker()
+        self.assertEqual(self.start(), 'processing' if valid else 'commit_pending')
+        with self.assertRaises(WorkerHeld): self.worker.poll(self.job['jobId'])
+        self.assertEqual(fixture.counts()['commit'], 1)
+
+    def test_http_matching_uuid_acknowledged(self):
+        self.exercise_response(lambda job: {'uuid': job}, True)
+
+    def test_http_empty_object_is_uncertain(self):
+        self.exercise_response(lambda job: {}, False)
+
+    def test_http_success_without_uuid_is_uncertain(self):
+        self.exercise_response(lambda job: {'success': True}, False)
+
+    def test_http_wrong_uuid_is_uncertain(self):
+        self.exercise_response(lambda job: {'uuid': str(uuid.uuid4())}, False)
 

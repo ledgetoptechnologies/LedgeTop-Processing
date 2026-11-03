@@ -193,9 +193,11 @@ class ReferenceEngineWorker:
                     if journal is not None:
                         journal.begin(op_id, kind, digest)
                     result = call()
+                    # NodeODM's commit schema requires the created task UUID.
+                    # A bare success or empty object is uncertain, even if HTTP 200.
                     if journal is not None and kind == 'commit' and (not isinstance(result, dict)
                             or 'error' in result or result.get('success') is False
-                            or ('uuid' in result and result['uuid'] != job['jobId'])):
+                            or result.get('uuid') != job['jobId']):
                         raise WorkerHeld('engine commit acknowledgment uncertain')
                     if journal is not None:
                         journal.acknowledge(op_id, p.digest(dict(
