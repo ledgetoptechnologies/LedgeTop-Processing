@@ -8,7 +8,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from ops.native_node_fixture import ARCHIVE
+from ops.native_node_fixture import ARCHIVE, task_archive
 from processing import reference_protocol as protocol
 from processing.guarded_native_client import GuardedNativeClient
 from processing.viewer_service import EngineUnavailable, ViewerService
@@ -95,6 +95,7 @@ class GuardedViewerAdapterTests(BoundJobTests):
         self._malformed_mutation_ack_holds_checkpoint('commit', lambda body: {**body, 'success': False})
 
     def test_factory_dispatches_two_distinct_assignments_with_per_job_claims(self):
+        self.backend.task_specific_output = True
         coordinator = ViewerServiceTests(methodName='runTest')
         coordinator.setUp()
         self.addCleanup(coordinator.tearDown)
@@ -150,9 +151,10 @@ class GuardedViewerAdapterTests(BoundJobTests):
             self.assertEqual(coordinator.service.info(identifier)['status']['code'], 40)
             # Both assignments must use their own bound node for progress logs
             # and archive retrieval, not just dispatch successfully.
-            self.assertEqual(coordinator.service.output(identifier, 1), ['', 'synthetic phase two'])
+            engine_id = coordinator.task(identifier)['engine_uuid']
+            self.assertEqual(coordinator.service.output(identifier, 1), ['', f'finished {engine_id}'])
             with coordinator.service.download(identifier)[0] as stream:
-                self.assertEqual(stream.read(), ARCHIVE)
+                self.assertEqual(stream.read(), task_archive(engine_id))
             return identifier
         first = submit(lose_factory=True)
         first_task = coordinator.task(first)
@@ -171,7 +173,7 @@ class GuardedViewerAdapterTests(BoundJobTests):
             coordinator.service._task_engine(first_task)
         claims[first_task['job_id']] = original_claim
         with coordinator.service.download(first)[0] as stream:
-            self.assertEqual(stream.read(), ARCHIVE)
+            self.assertEqual(stream.read(), task_archive(first_task['engine_uuid']))
         # Explicitly simulate a matching *trusted* completion receipt. Real
         # end-to-end authenticated outbox delivery is not wired by this test.
         with NodeGate('physical-engine') as gate:
@@ -185,6 +187,7 @@ class GuardedViewerAdapterTests(BoundJobTests):
         second_task = coordinator.task(second)
         self.assertNotEqual(first_task['engine_uuid'], second_task['engine_uuid'])
         self.assertNotEqual(first_task['job_id'], second_task['job_id'])
+        self.assertNotEqual(task_archive(first_task['engine_uuid']), task_archive(second_task['engine_uuid']))
         self.assertEqual(self.backend.counts()['initialize'], 2)
         self.assertEqual(self.backend.counts()['upload'], 2)
         self.assertEqual(self.backend.counts()['commit'], 2)

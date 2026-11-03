@@ -1,6 +1,6 @@
 """Explicit local synthetic NodeODM HTTP fixture; performs no processing.
 
-Only the three-byte abc upload and fixed empty ZIP are supported. Mutation
+Only the three-byte abc upload and empty ZIP results are supported. Mutation
 history is FULL SQLite state, so duplicate initialization/commit never reruns.
 No request/token logging, external services, shell or container operations.
 """
@@ -22,6 +22,11 @@ from processing import reference_protocol as p
 
 MAX_BODY = 8 * 1024
 ARCHIVE = b'PK\x05\x06' + bytes(18)
+
+def task_archive(identifier):
+    """Distinct valid empty ZIP per synthetic task, using its ZIP comment."""
+    comment = identifier.encode('ascii')
+    return ARCHIVE[:-2] + len(comment).to_bytes(2, 'little') + comment
 OPTIONS = [
     dict(name='fast-mode', type='bool', value=False, domain='true,false', help='Synthetic boolean mode.'),
     dict(name='numeric-limit', type='int', value=1, domain=dict(min=1, max=8), help='Synthetic numeric limit.'),
@@ -69,6 +74,7 @@ class NativeNodeFixture:
         if os.name != 'nt':
             self.path.chmod(0o600)
         self.engine_version = engine_version
+        self.task_specific_output = False
         self._thread = None
         self._closed = False
         with self._db() as db:
@@ -142,7 +148,10 @@ class NativeNodeFixture:
                             if not db.execute('SELECT 1 FROM tasks WHERE uuid=?', (identifier,)).fetchone():
                                 self.reply(404, {'error': 'synthetic_not_found'})
                                 return
-                        self.reply(200, ['synthetic phase one', '', 'synthetic phase two'][int(line):])
+                        lines = ([f'synthetic task {identifier}', '', f'finished {identifier}']
+                                 if fixture.task_specific_output else
+                                 ['synthetic phase one', '', 'synthetic phase two'])
+                        self.reply(200, lines[int(line):])
                         return
                     status, value, binary = fixture._dispatch(self.command, target.path, self.headers, body)
                     self.reply(status, value, binary=binary)
@@ -290,5 +299,5 @@ class NativeNodeFixture:
                 if not task['committed'] or task['status'] != 40:
                     return 409, {'error': 'synthetic_result_not_ready'}, False
                 db.execute("INSERT INTO calls VALUES('download',?)", (identifier,))
-                return 200, ARCHIVE, True
+                return 200, task_archive(identifier) if self.task_specific_output else ARCHIVE, True
         return 404, {'error': 'synthetic_not_found'}, False
