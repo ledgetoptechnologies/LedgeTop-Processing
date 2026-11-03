@@ -113,6 +113,15 @@ class HostMutationJournal:
             self.db.rollback()
             raise
 
+    def _validate_operations(self):
+        # Invalid acknowledgments must never look like permission to send again.
+        for state, digest in self.db.execute('SELECT state,ack_digest FROM operations'):
+            if state == 'pending' and digest is None:
+                continue
+            if state == 'done' and isinstance(digest, str) and _HASH.fullmatch(digest):
+                continue
+            raise GateError('guard journal malformed; inspection required')
+
     def begin(self, op_id, kind, request_digest):
         """Record intent before mutation. A done replay returns its ack hash.
 
@@ -125,6 +134,7 @@ class HostMutationJournal:
         if not valid_id or kind not in ('init', 'upload', 'commit') or not isinstance(request_digest, str) or not _HASH.fullmatch(request_digest):
             raise GateError('invalid operation identity')
         with self._transaction():
+            self._validate_operations()
             prior = self.db.execute('SELECT seq,op_id,kind,request_digest,ack_digest,state FROM operations WHERE op_id=?', (op_id,)).fetchone()
             if prior:
                 if (prior[2], prior[3]) != (kind, request_digest): raise GateError('operation identity conflict')
@@ -144,6 +154,7 @@ class HostMutationJournal:
         if not isinstance(ack_digest, str) or not _HASH.fullmatch(ack_digest):
             raise GateError('invalid acknowledgment digest')
         with self._transaction():
+            self._validate_operations()
             row = self.db.execute('SELECT ack_digest,state FROM operations WHERE op_id=?', (op_id,)).fetchone()
             if row is None: raise GateError('unknown mutation')
             if row[1] == 'done':

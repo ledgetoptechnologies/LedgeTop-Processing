@@ -116,6 +116,20 @@ class HostMutationJournalTests(unittest.TestCase):
             self.assertIsNotNone(gate.snapshot()['reservation'])
             journal.close()
 
+    def test_corrupt_done_ack_never_authorizes_replay_or_later_operation(self):
+        with NodeGate(self.engine) as gate:
+            journal = HostMutationJournal(gate, self.receipt).open()
+            for bad in (None, '', 'a' * 63, 'g' * 64):
+                journal.db.execute('UPDATE operations SET ack_digest=? WHERE op_id=?', (bad, self.init))
+                journal.db.commit()
+                with self.assertRaises(GateError):
+                    journal.begin(self.init, 'init', 'b' * 64)
+                with self.assertRaises(GateError):
+                    journal.begin(str(uuid.uuid4()), 'upload', 'e' * 64)
+                with self.assertRaises(GateError):
+                    journal.acknowledge(self.init, 'c' * 64)
+            journal.close()
+
     def test_missing_journal_is_not_recreated(self):
         with NodeGate(self.engine) as gate:
             journal = HostMutationJournal(gate, self.receipt)
