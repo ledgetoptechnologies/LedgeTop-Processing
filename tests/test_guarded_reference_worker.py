@@ -1,3 +1,4 @@
+import copy
 import os
 import unittest
 import uuid
@@ -98,6 +99,52 @@ class GuardedWorkerTests(ReferenceEngineWorkerTests):
             state = gate.snapshot()
             self.assertIsNone(state['reservation']['completionDigest'])
             self.assertNotIn('completion', state['hostMutationJournal'])
+
+    def test_cross_job_outbox_substitution_and_replaced_tombstone_hold(self):
+        self.worker = self.make_guarded()
+        self.engine.action = lambda action, identifier: {'uuid': identifier}
+        self.start()
+        outbox_id = self.worker.poll(self.job['jobId'])
+        completion = self.outbox.get(outbox_id)
+        payload = completion['payload']
+        receipt = dict(type='durable-result-receipt', durable=True, receiptId='receipt-3',
+            storageReceiptId='storage-3', outboxId=outbox_id, payloadSha256=completion['digest'],
+            acceptedObjectIds=[o['id'] for o in payload['resultManifest']['objects']],
+            **{key: payload[key] for key in ('jobId', 'generation', 'environment',
+                'inputManifestSha256', 'pipelineDigest', 'resultManifestSha256')})
+        # Direct outbox ACK models the existing trusted authenticated adapter;
+        # this unit test does not prove transport authentication.
+        self.outbox.claim_next()
+        self.outbox.acknowledge(outbox_id, receipt)
+        altered = copy.deepcopy(self.outbox.get(outbox_id))
+        altered['payload']['jobId'] = str(uuid.uuid4())
+        with NodeGate('physical-engine') as gate: before = gate.snapshot()
+        with patch.object(self.outbox, 'get', return_value=altered):
+            with self.assertRaises(WorkerHeld): self.worker.acknowledge_delivery(self.job['jobId'])
+        with NodeGate('physical-engine') as gate: self.assertEqual(gate.snapshot(), before)
+
+        original = NodeGate._save
+        def crash_after_release(gate, state):
+            original(gate, state)
+            if state['reservation'] is None:
+                raise OSError('synthetic crash after durable release')
+        with patch.object(NodeGate, '_save', crash_after_release):
+            with self.assertRaises(OSError): self.worker.acknowledge_delivery(self.job['jobId'])
+        with NodeGate('physical-engine') as gate:
+            receipt2 = 'c' * 32
+            other = dict(id=str(uuid.uuid4()), workerId='worker', nodeId='cluster', authorityId=self.authority)
+            gate.reserve('cluster', 'http://127.0.0.1:8000', self.authority, 1, receipt2)
+            gate.bind(receipt2, other)
+            gate.prepare_completion(receipt2, {'status': 'succeeded', 'result': {'id': 'second'}})
+            gate.acknowledge(receipt2, dict(other, status='succeeded', result={'id': 'second'}))
+            gate.reserve('cluster', 'http://127.0.0.1:8000', self.authority, 1, 'd' * 32)
+            gate.bind('d' * 32, dict(id=str(uuid.uuid4()), workerId='worker', nodeId='cluster', authorityId=self.authority))
+            new_journal = HostMutationJournal(gate, 'd' * 32).create()
+            new_journal.close()
+            before = gate.snapshot()
+        self.worker = self.make_worker()
+        with self.assertRaises(GateError): self.worker.acknowledge_delivery(self.job['jobId'])
+        with NodeGate('physical-engine') as gate: self.assertEqual(gate.snapshot(), before)
 
     def test_guarded_real_worker_records_exact_identity_and_checkpoints_completion(self):
         self.worker = self.make_guarded()
