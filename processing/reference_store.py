@@ -488,6 +488,8 @@ class ReferenceStore:
             row = self._row(db, job_id)
             claim = db.execute('SELECT * FROM reference_claims WHERE request_id=?',
                                (claim_request_id,)).fetchone()
+            self._claim_snapshot(db, job_id, node_id=node_id, worker_id=worker_id,
+                                 worker_instance_id=worker_instance_id, claim_token=claim_token)
             if (claim is None or tuple(claim[k] for k in ('job_id', 'node_id', 'worker_id', 'instance_id')) != binding[:4]
                     or not hmac.compare_digest(claim['token'], claim_token)
                     or row['status'] != 'running' or row['phase'] not in ('queued', 'waiting_capacity')
@@ -496,6 +498,11 @@ class ReferenceStore:
                     or row['transfer_json'] is not None or row['result_json'] is not None
                     or row['private_grant_json'] is not None):
                 raise Conflict('claim cannot be safely released')
+            if (row['terminal_failure_json'] is not None or
+                    db.execute('SELECT 1 FROM reference_worker_receipts WHERE job_id=? LIMIT 1', (job_id,)).fetchone() or
+                    db.execute("""SELECT 1 FROM reference_outbox WHERE
+                        json_extract(payload_json,'$.jobId')=? LIMIT 1""", (job_id,)).fetchone()):
+                raise Conflict('claim has durable outcome evidence')
             self._quota(db, sum(len(x) for x in (claim_request_id, *binding)))
             db.execute('INSERT INTO reference_released_claims VALUES(?,?,?,?,?,?)',
                        (claim_request_id, *binding))
