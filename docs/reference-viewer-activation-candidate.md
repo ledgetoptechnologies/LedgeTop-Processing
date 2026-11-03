@@ -63,3 +63,9 @@ refuses incomplete or incompatible layouts. Until an activation-bound grant is
 implemented, the coordinator also refuses discovery, claims and v1 grant use.
 The legacy 31-test suites now use explicit prepared bindings and a test-only
 mock future-grant readiness; those tests do not establish v2 grant safety.
+
+The environment-only legacy POST /ltds/v1/jobs validates the request but
+returns 503 viewer_prepared_submission_required before inserting a job.
+Read-only access to already existing legacy job status remains available.
+The original reference API suite expects legacy admission and needs separate
+fixture migration; its downstream result and acceptance tests remain unqualified.

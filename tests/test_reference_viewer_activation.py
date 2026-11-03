@@ -14,6 +14,7 @@ from processing.maintenance import Conflict
 from processing.prototype import Queue, PROFILE as LEGACY_PROFILE
 from processing.reference_store import ReferenceStore, PROFILE
 from processing.reference_worker_api import ReferenceWorkerAPI, PREFIX
+from processing.reference_api import ReferenceAPI
 from processing.reference_driver import ReferenceDriver, DriverHeld
 from processing.reference_engine_worker import WorkerHeld
 
@@ -248,6 +249,22 @@ class ViewerActivationTests(unittest.TestCase):
             self.store.private_transfer_grant(job['jobId'])
         with self.assertRaises(Conflict):
             self.store.reserve(job['jobId'], self.fixture['transferRequest'], node_id='cluster')
+
+    def test_environment_only_admission_cannot_create_blocking_queue_row(self):
+        token = 'synthetic-environment-token-0001'
+        api = ReferenceAPI(self.store, bearer_tokens={token: 'production'},
+            capability_fingerprint=self.fixture['capabilities']['capabilityFingerprint'],
+            options_fingerprint=self.fixture['capabilities']['engines']['odm']['optionsFingerprint'],
+            allowed_odm_options={'pc-quality', 'projection'})
+        raw = copy.deepcopy(self.fixture['submission'])
+        raw['submissionId'] = str(uuid.uuid4())
+        response = api.handle('POST', '/ltds/v1/jobs', {'Authorization': 'Bearer ' + token},
+                              json.dumps(raw).encode(), protected_transport=True)
+        self.assertEqual((response.status, response.body),
+                         (503, {'error': 'viewer_prepared_submission_required'}))
+        self.assertEqual(self.queue.list(), [])
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_jobs').fetchone()[0], 0)
 
     def test_partial_schema_fails_closed_on_restart(self):
         with self.queue._db() as db:
