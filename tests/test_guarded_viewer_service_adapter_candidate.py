@@ -148,6 +148,11 @@ class GuardedViewerAdapterTests(BoundJobTests):
             self.assertEqual([row['sequence'] for row in history], [1, 2, 3])
             coordinator.service.tick()  # observe synthetic node completion
             self.assertEqual(coordinator.service.info(identifier)['status']['code'], 40)
+            # Both assignments must use their own bound node for progress logs
+            # and archive retrieval, not just dispatch successfully.
+            self.assertEqual(coordinator.service.output(identifier, 1), ['', 'synthetic phase two'])
+            with coordinator.service.download(identifier)[0] as stream:
+                self.assertEqual(stream.read(), ARCHIVE)
             return identifier
         first = submit(lose_factory=True)
         first_task = coordinator.task(first)
