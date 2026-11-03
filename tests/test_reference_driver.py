@@ -402,6 +402,27 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(self.store.get(job['jobId'])['phase'], 'processing')
         self.assertEqual(sum(call[0] == 'commit' for call in self.transport.calls), 1)
 
+    def test_lost_processing_phase_ack_does_not_start_engine_twice(self):
+        job = self.submit()
+        self.advance(job, 'execution_pending')
+        original_request = self.driver._request
+        lost = [False]
+        def lose_once(method, suffix, payload=None, **kwargs):
+            result = original_request(method, suffix, payload, **kwargs)
+            if (method == 'POST' and suffix.endswith('/phase') and payload.get('phase') == 'processing'
+                    and not lost[0]):
+                lost[0] = True
+                raise OSError('synthetic lost coordinator acknowledgment')
+            return result
+        self.driver._request = lose_once
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertTrue(lost[0])
+        self.assertEqual(self.store.get(job['jobId'])['phase'], 'processing')
+        self.driver = self.make_driver()
+        self.assertEqual(self.driver.step()['state'], 'executing')
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
+        self.assertEqual(sum(call[0] == 'commit' for call in self.transport.calls), 1)
+
     def test_unrelated_failure_ack_does_not_release_current_job_gate(self):
         from processing.reference_failure import make_failure, _receipt
         # An earlier retained record is due first in the actual shared outbox.
