@@ -1,49 +1,13 @@
 # Partial catalog candidate: rollout remains blocked
 
-The selected-option journal and full-option journal are persisted together.
-The new `viewer_tasks.full_option_evidence_required` flag and
-`viewer_full_option_evidence` table are part of the task's safety state.
-They must be included in all migration, backup, integrity and cleanup censuses.
+This isolated candidate validates every explicitly requested option against the admission catalog and the actual selected node's current type and domain. It skips an incompatible node without dropping an option. Omitted options are passed through as omitted: each NodeODM uses its own defaults, which can differ, including max-concurrency. This is intentional and does not establish identical results between nodes. The assigned node ID is exposed in task info; the Viewer must still integrate this metadata. Actual effective omitted defaults are not persisted or reported.
 
-**Do not enable or roll back this candidate while an older coordinator can
-access its database or engine.** Earlier builds, including parent `e48fa46`,
-ignore the full-catalog evidence and can dispatch a task on a node whose
-unspecified defaults differ. Reusing the database, deleting the new column or
-table, resetting the task, or using another state directory does not enforce
-the barrier. A rollout must exclude old writers, reconcile existing tasks,
-prove the complete physical-engine ownership boundary, and qualify recovery
-and any rollback before activation. No such barrier is implemented here.
+Catalog admission remains conservative: when several nodes are online, the currently exposed intersection can omit options whose full descriptors differ even if some explicit values would be compatible. Unknown types or domains fail closed. This candidate is not a complete heterogeneous option discovery solution.
 
-The full-catalog equality check is deliberately conservative. A read-only
-live catalog observation on 2026-11-03 found that the existing cluster and
-main nodes advertise different full option definitions, including enum
-defaults/domains. They therefore would not currently be interchangeable under
-this candidate. A safe effective-default contract and paired Viewer/engine
-validation are required before claiming that partial-fleet admission supports
-fallback between them. The per-node route and browser behavior are not
-qualified by these unit tests.
+Older experimental task records may include `viewer_tasks.full_option_evidence_required` and `viewer_full_option_evidence`. Preserve these in migration, backup, integrity and cleanup censuses; evidence already recorded remains integrity checked. New tasks store explicit option evidence, not full default snapshots.
 
-The separate admission validator in `viewer_service.py` also still rejects
-descriptive string domains such as `positive integer` and `positive float`
-advertised by the current nodes. The planner below recognizes a bounded set
-for comparison, but is not connected to that validator. Consequently this
-candidate cannot be enabled as a general replacement even for valid numeric
-options until the accepted-domain contract is reconciled and tested.
+**Do not enable or roll back this candidate while an older coordinator can access its database or engines.** An older writer may ignore recorded evidence and dispatch without this validation. Reusing the database, deleting columns or tables, resetting a task, or using a different state directory does not fence it. A rollout must exclude old writers, reconcile existing tasks, prove physical-engine ownership, and qualify recovery and rollback. No such barrier is implemented here.
 
-`processing/effective_option_plan.py` is an unmounted, non-authorizing
-proposal for comparing a source and target catalog. Its caller must explicitly
-classify each changed default as a reviewed semantic pin or a node-local
-numeric execution setting. It never waives a missing definition, unknown type,
-unknown domain or ambiguous default; special workflow/file options cannot be
-pinned. It always returns `authorizesDispatch: false`, even for a proposal.
-The example `max-concurrency` classification preserves each node's own value;
-it does not change a running node or establish that this option is safe to
-classify. The actual catalogs still contain missing definitions, so this
-proposal holds rather than claiming that the existing PCs can fall back.
+`processing/effective_option_plan.py` is an unmounted historical proposal, not the behavior implemented here and not an authorization to dispatch. Its default-pinning approach was superseded by the explicit-option contract above.
 
-An implementation that uses such plans must first authenticate and version the
-reviewed classification against the exact catalog versions, persist the
-effective options and their provenance with the job, enforce them unchanged at
-the actual node, fence stale writers and verify the resulting workflow. The
-current comparison does not establish those properties or prove engine-version
-equivalence.
+These local tests do not qualify the real fleet, live admission, Viewer integration, per-node execution or recovery. Do not activate until independently reviewed and tested end-to-end.

@@ -209,8 +209,23 @@ class ViewerService:
                 raise ValueError('invalid option value')
             domain = spec.get('domain')
             if isinstance(domain, str):
-                if not domain.strip():
+                domain = domain.strip()
+                if not domain:
                     domain = None
+                elif domain in ('integer', 'positive integer', 'float', 'positive float',
+                                'float > 0.0', 'integer: 1 <= x <= 14'):
+                    if type(value) not in (int, float) or (domain in ('integer', 'positive integer', 'integer: 1 <= x <= 14') and not float(value).is_integer()):
+                        raise ValueError('option outside domain')
+                    if ((domain.startswith('positive ') and value <= 0)
+                            or (domain == 'float > 0.0' and value <= 0)
+                            or (domain == 'integer: 1 <= x <= 14' and not 1 <= value <= 14)):
+                        raise ValueError('option outside domain')
+                    continue
+                elif domain in ('string', 'json') and kind in ('str', 'string'):
+                    if domain == 'json' and value:
+                        try: json.loads(value)
+                        except (ValueError, TypeError, RecursionError): raise ValueError('invalid JSON option') from None
+                    continue
                 else:
                     try: domain = json.loads(domain)
                     except (ValueError, TypeError): raise ValueError('invalid option domain') from None
@@ -234,24 +249,17 @@ class ViewerService:
                 raise ValueError('invalid option domain')
 
     def _check_options(self, options, *, node_id=None, evidence=None, full_evidence=None, definitions=None):
-        # Legacy tasks lack admission evidence and retain the conservative
-        # fleet-wide intersection check.
-        if node_id is not None and full_evidence is None and self.inventory:
-            # Old tasks lack immutable option evidence; preserve their original
-            # complete-fleet policy rather than trusting a partial catalog.
+        # A legacy task without saved explicit-option definitions retains the
+        # conservative complete-fleet check.  Existing full-catalog evidence,
+        # where present, remains integrity checked by the task store, but is
+        # not treated as a requirement that node-local defaults be identical.
+        if node_id is not None and evidence is None and self.inventory:
             complete = catalog([(n['id'], n['origin'], n['token']) for n in self.inventory
                                 if 'odm' in n['capabilities']], inventory=True)
             if not complete['ready']:
                 raise Conflict('legacy engine catalog unavailable')
-            definitions = complete['commonOptions']
-            full = [sorted(node['options'], key=lambda item:item['name']) for node in complete['nodes'] if node['configured']]
-            if not full or any(item != full[0] for item in full[1:]):
-                raise Conflict('legacy engine defaults differ')
-        elif node_id is not None and full_evidence is not None and self.inventory:
+            self._option_values(options, complete['commonOptions'])
             definitions = self._selected_options(node_id)
-            if (json.dumps(sorted(definitions,key=lambda item:item['name']),sort_keys=True,separators=(',',':'),allow_nan=False)
-                    != json.dumps(full_evidence,sort_keys=True,separators=(',',':'),allow_nan=False)):
-                raise Conflict('selected engine full options changed')
         elif definitions is None:
             definitions = self._selected_options(node_id) if node_id is not None and evidence is not None else self.options()
         allowed = {item['name'] for item in definitions}
@@ -259,8 +267,12 @@ class ViewerService:
                                              or item['name'] not in allowed for item in options)):
             raise ValueError('option unavailable on configured engines')
         selected = [item for item in definitions if item['name'] in {option['name'] for option in options}]
-        if evidence is not None and json.dumps(sorted(selected,key=lambda item:item['name']),sort_keys=True,separators=(',',':'),allow_nan=False) != json.dumps(evidence,sort_keys=True,separators=(',',':'),allow_nan=False):
-            raise Conflict('selected engine option definitions changed')
+        if evidence is not None:
+            source = {item['name']: item for item in evidence}
+            if (set(source) != {item['name'] for item in options}
+                    or any(item.get('type') != source[item['name']].get('type') for item in selected)):
+                raise Conflict('selected engine option type changed')
+            self._option_values(options, evidence)
         self._option_values(options, definitions)
         return selected
 
@@ -268,20 +280,15 @@ class ViewerService:
         if capability is not None:
             replay = self.store.initialize(identifier, name, options, outputs, environment, capability, replay_only=True)
             if replay is not None: return replay
-        full = None
         if self.inventory:
             snapshot = self._catalog()
             if not snapshot['ready']:
                 raise Conflict('engine catalog unavailable')
-            available = [node for node in snapshot.get('nodes', []) if node.get('available')]
-            if not available:
-                raise Conflict('full engine catalog unavailable')
-            full = sorted(available[0]['options'], key=lambda item: item['name'])
             evidence = self._check_options(options or [], definitions=snapshot['commonOptions'])
         else:
             evidence = self._check_options(options or [])
         return self.store.initialize(identifier, name, options, outputs, environment, capability,
-                                     option_evidence=evidence, full_option_evidence=full)
+                                     option_evidence=evidence)
 
     def upload(self, identifier, filename, stream, length, environment=None, capability=None):
         return self.store.upload(identifier, filename, stream, length, environment, capability)
@@ -294,7 +301,15 @@ class ViewerService:
         return self.store.commit(identifier, environment, capability)
 
     def info(self, identifier):
-        return self.store.info(identifier)
+        info = self.store.info(identifier)
+        try:
+            task = self.store.task(identifier)
+        except Conflict:
+            return info
+        if task['node_id']:
+            # The ID is configured locally, not an endpoint or credential.
+            info['ledgetopNodeId'] = task['node_id']
+        return info
 
     def reserve(self, identifier, environment, capability):
         with self._lock:return self.store.reserve(identifier,environment,capability)

@@ -940,27 +940,23 @@ class ViewerServiceTests(unittest.TestCase):
         self.service = ViewerService(self.queue, self.config, engines=self.engines,
             probe=lambda role, origin, token: {'ready': (first if role == 'first' else second).mode == 'normal',
                 'maxImages': None, 'taskQueueCount': sum(x.startswith(role + ':') for x in self.fleet.active)})
-        self.assertEqual(self.task(identifier)['full_option_evidence'], sorted(OPTIONS, key=lambda option: option['name']))
-        # The first node changes a definition after admission. With the other
-        # still offline the task must wait without an engine mutation.
-        first.options[1]['value'] = True  # unselected default changed
+        # An omitted setting's default is local to each node and may change.
+        first.options[1]['value'] = True
         self.service.tick()
-        self.assertIsNone(self.task(identifier)['node_id'])
-        self.assertEqual(self.engines['first'].calls, [])
-        # The previously unavailable node returns with the original definition.
+        self.assertEqual(self.task(identifier)['node_id'], 'first')
+        self.assertEqual(self.service.info(identifier)['ledgetopNodeId'], 'first')
+        self.finish(identifier)
+        self.service.tick()
+        # The selected option is incompatible on the first node; a returning
+        # second node supporting it must take the queued task instead.
+        other = self.submit()
+        first.options = [dict(item, type='string') if item['name'] == 'pc-ept' else dict(item) for item in first.options]
+        self.service.tick()
+        self.assertIsNone(self.task(other)['node_id'])
         second.mode = 'normal'
         self.service.tick()
-        self.assertEqual(self.task(identifier)['node_id'], 'second')
-        self.assertEqual(self.engines['first'].calls, [])
-        self.assertEqual([name for name, _ in self.fleet.commits], ['second'])
-        # Losing required full evidence must never silently fall back to the
-        # selected-only compatibility rule.
-        from processing.viewer_tasks import OptionEvidenceConflict
-        other = self.submit()
-        with self.queue._db() as db:
-            db.execute('DELETE FROM viewer_full_option_evidence WHERE uuid=?', (other,))
-        with self.assertRaises(OptionEvidenceConflict):
-            self.service.store.task(other)
+        self.assertEqual(self.task(other)['node_id'], 'second')
+        self.assertEqual(self.service.info(other)['ledgetopNodeId'], 'second')
 
     def test_direct_option_values_are_validated_before_admission(self):
         self.option_catalog = [
@@ -979,6 +975,25 @@ class ViewerServiceTests(unittest.TestCase):
         self.option_catalog[1]['domain'] = []
         with self.assertRaises(ValueError):
             self.service.initialize(str(uuid.uuid4()), 'invalid enum schema', [{'name':'quality','value':'low'}])
+
+    def test_real_nodeodm_numeric_and_enum_domains(self):
+        validate = ViewerService._option_values
+        for kind, domain, valid, invalid in (
+            ('enum', ['ultra','high','medium','low','lowest'], 'low', 'bad'),
+            ('int', 'integer', -1, True),
+            ('int', 'positive integer', 1, 0),
+            ('float', 'float', -0.5, '0.5'),
+            ('float', 'positive float', 0.5, -0.5),
+            ('float', 'float > 0.0', 0.5, 0),
+            ('int', 'integer: 1 <= x <= 14', 14, 15),
+        ):
+            with self.subTest(domain=domain):
+                definition = [{'name':'x', 'type':kind, 'domain':domain}]
+                validate([{'name':'x', 'value':valid}], definition)
+                with self.assertRaises(ValueError):
+                    validate([{'name':'x', 'value':invalid}], definition)
+        with self.assertRaises(ValueError):
+            validate([{'name':'x','value':1}], [{'name':'x','type':'int','domain':'unknown domain'}])
 
     def test_inventory_rejects_invalid_caps_and_duplicate_hosts(self):
         from processing.config import parse_node_inventory
