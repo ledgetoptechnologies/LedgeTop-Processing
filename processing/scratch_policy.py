@@ -254,6 +254,18 @@ class ScratchLedger:
         db.execute("UPDATE reservations SET state='expired', remaining=0 "
                    "WHERE state='reserved' AND expires<=? AND allocated=0", (now,))
 
+    def _available_scratch(self, db):
+        outstanding = db.execute("SELECT COALESCE(SUM(remaining),0) FROM reservations").fetchone()[0]
+        outstanding += db.execute("SELECT COALESCE(SUM(bytes),0) FROM control_charges").fetchone()[0]
+        free = _integer(self.probe(self.root), "free bytes")
+        return free - outstanding - self.floor
+
+    def available_scratch(self):
+        """Local advisory bytes after current holds and floor, not a reservation."""
+        with self._transaction() as db:
+            self._expire(db, self._now(db))
+            return max(0, self._available_scratch(db))
+
     def reserve(self, *, job_id, generation, reservation_id, manifest_sha256,
                 input_bytes, output_budget, environment, ttl_seconds, worker_ready):
         _id(job_id); _id(reservation_id); _sha(manifest_sha256)
@@ -279,13 +291,9 @@ class ScratchLedger:
                 if old["settings"] != settings or old["state"] == "expired":
                     raise PolicyConflict("reservation settings changed or lease expired")
                 return dict(old)
-            outstanding = db.execute("SELECT COALESCE(SUM(remaining),0) FROM reservations").fetchone()[0]
-            # A precharged control allowance is not yet physical disk use. Keep
-            # its full hold even after materialization: conservative until an
-            # explicitly qualified control lifecycle can release it.
-            outstanding += db.execute("SELECT COALESCE(SUM(bytes),0) FROM control_charges").fetchone()[0]
-            free = _integer(self.probe(self.root), "free bytes")
-            if free - outstanding - self.floor < total:
+            # The same conservative calculation is used by the advisory
+            # snapshot; this transaction is the actual reservation decision.
+            if self._available_scratch(db) < total:
                 raise PolicyConflict("insufficient unreserved scratch")
             try:
                 db.execute("INSERT OR IGNORE INTO job_environments VALUES(?,?)", (job_id, environment))

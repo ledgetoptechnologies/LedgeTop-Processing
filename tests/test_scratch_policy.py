@@ -60,6 +60,18 @@ class ScratchPolicyTests(unittest.TestCase):
         self.now = 10000
         self.assertEqual(self.ledger.cleanup_candidates(), [])
 
+    def test_available_scratch_uses_same_reservation_and_floor_accounting(self):
+        self.assertEqual(self.ledger.available_scratch(), 900)
+        self.reserve()
+        self.assertEqual(self.ledger.available_scratch(), 500)
+        self.free = 50
+        self.assertEqual(self.ledger.available_scratch(), 0)
+        with self.assertRaises(PolicyConflict):
+            self.reserve(job_id='j2', reservation_id='r2', input_bytes=0, output_budget=0)
+        self.free = 1000
+        self.now += 21
+        self.assertEqual(self.ledger.available_scratch(), 900)
+
     def test_readiness_identity_and_environment(self):
         with self.assertRaises(PolicyConflict):
             self.reserve(worker_ready=False)
