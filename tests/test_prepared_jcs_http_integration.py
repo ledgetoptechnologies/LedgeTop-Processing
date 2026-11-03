@@ -417,6 +417,27 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
             server.shutdown();server.server_close();thread.join(5)
         self.assertFalse(thread.is_alive())
 
+    def test_unmocked_writer_boundary_returns_503_without_copy_writes(self):
+        from tests.viewer_receipt_signer import SyntheticViewerSigner
+        temp=tempfile.TemporaryDirectory();self.addCleanup(temp.cleanup)
+        queue=Queue(temp.name,reference_enabled=True);self.addCleanup(queue.close)
+        store=ReferenceStore(queue,jcs_runtime_enabled=True)
+        fixture=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())
+        raw=copy.deepcopy(fixture['submission'])
+        envelope=dict(schemaVersion=3,protocol=PROTOCOL,submission=raw,viewerTaskId=str(uuid.uuid4()),viewerAttemptId=str(uuid.uuid4()),activationId=str(uuid.uuid4()))
+        legacy=dict(capabilityFingerprint=raw['capabilityFingerprint'],optionsFingerprint=raw['pipeline']['odm']['optionsFingerprint'],allowedOdmOptions=[],availableEngines=['odm'])
+        policy=dict(capabilityFingerprint=legacy['capabilityFingerprint'],optionsFingerprint=legacy['optionsFingerprint'],availableEngines=['odm'],optionDefinitions={})
+        token='synthetic-unmocked-writer-token';signer=SyntheticViewerSigner()
+        api=PreparedSubmissionAPI(store,credentials=[dict(token=token,principalId='viewer',environment='production')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy},jcs_policies={'production':policy,'staging':policy},expected_authority_id=queue.authority_id,copy_keys_by_identity={'viewer':{'production':signer.trusted_keys}})
+        headers={'Authorization':'Bearer '+token,'X-LTDS-Expected-Coordinator-Authority':queue.authority_id}
+        self.assertEqual(api.handle('POST','/ltds/prepared/v3/submissions',headers,json.dumps(envelope).encode(),protected_transport=True).status,201)
+        self.assertFalse(store._receipt_namespace_writer_boundary_ready())
+        response=api.handle('POST','/ltds/prepared/v3/submissions/'+raw['submissionId']+'/accepted-copies',headers,json.dumps({'acceptance':{},'viewerReceipt':{}}).encode(),protected_transport=True)
+        self.assertEqual((response.status,response.body),(503,{'error':'prepared_runtime_unavailable'}))
+        with queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_viewer_v3_copy_hold').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_acceptances').fetchone()[0],0)
+
     def test_missing_dependency_fails_before_reference_schema_mutation(self):
         temp=tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         queue=Queue(temp.name); queue.allowed_profiles.add(PROFILE); self.addCleanup(queue.close)
