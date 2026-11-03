@@ -16,7 +16,7 @@ class ViewerSnapshotAdapterTests(unittest.TestCase):
         self.fixture=SourceInventoryCandidateTests('test_exact_paths_bytes_and_immutable_binding');self.fixture.setUp()
         f=self.fixture
         self.expected=dict(principalId='viewer-prod',environment='production',authorityId='30000000-0000-4000-8000-000000000001',**f.expected)
-        self.policy=dict(objectLimit=10000,byteLimit=100000,transferByteBudget=3+len(f.gcp))
+        self.policy=dict(objectLimit=10000,byteLimit=100000,transferByteBudget=3*(3+len(f.gcp)))
         source=[dict(relativePath=x['relativePath'],byteSize=x['byteSize'],sha256=x['sha256'],processingRole=x['processingRole'])
                 for x in f.inv['processing']+f.inv['retained']]
         sent=[{k:x[k] for k in ('relativePath','byteSize','sha256')} for x in source[:2]]
@@ -40,6 +40,8 @@ class ViewerSnapshotAdapterTests(unittest.TestCase):
         self.assertEqual(len(digest),64)
         self.policy['transferByteBudget']=1
         with self.assertRaisesRegex(ValueError,'budget'):self.run_adapter()
+        self.policy['transferByteBudget']=2*(3+len(self.fixture.gcp))
+        with self.assertRaisesRegex(ValueError,'budget'):self.run_adapter()
 
     def test_changed_order_role_or_attempt_is_rejected(self):
         self.sub['inputFiles'].reverse()
@@ -50,6 +52,18 @@ class ViewerSnapshotAdapterTests(unittest.TestCase):
         self.sub['sourceFiles'][0]['processingRole']='image';self.sub['sourceFilesSha256']=p.digest(self.sub['sourceFiles'])
         self.sub['attemptId']='40000000-0000-4000-8000-000000000001'
         with self.assertRaisesRegex(ValueError,'attempt provenance differs'):self.run_adapter()
+
+    def test_generated_gcp_cannot_hide_raw_selected_gcp_list(self):
+        f=self.fixture
+        raw=dict(datasetFileId='raw-1',relativePath='legacy/GCP_LIST.TXT',byteSize=1,sha256='f'*64,
+                 processingRole='administrative',contentType='text/plain')
+        f.inv['retained'].append(raw)
+        f.authoritative['files'].append({k:raw[k] for k in ('datasetFileId','relativePath','byteSize','sha256','contentType')} |
+                                       dict(mimeType='text/plain',imageWidth=None,imageHeight=None))
+        f.selection['files'].append(dict(datasetFileId='raw-1',processingRole='administrative',disposition='retained'))
+        self.sub['sourceFiles'].append(dict(relativePath=raw['relativePath'],byteSize=1,sha256='f'*64,processingRole='provider_input'))
+        self.sub['sourceFilesSha256']=p.digest(self.sub['sourceFiles'])
+        with self.assertRaisesRegex(ValueError,'generated GCP shadows selected source'):self.run_adapter()
 
     def test_actual_viewer_input_inventory_matches(self):
         source=os.environ.get('VIEWER_PROCESSING_PROVENANCE_JS')

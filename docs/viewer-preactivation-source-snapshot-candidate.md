@@ -29,6 +29,10 @@ environment or source bytes. The candidate computes a separate domain-separated
 JCS snapshot hash over the source/attempt binding, these hashes, GCP snapshot
 hash, exact engine object count/bytes and independently supplied byte policy.
 The actual engine's object ceiling includes the generated GCP.
+For compatibility with the current source-range renewal candidate, the
+transfer byte budget must equal three times the input bytes, capped at the
+safe-integer maximum. Other retry budgets remain held until a versioned broker
+contract explicitly supports them.
 
 This proposal holds historical or absent evidence, nonrepresentable paths,
 unsupported source role/extension combinations, and the case where a raw

@@ -63,7 +63,8 @@ def evaluate(raw_inventory, *, expected, authoritative_dataset, trusted_selectio
     derived=[v for v in source if v['processingRole'] not in ('gcp_source','administrative')
              and (v['processingRole']!='auto' or _PHOTO.search(v['relativePath']))]
     if item['generated']:
-        derived=[v for v in derived if v['relativePath'].split('/')[-1].lower()!='gcp_list.txt']
+        if any(v['relativePath'].split('/')[-1].lower()=='gcp_list.txt' for v in derived):
+            raise ValueError('generated GCP shadows selected source')
     if {v['relativePath'] for v in derived} != set(selected):
         raise ValueError('Viewer attempt source selection differs')
     for v in derived:
@@ -86,7 +87,7 @@ def evaluate(raw_inventory, *, expected, authoritative_dataset, trusted_selectio
         raise ValueError('Viewer transmitted inventory differs')
     total=sum(v['byteSize'] for v in projected)
     if (len(projected)>source_policy['objectLimit'] or total>source_policy['byteLimit']
-            or not total<=source_policy['transferByteBudget']<=min(p.MAX_SAFE_INTEGER,3*total)):
+            or source_policy['transferByteBudget']!=min(p.MAX_SAFE_INTEGER,3*total)):
         raise ValueError('source budget invalid')
     payload=dict(protocol='ltds-viewer-preactivation-source-v1',schemaVersion=1,scope=expected,
         sourceInventorySha256=inventory_digest,sourceFilesSha256=viewer_submission['sourceFilesSha256'],
