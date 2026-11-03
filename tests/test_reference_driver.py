@@ -392,6 +392,35 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(data['sourceRenewalSequence'], 1)
         self.assertNotIn('sourceRenewal', data)
 
+    def test_unconfirmed_reservation_past_its_fixed_deadline_holds_instead_of_retrying(self):
+        offset = [0]
+        self.driver = self.make_driver(state_path=self.root / 'driver-expired-reservation.sqlite',
+                                       clock=lambda: time.time() + offset[0])
+        job = self.submit(contents=(b'expired-reservation-photo',))
+        real, posts = self.request, []
+        def lost_reservation(method, suffix, payload=None, **kwargs):
+            if suffix.endswith('/reservation'):
+                posts.append(payload['transferRequest']['reservationId'])
+                raise OSError('synthetic coordinator outage')
+            return real(method, suffix, payload, **kwargs)
+        self.driver._request = lost_reservation
+        for _ in range(10):
+            self.supply_grants()
+            result = self.driver.step()
+            if posts:
+                break
+        self.assertEqual(result['state'], 'retry_wait')  # inside the deadline the same request is retried
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertEqual(len(set(posts)), 1)
+        offset[0] = 241  # fixture transfer_ttl is 240 s
+        attempts = len(posts)
+        for _ in range(3):
+            self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'transfer_reservation_expired'})
+        self.assertEqual(len(posts), attempts)  # no further POST, and no new reservation is minted
+        with self.driver._db() as db:
+            stage, = db.execute('SELECT stage FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+        self.assertEqual(stage, 'reservation_pending')
+
     def test_mid_transfer_renewal_wait_and_rejection_keep_driver_state(self):
         from processing.source_range_transfer import validate_source_grant
         self.driver = self.make_driver(source_range_v2_enabled=True,

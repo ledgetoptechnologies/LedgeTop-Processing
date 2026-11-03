@@ -557,6 +557,11 @@ class ReferenceDriver:
         if self.combined_preparation is not None and self.combined_preparation.is_combined(job_id):return 'combined'
         return self.execution_router.kind_for(job_id) if self.execution_router else 'odm'
 
+    @staticmethod
+    def _timestamp(value):
+        """Epoch seconds of a minted ``...Z`` transfer deadline."""
+        return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
+
     def _new_transfer_request(self, claim):
         reservation_id = 'driver-' + secrets.token_hex(16)
         expires_at = datetime.fromtimestamp(self.clock() + self.transfer_ttl, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
@@ -888,6 +893,10 @@ class ReferenceDriver:
                 data['reservation'] = self._new_transfer_request(claim)
                 self._save(job_id, 'reservation_pending', data)
             request = data['reservation']
+            # The deadline is fixed at mint and nothing renews or succeeds it yet, so an
+            # unconfirmed reservation past it can never be admitted: hold, do not retry.
+            if stage == 'reservation_pending' and self._timestamp(request['expiresAt']) <= self.clock():
+                raise DriverHeld('transfer_reservation_expired')
             self.ledger.reserve(job_id=job_id, generation=claim['generation'], reservation_id=request['reservationId'],
                 manifest_sha256=claim['manifestSha256'], input_bytes=claim['submission']['manifest']['totalBytes'], output_budget=self.output_budget,
                 environment=claim['environment'], ttl_seconds=self.transfer_ttl, worker_ready=True)

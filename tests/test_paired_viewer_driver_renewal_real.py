@@ -304,5 +304,73 @@ class RealViewerDriverRenewalTests(unittest.TestCase):
         self.assertEqual((self.state / 'source' / 'a.jpg').read_bytes(), self.body)
 
 
+    def test_renewal_after_reservation_expiry_holds_with_lineage_frozen_for_a_successor(self):
+        """Baseline a reservation successor must start from (no successor exists yet).
+
+        Past the fixed reservation deadline the driver's own grant validation refuses
+        the lineage before any Viewer call (the Viewer would refuse too), and the
+        driver holds under a generic grant reason. Nothing is reset: broker usage, the driver renewal intent,
+        the Viewer grant head, the coordinator reservation and the partial input
+        stay exactly as they were, so a future authenticated successor can carry
+        them instead of recharging ranges or orphaning files.
+        """
+        job = self.submit_viewer_job()
+        driver = self.driver()
+        _result, _stage, data = self.step_until(driver, job, ('awaiting_grant',))
+        transfer = data['claim']['transferRequest']
+        grant = self.host.control(op='dispatch', transferRequest=transfer, jobId=job['jobId'],
+                                  generation=job['generation'])['grant']
+        self.fixture.store.receive_transfer_grant(job['jobId'], grant)
+        ranges_before = self.calls['range']
+        def fail_second_range(request, *, timeout, real=self.opener):
+            if urlsplit(request.full_url).path.startswith(RANGE) and self.calls['range'] - ranges_before == 1:
+                self.calls['range'] += 1
+                raise OSError('synthetic interrupted second range')
+            return real(request, timeout=timeout)
+        driver.source_range_client._open = fail_second_range
+        self.step_until(driver, job, ('fetching',))
+        for _ in range(5):
+            driver.step()
+            if self.usage()[0] >= 1:
+                break
+        before = self.usage()
+        self.assertEqual(before[:2], (1, CHUNK_BYTES))
+        parts = sorted((self.fixture.scratch / 'jobs').rglob('*.part'))
+        part_bytes = [path.read_bytes() for path in parts]
+        with self.fixture.queue._db() as db:
+            sealed = db.execute('SELECT phase,transfer_json FROM reference_jobs WHERE job_id=?', (job['jobId'],)).fetchone()
+
+        # Past the reservation deadline (driver transferTtl), not only the grant TTL.
+        reservation_expiry = transfer['expiresAt']
+        self.offset += 300
+        self.assertGreater(self.clock(), self._epoch(reservation_expiry))
+        self.host.control(op='clock', offsetMs=self.offset * 1000)
+        driver = self.driver()
+        result = driver.step()
+        # Not a renewal rejection: the hold reason does not say the reservation expired.
+        self.assertEqual(result, {'state': 'held', 'reason': 'source_transfer_grant_unavailable'}, self.calls)
+        self.assertEqual((self.calls['renew'], self.calls['ack']), (0, 0))
+        # A restarted Viewer and fresh driver still refuse; nothing is retried into a new lineage.
+        self.host.stop()
+        self.host = self.start_host()
+        driver = self.driver()
+        stage, data = self.stage(driver, job)
+        self.assertEqual(data['grant'], grant)
+        self.assertNotIn('sourceRenewal', data)  # no renewal intent was journaled
+        self.assertEqual(driver.step(), result)
+        self.assertEqual(self.calls['renew'], 0)
+        self.assertEqual(self.host.control(op='head')['head']['sequence'], 0)
+        self.assertEqual(self.usage(), before)
+        self.assertEqual([path.read_bytes() for path in sorted((self.fixture.scratch / 'jobs').rglob('*.part'))], part_bytes)
+        with self.fixture.queue._db() as db:
+            self.assertEqual(db.execute('SELECT phase,transfer_json FROM reference_jobs WHERE job_id=?',
+                                        (job['jobId'],)).fetchone(), sealed)
+
+    @staticmethod
+    def _epoch(value):
+        from datetime import datetime
+        return value if isinstance(value, (int, float)) else datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
+
+
 if __name__ == '__main__':
     unittest.main()
