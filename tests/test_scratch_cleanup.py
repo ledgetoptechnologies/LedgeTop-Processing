@@ -122,6 +122,21 @@ class ScratchCleanupTests(unittest.TestCase):
                 intent_token=intent['intent_token'])
         self.assertEqual(self.first.read_bytes(), b'abc')
 
+    def test_census_blocks_prior_executor_confirmation_even_after_physical_unlink(self):
+        intent = self.ledger.begin_cleanup('r1', 'o1', generation=1, sha256=self.sha)
+        self.ledger.arm_cleanup_census()
+        # Model an executor that passed its intent check before the hold and
+        # performed the physical unlink afterward. The hold cannot undo that
+        # operation; it must preserve ledger ambiguity for reconciliation.
+        self.first.unlink()
+        for ledger in (self.ledger, self.open_ledger()):
+            with self.assertRaisesRegex(PolicyConflict, 'census'):
+                ledger.mark_cleaned('r1', 'o1', generation=1, sha256=self.sha,
+                    intent_token=intent['intent_token'], executor_attested=True)
+        with self.ledger._transaction() as db:
+            self.assertIsNone(db.execute("SELECT cleaned FROM objects WHERE reservation='r1' AND id='o1'").fetchone()[0])
+            self.assertEqual(db.execute("SELECT state FROM cleanup_intents WHERE reservation='r1' AND object='o1'").fetchone()[0], 'cleanup_pending')
+
     def test_census_and_new_intent_serialize_on_separate_ledger_connections(self):
         other = self.open_ledger()
         def arm():

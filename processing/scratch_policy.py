@@ -691,6 +691,8 @@ class ScratchLedger:
         if executor_attested is not True:
             raise PolicyConflict("cleanup executor attestation required")
         with self._transaction() as db:
+            if db.execute("SELECT 1 FROM metadata WHERE key='cleanup_census_hold'").fetchone():
+                raise PolicyConflict('cleanup census requires reconciliation')
             row = db.execute("SELECT o.*,r.generation FROM objects o JOIN reservations r "
                 "ON r.id=o.reservation WHERE o.reservation=? AND o.id=?", (reservation_id, object_id)).fetchone()
             if row is None or row["generation"] != generation or row["sha"] != sha256:

@@ -1,7 +1,8 @@
 # Cleanup census hold candidate
 
 `ScratchLedger.arm_cleanup_census()` installs a durable, one-way hold on
-cleanup planning and intent acquisition or recovery in this candidate. It
+cleanup planning, intent acquisition or recovery, and cleanup confirmation in
+this candidate. It
 reports existing non-cleaned intents and remains armed after restart. There is
 no automatic release or production startup integration in this candidate.
 
@@ -13,3 +14,5 @@ marker and can bypass it, so external old-writer exclusion is required before
 the hold can serve as a startup boundary. The marker alone is not a census:
 driver and worker records, malformed identities, and reservation bindings
 still need coherent enumeration and review before any release design exists.
+If an executor already unlinked a file after the hold was armed, confirmation
+is blocked and its intent remains unresolved; the hold cannot restore the file.
