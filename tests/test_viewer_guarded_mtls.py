@@ -197,6 +197,46 @@ class ViewerGuardedMTLSTests(ViewerGuardedBridgeTests):
     def test_restart_upload_pending_holds(self):
         self.assert_restart_holds_pending('upload_pending', 40)
 
+    def assert_guarded_terminal_split_holds(self, phase, status):
+        identifier = self.submit()
+        self.service.tick()
+        self.service.store.update(identifier, phase=phase)
+        task = self.service.store.task(identifier)
+        result = {'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
+                  'environment': task['environment'], 'cancelled': False}
+        self.queue.complete(task['job_id'], {'claimToken': task['claim_token'], 'status': status, 'result': result})
+        self.service.close()
+        self.queue.close()
+        from processing.prototype import Queue
+        self.queue = Queue(self.root / 'state', node_ids=('cluster', 'main'),
+                           treedar_node_ids=('main',), viewer_enabled=True)
+        self.addCleanup(self.queue.close)
+        engine = self.service.engines['cluster']
+        from processing.viewer_service import ViewerService
+        self.service = ViewerService(self.queue, self.service.config,
+                                     engines={'cluster': engine, 'main': engine}, probe=self.service.probe)
+        self.addCleanup(self.service.close)
+        self.service._catalog = lambda: {'ready': True, 'commonOptions': []}
+        self.service._selected_options = lambda _: []
+        self.assertTrue(self.service.info(identifier).get('ledgetopHeld'))
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        before = self.native_fixture.counts()
+        with self.assertRaises(Conflict):
+            self.service.store.complete_engine_task(task, status, result)
+        with self.assertRaises(Conflict):
+            self.service.tick()
+        self.assertEqual(self.service.store.task(identifier)['phase'], phase)
+        self.assertEqual(self.native_fixture.counts(), before)
+
+    def test_guarded_terminal_split_commit_pending_never_recovers_as_success(self):
+        self.assert_guarded_terminal_split_holds('commit_pending', 'succeeded')
+
+    def test_guarded_terminal_split_upload_pending_never_recovers_as_success(self):
+        self.assert_guarded_terminal_split_holds('upload_pending', 'succeeded')
+
+    def test_guarded_terminal_split_init_pending_never_recovers_as_failure(self):
+        self.assert_guarded_terminal_split_holds('init_pending', 'failed')
+
     @unittest.skipIf(os.name == 'nt', 'coordinator restart fixture requires Linux gate locking')
     def test_new_process_holds_guarded_commit_before_observing_engine(self):
         job = self.submit()

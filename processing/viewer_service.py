@@ -823,6 +823,8 @@ class ViewerService:
                     task = self.store.task_for_job(job['id'])
                     if task['phase'] == 'complete':
                         continue
+                    if task['node_guarded'] == 1 and task['phase'] in ('init_pending','upload_pending','commit_pending'):
+                        raise Conflict('guarded mutation requires reconciliation')
                     expected = {'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
                                 'environment': task['environment'], 'cancelled': False}
                     if (job['status'] == 'failed' and isinstance(job['result'], dict)

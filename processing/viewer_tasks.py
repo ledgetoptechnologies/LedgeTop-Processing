@@ -629,7 +629,7 @@ class TaskStore:
 
     def incomplete_terminal_job_ids(self):
         with self._lock, self.queue._db() as db:
-            return {row[0] for row in db.execute("SELECT t.job_id FROM viewer_tasks t JOIN jobs j ON j.id=t.job_id WHERE t.removed=0 AND t.phase IN ('processing','commit_pending','cancel_pending') AND j.status IN ('succeeded','failed')")}
+            return {row[0] for row in db.execute("SELECT t.job_id FROM viewer_tasks t JOIN jobs j ON j.id=t.job_id WHERE t.removed=0 AND (t.phase IN ('processing','commit_pending','cancel_pending') OR (t.node_guarded=1 AND t.phase IN ('init_pending','upload_pending'))) AND j.status IN ('succeeded','failed')")}
 
     def complete_engine_task(self, task, status, result):
         """Commit the queue terminal state and matching Viewer task together."""
@@ -638,6 +638,8 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row=self._row(db,task['uuid'])
+            if row['node_guarded'] == 1 and row['phase'] in ('init_pending','upload_pending','commit_pending'):
+                raise Conflict('guarded mutation requires reconciliation')
             if (row['job_id']!=task['job_id'] or row['engine_uuid']!=task['engine_uuid']
                     or row['node_id']!=task['node_id'] or row['claim_token']!=task['claim_token']
                     or row['environment']!=task['environment'] or row['phase'] not in ('processing','commit_pending','cancel_pending')):
@@ -778,6 +780,11 @@ class TaskStore:
                         'ledgetopHeld':True,'ledgetopHoldReason':'option_evidence_invalid'}
         job = task['job']
         state = job['status'] if job else task['stage']
+        if (task['node_guarded'] == 1 and task['phase'] in ('init_pending','upload_pending','commit_pending')
+                and state in ('succeeded','failed')):
+            # A terminal queue row cannot prove that a guarded mutation was
+            # acknowledged. Surface the split as held until reconciled.
+            state = 'held'
         if state == 'running' and task['stage'] != 'running':
             # A coordinator claim and a successful commit ACK do not establish
             # that the engine has actually begun processing.
