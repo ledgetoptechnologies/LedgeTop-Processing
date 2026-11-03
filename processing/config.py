@@ -34,6 +34,7 @@ class Config:
     admission_drain_enabled: bool = False
     authority_lease_dir: str = ''
     viewer_production_held: bool = False
+    per_node_slots: bool = False
 
 
 def _node_origin(value: str) -> str:
@@ -83,6 +84,9 @@ def from_environment() -> Config:
     if photo_smoke == "1" and not os.environ.get("PROCESSING_PROTOTYPE_STATE_DIR"):
         raise ValueError("photo smoke requires a dedicated prototype state directory")
     viewer = os.environ.get('PROCESSING_VIEWER_ENABLED', '0')
+    per_node_slots = os.environ.get('PROCESSING_PER_NODE_SLOTS', '0')
+    if per_node_slots not in ('0', '1'):
+        raise ValueError('PROCESSING_PER_NODE_SLOTS must be 0 or 1')
     lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
     if lease_dir and (not os.path.isabs(lease_dir) or not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR')):
         raise ValueError('PROCESSING_AUTHORITY_LEASE_DIR must be an absolute path used with persistent state')
@@ -138,4 +142,5 @@ def from_environment() -> Config:
         admission_drain_enabled=admission == '1',
         authority_lease_dir=lease_dir,
         viewer_production_held=production_admission == 'held',
+        per_node_slots=per_node_slots == '1',
     )

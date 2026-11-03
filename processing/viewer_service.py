@@ -627,7 +627,7 @@ class ViewerService:
                 else:
                     self._hold(task, 'submission_interrupted')
             jobs = self.queue.list()
-            if any(j['status'] in ('running', 'held') for j in jobs):
+            if not self.queue.per_node_slots and any(j['status'] in ('running', 'held') for j in jobs):
                 return
             queued = sorted((j for j in jobs if j['status'] == 'queued'),
                             key=lambda j: (j['environment'] != 'production', jobs.index(j)))
@@ -640,8 +640,18 @@ class ViewerService:
                     ('main', 'main', self.config.main_node_url, self.config.main_node_token)):
                 nodes[node] = {**self.probe(role, origin, token),
                                'state': self.queue.get_node(node)['state']}
+            occupied = {j['nodeId'] for j in jobs if j['status'] in ('running', 'held')}
+            if any(node not in nodes for node in occupied):
+                return
+            cluster_busy = ('cluster' in occupied or
+                            (nodes['cluster'].get('ready') is True and
+                             type(nodes['cluster'].get('taskQueueCount')) is int and
+                             nodes['cluster']['taskQueueCount'] > 0))
+            for node in occupied:
+                nodes[node]['taskQueueCount'] = 1
             decision = plan(task['images_count'], task['input_bytes'], nodes['cluster'], nodes['main'],
-                            self.config.local_max_photos, self.config.local_max_input_bytes)
+                            self.config.local_max_photos, self.config.local_max_input_bytes,
+                            allow_main_fallback=self.queue.per_node_slots and cluster_busy)
             if decision['decision'] == 'wait':
                 self.store.update(task['uuid'], phase='waiting_node', error=decision['reason'])
                 return

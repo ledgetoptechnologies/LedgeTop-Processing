@@ -41,7 +41,8 @@ def make_handler(config: Config):
                       treedar_node_ids=config.treedar_node_ids,
                       viewer_enabled=config.viewer_enabled,
                       reference_enabled=reference_settings is not None,
-                      require_idle_existing=config.viewer_production_held) if config.prototype_state_dir else None
+                      require_idle_existing=config.viewer_production_held,
+                      per_node_slots=config.per_node_slots) if config.prototype_state_dir else None
     except BaseException:
         if lease is not None:
             lease.close()

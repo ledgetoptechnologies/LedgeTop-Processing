@@ -5,6 +5,7 @@ Viewer output ingestion. No network, Docker, real datasets or host writes.
 """
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import os
@@ -366,6 +367,73 @@ class ViewerServiceTests(unittest.TestCase):
         self.finish(staging);self.service.tick()
         self.assertEqual([node for node,_ in self.fleet.commits],['main','cluster','cluster'])
         self.assertEqual(self.fleet.max_active,1)
+
+    def test_opt_in_small_overflows_to_main_while_cluster_occupied(self):
+        self.queue.per_node_slots = True
+        first = self.submit()
+        second = self.submit()
+        third = self.submit(environment='staging')
+        self.service.tick()
+        self.service.tick()
+        self.service.tick()
+        self.assertEqual(self.task(first)['node_id'], 'cluster')
+        self.assertEqual(self.task(second)['node_id'], 'main')
+        self.assertIsNone(self.task(third)['node_id'])
+        self.assertEqual(self.fleet.max_active, 2)
+        self.finish(first)
+        self.service.tick()
+        self.assertEqual(self.task(third)['node_id'], 'cluster')
+
+    def test_opt_in_held_treedar_blocks_its_host_only(self):
+        self.queue.per_node_slots = True
+        tree, _ = self.queue.submit({'requestId': 'tree', 'environment': 'production', 'profile': PROFILE})
+        self.queue.claim({'workerId': 'tree-worker', 'nodeId': 'main'})
+        self.queue.operator(tree['id'], 'hold', {'note': 'synthetic'})
+        first = self.submit()
+        second = self.submit()
+        self.service.tick()
+        self.service.tick()
+        self.assertEqual(self.task(first)['node_id'], 'cluster')
+        self.assertIsNone(self.task(second)['node_id'])
+
+    def test_opt_in_production_takes_free_node_before_waiting_staging(self):
+        self.queue.per_node_slots = True
+        running = self.submit(environment='staging')
+        self.service.tick()
+        waiting = self.submit(environment='staging')
+        production = self.submit(environment='production')
+        self.service.tick()
+        self.assertEqual(self.task(running)['node_id'], 'cluster')
+        self.assertEqual(self.task(production)['node_id'], 'main')
+        self.assertIsNone(self.task(waiting)['node_id'])
+
+    def test_opt_in_tree_cannot_claim_photo_busy_main(self):
+        self.queue.per_node_slots = True
+        self.config.local_max_photos = 1
+        photo = self.submit(count=2)
+        self.service.tick()
+        self.assertEqual(self.task(photo)['node_id'], 'main')
+        tree, _ = self.queue.submit({'requestId': 'tree-after-photo', 'environment': 'production', 'profile': PROFILE})
+        self.assertIsNone(self.queue.claim({'workerId': 'tree-worker', 'nodeId': 'main'}))
+        self.assertEqual(self.queue.get(tree['id'])['status'], 'queued')
+
+    def test_opt_in_does_not_fallback_for_unavailable_cluster(self):
+        self.queue.per_node_slots = True
+        self.unavailable.add('cluster')
+        first = self.submit()
+        self.service.tick()
+        self.assertIsNone(self.task(first)['node_id'])
+
+    def test_opt_in_atomic_node_slot_blocks_simultaneous_claims(self):
+        self.queue.per_node_slots = True
+        first = self.submit()
+        second = self.submit()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(self.queue.claim, {'workerId': 'worker-' + str(i),
+                'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]}) for i in range(2)]
+            claims = [f.result() for f in futures]
+        self.assertEqual(sum(claim is not None for claim in claims), 1)
+        self.assertEqual(sum(self.task(i)['job']['status'] == 'running' for i in (first, second)), 1)
 
     def test_tree_running_and_held_block_all_photogrammetry(self):
         tree, _ = self.queue.submit({'requestId': 'tree', 'environment': 'production', 'profile': PROFILE})

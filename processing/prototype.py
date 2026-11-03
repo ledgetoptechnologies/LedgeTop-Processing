@@ -82,7 +82,7 @@ def _require_idle_state(path):
 class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
                  treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
-                 require_idle_existing=False):
+                 require_idle_existing=False, per_node_slots=False):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
@@ -91,6 +91,9 @@ class Queue(Maintenance):
         self._lifecycle_lock = threading.RLock()
         self._database_users = 0
         self.node_ids = tuple(node_ids)
+        if type(per_node_slots) is not bool:
+            raise ValueError("per_node_slots must be boolean")
+        self.per_node_slots = per_node_slots
         if treedar_node_ids is None:
             # Isolated legacy fixtures retain their original node capabilities.
             treedar_node_ids = self.node_ids
@@ -280,7 +283,9 @@ class Queue(Maintenance):
             self._refresh_nodes(db)
             if self._node(db, node_id)['state'] not in ('active', 'scheduled'):
                 return None
-            if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():
+            occupied = db.execute("SELECT node_id FROM jobs WHERE status IN ('running','held')").fetchall()
+            if occupied and (not self.per_node_slots or any(
+                    row['node_id'] == node_id or row['node_id'] not in self.node_ids for row in occupied)):
                 return None
             row = db.execute("""SELECT * FROM jobs WHERE status='queued'
                 ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
