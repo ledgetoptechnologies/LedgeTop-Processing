@@ -813,8 +813,6 @@ class ReferenceStore:
                 raise ValueError("missing offset")
         except ValueError:
             raise ValueError("transfer expiry must be an offset timestamp") from None
-        if source_range_v2 and expiry.timestamp() <= time.time():
-            raise Conflict('source-range-v2 reservation already expired')
         self.queue._known_node(node_id)
         encoded = _json(transfer_request)
         with self.queue._db() as db:
@@ -828,6 +826,10 @@ class ReferenceStore:
                 raise Conflict("reservation requires a running reference claim on this node")
             if row["transfer_json"] == encoded and row["node_id"] == node_id:
                 return self._public(row)
+            # A replay only acknowledges the immutable stored request; it does not
+            # renew the lease, grant or budget. Fresh reservations must be live.
+            if source_range_v2 and expiry.timestamp() <= time.time():
+                raise Conflict('source-range-v2 reservation already expired')
             if row["phase"] not in ("queued", "waiting_capacity"):
                 raise Conflict("reference job cannot be reserved in this phase")
             submission = json.loads(row["input_json"])

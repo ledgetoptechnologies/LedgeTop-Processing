@@ -126,6 +126,53 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertNotIn('token', json.dumps(public))
         self.assertEqual(self.store.private_transfer_grant(job['jobId']), grant)
 
+    def test_expired_source_range_exact_replay_preserves_reservation_and_restart_hold(self):
+        raw = copy.deepcopy(self.fixture['submission'])
+        raw['submissionId'] = str(uuid.uuid4())
+        raw['manifest']['id'] = 'dataset-replay-fixture'
+        raw['manifest']['sha256'] = p.manifest_sha256(raw['manifest'])
+        submission = p.validate_submission(raw, environment='staging', capability_fingerprint=raw['capabilityFingerprint'])
+        job, _ = prepare_reference_job(self.store, submission)
+        activate_reference_job(self.store, job)
+        claim = self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+            worker_instance_id='instance-v2', claim_request_id='replay-' + job['jobId'])
+        manifest = claim['submission']['manifest']
+        chunks = sum((item['byteSize'] + CHUNK_BYTES - 1) // CHUNK_BYTES for item in manifest['objects'])
+        request = {'protocol': 'source-range-v2', 'reservationId': 'replay-reservation',
+            'generation': claim['generation'], 'expiresAt': '2030-01-01T00:00:00.000Z',
+            'manifestSha256': manifest['sha256'], 'sourceVersion': source_version_for_manifest(manifest),
+            'objectIds': [item['id'] for item in manifest['objects']], 'chunkBytes': CHUNK_BYTES,
+            'requestBudget': chunks, 'byteBudget': manifest['totalBytes'],
+            'nonce': 'replay-nonce', 'attemptBudget': chunks * 3}
+        with patch('processing.reference_store.time.time', return_value=1893455999):
+            accepted = self.store.reserve(job['jobId'], request, node_id='cluster')
+        # Reconstruct the store after losing its response; exact persisted bytes only.
+        reopened = ReferenceStore(self.queue)
+        with patch('processing.reference_store.time.time', return_value=1893456001):
+            self.assertEqual(reopened.reserve(job['jobId'], request, node_id='cluster'), accepted)
+            for key, value in (('nonce', 'different-nonce'), ('byteBudget', request['byteBudget'] + 1),
+                               ('expiresAt', '2031-01-01T00:00:00.000Z')):
+                changed = dict(request, **{key: value})
+                with self.subTest(key=key), self.assertRaises(Conflict):
+                    reopened.reserve(job['jobId'], changed, node_id='cluster')
+            with self.assertRaises(Conflict):
+                reopened.reserve(job['jobId'], request, node_id='node-2')
+            with self.queue._db() as db:
+                persisted = json.loads(db.execute('SELECT transfer_json FROM reference_jobs WHERE job_id=?',
+                    (job['jobId'],)).fetchone()[0])
+            self.assertEqual(persisted, request)
+            self.assertIsNone(reopened.private_transfer_grant(job['jobId']))
+        # A full coordinator restart intentionally holds in-flight work; do not
+        # acknowledge it as running or reset ownership merely to permit replay.
+        self.queue.close()
+        self.queue = Queue(self.directory.name, node_ids=('cluster', 'node-2'))
+        self.queue.allowed_profiles.add(PROFILE)
+        self.store = ReferenceStore(self.queue)
+        with patch('processing.reference_store.time.time', return_value=1893456001):
+            with self.assertRaises(Conflict):
+                self.store.reserve(job['jobId'], request, node_id='cluster')
+        self.assertEqual(self.store.get(job['jobId'])['status'], 'held')
+
     def test_source_range_v2_reservation_rejects_source_identity_and_unbounded_budgets(self):
         submission = copy.deepcopy(self.fixture['submission'])
         submission['submissionId'] = str(uuid.uuid4())
