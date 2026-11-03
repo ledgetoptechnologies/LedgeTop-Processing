@@ -110,8 +110,17 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
             altered=dict(activation,viewerTaskId=str(uuid.uuid4()))
             self.assertEqual(post(altered,path)[0],409)
             with patch.object(ReferenceStore,'_v3_source_contract_ready',return_value=True):
-                code,first=post(activation,path); self.assertEqual(code,200); self.assertTrue(first['created'])
-                code,replay=post(activation,path);self.assertEqual(code,200);self.assertFalse(replay['created']);self.assertEqual(first['bindingSha256'],replay['bindingSha256'])
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    results=list(pool.map(lambda _: post(activation,path),range(2)))
+                self.assertEqual([code for code,_ in results],[200,200])
+                self.assertCountEqual([body['created'] for _,body in results],[True,False])
+                self.assertEqual(results[0][1]['bindingSha256'],results[1][1]['bindingSha256'])
+                with queue._db() as db:
+                    original=db.execute('SELECT policy_json FROM reference_viewer_v3_policy WHERE job_id=?',(job['jobId'],)).fetchone()[0]
+                    db.execute("UPDATE reference_viewer_v3_policy SET policy_json='{}' WHERE job_id=?",(job['jobId'],))
+                self.assertEqual(post(activation,path)[0],409)
+                with queue._db() as db:
+                    db.execute('UPDATE reference_viewer_v3_policy SET policy_json=? WHERE job_id=?',(original,job['jobId']))
                 # A reopened store retains the same evidence and does not dispatch.
                 server.api=make_api(ReferenceStore(queue,jcs_runtime_enabled=True),policy)
                 self.assertFalse(post(activation,path)[1]['created'])
