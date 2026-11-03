@@ -420,6 +420,39 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(len(list(self.scratch.glob('jobs/*/all.zip'))), 1)
         self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
 
+    def test_coordinator_offline_preserves_result_until_reconnect_after_worker_restart(self):
+        job = self.submit(contents=(b'synthetic-offline-photo',))
+        self.advance(job, 'delivering')
+        self.outbox.clock = lambda: 1_800_000_000
+        self.outbox.random = lambda: 0
+        sent = []
+        def offline(request, timeout):
+            sent.append(json.loads(request.data)['delivery'])
+            raise OSError('synthetic coordinator offline')
+        self.driver.sender._open = offline
+        self.assertEqual(self.driver.step()['state'], 'delivering')
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'running')
+        archive = next(self.scratch.glob('jobs/*/all.zip'))
+        original = archive.read_bytes()
+        due = self.outbox.get(sent[0]['outboxId'])['next_at']
+        self.outbox = WorkerOutbox(self.root / 'outbox.sqlite', clock=lambda: due + 1, random_source=lambda: 0)
+        self.worker = ReferenceEngineWorker(self.root / 'worker.sqlite', ledger=self.ledger,
+            outbox=self.outbox, engine=self.native, engine_id='engine', node_id='cluster',
+            authority_id=self.queue.authority_id, coordinator_origin=self.gate_origin,
+            gate_generation=1, worker_id='worker', engine_version='pinned-engine-1')
+        self.driver = self.make_driver()
+        replayed = []
+        def online(request, timeout):
+            replayed.append(json.loads(request.data)['delivery'])
+            return self.sender_open(request, timeout)
+        self.driver.sender._open = online
+        self.advance(job, 'awaiting_acceptance')
+        self.assertEqual(replayed, sent)
+        self.assertEqual(archive.read_bytes(), original)
+        self.assertEqual(self.outbox.get(sent[0]['outboxId'])['state'], 'acknowledged')
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
+        self.assertEqual(self.ledger.cleanup_candidates(), [])
+
     def test_uncertain_initialize_is_held_and_never_replayed_after_restart(self):
         job = self.submit()
         self.transport.fail_initialize = True
