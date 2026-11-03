@@ -131,6 +131,23 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.assertEqual(self.activate()['phase'],'completed')
         self.assert_retained_viewer_bytes()
 
+    def test_fresh_terminal_history_is_pinned_and_later_changes_block_update(self):
+        with self.queue._db() as db:
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,'staging','treedar-synthetic-v1','succeeded')",
+                       (str(__import__('uuid').uuid4()), 'additional-finished-job'))
+        operation=self.root/'new-history-operation';operation.mkdir(mode=0o700)
+        updater=module.ReferenceCoordinatorUpdate(operation,gate_factory=self.gates,transport=self.transport,
+            cluster_probe=lambda state:None)
+        state=updater.prepare(TARGET,SOURCE,MAIN)
+        self.assertEqual(state['history']['count'],module.REVIEWED_JOB_COUNT+1)
+        self.assertEqual(state['baseline']['tables']['jobs']['count'],state['history']['count'])
+        with self.queue._db() as db:
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,'staging','treedar-synthetic-v1','succeeded')",
+                       (str(__import__('uuid').uuid4()), 'changed-after-prepare'))
+        with self.assertRaises(module.Stopped):
+            updater.activate(state)
+        self.assertTrue(self.transport.containers[module.OLD_ID]['State']['Running'])
+
     def test_retained_viewer_bytes_survive_rollback(self):
         self.transport.loss='start'
         with self.assertRaises(OSError):self.activate()

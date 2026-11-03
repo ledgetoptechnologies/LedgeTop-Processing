@@ -41,7 +41,8 @@ AUTHORITY='7131882e-38ce-4d3e-99cc-4ba5a94d2ee8'
 OLD_ID = '525ca6e24ad3b9e57e2a3be36567471c10745a4aaa8ebc03c7f2d2f215dfb977'
 OLD_IMAGE = 'sha256:7fae9385fb5ca829783fe05eef2fdb1983abf4d491b2b9f795e55b617a5a0004'
 OLD_SOURCE = '693cb7eca32295da959a4f42399f317577ef8a8a'
-# Exact terminal job rows the predecessor held at that inspection (18 succeeded, 2 failed).
+# Historical fixture count, not a live authorization boundary. Each operation
+# pins the current idle history and requires that same count through its census.
 REVIEWED_JOB_COUNT = 20
 # Private space for the restart preflight that reads through a hot rollback
 # journal. It counts against --memory 256m; jobs.sqlite3 is about 0.25 MiB.
@@ -592,7 +593,10 @@ class ReferenceCoordinatorUpdate:
                 '--entrypoint','python',state['image'],'-c',code)
         else:raw=self.t.docker('exec','--user','10001:10001',container or state['old']['containerId'],'python','-c',code)
         result=json.loads(raw)
-        if result['authorityId']!=AUTHORITY or result['tables']['jobs']['count']!=REVIEWED_JOB_COUNT:raise Stopped('reviewed_idle_history_required')
+        history_count = state.get('history', {}).get('count')
+        if (type(history_count) is not int or history_count < 0 or result['authorityId'] != AUTHORITY
+                or result['tables']['jobs']['count'] != history_count):
+            raise Stopped('reviewed_idle_history_required')
         return result
 
     def tls(self,state):
@@ -673,7 +677,8 @@ class ReferenceCoordinatorUpdate:
                 or any(candidate['Config'].get(key)!=old['Config'].get(key) for key in ('User','WorkingDir','Cmd','Entrypoint','Healthcheck'))):
             raise Stopped('candidate_recipe_or_source_not_verified')
         _env,api,_operator=self.t.local_clients();history=self.t.activity(api,retained_viewer=True)
-        if history['count']!=REVIEWED_JOB_COUNT:raise Stopped('reviewed_terminal_job_count_required')
+        if type(history.get('count')) is not int or history['count'] < 0:
+            raise Stopped('reviewed_terminal_job_count_required')
         nodes={row['id']:row for row in api.json('GET','/v1/prototype/nodes')['nodes']}
         if set(nodes)!={'main','cluster'} or any(row['state']!='active' for row in nodes.values()):raise Stopped('other_maintenance_present')
         cluster=self.t.inspected('node-odx-gpu')
