@@ -828,6 +828,30 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
         self.assertFalse(any(kind in ('remove','cancel') for kind, _ in self.transport.calls))
 
+    @unittest.expectedFailure
+    def test_required_signed_copy_arriving_after_unsigned_metadata_remains_observable(self):
+        # Known held regression: never activate cleanup or release while this
+        # expected failure persists. Uses synthetic data and signer only.
+        signer = SyntheticViewerSigner()
+        self.worker.viewer_receipt_keys = signer.trusted_keys
+        job = self.submit()
+        self.advance(job, 'awaiting_acceptance')
+        result = self.store.get(job['jobId'], private=True)['resultManifest']
+        receipt = dict(schemaVersion=1, receiptId='later-proof', storageReceiptId='later-storage',
+            jobId=job['jobId'], generation=1, environment='staging', inputManifestSha256=job['manifestSha256'],
+            pipelineDigest=job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
+            acceptedObjectIds=[obj['id'] for obj in result['objects']],
+            acceptedAt='2026-10-27T22:00:00Z', validationVersion='ltds-reference-v1')
+        self.store.accept(job['jobId'], receipt)
+        # Reopening an older queue can leave an unsigned receipt recorded
+        # before this environment was configured to require signed copies.
+        self.store.viewer_required_environments = frozenset(('staging',))
+        self.assertEqual(self.driver.step()['state'], 'awaiting_acceptance')
+        self.assertEqual(self.ledger.cleanup_candidates(), [])
+        self.store.accept(job['jobId'], receipt, viewer_receipt=signer.receipt(receipt, result),
+                          trusted_viewer_receipt_keys=signer.trusted_keys)
+        self.assertEqual(self.driver.step()['state'], 'completed')
+
 
 class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
     # Reuse durable coordinator/transport helpers, while replacing the patched
