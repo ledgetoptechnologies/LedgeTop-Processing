@@ -16,6 +16,7 @@ import uuid
 from . import reference_protocol as protocol
 from .host_mutation_journal import HostMutationJournal, MutationHeld
 from .node_gate import GateError, NodeGate
+from .viewer_tasks import TaskStore
 
 
 class GuardedNativeProxy:
@@ -100,10 +101,14 @@ class GuardedNativeProxy:
         self._task(task)
         if (type(item) is not dict or set(item) != {'path','name','bytes','sha256'}
                 or type(item['name']) is not str or not item['name']
-                or type(item['bytes']) is not int or item['bytes'] < 0
+                or type(item['bytes']) is not int or item['bytes'] <= 0
                 or type(item['sha256']) is not str or len(item['sha256']) != 64
                 or any(c not in '0123456789abcdef' for c in item['sha256'])):
             raise GateError('invalid spooled input')
+        try:
+            name_key = TaskStore._filename(item['name'])
+        except ValueError:
+            raise GateError('invalid spooled input name') from None
         path = Path(item['path']).absolute()
         if (path == self.root or self.root not in path.parents or path.resolve() != path
                 or any(p.is_symlink() for p in (path, *path.parents) if p != self.root.parent)):
@@ -118,7 +123,7 @@ class GuardedNativeProxy:
             try:
                 # Names are the native upload identities. A repeated name is
                 # held even when byte metadata differs.
-                op = self._op(task, 'upload', hashlib.sha256(item['name'].encode()).hexdigest())
+                op = self._op(task, 'upload', hashlib.sha256(name_key.encode('ascii')).hexdigest())
                 self._mutate(journal, op, 'upload', request, lambda: self.engine.upload(task, item))
             finally:
                 journal.close()

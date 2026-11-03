@@ -72,8 +72,14 @@ class GuardedNativeProxyTests(unittest.TestCase):
             self.proxy.initialize({**self.task, 'engine_uuid': str(uuid.uuid4())}, **self.auth)
         self.proxy.upload(self.job, self.item, **self.auth)
         with self.assertRaises(MutationHeld): self.proxy.upload(self.job, self.item, **self.auth)
+        with self.assertRaises(GateError):
+            self.proxy.upload(self.job, {**self.item, 'name': 'PHOTO.JPG'}, **self.auth)
         self.assertEqual(self.proxy.commit(self.job, **self.auth), {'uuid': self.job})
         with self.assertRaises(MutationHeld): self.proxy.commit(self.job, **self.auth)
+        with self.assertRaises(GateError):
+            self.proxy.commit(self.job, bearer='wrong-token', protected_transport=True)
+        with self.assertRaises(GateError):
+            self.proxy.upload(self.job, self.item, bearer=TOKEN, protected_transport=False)
         self.assertEqual(self.journal(), [('init','done'),('upload','done'),('commit','done')])
         self.assertEqual(self.backend.counts(), dict(initialize=1, upload=1, commit=1, download=0))
         with NodeGate('physical-engine') as gate:
@@ -94,6 +100,19 @@ class GuardedNativeProxyTests(unittest.TestCase):
         outside.write_bytes(b'abc')
         with self.assertRaises(GateError): self.proxy.upload(self.job, {**self.item, 'path': str(outside)}, **self.auth)
         self.assertEqual(self.backend.counts()['upload'], 0)
+
+    def test_unsafe_upload_names_and_unauthorized_replay_do_not_record_intent(self):
+        self.proxy.initialize(self.task, **self.auth)
+        for name in ('x.jpg"\r\nX-Injected: yes\r\n', 'é.jpg', '../photo.jpg',
+                     'folder\\photo.jpg', '.jpg', 'x.jpg ', 'x.jpg.', 'x.exe', 'a' * 181 + '.jpg'):
+            with self.subTest(name=name), self.assertRaises(GateError):
+                self.proxy.upload(self.job, {**self.item, 'name': name}, **self.auth)
+        with self.assertRaises(GateError):
+            self.proxy.upload(self.job, self.item, bearer='wrong-token', protected_transport=True)
+        with self.assertRaises(GateError):
+            self.proxy.commit(self.job, bearer=TOKEN, protected_transport=False)
+        self.assertEqual(self.journal(), [('init', 'done')])
+        self.assertEqual(self.backend.counts(), dict(initialize=1, upload=0, commit=0, download=0))
 
     def test_lost_upload_response_stays_pending_across_new_adapter_instance(self):
         original = self.backend._dispatch
