@@ -9,6 +9,7 @@ import http.client
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -155,9 +156,12 @@ class ViewerService:
 
     def capabilities(self):
         # This is our own 2.x-compatible facade, not an official ClusterODM build.
-        self.options()
+        snapshot = self._catalog()
+        if not snapshot['ready']:
+            raise Conflict('engine catalog unavailable')
         jobs = self.queue.list()
         return {'version': '2.4.0', 'engine': 'ledgetop-processing', 'engineVersion': '0.2.0',
+                'ledgetopCatalogDegraded': snapshot.get('degraded', False),
                 'maxImages': None, 'maxParallelTasks': sum('odm' in n['capabilities'] for n in self.inventory) if self.inventory else (len(self.queue.node_ids) if self.queue.per_node_slots else 1), 'coordinator': True,
                 'ledgetopMaxInputBytes': self.store.max_input_bytes,
                 'ledgetopMaxUploadRequestBytes': MAX_UPLOAD_BYTES,
@@ -184,10 +188,52 @@ class ViewerService:
             raise Conflict('selected engine options unavailable')
         return snapshot['options']
 
-    def _check_options(self, options, *, node_id=None, evidence=None):
+    @staticmethod
+    def _option_values(options, definitions):
+        by_name = {item['name']: item for item in definitions}
+        if (type(options) is not list
+                or any(type(item) is not dict or set(item) != {'name', 'value'}
+                       or type(item['name']) is not str or item['name'] not in by_name for item in options)
+                or len({item['name'] for item in options}) != len(options)):
+            raise ValueError('option unavailable on configured engines')
+        for item in options:
+            spec, value = by_name[item['name']], item['value']
+            kind = spec.get('type')
+            finite = lambda number: ((type(number) is int and abs(number) <= 9007199254740991)
+                                     or (type(number) is float and math.isfinite(number)))
+            valid = ((kind in ('bool', 'boolean') and type(value) is bool)
+                     or (kind in ('int', 'integer') and type(value) is int and finite(value))
+                     or (kind in ('float', 'double', 'number') and finite(value))
+                     or (kind in ('str', 'string') and type(value) is str and len(value) <= 4000))
+            if not valid:
+                raise ValueError('invalid option value')
+            domain = spec.get('domain')
+            if isinstance(domain, str):
+                if not domain.strip():
+                    domain = None
+                else:
+                    try: domain = json.loads(domain)
+                    except (ValueError, TypeError): raise ValueError('invalid option domain') from None
+            if domain is None:
+                continue
+            if type(domain) is list:
+                if not any(type(value) is type(choice) and value == choice for choice in domain):
+                    raise ValueError('option outside domain')
+            elif type(domain) is dict:
+                for key in ('min', 'max'):
+                    bound = domain.get(key)
+                    if bound is not None:
+                        if not finite(bound) or type(value) not in (int, float):
+                            raise ValueError('invalid option domain')
+                        if (key == 'min' and value < bound) or (key == 'max' and value > bound):
+                            raise ValueError('option outside domain')
+            else:
+                raise ValueError('invalid option domain')
+
+    def _check_options(self, options, *, node_id=None, evidence=None, full_evidence=None, definitions=None):
         # Legacy tasks lack admission evidence and retain the conservative
         # fleet-wide intersection check.
-        if node_id is not None and evidence is None and self.inventory:
+        if node_id is not None and full_evidence is None and self.inventory:
             # Old tasks lack immutable option evidence; preserve their original
             # complete-fleet policy rather than trusting a partial catalog.
             complete = catalog([(n['id'], n['origin'], n['token']) for n in self.inventory
@@ -195,23 +241,44 @@ class ViewerService:
             if not complete['ready']:
                 raise Conflict('legacy engine catalog unavailable')
             definitions = complete['commonOptions']
-        else:
+            full = [sorted(node['options'], key=lambda item:item['name']) for node in complete['nodes'] if node['configured']]
+            if not full or any(item != full[0] for item in full[1:]):
+                raise Conflict('legacy engine defaults differ')
+        elif node_id is not None and full_evidence is not None and self.inventory:
+            definitions = self._selected_options(node_id)
+            if (json.dumps(sorted(definitions,key=lambda item:item['name']),sort_keys=True,separators=(',',':'),allow_nan=False)
+                    != json.dumps(full_evidence,sort_keys=True,separators=(',',':'),allow_nan=False)):
+                raise Conflict('selected engine full options changed')
+        elif definitions is None:
             definitions = self._selected_options(node_id) if node_id is not None and evidence is not None else self.options()
         allowed = {item['name'] for item in definitions}
-        if (not isinstance(options, list) or any(not isinstance(item, dict)
-                or item.get('name') not in allowed for item in options)):
+        if (type(options) is not list or any(type(item) is not dict or type(item.get('name')) is not str
+                                             or item['name'] not in allowed for item in options)):
             raise ValueError('option unavailable on configured engines')
         selected = [item for item in definitions if item['name'] in {option['name'] for option in options}]
         if evidence is not None and json.dumps(sorted(selected,key=lambda item:item['name']),sort_keys=True,separators=(',',':'),allow_nan=False) != json.dumps(evidence,sort_keys=True,separators=(',',':'),allow_nan=False):
             raise Conflict('selected engine option definitions changed')
+        self._option_values(options, definitions)
         return selected
 
     def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None):
         if capability is not None:
             replay = self.store.initialize(identifier, name, options, outputs, environment, capability, replay_only=True)
             if replay is not None: return replay
-        evidence = self._check_options(options or [])
-        return self.store.initialize(identifier, name, options, outputs, environment, capability, option_evidence=evidence)
+        full = None
+        if self.inventory:
+            snapshot = self._catalog()
+            if not snapshot['ready']:
+                raise Conflict('engine catalog unavailable')
+            available = [node for node in snapshot.get('nodes', []) if node.get('available')]
+            if not available:
+                raise Conflict('full engine catalog unavailable')
+            full = sorted(available[0]['options'], key=lambda item: item['name'])
+            evidence = self._check_options(options or [], definitions=snapshot['commonOptions'])
+        else:
+            evidence = self._check_options(options or [])
+        return self.store.initialize(identifier, name, options, outputs, environment, capability,
+                                     option_evidence=evidence, full_option_evidence=full)
 
     def upload(self, identifier, filename, stream, length, environment=None, capability=None):
         return self.store.upload(identifier, filename, stream, length, environment, capability)
@@ -784,7 +851,7 @@ class ViewerService:
                         if all(maximum is None or current['images_count'] <= maximum for maximum in (spec['maxPhotos'], limit)):
                             try:
                                 self._check_options(current['options'], node_id=spec['id'],
-                                                    evidence=current['option_evidence'])
+                                                    evidence=current['option_evidence'], full_evidence=current['full_option_evidence'])
                             except (Conflict, ValueError):
                                 # A node that returned with changed options is
                                 # ineligible for this task; try the next node.
@@ -821,7 +888,8 @@ class ViewerService:
             # Submission uses the fleet-wide common catalog. At dispatch,
             # refresh the selected engine specifically so an unrelated node
             # outage does not strand an already accepted job.
-            self._check_options(task['options'], node_id=node_id, evidence=task['option_evidence'])
+            self._check_options(task['options'], node_id=node_id, evidence=task['option_evidence'],
+                                full_evidence=task['full_option_evidence'])
             claim_request = {'workerId': 'viewer-dispatch', 'nodeId': node_id,
                              'profiles': [VIEWER_PROFILE], 'expectedJobId': task['job_id']}
             job = (self.queue.claim(claim_request, allow_viewer_same_priority_skip=True)

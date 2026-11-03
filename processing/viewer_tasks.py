@@ -134,6 +134,8 @@ class TaskStore:
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
             if 'option_evidence_required' not in {row['name'] for row in db.execute('PRAGMA table_info(viewer_tasks)')}:
                 db.execute('ALTER TABLE viewer_tasks ADD COLUMN option_evidence_required INTEGER NOT NULL DEFAULT 0 CHECK(option_evidence_required IN (0,1))')
+            if 'full_option_evidence_required' not in {row['name'] for row in db.execute('PRAGMA table_info(viewer_tasks)')}:
+                db.execute('ALTER TABLE viewer_tasks ADD COLUMN full_option_evidence_required INTEGER NOT NULL DEFAULT 0 CHECK(full_option_evidence_required IN (0,1))')
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_files (
                 uuid TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL,
                 path TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
@@ -151,6 +153,31 @@ class TaskStore:
                 uuid TEXT NOT NULL, generation INTEGER NOT NULL,
                 definitions TEXT NOT NULL, sha256 TEXT NOT NULL,
                 PRIMARY KEY(uuid,generation))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS viewer_full_option_evidence (
+                uuid TEXT NOT NULL, generation INTEGER NOT NULL,
+                definitions TEXT NOT NULL, sha256 TEXT NOT NULL,
+                PRIMARY KEY(uuid,generation))''')
+
+    @staticmethod
+    def _full_option_evidence(db, row):
+        evidence = db.execute('SELECT definitions,sha256 FROM viewer_full_option_evidence WHERE uuid=? AND generation=?',
+                              (row['uuid'], row['generation'])).fetchone()
+        if row['full_option_evidence_required'] not in (0, 1) or bool(row['full_option_evidence_required']) != (evidence is not None):
+            raise OptionEvidenceConflict('full option evidence missing or unexpected')
+        if evidence is None:
+            return None
+        try:
+            text = evidence['definitions']
+            if type(text) is not str or len(text.encode()) > 262144 or hashlib.sha256(text.encode()).hexdigest() != evidence['sha256']:
+                raise ValueError()
+            value = json.loads(text)
+            if (type(value) is not list or not value or canonical(value) != text
+                    or any(type(item) is not dict or type(item.get('name')) is not str for item in value)
+                    or len({item['name'] for item in value}) != len(value)):
+                raise ValueError()
+            return value
+        except (ValueError, TypeError, KeyError, RecursionError, UnicodeError):
+            raise OptionEvidenceConflict('full option evidence changed') from None
 
     def _row(self, db, identifier, *, removed=False):
         checked_uuid(identifier)
@@ -289,7 +316,7 @@ class TaskStore:
             return {'uuid':identifier,'state':'cancelled'}
 
     @task_fenced
-    def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None, option_evidence=None, *, replay_only=False):
+    def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None, option_evidence=None, *, full_option_evidence=None, replay_only=False):
         checked_uuid(identifier)
         if type(replay_only) is not bool: raise ValueError('invalid replay mode')
         if (not isinstance(name, str) or len(name) > 256
@@ -306,6 +333,18 @@ class TaskStore:
         if len({item['name'] for item in options}) != len(options):
             raise ValueError('duplicate option')
         evidence_text = None
+        full_evidence_text = None
+        if full_option_evidence is not None:
+            if (type(full_option_evidence) is not list or not full_option_evidence
+                    or any(type(item) is not dict or type(item.get('name')) is not str for item in full_option_evidence)
+                    or len({item['name'] for item in full_option_evidence}) != len(full_option_evidence)):
+                raise ValueError('full option definitions required')
+            try:
+                full_evidence_text = canonical(sorted(full_option_evidence, key=lambda item: item['name']))
+            except (ValueError, TypeError, RecursionError):
+                raise ValueError('invalid full option definitions') from None
+            if len(full_evidence_text.encode()) > 262144:
+                raise ValueError('full option definitions too large')
         if option_evidence is not None:
             if (type(option_evidence) is not list or len(option_evidence)!=len(options)
                     or any(type(item) is not dict or type(item.get('name')) is not str for item in option_evidence)
@@ -339,6 +378,7 @@ class TaskStore:
             if replay_only and row is not None:
                 self._directory(row)
                 self._job(db,row)
+                self._full_option_evidence(db, row)
                 evidence=db.execute('SELECT definitions,sha256 FROM viewer_option_evidence WHERE uuid=? AND generation=?',(identifier,row['generation'])).fetchone()
                 if row['option_evidence_required'] not in (0,1) or bool(row['option_evidence_required']) != (evidence is not None):
                     raise Conflict('option evidence unavailable')
@@ -360,6 +400,7 @@ class TaskStore:
                 # removed task is reset into a new private incarnation.
                 raise Conflict('task UUID belongs to another environment')
             if row is not None and not row['removed']:
+                self._full_option_evidence(db, row)
                 if (row['name'], row['options'], row['outputs'], row['environment']) != (
                         name, options_text, outputs_text, environment):
                     raise Conflict('task UUID belongs to different settings')
@@ -384,12 +425,15 @@ class TaskStore:
             sync_directory(self.root)
             db.execute('DELETE FROM viewer_files WHERE uuid=?', (identifier,))
             db.execute('''INSERT OR REPLACE INTO viewer_tasks
-                (uuid,generation,directory,name,options,outputs,environment,option_evidence_required)
-                VALUES(?,?,?,?,?,?,?,?)''', (identifier, generation, directory_name, name,
-                                          options_text, outputs_text, environment, int(evidence_text is not None)))
+                (uuid,generation,directory,name,options,outputs,environment,option_evidence_required,full_option_evidence_required)
+                VALUES(?,?,?,?,?,?,?,?,?)''', (identifier, generation, directory_name, name,
+                                          options_text, outputs_text, environment, int(evidence_text is not None), int(full_evidence_text is not None)))
             if evidence_text is not None:
                 db.execute('INSERT INTO viewer_option_evidence(uuid,generation,definitions,sha256) VALUES(?,?,?,?)',
                     (identifier,generation,evidence_text,hashlib.sha256(evidence_text.encode()).hexdigest()))
+            if full_evidence_text is not None:
+                db.execute('INSERT INTO viewer_full_option_evidence(uuid,generation,definitions,sha256) VALUES(?,?,?,?)',
+                    (identifier,generation,full_evidence_text,hashlib.sha256(full_evidence_text.encode()).hexdigest()))
             return {'uuid': identifier}
 
     @staticmethod
@@ -527,6 +571,7 @@ class TaskStore:
         evidence=db.execute('SELECT definitions,sha256 FROM viewer_option_evidence WHERE uuid=? AND generation=?',
                             (row['uuid'],row['generation'])).fetchone()
         value['option_evidence']=None
+        value['full_option_evidence']=self._full_option_evidence(db, row)
         if row['option_evidence_required'] not in (0,1) or bool(row['option_evidence_required']) != (evidence is not None):
             raise OptionEvidenceConflict('option evidence missing or unexpected')
         if evidence is not None:

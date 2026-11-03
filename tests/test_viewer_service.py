@@ -871,7 +871,8 @@ class ViewerServiceTests(unittest.TestCase):
         self.service = ViewerService(self.queue, self.config, engines=self.engines,
             probe=lambda role, origin, token: {'ready': role not in self.unavailable, 'maxImages': None,
                 'taskQueueCount': sum(x.startswith(role + ':') for x in self.fleet.active)})
-        self.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(item) for item in OPTIONS]}
+        self.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(item) for item in OPTIONS],
+                                        'nodes': [{'available':True, 'options':[dict(item) for item in OPTIONS]}]}
         self.service._selected_options = lambda _node: [dict(item) for item in OPTIONS]
         first = self.submit(); second = self.submit(); third = self.submit(count=3)
         self.service.tick(); self.service.tick(); self.service.tick()
@@ -931,10 +932,18 @@ class ViewerServiceTests(unittest.TestCase):
             probe=lambda role, origin, token: {'ready': (first if role == 'first' else second).mode == 'normal',
                 'maxImages': None, 'taskQueueCount': sum(x.startswith(role + ':') for x in self.fleet.active)})
         self.assertEqual(self.service.options(), sorted(OPTIONS, key=lambda option: option['name']))
+        self.assertTrue(self.service.capabilities()['ledgetopCatalogDegraded'])
         identifier = self.submit()
+        self.service.close(); self.queue.close()
+        self.queue = Queue(self.config.prototype_state_dir, node_ids=('first', 'second'),
+                           treedar_node_ids=(), viewer_enabled=True, per_node_slots=True)
+        self.service = ViewerService(self.queue, self.config, engines=self.engines,
+            probe=lambda role, origin, token: {'ready': (first if role == 'first' else second).mode == 'normal',
+                'maxImages': None, 'taskQueueCount': sum(x.startswith(role + ':') for x in self.fleet.active)})
+        self.assertEqual(self.task(identifier)['full_option_evidence'], sorted(OPTIONS, key=lambda option: option['name']))
         # The first node changes a definition after admission. With the other
         # still offline the task must wait without an engine mutation.
-        first.options[0]['value'] = True
+        first.options[1]['value'] = True  # unselected default changed
         self.service.tick()
         self.assertIsNone(self.task(identifier)['node_id'])
         self.assertEqual(self.engines['first'].calls, [])
@@ -944,6 +953,29 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.task(identifier)['node_id'], 'second')
         self.assertEqual(self.engines['first'].calls, [])
         self.assertEqual([name for name, _ in self.fleet.commits], ['second'])
+        # Losing required full evidence must never silently fall back to the
+        # selected-only compatibility rule.
+        from processing.viewer_tasks import OptionEvidenceConflict
+        other = self.submit()
+        with self.queue._db() as db:
+            db.execute('DELETE FROM viewer_full_option_evidence WHERE uuid=?', (other,))
+        with self.assertRaises(OptionEvidenceConflict):
+            self.service.store.task(other)
+
+    def test_direct_option_values_are_validated_before_admission(self):
+        self.option_catalog = [
+            {'name':'switch','type':'bool','value':False},
+            {'name':'quality','type':'string','value':'low','domain':['low','high']},
+            {'name':'count','type':'int','value':1,'domain':{'min':1,'max':5}},
+        ]
+        for options in ([{'name':'switch','value':'true'}],
+                        [{'name':'quality','value':'unknown'}],
+                        [{'name':'count','value':True}],
+                        [{'name':'count','value':6}],
+                        [{'name':'count','value':1},{'name':'count','value':2}]):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self.service.initialize(str(uuid.uuid4()), 'bad', options)
+        self.service.initialize(str(uuid.uuid4()), 'valid', [{'name':'quality','value':'low'}])
 
     def test_inventory_rejects_invalid_caps_and_duplicate_hosts(self):
         from processing.config import parse_node_inventory
