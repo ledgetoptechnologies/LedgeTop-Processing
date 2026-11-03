@@ -264,6 +264,12 @@ class ReferenceStore:
     def _require_viewer_authority(self, db, expected):
         if expected is None: return
         protocol._uuid(expected, 'expected coordinator authority')
+        table=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='coordinator_identity'").fetchone()
+        if table is None:
+            raise JCSRuntimeUnavailable('coordinator authority schema unavailable')
+        columns={row['name'] for row in db.execute('PRAGMA table_info(coordinator_identity)')}
+        if not {'singleton','authority_id'}.issubset(columns):
+            raise JCSRuntimeUnavailable('coordinator authority schema unavailable')
         values=db.execute('SELECT singleton,authority_id FROM coordinator_identity').fetchall()
         if len(values)!=1 or values[0]['singleton']!=1 or values[0]['authority_id']!=expected or self.queue.authority_id!=expected:
             raise JCSRuntimeUnavailable('coordinator authority missing or changed')
