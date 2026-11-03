@@ -8,6 +8,13 @@ The page digest is SHA-256 of UTF-8 bytes `ltds-paged-source-v1-page` followed b
 
 This prototype caps objects at 25,000, pages at 64, page members at 512, serialized page body at 256 KiB and total serialized page bodies at 8 MiB. Validation checks fields before serializing a page, rejects out-of-order/missing pages, wrong pins, altered hashes, duplicates, unsafe values, and returns detached object records in an ID-indexed dictionary. The caller must exclusively own the supplied decoded Python objects for the duration of validation; this is not a bounded network parser or a streaming page fetcher. No disk-backed index, crash recovery or memory/RSS limit is implemented.
 
+The builder splits a page before either its 512-object or encoded-byte ceiling,
+so long valid basenames do not force rejection merely because a fixed-size
+page would be too large. It validates the entire input and computes bounded
+page spans before copying or serializing page bodies. The existing page and
+aggregate limits still apply; sufficiently long records may exceed them and
+remain held. This does not change the separate Viewer frame producer.
+
 A one-object test vector uses id `i`, name `a.jpg`, byteSize 1, SHA-256 `a` repeated 64, kind `image`, mediaType `image/jpeg`: page digest `c0f512a2a64fc24849b4cee33c5239773bc665f7b1085c4c0b7f0b94d77a05c2`; closure pin `0987a3830b10ca7c53a9ddc72138fa05a70fa0df96b5353fcbb039fcba6fa7a8`.
 
 For a 16,832-object synthetic fixture, one local Python-traced run before adding the hash domains measured 2,980,046 page bytes, 1.39 seconds to construct and self-validate, 0.70 seconds to revalidate, and about 17.9 MB peak traced allocations. This is illustrative, excludes process RSS and runtime integration, and is not a production benchmark. Independent review and Viewer/broker agreement on immutable snapshots, identity, digest, bounded streaming, durable ledgers, request authentication, revocation, retry and storage budgets are required before use.

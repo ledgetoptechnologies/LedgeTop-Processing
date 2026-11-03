@@ -25,24 +25,26 @@ def build(objects):
  """Prepare bounded metadata only; caller must not treat this as authorization."""
  if type(objects) is not list or not 0 < len(objects) <= MAX_OBJECTS: raise PagedManifestError('object count')
  try:
-  seen=set();names=set();total_bytes=0;metadata_bytes=0
-  for start in range(0,len(objects),MAX_PAGE_OBJECTS):
-   idx=start//MAX_PAGE_OBJECTS
-   if idx>=MAX_PAGES:raise ValueError()
-   page_size=len(p.canonical_json({'index':idx,'objects':[]}))
-   for offset,obj in enumerate(objects[start:start+MAX_PAGE_OBJECTS]):
-    _check_object(obj)
-    if obj['id'] in seen or obj['name'].casefold() in names:raise ValueError()
-    seen.add(obj['id']);names.add(obj['name'].casefold());total_bytes+=obj['byteSize']
-    if total_bytes>p.MAX_SAFE_INTEGER:raise ValueError()
-    page_size+=len(p.canonical_json(obj))+(1 if offset else 0)
-    if page_size>MAX_PAGE_BYTES:raise ValueError()
-   metadata_bytes+=page_size
-   if metadata_bytes>MAX_TOTAL_BYTES:raise ValueError()
+  seen=set();names=set();total_bytes=0;metadata_bytes=0;spans=[]
+  start=0;count=0;page_size=len(p.canonical_json({'index':0,'objects':[]}))
+  for idx,obj in enumerate(objects):
+   _check_object(obj)
+   if obj['id'] in seen or obj['name'].casefold() in names:raise ValueError()
+   seen.add(obj['id']);names.add(obj['name'].casefold());total_bytes+=obj['byteSize']
+   if total_bytes>p.MAX_SAFE_INTEGER:raise ValueError()
+   object_size=len(p.canonical_json(obj))
+   if count and (count>=MAX_PAGE_OBJECTS or page_size+1+object_size>MAX_PAGE_BYTES):
+    spans.append((start,idx));metadata_bytes+=page_size
+    if len(spans)>=MAX_PAGES or metadata_bytes>MAX_TOTAL_BYTES:raise ValueError()
+    start=idx;count=0;page_size=len(p.canonical_json({'index':len(spans),'objects':[]}))
+   page_size+=object_size+(1 if count else 0);count+=1
+   if page_size>MAX_PAGE_BYTES:raise ValueError()
+  spans.append((start,len(objects)));metadata_bytes+=page_size
+  if len(spans)>MAX_PAGES or metadata_bytes>MAX_TOTAL_BYTES:raise ValueError()
  except (ValueError,TypeError,KeyError):raise PagedManifestError('invalid paged manifest') from None
  pages=[]
- for start in range(0,len(objects),MAX_PAGE_OBJECTS):
-  body={'index':len(pages),'objects':[dict(obj) for obj in objects[start:start+MAX_PAGE_OBJECTS]]}
+ for start,end in spans:
+  body={'index':len(pages),'objects':[dict(obj) for obj in objects[start:end]]}
   pages.append(dict(body=body,sha256=hashlib.sha256(PAGE_DOMAIN+p.canonical_json(body)).hexdigest()))
  closure={'version':VERSION,'objectCount':len(objects),'totalBytes':sum(o['byteSize'] for o in objects),'pageCount':len(pages),'pages':[page['sha256'] for page in pages]}
  # Building does not bypass input validation or resource limits.
