@@ -41,3 +41,13 @@ Pre-existing historical collisions are not migrated or reconciled: an operator
 must audit them before enabling any future use. This candidate does not prove
 identity safety across databases, older binaries or unmounted alternative
 writers, and retains all source/result/cleanup holds.
+
+The shared scanner now checks bounded canonical proof bytes and SHA, prepared
+JCS envelope digest and activation/job/owner binding before using any held IDs.
+It fails closed on corruption and caps aggregate scan rows/bytes. Cross-journal
+checks only apply to tables in the same SQLite file; the generic standalone
+import store can use another database and therefore does not share this fence.
+A single pinned authority/database or independently fenced global ID index,
+historical collision audit and migration are required before deployment. Key
+and issuer uniqueness is enforced only within this API instance; a durable
+global registry and key rotation protocol remain missing.

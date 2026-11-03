@@ -661,16 +661,9 @@ class ReferenceStore:
 
     @staticmethod
     def _held_copy_ids(db, *, exclude_job=None):
-        identities=set()
-        for row in db.execute("SELECT job_id, CASE WHEN typeof(payload_json)='text' AND length(CAST(payload_json AS BLOB))<=? THEN payload_json END AS payload_json FROM reference_viewer_v3_copy_hold",(protocol.MAX_BODY_BYTES,)):
-            if row['job_id']==exclude_job: continue
-            try:
-                if row['payload_json'] is None: raise ValueError('oversized')
-                obj=json.loads(row['payload_json'])
-                identities.update(obj['acceptance'][key] for key in ('receiptId','storageReceiptId'))
-                identities.update(obj['viewerReceipt'][key] for key in ('receiptId','storageReceiptId'))
-            except (ValueError,TypeError,KeyError): raise Conflict('held copy proof unavailable') from None
-        return identities
+        from .reference_copy_hold_integrity import held_copy_ids
+        try: return held_copy_ids(db,exclude_job=exclude_job)
+        except ValueError: raise Conflict('held copy proof unavailable') from None
 
     @classmethod
     def _check_copy_identity_namespaces(cls, db, identities, *, exclude_job=None):

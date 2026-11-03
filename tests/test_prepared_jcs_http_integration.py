@@ -364,6 +364,19 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
                     # take either of the already-held v3 proof identities.
                     with self.assertRaisesRegex(Conflict,'held by v3'):
                         reopened.accept(job['jobId'],acceptance)
+                    with queue._db() as db:
+                        original_hold=db.execute('SELECT payload_json,payload_sha256 FROM reference_viewer_v3_copy_hold WHERE job_id=?',(job['jobId'],)).fetchone()
+                        corrupted=json.loads(original_hold['payload_json']);corrupted['acceptance']['receiptId']='corrupt-id'
+                        db.execute('UPDATE reference_viewer_v3_copy_hold SET payload_json=? WHERE job_id=?',(rp.canonical_json(corrupted).decode(),job['jobId']))
+                    with self.assertRaisesRegex(Conflict,'proof unavailable'):
+                        reopened.accept(job['jobId'],acceptance)
+                    with queue._db() as db:
+                        self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_acceptances').fetchone()[0],0)
+                        db.execute('UPDATE reference_viewer_v3_copy_hold SET payload_json=?,payload_sha256=? WHERE job_id=?',(original_hold['payload_json'],'f'*64,job['jobId']))
+                    with self.assertRaisesRegex(Conflict,'proof unavailable'):
+                        reopened.accept(job['jobId'],acceptance)
+                    with queue._db() as db:
+                        db.execute('UPDATE reference_viewer_v3_copy_hold SET payload_sha256=? WHERE job_id=?',(original_hold['payload_sha256'],job['jobId']))
                     from processing.reference_terminal import TerminalService
                     terminal=TerminalService(reopened)
                     with queue._db() as db:
