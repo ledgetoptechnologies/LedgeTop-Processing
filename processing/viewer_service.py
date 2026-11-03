@@ -204,7 +204,7 @@ class ViewerService:
             valid = ((kind in ('bool', 'boolean') and type(value) is bool)
                      or (kind in ('int', 'integer') and type(value) is int and finite(value))
                      or (kind in ('float', 'double', 'number') and finite(value))
-                     or (kind in ('str', 'string') and type(value) is str and len(value) <= 4000))
+                     or (kind in ('str', 'string', 'enum') and type(value) is str and len(value) <= 4000))
             if not valid:
                 raise ValueError('invalid option value')
             domain = spec.get('domain')
@@ -214,6 +214,9 @@ class ViewerService:
                 else:
                     try: domain = json.loads(domain)
                     except (ValueError, TypeError): raise ValueError('invalid option domain') from None
+            if kind == 'enum' and (type(domain) is not list or not domain
+                                   or any(type(choice) is not str for choice in domain)):
+                raise ValueError('invalid enum domain')
             if domain is None:
                 continue
             if type(domain) is list:

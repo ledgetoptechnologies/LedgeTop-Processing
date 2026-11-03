@@ -965,7 +965,7 @@ class ViewerServiceTests(unittest.TestCase):
     def test_direct_option_values_are_validated_before_admission(self):
         self.option_catalog = [
             {'name':'switch','type':'bool','value':False},
-            {'name':'quality','type':'string','value':'low','domain':['low','high']},
+            {'name':'quality','type':'enum','value':'low','domain':['low','high']},
             {'name':'count','type':'int','value':1,'domain':{'min':1,'max':5}},
         ]
         for options in ([{'name':'switch','value':'true'}],
@@ -976,6 +976,9 @@ class ViewerServiceTests(unittest.TestCase):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 self.service.initialize(str(uuid.uuid4()), 'bad', options)
         self.service.initialize(str(uuid.uuid4()), 'valid', [{'name':'quality','value':'low'}])
+        self.option_catalog[1]['domain'] = []
+        with self.assertRaises(ValueError):
+            self.service.initialize(str(uuid.uuid4()), 'invalid enum schema', [{'name':'quality','value':'low'}])
 
     def test_inventory_rejects_invalid_caps_and_duplicate_hosts(self):
         from processing.config import parse_node_inventory
