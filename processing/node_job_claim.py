@@ -25,6 +25,10 @@ def _uuid(value):
         return False
 
 
+def _now():
+    return int(time.time())
+
+
 def verify_job_claim(envelope, key, *, node, authority, gate_generation, task, origin, now=None, admission=True):
     if not isinstance(key, bytes) or len(key) < 32 or len(key) > 4096:
         raise GateError('job claim verification unavailable')
@@ -49,7 +53,7 @@ def verify_job_claim(envelope, key, *, node, authority, gate_generation, task, o
     if not hmac.compare_digest(mac, expected):
         raise GateError('invalid job claim authentication')
     if admission:
-        current = int(time.time()) if now is None else now
+        current = _now() if now is None else now
         if type(current) is not int or not current < claim['expiresAt'] <= current + 900:
             raise GateError('job claim expired or too long')
     return dict(claim)

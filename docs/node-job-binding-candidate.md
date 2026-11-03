@@ -47,3 +47,9 @@ claim. A read-only ledger check still reports an existing same-reservation
 replay as held and rejects a consumed nonce before any reservation attempt.
 If the process dies after consumption but before reservation, the claim remains
 consumed and requires reconciliation; it is never silently reissued.
+
+Claim expiration is revalidated under the node gate lock before the nonce is
+consumed and once more immediately before engine initialization. If it expires
+after consumption, the node keeps its reservation and pending journal intent;
+no native mutation is issued, and explicit reconciliation is required. This is
+not a cross-host lease or protection from system clock rollback.

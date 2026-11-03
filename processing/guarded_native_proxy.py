@@ -85,12 +85,13 @@ class GuardedNativeProxy:
         return str(uuid.uuid5(uuid.UUID(task), kind + ':' + discriminator))
 
     @staticmethod
-    def _mutate(journal, op, kind, request, action, validate=lambda _: True):
+    def _mutate(journal, op, kind, request, action, validate=lambda _: True, before_action=lambda: None):
         digest = protocol.digest(request)
         # Even a completed retry is held: journal stores only an ack digest,
         # not the original response needed to prove a compatible replay.
         if journal.begin(op, kind, digest) is not None:
             raise MutationHeld('mutation already issued; inspect before retry')
+        before_action()
         result = action()
         if not validate(result):
             raise MutationHeld('engine acknowledgment uncertain')
@@ -141,6 +142,10 @@ class GuardedNativeProxy:
                 # node would permanently burn a valid scheduler claim.
                 ledger.check_existing(verified)
                 gate.check_reservable(self.node_id, self.origin, self.authority_id, self.generation, receipt)
+                current_claim = verify_job_claim(job_claim, self._job_claim_key, node=self.node_id,
+                    authority=self.authority_id, gate_generation=self.generation, task=identifier, origin=self.origin)
+                if current_claim != verified or protocol.digest(task) != verified['requestSha256']:
+                    raise GateError('job claim changed during admission')
                 ledger.consume(verified, receipt)
             gate.reserve(self.node_id, self.origin, self.authority_id, self.generation, receipt)
             gate.bind(receipt, dict(id=identifier, workerId=self.worker_id,
@@ -150,8 +155,15 @@ class GuardedNativeProxy:
                 if verified is not None:
                     journal.bind_viewer_job(verified)
                 request = dict(task=identifier, name=task['name'], outputs=task['outputs'], options=task['options'])
+                def pre_issue():
+                    if verified is None:
+                        return
+                    current_claim = verify_job_claim(job_claim, self._job_claim_key, node=self.node_id,
+                        authority=self.authority_id, gate_generation=self.generation, task=identifier, origin=self.origin)
+                    if current_claim != verified or protocol.digest(task) != verified['requestSha256']:
+                        raise GateError('job claim changed before mutation')
                 self._mutate(journal, self._op(identifier, 'init'), 'init', request,
-                    lambda: self.engine.initialize(task))
+                    lambda: self.engine.initialize(task), before_action=pre_issue)
             finally:
                 journal.close()
 

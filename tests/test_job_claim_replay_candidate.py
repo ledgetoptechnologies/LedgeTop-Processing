@@ -73,6 +73,38 @@ class JobClaimReplayTests(BoundJobTests):
             self.assertNotIn('jobClaimLedger', gate.snapshot())
         self.assertEqual(self.backend.counts()['initialize'], 0)
 
+    def test_claim_expiring_before_lock_does_not_consume_nonce(self):
+        env = self.envelope(expiresAt=1200)
+        with patch('processing.node_job_claim._now', side_effect=[1000, 1200]):
+            with self.assertRaises(GateError):
+                self.proxy.initialize(self.task, job_claim=env, **self.auth)
+        with NodeGate('physical-engine') as gate:
+            self.assertIsNone(gate.snapshot()['reservation'])
+            self.assertNotIn('jobClaimLedger', gate.snapshot())
+        self.assertEqual(self.backend.counts()['initialize'], 0)
+        # A valid claim may still be used because it was never consumed.
+        with patch('processing.node_job_claim._now', return_value=1100):
+            self.proxy.initialize(self.task, job_claim=env, **self.auth)
+        self.assertEqual(self.backend.counts()['initialize'], 1)
+
+    def test_expiry_after_consumption_holds_intent_without_engine_mutation(self):
+        env = self.envelope(expiresAt=1200)
+        with patch('processing.node_job_claim._now', side_effect=[1000, 1100, 1200]):
+            with self.assertRaises(GateError):
+                self.proxy.initialize(self.task, job_claim=env, **self.auth)
+        with NodeGate('physical-engine') as gate:
+            state = gate.snapshot()
+            self.assertIsNotNone(state['reservation'])
+            self.assertIn('hostMutationJournal', state)
+            self.assertIn('jobClaimLedger', state)
+        self.assertEqual(self.journal(), [('init', 'pending')])
+        self.assertEqual(self.backend.counts()['initialize'], 0)
+        # Replaying the consumed claim must not reissue the mutation.
+        with patch('processing.node_job_claim._now', return_value=1100):
+            with self.assertRaises(MutationHeld):
+                self.proxy.initialize(self.task, job_claim=env, **self.auth)
+        self.assertEqual(self.backend.counts()['initialize'], 0)
+
     def test_crash_after_consumption_before_reservation_stays_consumed(self):
         env = self.envelope()
         with patch.object(NodeGate, 'reserve', side_effect=RuntimeError('synthetic interruption')):
