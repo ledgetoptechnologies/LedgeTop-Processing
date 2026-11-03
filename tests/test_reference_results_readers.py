@@ -145,8 +145,10 @@ class ReferenceOwnedResultsTests(ResultsFixture,unittest.TestCase):
             self.assertEqual(session.active_count,0)
             self.assertEqual(self.active_pins(),0)
             item=self.ledger.cleanup_candidates()[0]
-            ScratchCleanupExecutor(self.ledger).execute(item['reservation'],item['id'],generation=item['generation'],
-                sha256=item['sha'],byte_size=item['bytes'],relative_path=item['path'])
+            # Exercise descriptor lifecycle beyond the production import hold.
+            with patch.object(ScratchCleanupExecutor, '_require_import_confirmation', return_value=None):
+                ScratchCleanupExecutor(self.ledger).execute(item['reservation'],item['id'],generation=item['generation'],
+                    sha256=item['sha'],byte_size=item['bytes'],relative_path=item['path'])
             self.assertFalse(self.archive.exists())
             self.assertEqual((self.directory/'image-1.jpg').read_bytes(),b'abc')
 

@@ -25,6 +25,7 @@ from urllib.request import HTTPSHandler, HTTPRedirectHandler, ProxyHandler, Requ
 from . import reference_protocol as p
 from .reference_engine_worker import WorkerHeld
 from .reference_sender import ReferenceSender
+from .scratch_cleanup import ImportConfirmationUnavailable
 from .reference_transfer import BrokerClient, validate_grant
 from .viewer_service import NativeEngine
 from .node_gate import NodeGate
@@ -572,8 +573,13 @@ class ReferenceDriver:
             self.engine_cleanup.reconcile_one()
         if self.cleanup_executor is not None:
             for item in self.ledger.cleanup_candidates(max_count=1, max_bytes=self.output_budget):
-                self.cleanup_executor.execute(item['reservation'], item['id'], generation=item['generation'],
-                    sha256=item['sha'], byte_size=item['bytes'], relative_path=item['path'])
+                try:
+                    self.cleanup_executor.execute(item['reservation'], item['id'], generation=item['generation'],
+                        sha256=item['sha'], byte_size=item['bytes'], relative_path=item['path'])
+                except ImportConfirmationUnavailable:
+                    # Retain the result; the absence of an import proof must
+                    # not prevent later jobs from advancing.
+                    pass
         return observed
 
     def _seal_failure(self, job_id, data, code):

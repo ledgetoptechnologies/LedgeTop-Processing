@@ -522,7 +522,7 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertNotIn(TOKEN, str(observed.exception))
 
     @unittest.skipUnless(sys.platform.startswith('linux'), 'exact-object cleanup requires Linux')
-    def test_opted_in_background_cleanup_removes_only_accepted_result_after_receipt(self):
+    def test_background_cleanup_retains_result_until_viewer_import_confirmation(self):
         job = self.submit()
         self.advance(job, 'awaiting_acceptance')
         private = self.store.get(job['jobId'], private=True)
@@ -538,7 +538,7 @@ class ReferenceDriverTests(unittest.TestCase):
             trusted_viewer_receipt_keys=signer.trusted_keys)
         self.driver.cleanup_executor = ScratchCleanupExecutor(self.ledger)
         self.driver.step()
-        self.assertEqual(len(list(self.scratch.glob('jobs/*/all.zip'))), 0)
+        self.assertEqual(len(list(self.scratch.glob('jobs/*/all.zip'))), 1)
         self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
         self.assertFalse(any(kind in ('remove','cancel') for kind, _ in self.transport.calls))
 
@@ -606,7 +606,7 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             raise AssertionError('synthetic legacy Viewer acceptance was rejected')
         return response.body
 
-    def test_actual_native_http_cache_removed_once_only_after_full_viewer_ack_with_inputs_retained(self):
+    def test_actual_native_http_cache_is_retained_after_full_viewer_copy_ack(self):
         job = self.submit(contents=(b'abc',))
         self.advance(job, 'awaiting_acceptance')
         for _ in range(2):
@@ -618,11 +618,11 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
         self.assertEqual(self.node_fixture.counts().get('remove', 0), 0)
         self.accept_viewer_copy(job, full=True)
         self.driver.step()
-        self.assertEqual(self.node_fixture.counts().get('remove', 0), 1)
-        self.assertIsNone(self.native.read('/task/' + job['jobId'] + '/info', missing=True))
+        self.assertEqual(self.node_fixture.counts().get('remove', 0), 0)
+        self.assertEqual(self.native.read('/task/' + job['jobId'] + '/info')['status']['code'], 40)
         for _ in range(2):
             self.driver.step()
-        self.assertEqual(self.node_fixture.counts().get('remove', 0), 1)
+        self.assertEqual(self.node_fixture.counts().get('remove', 0), 0)
         inputs = list(self.scratch.glob('jobs/*/*.input'))
         self.assertEqual(len(inputs), 1)
         self.assertEqual(inputs[0].read_bytes(), b'abc')
