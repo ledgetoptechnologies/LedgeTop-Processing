@@ -939,6 +939,17 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'completed_result_ledger_unavailable'})
         self.assertEqual(len(list(self.scratch.glob('jobs/*/all.zip'))), 1)
 
+    def test_legacy_completion_scan_is_bounded_and_wraps(self):
+        self.worker.viewer_receipt_keys = SyntheticViewerSigner().trusted_keys
+        with self.driver._db() as db:
+            for index in range(33):
+                db.execute("INSERT INTO driver_jobs(job,claim_request,stage,data) VALUES(?,?,'completed',?)",
+                           ('failure-' + str(index), 'request-' + str(index), json.dumps({'failure': {}})))
+        self.driver._reopen_unverified_success()
+        self.assertEqual(self.driver._legacy_scan_cursor, 32)
+        self.driver._reopen_unverified_success()
+        self.assertEqual(self.driver._legacy_scan_cursor, 0)
+
 
 class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
     # Reuse durable coordinator/transport helpers, while replacing the patched

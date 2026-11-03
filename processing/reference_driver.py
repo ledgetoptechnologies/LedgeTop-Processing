@@ -178,6 +178,7 @@ class ReferenceDriver:
                 or not all(0x21 <= ord(char) <= 0x7e for char in worker_bearer)):
             raise ValueError('invalid private worker credential')
         self.worker, self.ledger, self.outbox, self.broker = worker, ledger, outbox, broker
+        self._legacy_scan_cursor = 0
         self.origin, self._bearer = coordinator_origin.rstrip('/'), worker_bearer
         self.node_id, self.worker_id, self.clock = node_id, worker_id, clock
         self._lock = threading.Lock()
@@ -614,10 +615,15 @@ class ReferenceDriver:
         if not self.worker.viewer_receipt_keys:
             return
         with self._db() as db:
-            rows = db.execute("SELECT job,data FROM driver_jobs WHERE stage='completed' ORDER BY created").fetchall()
+            rows = db.execute("""SELECT created,job,data FROM driver_jobs WHERE stage='completed'
+                AND created>? ORDER BY created LIMIT 32""", (self._legacy_scan_cursor,)).fetchall()
+        if not rows:
+            self._legacy_scan_cursor = 0
+            return
         for row in rows:
             data = json.loads(row['data'])
             if data.get('failure') is not None:
+                self._legacy_scan_cursor = row['created']
                 continue
             local = self._adapter(row['job'])._row(row['job'])
             if not local['result']:
@@ -634,7 +640,11 @@ class ReferenceDriver:
                 with self._db() as db:
                     db.execute("UPDATE driver_jobs SET stage='awaiting_acceptance' WHERE job=? AND stage='completed'",
                                (row['job'],))
+                self._legacy_scan_cursor = row['created']
                 return
+            self._legacy_scan_cursor = row['created']
+        if len(rows) < 32:
+            self._legacy_scan_cursor = 0
 
     def _hold_guarded_failure(self, execution):
         identity = json.loads(execution['identity'])
