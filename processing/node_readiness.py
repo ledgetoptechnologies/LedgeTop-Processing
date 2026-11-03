@@ -24,10 +24,13 @@ class NodeReadiness:
     def publish(self, node_id, report):
         if node_id not in self._nodes:
             raise ValueError('unknown node')
-        if (type(report) is not dict or set(report) != {'ready', 'taskQueueCount', 'maxImages'}
+        if (type(report) is not dict or set(report) != {'ready', 'taskQueueCount', 'maxImages',
+                                                      'availableScratchBytes', 'outputBudgetBytes'}
                 or type(report['ready']) is not bool or type(report['taskQueueCount']) is not int
                 or report['taskQueueCount'] < 0 or (report['maxImages'] is not None
-                    and (type(report['maxImages']) is not int or report['maxImages'] < 1))):
+                    and (type(report['maxImages']) is not int or report['maxImages'] < 1))
+                or any(type(report[k]) is not int or report[k] < 0
+                       for k in ('availableScratchBytes', 'outputBudgetBytes'))):
             self.invalidate(node_id)
             raise ValueError('invalid readiness observation')
         now = self._clock()

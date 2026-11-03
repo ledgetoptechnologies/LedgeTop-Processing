@@ -353,7 +353,10 @@ class ReferenceStore:
             limit = report['maxImages']
             if limit is not None and (type(limit) is not int or limit < 1):
                 continue
-            available.append((spec, limit))
+            scratch, output = report.get('availableScratchBytes'), report.get('outputBudgetBytes')
+            if (type(scratch) is not int or scratch < 0 or type(output) is not int or output < 0):
+                continue
+            available.append((spec, limit, scratch, output))
         jobs = db.execute("""SELECT id,profile,environment FROM jobs WHERE status='queued'
             ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq""").fetchall()
         if not jobs:
@@ -368,12 +371,13 @@ class ReferenceStore:
             row = self._row(db, job['id'])
             submission = json.loads(row['input_json'])
             photos = submission['manifest']['inputCounts']['images']
-            for spec, limit in available:
+            for spec, limit, scratch, output in available:
                 if ((submission['pipeline']['odm']['requested'] and 'odm' not in spec['capabilities']) or
                     (submission['pipeline']['treedar']['requested'] and
                      ('treedar' not in spec['capabilities'] or spec['id'] not in self.queue.treedar_node_ids))):
                     continue
-                if all(cap is None or photos <= cap for cap in (spec['maxPhotos'], limit)):
+                if (submission['manifest']['totalBytes'] + output <= scratch
+                        and all(cap is None or photos <= cap for cap in (spec['maxPhotos'], limit))):
                     return row if spec['id'] == node_id else None
         return None
 

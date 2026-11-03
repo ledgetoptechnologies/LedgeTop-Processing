@@ -163,7 +163,7 @@ class ReferenceWorkerAPITests(unittest.TestCase):
                 inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
                              dict(id='main', maxPhotos=None, capabilities=['odm'])]
                 store = ReferenceStore(queue, node_inventory=inventory,
-                    node_readiness=lambda _: {'ready': True, 'taskQueueCount': 0, 'maxImages': None})
+                    node_readiness=lambda _: {'ready': True, 'taskQueueCount': 0, 'maxImages': None, 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024})
                 identities = {WORKER: dict(node_id='cluster', worker_id='small', worker_instance_id='one'),
                               OTHER: dict(node_id='main', worker_id='large', worker_instance_id='two')}
                 api = ReferenceWorkerAPI(store, DeliveryReceiver(store), bearer_workers=identities)
@@ -209,7 +209,7 @@ class ReferenceWorkerAPITests(unittest.TestCase):
                     inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
                                  dict(id='main', maxPhotos=None, capabilities=['treedar'])]
                     store = ReferenceStore(queue, node_inventory=inventory,
-                        node_readiness=lambda _: {'ready': True, 'taskQueueCount': 0, 'maxImages': None})
+                        node_readiness=lambda _: {'ready': True, 'taskQueueCount': 0, 'maxImages': None, 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024})
                     raw = self.pipeline_submission(kind)
                     job = store.submit(validate_submission(raw, environment='staging',
                         capability_fingerprint=raw['capabilityFingerprint'],

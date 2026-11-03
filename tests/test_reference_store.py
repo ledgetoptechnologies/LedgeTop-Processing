@@ -145,7 +145,7 @@ class ReferenceStoreTests(unittest.TestCase):
         self.queue.per_node_slots = True
         inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
                      dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
-        ready = {node['id']: {'ready': True, 'taskQueueCount': 0, 'maxImages': None}
+        ready = {node['id']: {'ready': True, 'taskQueueCount': 0, 'maxImages': None, 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024}
                  for node in inventory}
         store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda n: ready[n])
         first, _ = store.submit(self.new_submission())
@@ -166,7 +166,7 @@ class ReferenceStoreTests(unittest.TestCase):
         inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
                      dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
         store = ReferenceStore(self.queue, node_inventory=inventory,
-            node_readiness=lambda _: {'ready': True, 'taskQueueCount': 0, 'maxImages': None})
+            node_readiness=lambda _: {'ready': True, 'taskQueueCount': 0, 'maxImages': None, 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024})
         job, _ = store.submit(self.new_submission())
         def claim(i):
             return store.claim(job['jobId'], node_id='cluster', worker_id='worker',
@@ -179,7 +179,7 @@ class ReferenceStoreTests(unittest.TestCase):
         self.queue.per_node_slots = True
         inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
                      dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
-        ready = {node['id']: {'ready': True, 'taskQueueCount': 0, 'maxImages': None}
+        ready = {node['id']: {'ready': True, 'taskQueueCount': 0, 'maxImages': None, 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024}
                  for node in inventory}
         store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda n: ready[n])
         def submission(images, environment):
@@ -212,12 +212,12 @@ class ReferenceStoreTests(unittest.TestCase):
         self.queue.per_node_slots = True
         inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
                      dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
-        ready = {n['id']: {'ready': True, 'taskQueueCount': 0, 'maxImages': None}
+        ready = {n['id']: {'ready': True, 'taskQueueCount': 0, 'maxImages': None, 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024}
                  for n in inventory}
         store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda n: ready[n])
         job, _ = store.submit(self.new_submission())
         self.assertEqual(store.next_for_node('cluster')['jobId'], job['jobId'])
-        ready['cluster'] = {'ready': False, 'taskQueueCount': 0, 'maxImages': None}
+        ready['cluster'] = {'ready': False, 'taskQueueCount': 0, 'maxImages': None, 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024}
         def claim(node):
             return store.claim(job['jobId'], node_id=node, worker_id=node,
                 worker_instance_id='instance', claim_request_id='claim-' + node)
@@ -234,11 +234,11 @@ class ReferenceStoreTests(unittest.TestCase):
         store = ReferenceStore(self.queue, node_inventory=inventory,
                                node_readiness=lambda name: observations[name])
         job, _ = store.submit(self.new_submission())
-        malformed = (None, {}, {'ready': True, 'taskQueueCount': False, 'maxImages': None},
+        malformed = (None, {}, {'ready': True, 'taskQueueCount': False, 'maxImages': None, 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024},
                      {'ready': True, 'taskQueueCount': 0, 'maxImages': True},
-                     {'ready': True, 'taskQueueCount': 1, 'maxImages': None},
+                     {'ready': True, 'taskQueueCount': 1, 'maxImages': None, 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024},
                      {'ready': True, 'taskQueueCount': 0},
-                     {'ready': False, 'taskQueueCount': 0, 'maxImages': None})
+                     {'ready': False, 'taskQueueCount': 0, 'maxImages': None, 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024})
         for report in malformed:
             with self.subTest(report=report):
                 observations['cluster'] = report
@@ -246,8 +246,24 @@ class ReferenceStoreTests(unittest.TestCase):
                 self.assertIsNone(store.claim(job['jobId'], node_id='cluster', worker_id='worker',
                     worker_instance_id='instance', claim_request_id='bad-report'))
                 self.assertEqual(self.queue.get(job['jobId'])['status'], 'queued')
-        observations['cluster'] = {'ready': True, 'taskQueueCount': 0, 'maxImages': 1}
+        observations['cluster'] = {'ready': True, 'taskQueueCount': 0, 'maxImages': 1, 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024}
         self.assertEqual(store.next_for_node('cluster')['jobId'], job['jobId'])
+
+    def test_candidate_inventory_requires_capacity_for_inputs_and_outputs(self):
+        self.queue.per_node_slots = True
+        inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
+                     dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
+        reports = {'cluster': {'ready': True, 'taskQueueCount': 0, 'maxImages': None,
+                    'availableScratchBytes': 1026, 'outputBudgetBytes': 1024},
+                   'node-2': {'ready': True, 'taskQueueCount': 0, 'maxImages': None,
+                    'availableScratchBytes': 1027, 'outputBudgetBytes': 1024}}
+        store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda n: reports[n])
+        job, _ = store.submit(self.new_submission())
+        self.assertIsNone(store.next_for_node('cluster'))
+        self.assertEqual(store.next_for_node('node-2')['jobId'], job['jobId'])
+        del reports['node-2']['availableScratchBytes']
+        self.assertIsNone(store.next_for_node('node-2'))
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'queued')
 
     def test_metadata_quota_rolls_back_both_tables(self):
         store = ReferenceStore(self.queue, max_metadata_bytes=1)
