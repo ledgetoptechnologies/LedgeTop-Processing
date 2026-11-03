@@ -22,6 +22,7 @@ from processing.treedar_engine import TreeDarEngine
 from processing.treedar_runtime import TreeDarRuntimeManager,runtime_descriptor
 from tests import test_treedar_delivery as delivery_fixture
 from tests.test_treedar_engine import FakeDocker
+from tests.viewer_receipt_signer import SyntheticViewerSigner
 
 
 class FrozenV1Delivery(ReferenceEngineWorker):
@@ -156,7 +157,14 @@ class TreeDarRuntimeTests(unittest.TestCase):
             coverage=retained.apply_viewer_acceptance(self.f.job['jobId'],[
                 self.f.acceptance(result,[obj['id'] for obj in result['objects']])])
             self.assertTrue(coverage['fullyAccepted'])
-        self.assertEqual(self.f.ledger.cleanup_candidates()[0]['generation'],1)
+            # Metadata coverage alone does not establish a verified Viewer copy.
+            self.assertEqual(self.f.ledger.cleanup_candidates(),[])
+            # This legacy synthetic TreeDar result is not a Viewer v2 closure;
+            # even a correctly signed invented receipt must not release it.
+            signer=SyntheticViewerSigner();retained.viewer_receipt_keys=signer.trusted_keys
+            acceptance=self.f.acceptance(result,[obj['id'] for obj in result['objects']])
+            with self.assertRaises(WorkerHeld):retained.apply_viewer_acceptance(self.f.job['jobId'],[signer.envelope(acceptance,result)])
+        self.assertEqual(self.f.ledger.cleanup_candidates(),[])
         self.assertEqual(self.manager.runtime_for_job(self.f.job['jobId'])[0],self.old_runtime)
         self.assertTrue(self.f.controller.path.exists())
         self.assertFalse(any(call[0] in ('create','start','stop','rm') for call in self.docker.calls))

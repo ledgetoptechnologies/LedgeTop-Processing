@@ -135,7 +135,8 @@ def volume_census(root, *, uid=10001, offline=False):
     def sha(value):return hashlib.sha256(encode(value)).hexdigest()
     allowed={'jobs','sqlite_sequence','coordinator_identity','nodes','viewer_tasks','viewer_files','viewer_incarnations',
         'reference_jobs','reference_acceptances','reference_outbox','reference_claims','reference_worker_receipts',
-        'reference_transfer_grants','reference_worker_failures','reference_terminal_acceptances','owned_maintenance_schedules'}
+        'reference_transfer_grants','reference_worker_failures','reference_terminal_acceptances','owned_maintenance_schedules',
+        'reference_viewer_receipts','reference_viewer_transfers'}
     files=[]
     for path in sorted(root.rglob('*')):
         relative=path.relative_to(root).as_posix();info=path.lstat()

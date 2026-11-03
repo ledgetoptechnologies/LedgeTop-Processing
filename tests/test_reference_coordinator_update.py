@@ -319,6 +319,39 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.assertIn('reference_terminal_acceptances',names)
         self.assertEqual(self.activate()['phase'],'completed')
 
+    def test_viewer_receipt_tables_are_censused_and_nonempty_blocks_prepare_and_rollback(self):
+        baseline=module.volume_census(self.volume,uid=os.geteuid())
+        for name in ('reference_viewer_receipts','reference_viewer_transfers'):
+            self.assertEqual(baseline['tables'][name]['count'],0)
+            self.assertTrue(any(row[0]=='table' and row[1]==name for row in baseline['schema']))
+            missing=copy.deepcopy(baseline)
+            missing['tables'].pop(name)
+            missing['schema']=[row for row in missing['schema'] if row[2]!=name]
+            with self.assertRaises(module.Stopped):module.compatible(baseline,missing)
+        def with_row(table):
+                # A partial or orphaned row must still block a downgrade.
+                with sqlite3.connect(self.queue.path) as db:
+                    if table=='reference_viewer_receipts':
+                        db.execute("INSERT INTO reference_viewer_receipts(receipt_id,storage_receipt_id,acceptance_receipt_id,job_id,digest,receipt_json) VALUES('receipt','storage','acceptance','synthetic',?, '{}')",('a'*64,))
+                    else:
+                        db.execute("INSERT INTO reference_viewer_transfers(job_id,receipt_id,acceptance_json) VALUES('synthetic','receipt','{}')")
+        for table in ('reference_viewer_receipts','reference_viewer_transfers'):
+            with self.subTest(stage='prepare',table=table):
+                with_row(table);before=len(self.transport.calls)
+                fresh=self.root/('fresh-'+table);fresh.mkdir(mode=0o700)
+                updater=module.ReferenceCoordinatorUpdate(fresh,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda state:None)
+                with self.assertRaises(AssertionError):updater.prepare(TARGET,SOURCE,MAIN)
+                self.assertEqual(len(self.transport.calls),before)
+                with sqlite3.connect(self.queue.path) as db:db.execute('DELETE FROM '+table)
+        self.fail_after_start()
+        for table in ('reference_viewer_receipts','reference_viewer_transfers'):
+            with self.subTest(stage='rollback',table=table):
+                with_row(table);before=len(self.transport.calls)
+                with self.assertRaises(AssertionError):self.updater.rollback(self.state)
+                self.assertEqual(len(self.transport.calls),before)
+                self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
+                with sqlite3.connect(self.queue.path) as db:db.execute('DELETE FROM '+table)
+
     def test_terminal_receipt_refuses_fresh_prepare_before_any_drain(self):
         self.terminal_receipt_row()
         fresh=self.root/'fresh-operation';fresh.mkdir(mode=0o700)
