@@ -77,6 +77,19 @@ class GuardedWorkerTests(ReferenceEngineWorkerTests):
             self.assertIsNone(gate.snapshot()['reservation'])
         self.assertTrue((self.scratch / 'jobs/reservation-1/all.zip').exists())
 
+    def test_nonterminal_or_mismatched_task_never_checkpoints(self):
+        self.worker = self.make_guarded()
+        self.engine.action = lambda action, identifier: {'uuid': identifier}
+        self.start()
+        self.engine.code = 20
+        self.assertIsNone(self.worker.poll(self.job['jobId']))
+        self.engine.read = lambda route: {'uuid': str(uuid.uuid4()), 'status': {'code': 40}}
+        with self.assertRaises(WorkerHeld): self.worker.poll(self.job['jobId'])
+        with NodeGate('physical-engine') as gate:
+            state = gate.snapshot()
+            self.assertIsNone(state['reservation']['completionDigest'])
+            self.assertNotIn('completion', state['hostMutationJournal'])
+
     def test_guarded_real_worker_records_exact_identity_and_checkpoints_completion(self):
         self.worker = self.make_guarded()
         self.engine.action = lambda action, identifier: {'success': True, 'uuid': identifier}
