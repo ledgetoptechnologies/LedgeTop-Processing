@@ -82,7 +82,8 @@ def _require_idle_state(path):
 class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
                  treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
-                 require_idle_existing=False, per_node_slots=False, node_capabilities=None):
+                 require_idle_existing=False, per_node_slots=False, node_capabilities=None,
+                 parallel_viewer_uploads=False):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or ('cluster' not in node_ids and not per_node_slots)):
@@ -90,6 +91,12 @@ class Queue(Maintenance):
         self._creator_pid = os.getpid()
         self._lifecycle_lock = threading.RLock()
         self._database_users = 0
+        if type(parallel_viewer_uploads) is not bool:
+            raise ValueError('parallel_viewer_uploads must be boolean')
+        self.parallel_viewer_uploads = parallel_viewer_uploads
+        self._viewer_store_lock = threading.RLock()
+        self._viewer_task_locks_guard = threading.Lock()
+        self._viewer_task_locks = {}
         self.node_ids = tuple(node_ids)
         if type(per_node_slots) is not bool:
             raise ValueError("per_node_slots must be boolean")

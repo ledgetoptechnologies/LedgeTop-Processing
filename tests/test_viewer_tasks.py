@@ -2,6 +2,7 @@ import io
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 import tempfile
 import unittest
@@ -111,6 +112,140 @@ with patch('processing.viewer_tasks.sync_directory',side_effect=lambda _path:os.
             self.photo(name='PHOTO.jpg', data=b'different')
         self.assertEqual(self.store.info(self.identifier)['imagesCount'], 1)
         self.assertFalse(list(Path(task['directory']).glob('.incoming-*')))
+
+    def test_separate_store_instance_cannot_commit_while_upload_is_in_flight(self):
+        self.queue.close()
+        self.queue = Queue(self.root / 'parallel-queue', node_ids=('cluster','main'),
+                           viewer_enabled=True, parallel_viewer_uploads=True)
+        self.store = TaskStore(self.queue, self.root / 'parallel-inputs')
+        self.initialize()
+        self.photo(name='first.jpg', data=b'first')
+        second_store = TaskStore(self.queue, self.root / 'parallel-inputs')
+        entered, release = threading.Event(), threading.Event()
+        errors, committed = [], []
+        class SlowStream(io.BytesIO):
+            def read(self, size=-1):
+                if not entered.is_set():
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError('test upload was not released')
+                return super().read(size)
+        def upload():
+            try:
+                self.store.upload(self.identifier, 'second.jpg', SlowStream(b'second'), 6)
+            except Exception as error:
+                errors.append(error)
+        thread = threading.Thread(target=upload)
+        thread.start()
+        commit_thread = None
+        try:
+            self.assertTrue(entered.wait(5))
+            commit_thread = threading.Thread(target=lambda: committed.append(second_store.commit(self.identifier)))
+            commit_thread.start()
+            self.assertFalse(threading.Event().wait(0.05) or committed)
+            with self.assertRaises(RuntimeError): self.queue.close()
+        finally:
+            release.set()
+            thread.join(5)
+            if commit_thread: commit_thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(commit_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(committed[0]['success'])
+        self.assertEqual([f['name'] for f in self.store.task(self.identifier)['files']], ['first.jpg','second.jpg'])
+
+    def test_parallel_upload_does_not_block_another_task(self):
+        # Isolated opt-in only; production configuration cannot enable it yet.
+        self.queue.close()
+        self.queue = Queue(self.root / 'parallel-queue', node_ids=('cluster','main'),
+                           viewer_enabled=True, parallel_viewer_uploads=True)
+        self.store = TaskStore(self.queue, self.root / 'parallel-inputs')
+        self.initialize()
+        other = str(uuid.uuid4())
+        self.initialize(other)
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        class SlowStream(io.BytesIO):
+            def read(self, size=-1):
+                if not entered.is_set():
+                    entered.set()
+                    if not release.wait(5): raise TimeoutError('test upload not released')
+                return super().read(size)
+        def upload():
+            try: self.store.upload(self.identifier, 'first.jpg', SlowStream(b'first'), 5)
+            except Exception as error: errors.append(error)
+        thread = threading.Thread(target=upload)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            self.photo(other, 'other.jpg', b'other')
+            self.assertTrue(self.store.commit(other)['success'])
+        finally:
+            release.set()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_cancel_waits_for_inflight_upload_and_keeps_uploaded_bytes(self):
+        self.queue.close()
+        self.queue = Queue(self.root / 'parallel-queue', node_ids=('cluster','main'),
+                           viewer_enabled=True, parallel_viewer_uploads=True)
+        self.store = TaskStore(self.queue, self.root / 'parallel-inputs')
+        self.initialize()
+        entered, release, cancelled = threading.Event(), threading.Event(), []
+        class SlowStream(io.BytesIO):
+            def read(self, size=-1):
+                if not entered.is_set():
+                    entered.set()
+                    if not release.wait(5): raise TimeoutError('test upload not released')
+                return super().read(size)
+        upload = threading.Thread(target=lambda: self.store.upload(self.identifier, 'first.jpg', SlowStream(b'first'), 5))
+        upload.start()
+        cancel = None
+        try:
+            self.assertTrue(entered.wait(5))
+            cancel = threading.Thread(target=lambda: cancelled.append(self.store.cancel(self.identifier)))
+            cancel.start()
+            self.assertFalse(threading.Event().wait(0.05) or cancelled)
+        finally:
+            release.set()
+            upload.join(5)
+            if cancel: cancel.join(5)
+        self.assertFalse(upload.is_alive())
+        self.assertFalse(cancel.is_alive())
+        self.assertTrue(cancelled[0]['success'])
+        task = self.store.task(self.identifier)
+        self.assertEqual(task['stage'], 'cancelled')
+        self.assertEqual(Path(task['files'][0]['path']).read_bytes(), b'first')
+
+    def test_parallel_upload_process_death_keeps_partial_out_of_manifest(self):
+        root = self.root / 'upload-exit'
+        identifier = str(uuid.uuid4())
+        program = '''import io,os,sys
+from pathlib import Path
+from processing.prototype import Queue
+from processing.viewer_tasks import TaskStore
+root=Path(sys.argv[1]);identifier=sys.argv[2]
+queue=Queue(root/'queue',node_ids=('cluster','main'),viewer_enabled=True,parallel_viewer_uploads=True)
+store=TaskStore(queue,root/'inputs');store.initialize(identifier,'synthetic',[],None,'production')
+class DyingStream(io.BytesIO):
+ def read(self,n=-1):
+  if self.tell(): os._exit(73)
+  return super().read(1)
+store.upload(identifier,'image.jpg',DyingStream(b'abc'),3)
+'''
+        proc = subprocess.run([sys.executable, '-c', program, str(root), identifier], capture_output=True, timeout=15)
+        self.assertEqual(proc.returncode, 73)
+        queue = Queue(root/'queue', node_ids=('cluster','main'), viewer_enabled=True, parallel_viewer_uploads=True)
+        try:
+            store = TaskStore(queue, root/'inputs')
+            task = store.task(identifier)
+            self.assertEqual(task['files'], [])
+            self.assertEqual(len(list(Path(task['directory']).glob('.incoming-*'))), 1)
+            self.assertTrue(store.upload(identifier, 'image.jpg', io.BytesIO(b'abc'), 3)['success'])
+            self.assertEqual(Path(store.task(identifier)['files'][0]['path']).read_bytes(), b'abc')
+        finally:
+            queue.close()
 
     def test_truncated_or_overlong_stream_never_enters_manifest(self):
         self.initialize()

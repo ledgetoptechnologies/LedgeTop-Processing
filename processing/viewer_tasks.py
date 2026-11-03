@@ -18,6 +18,8 @@ import secrets
 import stat
 import threading
 import uuid as uuid_module
+from contextlib import contextmanager, nullcontext
+from functools import wraps
 
 from .maintenance import Conflict
 
@@ -68,6 +70,14 @@ def sync_directory(path):
             os.close(descriptor)
 
 
+def task_fenced(method):
+    @wraps(method)
+    def call(self, identifier, *args, **kwargs):
+        with self._task_fence(identifier):
+            return method(self, identifier, *args, **kwargs)
+    return call
+
+
 class TaskStore:
     def __init__(self, queue, directory, max_input_bytes=20 * 1024 ** 3):
         if type(max_input_bytes) is not int or not 1 <= max_input_bytes <= 10 ** 15:
@@ -82,7 +92,7 @@ class TaskStore:
         if os.name != 'nt' and self.root.stat().st_mode & 0o077:
             raise ValueError('private input directory required')
         self.max_input_bytes = max_input_bytes
-        self._lock = threading.RLock()
+        self._lock = queue._viewer_store_lock
         # Claim credentials are stored in this shared database. Tighten the
         # exact existing, owned database before creating or updating secret
         # metadata; future SQLite rollback journals inherit its private mode.
@@ -185,6 +195,37 @@ class TaskStore:
         if row['state']=='cancelled' and not allow_cancelled:raise Conflict('task reservation is cancelled')
         return row
 
+    @contextmanager
+    def _task_fence(self, identifier):
+        checked_uuid(identifier)
+        queue = self.queue
+        if os.getpid() != queue._creator_pid:
+            raise RuntimeError('coordinator process changed')
+        with queue._viewer_task_locks_guard:
+            entry = queue._viewer_task_locks.get(identifier)
+            if entry is None:
+                entry = [threading.RLock(), 0]
+                queue._viewer_task_locks[identifier] = entry
+            entry[1] += 1
+        try:
+            with entry[0]:
+                # Keep the OS authority lock until even a slow stream finishes.
+                with queue._lifecycle_lock:
+                    if queue._lock.closed:
+                        raise RuntimeError('coordinator ownership closed')
+                    queue._database_users += 1
+                try:
+                    yield
+                finally:
+                    with queue._lifecycle_lock:
+                        queue._database_users -= 1
+        finally:
+            with queue._viewer_task_locks_guard:
+                entry[1] -= 1
+                if not entry[1]:
+                    del queue._viewer_task_locks[identifier]
+
+    @task_fenced
     def reserve(self, identifier, environment, capability):
         digest=self._capability_hash(identifier,environment,capability)
         with self._lock,self.queue._db() as db:
@@ -208,6 +249,7 @@ class TaskStore:
     def authorize_reservation(self,identifier,environment,capability):
         with self.queue._db() as db:self._reservation(db,identifier,environment,capability,allow_cancelled=True)
 
+    @task_fenced
     def cancel_reservation(self, identifier, environment, capability):
         with self._lock,self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -227,6 +269,7 @@ class TaskStore:
             db.execute("UPDATE viewer_reservations SET state='cancelled' WHERE uuid=?",(identifier,))
             return {'uuid':identifier,'state':'cancelled'}
 
+    @task_fenced
     def initialize(self, identifier, name='', options=None, outputs=None, environment='production', capability=None, option_evidence=None, *, replay_only=False):
         checked_uuid(identifier)
         if type(replay_only) is not bool: raise ValueError('invalid replay mode')
@@ -338,13 +381,14 @@ class TaskStore:
             raise ValueError('safe supported input basename required')
         return name.casefold()
 
+    @task_fenced
     def upload(self, identifier, filename, stream, length, environment=None, capability=None):
         key = self._filename(filename)
         if type(length) is not int or length <= 0:
             raise ValueError('invalid input length')
         if length > self.max_input_bytes:
             raise InputLimitExceeded('task input ceiling exceeded')
-        with self._lock:
+        with (nullcontext() if self.queue.parallel_viewer_uploads else self._lock):
             with self.queue._db() as db:
                 self._reservation(db,identifier,environment,capability)
                 row = self._row(db, identifier)
@@ -415,6 +459,7 @@ class TaskStore:
             return row['uuid']
         return str(uuid_module.uuid5(uuid_module.UUID(row['uuid']), 'generation:' + str(row['generation'])))
 
+    @task_fenced
     def commit(self, identifier, environment=None, capability=None):
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -588,6 +633,7 @@ class TaskStore:
             db.execute("UPDATE viewer_tasks SET stage='held',phase='held',error='operator_resolved',updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
                 (row['uuid'],))
 
+    @task_fenced
     def update(self, identifier, **fields):
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
                    'progress', 'output_lines', 'archive_path'}
@@ -692,6 +738,7 @@ class TaskStore:
             raise ValueError('nonnegative output cursor required')
         return self.task(identifier)['output_lines'][line:]
 
+    @task_fenced
     def cancel(self, identifier):
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -724,6 +771,7 @@ class TaskStore:
                 and job['result'] == canonical({'cancelled':True})
                 and row['stage'] == 'cancelled' and row['phase'] == 'cancelled')
 
+    @task_fenced
     def cancel_never_started(self, identifier):
         """Cancel or acknowledge an unambiguously unclaimed job atomically."""
         with self._lock, self.queue._db() as db:
@@ -743,6 +791,7 @@ class TaskStore:
             db.execute("UPDATE viewer_tasks SET stage='cancelled',phase='cancelled',updated_at=CURRENT_TIMESTAMP WHERE uuid=?",(identifier,))
             return {'success':True,'uuid':identifier}
 
+    @task_fenced
     def remove(self, identifier):
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
