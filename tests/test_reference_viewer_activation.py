@@ -342,6 +342,9 @@ class ViewerActivationTests(unittest.TestCase):
         for field in ('activationId', 'viewerTaskId', 'viewerAttemptId'):
             changed = copy.deepcopy(envelope); changed[field] = str(uuid.uuid4())
             with self.assertRaises(Conflict): recover(changed)
+        changed_submission = copy.deepcopy(envelope)
+        changed_submission['submission']['manifest']['objects'][0]['name'] = 'different-image.jpg'
+        with self.assertRaises(Conflict): recover(changed_submission)
         with self.assertRaises(Conflict): recover(envelope, principal='other-viewer')
         with self.assertRaises(Conflict): recover(envelope, environment='staging')
         fresh = self.envelope_v2(); fresh['submission']['submissionId'] = str(uuid.uuid4())
