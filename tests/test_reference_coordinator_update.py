@@ -178,6 +178,12 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                 finally:undo()
                 census()
 
+    def test_failed_and_cancelled_complete_viewer_tasks_remain_retained(self):
+        with self.queue._db() as db:
+            db.execute("UPDATE viewer_tasks SET stage='failed' WHERE directory='task-0'")
+            db.execute("UPDATE viewer_tasks SET stage='cancelled' WHERE directory='task-1'")
+        self.assertEqual(module.volume_census(self.volume,uid=os.geteuid())['tables']['viewer_tasks']['count'],2)
+
     def test_nonterminal_viewer_task_refuses_fresh_prepare(self):
         with self.queue._db() as db:db.execute("UPDATE viewer_tasks SET phase='processing' WHERE directory='task-1'")
         operation=self.root/'second-operation';operation.mkdir(mode=0o700)
@@ -214,6 +220,39 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
     def test_viewer_extra_tables_nonempty_reservation_holds(self):
         with self.queue._db() as db:
             db.execute("INSERT INTO viewer_reservations VALUES('synthetic','staging','synthetic','reserved')")
+        with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
+
+    def test_terminal_viewer_task_files_are_retained_and_censused(self):
+        import hashlib,uuid
+        identifier=str(uuid.uuid4())
+        directory=self.volume/'viewer-tasks'/identifier
+        directory.mkdir(mode=0o700)
+        payload=b'synthetic retained viewer artifact'
+        artifact=directory/'retained.bin'
+        artifact.write_bytes(payload);artifact.chmod(0o600)
+        digest=hashlib.sha256(payload).hexdigest()
+        with self.queue._db() as db:
+            db.execute("""INSERT INTO viewer_tasks
+                (uuid,directory,name,options,outputs,environment,stage,phase)
+                VALUES(?,?,?,?,?,?,?,?)""",(identifier,identifier,'synthetic','[]','null',
+                'production','succeeded','complete'))
+            db.execute("INSERT INTO viewer_files VALUES(?,?,?,?,?,?,?)",
+                (identifier,'retained','retained.bin','retained.bin',len(payload),digest,0))
+            db.execute("INSERT INTO viewer_option_evidence VALUES(?,?,?,?)",
+                (identifier,1,'[]',hashlib.sha256(b'[]').hexdigest()))
+            db.execute("INSERT INTO viewer_incarnations VALUES(?,?,?,?,?)",
+                (identifier,1,None,'{}','[]'))
+        before=module.volume_census(self.volume,uid=os.geteuid())
+        copied=self.root/'retained-viewer-copy';shutil.copytree(self.volume,copied)
+        copied_artifact=copied/'viewer-tasks'/identifier/'retained.bin'
+        copied_artifact.write_bytes(payload+b'changed')
+        changed=module.volume_census(copied,uid=os.geteuid(),offline=True)
+        with self.assertRaises(module.Stopped):module.compatible(changed,before)
+        copied_artifact.write_bytes(payload);copied_artifact.chmod(0o600)
+        module.compatible(module.volume_census(copied,uid=os.geteuid(),offline=True),before)
+        self.assertEqual(artifact.read_bytes(),payload)
+        with self.queue._db() as db:
+            db.execute("UPDATE viewer_tasks SET phase='queued',removed=1 WHERE uuid=?",(identifier,))
         with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
 
     def test_nonempty_viewer_reservation_holds_under_optimized_python(self):
@@ -705,14 +744,24 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
 
     def test_actual_copy_script_hashes_copied_full_database_and_retains_all_bytes(self):
+        large=self.volume/'viewer-tasks/task-0/large-synthetic.bin'
+        with large.open('wb') as stream:stream.truncate(64*1024*1024+1)
+        large.chmod(0o600)
         destination=self.root/'actual-backup';destination.mkdir(mode=0o700)
         code=module.backup_script().replace("Path('/source')",'Path('+repr(str(self.volume))+')').replace("Path('/backup')",'Path('+repr(str(destination))+')')
         code=code.replace('10001',str(os.geteuid())).replace('uid=10001','uid='+str(os.geteuid()))
         output=io.StringIO()
-        with redirect_stdout(output):exec(compile(code,'<synthetic-offline-backup>','exec'),{})
+        with redirect_stdout(output):exec(compile(code,'<synthetic-offline-backup>','exec',optimize=2),{})
         proof=json.loads(output.getvalue())
         self.assertEqual(proof['fullCensusSha256'],module.digest(module.volume_census(self.volume,uid=os.geteuid(),offline=True)))
         self.assertEqual((destination/'jobs.sqlite3').read_bytes(),(self.volume/'jobs.sqlite3').read_bytes())
+        for relative,content in self.retained.items():self.assertEqual((destination/relative).read_bytes(),content)
+        self.assertEqual((destination/'viewer-tasks/task-0/large-synthetic.bin').stat().st_size,large.stat().st_size)
+        restored=self.root/'synthetic-restore';shutil.copytree(destination,restored)
+        before=module.volume_census(self.volume,uid=os.geteuid(),offline=True)
+        after=module.volume_census(restored,uid=os.geteuid(),offline=True)
+        before.pop('rootMode');after.pop('rootMode')
+        self.assertEqual(after,before)
 
     def test_actual_authenticated_owned_get_requires_exact_new_missing_receipt_body(self):
         self.probe.stop()
