@@ -40,7 +40,7 @@ class ViewerCapacityPair(unittest.TestCase):
  def run_node(self,mode='valid'):
   viewer=os.environ.get('PINNED_VIEWER_ROOT')
   if not viewer: self.fail('PINNED_VIEWER_ROOT required; no skip')
-  expected=os.environ.get('VIEWER_COMMIT','7a7734c3c9c49766deb7c7e56e612702cf5f7069')
+  expected=os.environ.get('VIEWER_COMMIT','5a26155d2a2e4a52f8369d96d255ef9966dca2b5')
   self.assertEqual(subprocess.check_output(['git','rev-parse','HEAD'],cwd=viewer,text=True).strip(),expected)
   self.assertFalse(subprocess.check_output(['git','status','--porcelain'],cwd=viewer,text=True).strip())
   args=dict(viewer=viewer,origin='http://127.0.0.1:'+str(self.server.server_port),token=TOKEN,root=str(self.root),mode=mode)
@@ -71,3 +71,6 @@ class ViewerCapacityPair(unittest.TestCase):
   result=self.run_node('probe-error');self.assertFalse(result['completed']);self.assertEqual(result['error']['code'],'upload_admission_capability_unavailable');self.assertFalse(any('/upload/' in r.get('route','') for r in result['observations']))
  def test_malformed_capability_holds(self):
   result=self.run_node('malformed');self.assertFalse(result['completed']);self.assertEqual(result['error']['code'],'upload_admission_capability_unavailable');self.assertFalse(any('/upload/' in r.get('route','') for r in result['observations']))
+
+ def test_capability_outage_is_deferred_then_retries(self):
+  result=self.run_node('outage-retry');self.assertTrue(result['completed'],msg=str(result));self.assertEqual(result['retry']['firstUploadCount'],0);self.assertEqual(result['retry']['firstStatus'],'admitted');self.assertEqual(result['retry']['firstJob'],'pending');self.assertEqual(result['retry']['afterPhase'],'committed');self.assertEqual(self.service.store.task(result['uuid'])['input_bytes'],10)
