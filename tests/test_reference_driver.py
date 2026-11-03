@@ -702,6 +702,17 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(len(checks), 4)
         self.assertEqual(self.driver.step()['state'], 'claim_pending')
 
+    def test_restarted_retained_task_with_busy_engine_is_not_ready(self):
+        task = str(uuid.uuid4())
+        self.transport.tasks = {task: 40}
+        self.assertTrue(self.driver._ready())
+        # The engine reports the restarted task as processing in its queue
+        # count; the previously cached terminal UUID must not grant readiness.
+        self.transport.tasks[task] = 20
+        self.transport.queue_count = 1
+        self.assertFalse(self.driver._ready())
+        self.assertIsNone(self.driver.readiness_report())
+
     def test_authority_mismatch_and_actual_native_engine_requirement(self):
         self.submit()
         original = self.driver._request
