@@ -1645,6 +1645,23 @@ else:
         self.service.tick()
         self.assertEqual(self.service.store.guarded_dispatch_checkpoint(identifier)['operation'], 'commit')
 
+    def test_guarded_decision_is_captured_once_for_checkpoint_and_persistence(self):
+        class ChangingGuardEngine(FakeEngine):
+            @property
+            def node_guarded(self):
+                self.guard_reads += 1
+                return self.guard_reads == 1
+
+        engine = ChangingGuardEngine('cluster', self.fleet)
+        engine.guard_reads = 0
+        self.service.engines['cluster'] = engine
+        identifier = self.submit()
+        self.service.tick()
+        self.assertEqual(engine.guard_reads, 1)
+        self.assertEqual(self.task(identifier)['node_guarded'], 1)
+        checkpoint = self.service.store.guarded_dispatch_checkpoint(identifier)
+        self.assertEqual((checkpoint['operation'], checkpoint['state']), ('commit', 'acknowledged'))
+
     def test_lost_commit_ack_polls_known_uuid_without_replay_and_completes(self):
         identifier = self.submit()
         self.engines['cluster'].fail = 'commit'

@@ -718,9 +718,8 @@ class ViewerService:
             # Persist the guard association with the first pending phase,
             # before issuing a mutation, so recovery is independent of the
             # replacement process's engine object or runtime configuration.
-            self.store.update(identifier, phase='init_pending',
-                              node_guarded=getattr(engine, 'node_guarded', False) is True)
             guarded = getattr(engine, 'node_guarded', False) is True
+            self.store.update(identifier, phase='init_pending', node_guarded=guarded)
             if guarded:
                 checkpoint = self.store.checkpoint_guarded_dispatch(identifier, 'init',
                     {'requestSha256': hashlib.sha256(json.dumps(
