@@ -128,6 +128,17 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
             db.execute("INSERT INTO viewer_reservations VALUES('synthetic','staging','synthetic','reserved')")
         with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
 
+    def test_release_tombstones_and_changed_guard_schema_block_update(self):
+        with self.queue._db() as db:
+            db.execute("INSERT INTO reference_released_claims VALUES('r','j','n','w','i','digest')")
+        with self.assertRaises(AssertionError):
+            module.volume_census(self.volume,uid=os.geteuid())
+        with self.queue._db() as db:
+            db.execute('DELETE FROM reference_released_claims')
+            db.execute('ALTER TABLE viewer_guarded_dispatch_history ADD COLUMN unreviewed TEXT')
+        with self.assertRaises(AssertionError):
+            module.volume_census(self.volume,uid=os.geteuid())
+
     def test_nonempty_viewer_reservation_holds_under_optimized_python(self):
         with self.queue._db() as db:
             db.execute("INSERT INTO viewer_reservations VALUES('synthetic','staging','synthetic','reserved')")
@@ -153,7 +164,9 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
     def old_volume(self,*,extra=()):
         """Live predecessor schema; only the first start runs the real migration."""
         with self.queue._db() as db:
-            for name in ('reference_viewer_receipts','reference_viewer_transfers','viewer_full_option_evidence'):db.execute('DROP TABLE '+name)
+            for name in ('reference_viewer_receipts','reference_viewer_transfers','viewer_full_option_evidence',
+                         'reference_released_claims','viewer_guarded_dispatch_checkpoint','viewer_guarded_dispatch_history'):
+                db.execute('DROP TABLE '+name)
             for table,column,_statement in module.MIGRATION_COLUMNS:db.execute('ALTER TABLE '+table+' DROP COLUMN '+column)
         self.state['baseline']=module.volume_census(self.volume,uid=os.geteuid());self.updater.save(self.state)
         started=[]
@@ -174,7 +187,9 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
     def test_pinned_migration_is_exactly_what_the_candidate_creates(self):
         fresh=module.volume_census(self.volume,uid=os.geteuid())
         pinned=module.normalized_schema(module.migration_schema())
-        self.assertEqual({row[2] for row in pinned},{'reference_viewer_receipts','reference_viewer_transfers','viewer_full_option_evidence'})
+        self.assertEqual({row[2] for row in pinned},{'reference_viewer_receipts','reference_viewer_transfers',
+            'viewer_full_option_evidence','reference_released_claims','viewer_guarded_dispatch_checkpoint',
+            'viewer_guarded_dispatch_history'})
         self.assertEqual(module.normalized_schema([row for row in fresh['schema'] if row[2] in {row[2] for row in pinned}]),pinned)
         source=''.join((Path(module.__file__).resolve().parents[1]/'processing'/name).read_text() for name in ('reference_store.py','viewer_tasks.py'))
         for table,column,statement in module.MIGRATION_COLUMNS:

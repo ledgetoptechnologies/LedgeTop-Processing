@@ -142,7 +142,7 @@ def volume_census(root, *, uid=10001, offline=False):
 
     def sha(value):
         return hashlib.sha256(encode(value)).hexdigest()
-    allowed = {'jobs', 'sqlite_sequence', 'coordinator_identity', 'nodes', 'viewer_tasks', 'viewer_files', 'viewer_incarnations', 'reference_jobs', 'reference_acceptances', 'reference_outbox', 'reference_claims', 'reference_worker_receipts', 'reference_transfer_grants', 'reference_worker_failures', 'reference_terminal_acceptances', 'owned_maintenance_schedules', 'reference_viewer_receipts', 'reference_viewer_transfers', 'viewer_reservations', 'viewer_option_evidence', 'viewer_full_option_evidence'}
+    allowed = {'jobs', 'sqlite_sequence', 'coordinator_identity', 'nodes', 'viewer_tasks', 'viewer_files', 'viewer_incarnations', 'reference_jobs', 'reference_acceptances', 'reference_outbox', 'reference_claims', 'reference_worker_receipts', 'reference_transfer_grants', 'reference_worker_failures', 'reference_terminal_acceptances', 'owned_maintenance_schedules', 'reference_viewer_receipts', 'reference_viewer_transfers', 'viewer_reservations', 'viewer_option_evidence', 'viewer_full_option_evidence', 'reference_released_claims', 'viewer_guarded_dispatch_checkpoint', 'viewer_guarded_dispatch_history'}
     files = []
     for path in sorted(root.rglob('*')):
         relative = path.relative_to(root).as_posix()
@@ -196,6 +196,9 @@ def volume_census(root, *, uid=10001, offline=False):
             'viewer_reservations': "CREATE TABLE viewer_reservations ( uuid TEXT PRIMARY KEY, environment TEXT NOT NULL, capability_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('reserved','cancelled')))",
             'viewer_option_evidence': "CREATE TABLE viewer_option_evidence ( uuid TEXT NOT NULL, generation INTEGER NOT NULL, definitions TEXT NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(uuid,generation))",
             'viewer_full_option_evidence': "CREATE TABLE viewer_full_option_evidence ( uuid TEXT NOT NULL, generation INTEGER NOT NULL, definitions TEXT NOT NULL, sha256 TEXT NOT NULL, PRIMARY KEY(uuid,generation))",
+            'reference_released_claims': "CREATE TABLE reference_released_claims ( request_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, node_id TEXT NOT NULL, worker_id TEXT NOT NULL, instance_id TEXT NOT NULL, token_hash TEXT NOT NULL)",
+            'viewer_guarded_dispatch_checkpoint': "CREATE TABLE viewer_guarded_dispatch_checkpoint ( uuid TEXT PRIMARY KEY, generation INTEGER NOT NULL, job_id TEXT NOT NULL, node_id TEXT NOT NULL, engine_uuid TEXT NOT NULL, sequence INTEGER NOT NULL, operation TEXT NOT NULL, evidence TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','acknowledged')))",
+            'viewer_guarded_dispatch_history': "CREATE TABLE viewer_guarded_dispatch_history ( uuid TEXT NOT NULL, generation INTEGER NOT NULL, job_id TEXT NOT NULL, node_id TEXT NOT NULL, engine_uuid TEXT NOT NULL, sequence INTEGER NOT NULL, operation TEXT NOT NULL, evidence TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','acknowledged')), PRIMARY KEY(uuid,sequence))",
         }
         for name in sorted(names & set(expected)):
             entries = [row for row in objects if row[2] == name]
@@ -273,10 +276,24 @@ MIGRATION_TABLES=(
                   lease_token TEXT, lease_until REAL, last_error TEXT,
                   completed_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)''',
     'ALTER TABLE reference_viewer_transfers ADD COLUMN verified_full_coverage INTEGER',
+    '''CREATE TABLE reference_released_claims (
+                  request_id TEXT PRIMARY KEY, job_id TEXT NOT NULL, node_id TEXT NOT NULL,
+                  worker_id TEXT NOT NULL, instance_id TEXT NOT NULL, token_hash TEXT NOT NULL)''',
     '''CREATE TABLE viewer_full_option_evidence (
                 uuid TEXT NOT NULL, generation INTEGER NOT NULL,
                 definitions TEXT NOT NULL, sha256 TEXT NOT NULL,
-                PRIMARY KEY(uuid,generation))''')
+                PRIMARY KEY(uuid,generation))''',
+    '''CREATE TABLE viewer_guarded_dispatch_checkpoint (
+                uuid TEXT PRIMARY KEY, generation INTEGER NOT NULL, job_id TEXT NOT NULL,
+                node_id TEXT NOT NULL, engine_uuid TEXT NOT NULL,
+                sequence INTEGER NOT NULL, operation TEXT NOT NULL, evidence TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('pending','acknowledged')))''',
+    '''CREATE TABLE viewer_guarded_dispatch_history (
+                uuid TEXT NOT NULL, generation INTEGER NOT NULL, job_id TEXT NOT NULL,
+                node_id TEXT NOT NULL, engine_uuid TEXT NOT NULL,
+                sequence INTEGER NOT NULL, operation TEXT NOT NULL, evidence TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('pending','acknowledged')),
+                PRIMARY KEY(uuid,sequence))''')
 # (table, column, exact statement); defaults are 0, 0 and NULL respectively.
 MIGRATION_COLUMNS=(
     ('viewer_tasks','full_option_evidence_required','ALTER TABLE viewer_tasks ADD COLUMN full_option_evidence_required INTEGER NOT NULL DEFAULT 0 CHECK(full_option_evidence_required IN (0,1))'),
