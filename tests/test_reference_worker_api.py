@@ -9,7 +9,7 @@ from unittest.mock import patch
 from processing.prototype import Queue
 from processing.reference_delivery import DeliveryReceiver, BINDING
 from processing.reference_protocol import digest, validate_submission
-from processing.reference_store import ReferenceStore
+from processing.reference_store import ReferenceStore, JCSRuntimeUnavailable
 from processing.reference_worker_api import ReferenceWorkerAPI, PREFIX
 from processing.reference_failure import FailureOutbox, make_failure
 from tests.reference_activation_fixture import activate_reference_job, prepare_reference_job
@@ -77,6 +77,11 @@ class ReferenceWorkerAPITests(unittest.TestCase):
         self.queue = Queue(self.directory.name, reference_enabled=True)
         self.store = ReferenceStore(self.queue)
         self.api = ReferenceWorkerAPI(self.store, DeliveryReceiver(self.store), bearer_workers=self.identities)
+
+    def test_runtime_unavailable_is_503(self):
+        with patch.object(self.store, 'next_for_node', side_effect=JCSRuntimeUnavailable('held')):
+            result = self.request('GET', '/next')
+        self.assertEqual((result.status,result.body),(503,{'error':'prepared_runtime_unavailable'}))
 
     def test_private_auth_transport_and_fixed_identity_claim_replay(self):
         self.assertEqual(self.request('GET','/authority').body, {'authorityId':self.queue.authority_id})

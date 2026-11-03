@@ -23,6 +23,7 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
         token='synthetic-jcs-viewer-token-0001'
         def make_api(store,policy): return PreparedSubmissionAPI(store,credentials=[dict(token=token,principalId='viewer-a',environment='production')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy},jcs_policies={'production':policy,'staging':policy})
         api=make_api(store,policy)
+        disabled_api=PreparedSubmissionAPI(disabled_store,credentials=[dict(token=token,principalId='viewer-a',environment='production')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy})
         env=dict(schemaVersion=3,protocol=PROTOCOL,submission=copy.deepcopy(fixture['submission']),viewerTaskId=str(uuid.uuid4()),viewerAttemptId=str(uuid.uuid4()),activationId=str(uuid.uuid4()))
         env['submission']['pipeline']['odm']['options']={'resolution':-1.25,'quality':'ultra'}
         class Handler(BaseHTTPRequestHandler):
@@ -41,6 +42,8 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
             status,job=post(env); self.assertEqual(status,201)
             with self.assertRaises(JCSRuntimeUnavailable): disabled_store.next_for_node('cluster')
             with self.assertRaises(JCSRuntimeUnavailable): disabled_store.list()
+            failure=disabled_api.handle('GET','/ltds/prepared/v2/submissions/'+env['submission']['submissionId'],{'Authorization':'Bearer '+token},protected_transport=True)
+            self.assertEqual((failure.status,failure.body),(503,{'error':'prepared_runtime_unavailable'}))
             with self.assertRaises(ValueError): make_api(disabled_store,policy)
 
             persisted=store.get(job['jobId'],private=True)['submission']

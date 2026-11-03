@@ -10,6 +10,7 @@ import re
 from types import MappingProxyType
 
 from .maintenance import Conflict
+from .reference_store import JCSRuntimeUnavailable
 from . import reference_protocol as protocol
 
 
@@ -90,6 +91,8 @@ class ReferenceAPI:
     def _job(self, job_id, environment, *, private=False):
         try:
             job = self.store.get_legacy_job(job_id, environment, private=private)
+        except JCSRuntimeUnavailable:
+            raise
         except Conflict:
             return None
         if job is None:
@@ -186,6 +189,8 @@ class ReferenceAPI:
             return self._error(405, "method_not_allowed")
         except (protocol.ProtocolError, ValueError, TypeError):
             return self._error(400, "invalid_request")
+        except JCSRuntimeUnavailable:
+            return self._error(503, 'prepared_runtime_unavailable')
         except Conflict:
             return self._error(409, "reference_conflict")
         except Exception:
