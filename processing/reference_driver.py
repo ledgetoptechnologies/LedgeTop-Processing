@@ -577,6 +577,12 @@ class ReferenceDriver:
         return observed
 
     def _seal_failure(self, job_id, data, code):
+        # A NodeODM terminal status alone does not prove that the physical
+        # process stopped, especially after a cancellation. Guarded work must
+        # retain its journal and scratch reservation until independent stop
+        # evidence and a durable failure handoff are implemented.
+        if self.worker._row(job_id)['host_guarded']:
+            raise DriverHeld('guarded_terminal_stop_unverified')
         claim = data['claim']
         failure = make_failure(job_id=job_id, generation=claim['generation'], environment=claim['environment'],
             input_manifest_sha256=claim['manifestSha256'], pipeline_digest=claim['pipelineDigest'],
@@ -594,6 +600,10 @@ class ReferenceDriver:
         return {'status': 'failed', 'result': {key: failure[key] for key in ('failureSha256', 'terminalState', 'errorCode')}}
 
     def _prepare_failure(self, job_id, data):
+        # Also fence records created by an older version before it can mark
+        # scratch terminal or release a physical reservation.
+        if self.worker._row(job_id)['host_guarded']:
+            raise DriverHeld('guarded_terminal_stop_unverified')
         self.ledger.set_engine_state(data['reservation']['reservationId'], 'terminal', terminal_attested=True)
         local = self.worker._row(job_id)
         if local['phase'] == 'failure_delivered' and self.failure_outbox.get(data['failureOutboxId'])['state'] == 'acknowledged':

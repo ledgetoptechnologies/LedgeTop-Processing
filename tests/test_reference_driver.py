@@ -314,6 +314,51 @@ class ReferenceDriverTests(unittest.TestCase):
         with NodeGate('engine') as gate:
             self.assertIsNone(gate.snapshot()['reservation'])
 
+    def test_guarded_failed_and_cancelled_status_keep_gate_and_scratch_unmodified(self):
+        # NodeODM's status alone is not independent proof that the physical
+        # process stopped. In particular, code 50 must not free the node.
+        for code in (30, 50):
+            with self.subTest(code=code):
+                # Use a fresh real durable fixture per status so each retains
+                # its own bound gate and journal.
+                case = ReferenceDriverTests(methodName='runTest')
+                case.setUp()
+                try:
+                    case.worker.host_mutation_journal = True
+                    case.transport.code = code
+                    original = case.transport.action
+                    def action(kind, identifier):
+                        original(kind, identifier)
+                        return {'uuid': identifier}
+                    with patch.object(case.native, 'action', side_effect=action):
+                        job = case.submit()
+                        case.advance(job, 'executing')
+                        with case.driver._db() as db:
+                            data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+                        reservation = data['reservation']['reservationId']
+                        with case.ledger._transaction() as db:
+                            before = dict(case.ledger._reservation(db, reservation))
+                        with NodeGate('engine') as gate:
+                            gate_before = gate.snapshot()
+                        result = case.driver.step()
+                        self.assertEqual(result, {'state': 'held', 'reason': 'guarded_terminal_stop_unverified'})
+                        with case.ledger._transaction() as db:
+                            self.assertEqual(dict(case.ledger._reservation(db, reservation)), before)
+                        with NodeGate('engine') as gate:
+                            self.assertEqual(gate.snapshot(), gate_before)
+                        with case.failures._transaction() as db:
+                            self.assertEqual(db.execute('SELECT COUNT(*) FROM completions').fetchone()[0], 0)
+                        # Older versions may already have saved a failure stage.
+                        # That recovery path must not mark scratch terminal either.
+                        with self.assertRaisesRegex(DriverHeld, 'guarded_terminal_stop_unverified'):
+                            case.driver._prepare_failure(job['jobId'], data)
+                        with case.ledger._transaction() as db:
+                            self.assertEqual(dict(case.ledger._reservation(db, reservation)), before)
+                        case.driver = case.make_driver()
+                        self.assertEqual(case.driver.step()['reason'], 'guarded_terminal_stop_unverified')
+                finally:
+                    case.tearDown()
+
     def test_unrelated_success_ack_does_not_advance_current_job(self):
         job = self.submit()
         self.advance(job, 'delivering')
