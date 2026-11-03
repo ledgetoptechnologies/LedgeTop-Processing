@@ -29,6 +29,9 @@ class NodeDirectSourceCandidate(GuardedHTTPS):
     def test_uncertain_upload_keeps_source_and_spool_for_reconciliation(self):
         self._direct_source(b'abc', ack_failure=True)
 
+    def test_recover_durable_ack_releases_spool_without_resending_source(self):
+        self._direct_source(b'abc', ack_failure=True, recover_after=True)
+
     def test_32mib_source_ranges_arrive_intact_on_node_without_coordinator_copy(self):
         body = b'synthetic-32mib-' * (32 * 1024 * 1024 // len(b'synthetic-32mib-'))
         # Permit a large synthetic multipart request and verify the received
@@ -54,7 +57,7 @@ class NodeDirectSourceCandidate(GuardedHTTPS):
         self.backend._dispatch = dispatch
         self._direct_source(body, disconnect_once=True)
 
-    def _direct_source(self, body, disconnect_once=False, ack_failure=False):
+    def _direct_source(self, body, disconnect_once=False, ack_failure=False, recover_after=False):
         digest = hashlib.sha256(body).hexdigest()
         requests = []
         failed = []
@@ -143,6 +146,19 @@ class NodeDirectSourceCandidate(GuardedHTTPS):
             self.assertEqual(self.backend.counts()['upload'], 1)
             self.assertEqual(self.journal(), [('init','done'), ('upload','done')])
             self.assertEqual(list(coordinator.iterdir()), [])
+            if recover_after:
+                # Reopen the durable ledger after the failed HTTP response, as
+                # the node would after a process restart. Recovery checks the
+                # original journal ACK and does not resend the engine upload.
+                from processing.guarded_spool_budget import GuardedSpoolBudget
+                reopened = GuardedSpoolBudget(self.spool, cap=server.spool_budget.cap,
+                                               floor=server.spool_budget.floor)
+                self.proxy.recover_acknowledged_spool(reopened, spools[0].name)
+                self.assertEqual(reopened.inspect()['reservations'], [])
+                self.assertFalse(spools[0].exists())
+                self.assertEqual(photo.read_bytes(), body)
+                self.assertEqual(self.backend.counts()['upload'], 1)
+                self.assertEqual(list(coordinator.iterdir()), [])
             return
         node_client.upload(self.job, item)
         self.assertTrue(server.wait_drained(5))
