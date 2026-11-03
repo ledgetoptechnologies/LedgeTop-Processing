@@ -112,6 +112,16 @@ class _RefuseRedirects(HTTPRedirectHandler):
         raise TransferError("broker redirects are forbidden")
 
 
+def _sync_directory(parent):
+    if os.name == "nt":
+        return
+    directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 class BrokerClient:
     def __init__(self, origin, *, ssl_context=None, opener=None, clock=time.time, timeout=30):
         parsed = urlsplit(origin)
@@ -162,6 +172,7 @@ class BrokerClient:
         part = parent / (".reference-" + secrets.token_hex(16) + ".part")
         descriptor = None
         owned_part = False
+        published_identity = None
         try:
             descriptor = os.open(part, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
             owned_part = True
@@ -208,16 +219,23 @@ class BrokerClient:
                 raise TransferError("transfer grant expired")
             # Same-directory hard link atomically fails if target exists, including
             # a dangling symlink. os.replace would overwrite a racing consumer.
+            part_info = part.stat(follow_symlinks=False)
             os.link(part, target, follow_symlinks=False)
+            published_identity = (part_info.st_dev, part_info.st_ino)
             part.unlink()
-            if os.name != "nt":
-                directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
+            _sync_directory(parent)
             return target
         except Exception:
+            # If any step after publication fails (including directory fsync),
+            # roll back only the exact inode this call linked. Never remove a
+            # replacement installed by another process after publication.
+            if published_identity is not None:
+                try:
+                    current = target.stat(follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) == published_identity:
+                        target.unlink()
+                except OSError:
+                    pass
             # Do not expose exception strings from HTTP stacks or injected openers:
             # they can embed request headers and credentials.
             raise TransferError("reference object transfer failed") from None
