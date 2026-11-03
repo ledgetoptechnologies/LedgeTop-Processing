@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import ssl
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -211,6 +212,37 @@ class ReferenceDriverTests(unittest.TestCase):
         self.submit()
         self.assertEqual(self.driver.step()['state'], 'claim_pending')
         self.assertIsNone(self.driver.readiness_report())
+
+    def test_poller_reads_real_worker_api_and_driver_over_tls(self):
+        from processing.reference_result_api import ReferenceResultAPI
+        from processing.reference_results import ReferenceResults
+        from processing.node_readiness import NodeReadiness
+        from processing.worker_readiness_poller import WorkerReadinessPoller
+        cert, key = self.root / 'readiness-cert.pem', self.root / 'readiness-key.pem'
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+            '-subj', '/CN=localhost', '-addext', 'subjectAltName=IP:127.0.0.1',
+            '-keyout', str(key), '-out', str(cert)], check=True, capture_output=True, timeout=15)
+        api = ReferenceResultAPI(ReferenceResults(self.worker), bearer_readers={TOKEN: dict(
+            node_id='cluster', worker_id='worker', environments=('staging',), share_policy=lambda _: True)},
+            readiness_provider=self.driver.readiness_report)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); tls.load_cert_chain(cert, key)
+        server = create_reference_http_server(api, '127.0.0.1', 0, ssl_context=tls)
+        thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.05})
+        thread.start()
+        try:
+            cache = NodeReadiness(('cluster',))
+            poller = WorkerReadinessPoller({'cluster': dict(origin='https://127.0.0.1:' + str(server.server_port),
+                bearer=TOKEN, workerId='worker')}, cache, ssl_context=ssl.create_default_context(cafile=str(cert)))
+            poller.poll_once()
+            self.assertEqual(cache.get('cluster')['availableScratchBytes'], self.ledger.available_scratch())
+            self.submit()
+            self.assertEqual(self.driver.step()['state'], 'claim_pending')
+            poller.poll_once()
+            self.assertIsNone(cache.get('cluster'))
+            poller.close()
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
 
     def supply_grants(self):
         for job in self.store.list(private=True):
