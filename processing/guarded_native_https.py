@@ -5,6 +5,7 @@ not secure engine ingress, authenticate a job claim, reserve aggregate spool
 space, fence same-user file replacement, or release reservations. The bounded
 stream receiver is experimental and is not mounted in an operational service.
 """
+import base64
 import hashlib
 import hmac
 import json
@@ -112,6 +113,8 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                     result = adapter.inspect_bound_mutation(request['jobClaim'], request['operation'], **args)
                 elif self.path == '/v1/commit' and set(request) == {'task'}:
                     result = adapter.commit(request['task'], **args)
+                elif self.path == '/v1/commit-bound' and set(request) == {'task', 'operationClaim'}:
+                    result = adapter.commit(request['task'], operation_claim=request['operationClaim'], **args)
                 elif self.path == '/v1/inspect-mutation' and set(request) == {'claim'}:
                     result = adapter.inspect_mutation(request['claim'], **args)
                 else:
@@ -141,6 +144,27 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                 from .viewer_tasks import TaskStore
                 from .node_gate import NodeGate
                 TaskStore._filename(name)
+                encoded_claim = self.headers.get_all('X-Operation-Claim', [])
+                if len(encoded_claim) > 1:
+                    raise ValueError()
+                operation_claim = None
+                if encoded_claim:
+                    value = encoded_claim[0]
+                    if len(value) > 8192 or not re.fullmatch(r'[A-Za-z0-9_-]+', value):
+                        raise ValueError()
+                    raw = base64.urlsafe_b64decode(value + '=' * (-len(value) % 4))
+                    if base64.urlsafe_b64encode(raw).decode().rstrip('=') != value:
+                        raise ValueError()
+                    def unique(pairs):
+                        data = {}
+                        for key, entry in pairs:
+                            if key in data: raise ValueError()
+                            data[key] = entry
+                        return data
+                    operation_claim = json.loads(raw, object_pairs_hook=unique,
+                        parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+                adapter.preflight_upload(task, name, size, expected, operation_claim,
+                                         bearer=bearer, protected_transport=True)
                 with NodeGate(adapter.engine_id) as gate:
                     receipt = adapter._owner(gate, task)
                 if os.name == 'nt' or not hasattr(os, 'O_NOFOLLOW'):
@@ -194,7 +218,7 @@ def create_guarded_https_server(adapter, *, bind_host, port, certificate, privat
                     try:
                         proof = adapter.upload(task, {'path': str(adapter.root / filename), 'name': name,
                                               'bytes': size, 'sha256': expected},
-                                       bearer=bearer, protected_transport=True)
+                                       bearer=bearer, protected_transport=True, operation_claim=operation_claim)
                         # Only a returned, journal-verified exact acknowledgment
                         # permits discarding this request's owned spool inode.
                         from . import reference_protocol as protocol

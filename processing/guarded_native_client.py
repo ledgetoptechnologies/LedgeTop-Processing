@@ -4,6 +4,7 @@ The caller must supply a certificate-verifying SSL context, a trusted fixed
 endpoint, and an authenticated job-to-engine binding. Lost acknowledgments are
 never retried here: the node journal and spool must be reconciled first.
 """
+import base64
 import hashlib
 import http.client
 import json
@@ -16,10 +17,13 @@ from .viewer_service import EngineUnavailable
 class GuardedNativeClient:
     node_guarded = True
 
-    def __init__(self, host, port, context, bearer, *, timeout=120):
+    def __init__(self, host, port, context, bearer, *, timeout=120, job_claim=None, operation_signer=None):
         if not context.check_hostname or context.verify_mode == 0:
             raise ValueError('certificate and hostname verification required')
         self.host, self.port, self.context, self.bearer, self.timeout = host, port, context, bearer, timeout
+        if (job_claim is None) != (operation_signer is None) or (operation_signer is not None and not callable(operation_signer)):
+            raise ValueError('job claim and operation signer must be supplied together')
+        self.job_claim, self.operation_signer = job_claim, operation_signer
 
     def _connection(self):
         return http.client.HTTPSConnection(self.host, self.port, context=self.context, timeout=self.timeout)
@@ -40,10 +44,16 @@ class GuardedNativeClient:
             conn.close()
 
     def initialize(self, task):
-        self._json('initialize', {'task': {k: task[k] for k in ('name', 'engine_uuid', 'outputs', 'options')}})
+        data = {'task': {k: task[k] for k in ('name', 'engine_uuid', 'outputs', 'options')}}
+        if self.job_claim is not None:
+            data['jobClaim'] = self.job_claim
+        self._json('initialize-bound' if self.job_claim is not None else 'initialize', data)
 
     def action(self, action, identifier):
         if action != 'commit': raise EngineUnavailable('unsupported guarded operation')
+        if self.operation_signer is not None:
+            claim = self.operation_signer('commit', {'task': identifier})
+            return self._json('commit-bound', {'task': identifier, 'operationClaim': claim})
         return self._json('commit', {'task': identifier})
 
     def inspect_mutation(self, claim):
@@ -72,6 +82,13 @@ class GuardedNativeClient:
                                'X-Task-Id': identifier, 'X-File-Name': item['name'],
                                'X-File-Sha256': item['sha256']}.items():
                 conn.putheader(key, value)
+            if self.operation_signer is not None:
+                claim = self.operation_signer('upload', dict(task=identifier, name=item['name'],
+                                                             bytes=item['bytes'], sha256=item['sha256']))
+                encoded = base64.urlsafe_b64encode(json.dumps(claim, allow_nan=False,
+                    separators=(',', ':')).encode()).decode().rstrip('=')
+                if len(encoded) > 8192: raise ValueError('operation claim too large')
+                conn.putheader('X-Operation-Claim', encoded)
             conn.endheaders()
             digest = hashlib.sha256()
             sent = 0

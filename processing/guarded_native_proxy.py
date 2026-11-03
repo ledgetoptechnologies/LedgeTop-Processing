@@ -84,6 +84,27 @@ class GuardedNativeProxy:
     def _op(task, kind, discriminator=''):
         return str(uuid.uuid5(uuid.UUID(task), kind + ':' + discriminator))
 
+    def _authorize_operation(self, journal, task, op, kind, request, operation_claim):
+        if operation_claim is None and not self._require_job_claim and not journal.has_viewer_job():
+            return
+        from .node_operation_claim import verify_operation_claim
+        job = verify_operation_claim(operation_claim, self._job_claim_key, node=self.node_id,
+            authority=self.authority_id, gate_generation=self.generation, task=task,
+            origin=self.origin, operation_id=op, kind=kind, request_digest=protocol.digest(request))
+        journal.verify_viewer_job(job)
+
+    def preflight_upload(self, task, name, size, sha256, operation_claim, *, bearer, protected_transport):
+        """Reject unauthorized transfers before allocating spool space."""
+        self._auth(bearer, protected_transport)
+        self._task(task)
+        key = TaskStore._filename(name)
+        op = self._op(task, 'upload', hashlib.sha256(key.encode('ascii')).hexdigest())
+        request = dict(task=task, name=name, bytes=size, sha256=sha256)
+        with NodeGate(self.engine_id) as gate:
+            journal = HostMutationJournal(gate, self._owner(gate, task)).open()
+            try: self._authorize_operation(journal, task, op, 'upload', request, operation_claim)
+            finally: journal.close()
+
     @staticmethod
     def _mutate(journal, op, kind, request, action, validate=lambda _: True, before_action=lambda: None):
         digest = protocol.digest(request)
@@ -167,7 +188,7 @@ class GuardedNativeProxy:
             finally:
                 journal.close()
 
-    def upload(self, task, item, *, bearer, protected_transport):
+    def upload(self, task, item, *, bearer, protected_transport, operation_claim=None):
         self._auth(bearer, protected_transport)
         self._task(task)
         if (type(item) is not dict or set(item) != {'path','name','bytes','sha256'}
@@ -201,10 +222,12 @@ class GuardedNativeProxy:
                 # Names are the native upload identities. A repeated name is
                 # held even when byte metadata differs.
                 op = self._op(task, 'upload', hashlib.sha256(name_key.encode('ascii')).hexdigest())
+                self._authorize_operation(journal, task, op, 'upload', request, operation_claim)
                 if journal.contains_operation(op):
                     raise DuplicateGuardedUpload('prior upload intent already exists')
                 try:
-                    self._mutate(journal, op, 'upload', request, lambda: self.engine.upload(task, item))
+                    self._mutate(journal, op, 'upload', request, lambda: self.engine.upload(task, item),
+                        before_action=lambda: self._authorize_operation(journal, task, op, 'upload', request, operation_claim))
                 except UnissuedGuardedUpload:
                     # Once begin may have committed, no downstream exception
                     # can establish that this request did not mutate NodeODM.
@@ -219,16 +242,19 @@ class GuardedNativeProxy:
             finally:
                 journal.close()
 
-    def commit(self, task, *, bearer, protected_transport):
+    def commit(self, task, *, bearer, protected_transport, operation_claim=None):
         self._auth(bearer, protected_transport)
         self._task(task)
         with NodeGate(self.engine_id) as gate:
             journal = HostMutationJournal(gate, self._owner(gate, task)).open()
             try:
-                return self._mutate(journal, self._op(task, 'commit'), 'commit', dict(task=task),
+                op, request = self._op(task, 'commit'), dict(task=task)
+                self._authorize_operation(journal, task, op, 'commit', request, operation_claim)
+                return self._mutate(journal, op, 'commit', request,
                     lambda: self.engine.action('commit', task),
                     lambda value: type(value) is dict and value.get('uuid') == task
-                        and 'error' not in value and value.get('success') is not False)
+                        and 'error' not in value and value.get('success') is not False,
+                    before_action=lambda: self._authorize_operation(journal, task, op, 'commit', request, operation_claim))
             finally:
                 journal.close()
 
