@@ -1,5 +1,6 @@
 """Unmounted synthetic v1 dual-identity binding; never admission authority."""
 import hashlib,json,sqlite3
+from contextlib import nullcontext
 from . import reference_protocol as p
 from . import prepared_envelope_jcs_candidate as jcs
 
@@ -34,7 +35,7 @@ def initialize(db):
   db.rollback();raise BindingHeld('binding_schema_unavailable') from None
 
 
-def stage(store,submission_id,statement,*,principal,environment,configured_authority,synthetic_viewer_provenance,_fault=None):
+def _stage(store,submission_id,statement,*,principal,environment,configured_authority,synthetic_viewer_provenance,_fault=None,_owned_db=None):
  """Only test-injected provenance; writes held metadata in one coordinator tx.
 
  Independent authenticated provenance does not yet exist. This function has no
@@ -75,8 +76,10 @@ def stage(store,submission_id,statement,*,principal,environment,configured_autho
   if any(statement[k]!=v for k,v in synthetic_viewer_provenance.items()):raise ValueError()
   wire=p.canonical_json(statement);digest=hashlib.sha256(DOMAIN+wire).hexdigest()
   if len(wire)>65536:raise ValueError()
-  with store.queue._db() as db:
-   db.execute('BEGIN IMMEDIATE');_schema(db);store._check_jcs_capability(db);store._require_viewer_authority(db,configured_authority)
+  with (store.queue._db() if _owned_db is None else nullcontext(_owned_db)) as db:
+   if _owned_db is None:db.execute('BEGIN IMMEDIATE')
+   elif not db.in_transaction:raise ValueError('owned transaction required')
+   _schema(db);store._check_jcs_capability(db);store._require_viewer_authority(db,configured_authority)
    found=store._scoped_prepared_job_id(db,submission_id,principal,environment,jcs.PROTOCOL)
    if found is None:return None
    row=store._row(db,found['job_id']);owner=store._submission_owner(db,row)
@@ -96,3 +99,11 @@ def stage(store,submission_id,statement,*,principal,environment,configured_autho
    if _fault:_fault()
    return {'state':'held_synthetic_binding_only','created':True,'bindingSha256':digest}
  except (ValueError,TypeError,KeyError,sqlite3.Error,UnicodeError,RuntimeError,AttributeError):raise BindingHeld('binding_unavailable') from None
+
+
+def stage(store,submission_id,statement,**kwargs):
+ return _stage(store,submission_id,statement,**kwargs)
+
+def _stage_owned(db,store,submission_id,statement,**kwargs):
+ if not db.in_transaction:raise BindingHeld("owned_transaction_required")
+ return _stage(store,submission_id,statement,_owned_db=db,**kwargs)

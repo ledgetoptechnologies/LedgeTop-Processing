@@ -43,3 +43,21 @@ quota verification. No old-binary downgrade or external writer fencing has
 been implemented. The paired test separately reconstructs the captured Viewer
 input hash with synthetic trust; that reconstruction is not yet in the same
 transaction as the held binding row.
+
+The later unmounted `viewer_dual_gcp_atomic_candidate.py` composes that held
+binding with actual source/selection/evidence/generated-file synthetic bundle
+validation in one coordinator SQLite write transaction. It also requires the
+persisted reference transport manifest objects to match the independently
+validated selected closure exactly. Tests use Viewer 4ed exporter frames and
+explicitly injected synthetic provenance, image and correspondence facts.
+Selected dataset object IDs must equal their dataset file IDs; generated GCP
+uses `gcp_<attemptId>` with `text/plain` and cannot collide with an original
+dataset file ID. Nested paths remain bound by the Viewer input-list digest,
+while transport objects carry basenames. These rules need independent review.
+Failure during any phase rolls back both synthetic rows; exact replay rechecks
+the retained bytes and validation. There is still no signature over this new
+binding, no authenticated loader or production trust, and no independently
+verified raw source custody, JS correspondence provenance, revocation/fencing,
+old-binary downgrade protection or production schema migration. It always
+returns held. Process reopen tests are orderly and do not demonstrate power
+failure or host crash recovery.
