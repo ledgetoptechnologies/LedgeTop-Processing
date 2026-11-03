@@ -62,3 +62,11 @@ independent key registry. A test deliberately demonstrates that boundary.
 Authenticated current-key re-verification, trusted DB access controls, global
 namespace ownership and historical migration remain prerequisites; no hold is
 lifted.
+
+The structural-scan successor requires an existing SQLite transaction and
+restores the connection length limit after scanning. It bounds row counts and
+TEXT character lengths before any BLOB conversion, then bounds UTF-8 bytes,
+preflights JSON depth and density before decoding, and applies bounded checks
+to adjacent legacy namespaces. This is not a full result-manifest/object or
+signature re-verifier. An authenticated independent-key verifier and
+transactionally consistent source/result custody remain release blockers.

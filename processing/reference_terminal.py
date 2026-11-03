@@ -93,6 +93,9 @@ class TerminalService:
 
     def _check_ids(self, db, checked):
         ids = {checked["receiptId"], checked["storageReceiptId"]}
+        from .reference_copy_hold_integrity import legacy_reserved_ids
+        try: legacy_reserved_ids(db)
+        except (ValueError,TypeError,KeyError,RecursionError): raise Conflict('legacy receipt namespace unavailable') from None
         if ids & self.store._held_copy_ids(db): raise Conflict("receipt identity held by v3 proof")
         for row in db.execute("SELECT receipt_id,receipt_json FROM reference_acceptances"):
             old = json.loads(row["receipt_json"])

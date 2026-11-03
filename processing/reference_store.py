@@ -667,17 +667,11 @@ class ReferenceStore:
 
     @classmethod
     def _check_copy_identity_namespaces(cls, db, identities, *, exclude_job=None):
+        from .reference_copy_hold_integrity import legacy_reserved_ids
         if identities & cls._held_copy_ids(db,exclude_job=exclude_job): raise Conflict('receipt identity already held')
-        for row in db.execute('SELECT receipt_id,receipt_json FROM reference_acceptances'):
-            try: old=json.loads(row['receipt_json']); occupied={row['receipt_id'],old['receiptId'],old['storageReceiptId']}
-            except (ValueError,TypeError,KeyError): raise Conflict('acceptance identity unavailable') from None
-            if identities & occupied: raise Conflict('receipt identity already accepted')
-        for row in db.execute('SELECT receipt_id,storage_receipt_id FROM reference_viewer_receipts'):
-            if identities & {row['receipt_id'],row['storage_receipt_id']}: raise Conflict('receipt identity already accepted')
-        for table,columns in (('reference_terminal_acceptances','receipt_id,storage_receipt_id'),('viewer_import_confirmations_candidate_v1','confirmation_id'),('viewer_odm_import_confirmations_candidate_v2','confirmation_id')):
-            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone():
-                for row in db.execute('SELECT '+columns+' FROM '+table):
-                    if identities & set(row): raise Conflict('receipt identity already reserved')
+        try: occupied=legacy_reserved_ids(db)
+        except (ValueError,TypeError,KeyError,RecursionError): raise Conflict('legacy receipt namespace unavailable') from None
+        if identities & occupied: raise Conflict('receipt identity already reserved')
 
     def verify_viewer_v3_copy_held(self, submission_id, payload, *, authenticated_principal, authenticated_environment, expected_authority_id, trusted_keys):
         """Candidate verifies and journals only; it never records acceptance or cleanup authority."""
@@ -1428,6 +1422,9 @@ class ReferenceStore:
                 viewer_identities = {viewer_checked['receiptId'], viewer_checked['storageReceiptId']}
                 if len(viewer_identities) != 2 or viewer_identities & identities:
                     raise Conflict('Viewer receipt identities must be independent')
+            from .reference_copy_hold_integrity import legacy_reserved_ids
+            try: legacy_reserved_ids(db)
+            except (ValueError,TypeError,KeyError,RecursionError): raise Conflict('legacy receipt namespace unavailable') from None
             if (identities | (viewer_identities if viewer_checked is not None else set())) & self._held_copy_ids(db): raise Conflict('receipt identity held by v3 proof')
             encoded, receipt_digest = _json(checked), protocol.receipt_tombstone_digest(checked)
             identities = {checked['receiptId'], checked['storageReceiptId']}

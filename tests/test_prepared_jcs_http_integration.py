@@ -386,11 +386,36 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
                                 db.execute('UPDATE '+table+' SET '+column+'=? WHERE job_id=?',('x'*(rp.MAX_BODY_BYTES+1),job['jobId']))
                             with patch('processing.reference_copy_hold_integrity.json.loads',side_effect=AssertionError('parser reached')):
                                 with queue._db() as db:
+                                    db.execute('BEGIN')
                                     with self.assertRaises(Conflict): reopened._held_copy_ids(db)
                             with queue._db() as db: db.execute('UPDATE '+table+' SET '+column+'=? WHERE job_id=?',(old_value,job['jobId']))
                     with patch('processing.reference_copy_hold_integrity.MAX_SCAN_BYTES',1), patch('processing.reference_copy_hold_integrity.json.loads',side_effect=AssertionError('parser reached')):
                         with queue._db() as db:
+                            db.execute('BEGIN')
                             with self.assertRaises(Conflict): reopened._held_copy_ids(db)
+                    # Deep/dense retained JSON is rejected structurally before
+                    # the allocating JSON decoder is invoked.
+                    for malformed in ('['*30+'0'+']'*30, '['+','.join(['0']*10001)+']'):
+                        with queue._db() as db:
+                            before=db.execute('SELECT payload_json FROM reference_viewer_v3_copy_hold WHERE job_id=?',(job['jobId'],)).fetchone()[0]
+                            db.execute('UPDATE reference_viewer_v3_copy_hold SET payload_json=? WHERE job_id=?',(malformed,job['jobId']))
+                        with patch('processing.reference_copy_hold_integrity.json.loads',side_effect=AssertionError('decoder reached')):
+                            with queue._db() as db:
+                                db.execute('BEGIN')
+                                with self.assertRaises(Conflict): reopened._held_copy_ids(db)
+                        with queue._db() as db: db.execute('UPDATE reference_viewer_v3_copy_hold SET payload_json=? WHERE job_id=?',(before,job['jobId']))
+                    with queue._db() as db:
+                        with self.assertRaises(Conflict): reopened._held_copy_ids(db)
+                    # Legacy receipt namespaces get the same predecode bounds.
+                    from processing.reference_copy_hold_integrity import legacy_reserved_ids
+                    for malformed in ('x'*(rp.MAX_BODY_BYTES+1), '['*30+'0'+']'*30, '['+','.join(['0']*10001)+']'):
+                        with queue._db() as db:
+                            db.execute('INSERT INTO reference_acceptances(receipt_id,job_id,digest,receipt_json) VALUES(?,?,?,?)',('legacy-bounded',job['jobId'],'f'*64,malformed))
+                        with patch('processing.reference_copy_hold_integrity.json.loads',side_effect=AssertionError('decoder reached')):
+                            with queue._db() as db:
+                                db.execute('BEGIN')
+                                with self.assertRaises(ValueError): legacy_reserved_ids(db)
+                        with queue._db() as db: db.execute("DELETE FROM reference_acceptances WHERE receipt_id='legacy-bounded'")
                     # A coherent hash rewrite by a DB writer remains outside
                     # this hash-only scanner's threat model; this demonstrates
                     # why authenticated re-verification remains a release gate.
@@ -413,6 +438,7 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
                     from processing.reference_terminal import TerminalService
                     terminal=TerminalService(reopened)
                     with queue._db() as db:
+                        db.execute('BEGIN')
                         with self.assertRaisesRegex(Conflict,'held by v3'):
                             terminal._check_ids(db,acceptance)
 
