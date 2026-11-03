@@ -491,6 +491,8 @@ class ReferenceStore:
             if (claim is None or tuple(claim[k] for k in ('job_id', 'node_id', 'worker_id', 'instance_id')) != binding[:4]
                     or not hmac.compare_digest(claim['token'], claim_token)
                     or row['status'] != 'running' or row['phase'] not in ('queued', 'waiting_capacity')
+                    or row['node_id'] != node_id or type(row['claim_hash']) is not str
+                    or not hmac.compare_digest(row['claim_hash'], digest)
                     or row['transfer_json'] is not None or row['result_json'] is not None
                     or row['private_grant_json'] is not None):
                 raise Conflict('claim cannot be safely released')

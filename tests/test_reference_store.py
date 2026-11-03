@@ -207,6 +207,37 @@ class ReferenceStoreTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=claim['claimToken'])
 
+    def test_release_refuses_inconsistent_queue_claim_hash(self):
+        job, _ = self.store.submit(self.new_submission())
+        binding = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
+                       claim_request_id='corrupt-claim')
+        claim = self.store.claim(job['jobId'], **binding)
+        with self.queue._db() as db:
+            db.execute('UPDATE jobs SET claim_hash=? WHERE id=?', ('0' * 64, job['jobId']))
+        with self.assertRaises(Conflict):
+            self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=claim['claimToken'])
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'running')
+
+    def test_released_claim_tombstone_survives_coordinator_restart(self):
+        job, _ = self.store.submit(self.new_submission())
+        binding = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
+                       claim_request_id='restart-release')
+        old = self.store.claim(job['jobId'], **binding)
+        self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=old['claimToken'])
+        before = self.store.get(job['jobId'])
+        self.queue.close()
+        self.queue = Queue(self.directory.name, node_ids=('cluster', 'node-2'))
+        self.queue.allowed_profiles.add(PROFILE)
+        self.store = ReferenceStore(self.queue)
+        after = self.store.get(job['jobId'])
+        self.assertEqual((after['phase'], after['manifestSha256'], after['pipelineDigest']),
+                         ('waiting_capacity', before['manifestSha256'], before['pipelineDigest']))
+        with self.assertRaises(Conflict):
+            self.store.claim(job['jobId'], **binding)
+        self.assertFalse(self.store.release_unstarted_claim(job['jobId'], **binding, claim_token=old['claimToken']))
+        new = self.store.claim(job['jobId'], **{**binding, 'claim_request_id': 'restart-new'})
+        self.assertNotEqual(new['claimToken'], old['claimToken'])
+
     def test_candidate_inventory_skips_ineligible_head_without_bypassing_production(self):
         self.queue.per_node_slots = True
         inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
