@@ -132,6 +132,9 @@ class BrokerClient:
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 300:
             raise ValueError("invalid transfer timeout")
         self.origin = origin.rstrip("/")
+        # The range client must use the same verified broker trust and client
+        # credentials as the original object-transfer client.
+        self.ssl_context = context
         self.clock, self.timeout = clock, timeout
         self._open = opener or build_opener(_RefuseRedirects(), HTTPSHandler(context=context)).open
 

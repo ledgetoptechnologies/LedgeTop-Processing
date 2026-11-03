@@ -268,6 +268,20 @@ class ReferenceDriverTests(unittest.TestCase):
             self.advance(job, 'awaiting_acceptance')
             self.assertEqual(download.call_count, 1)
 
+    def test_source_range_v2_uses_configured_broker_tls_context(self):
+        with patch('processing.source_range_transfer.SourceRangeClient') as range_client:
+            self.make_driver(source_range_v2_enabled=True,
+                             state_path=self.root / 'driver-source-range-tls.sqlite')
+        self.assertIs(range_client.call_args.kwargs['ssl_context'], self.context)
+        self.assertTrue(self.context.check_hostname)
+        self.assertEqual(self.context.verify_mode, ssl.CERT_REQUIRED)
+
+    def test_source_range_v2_rejects_broker_context_if_verification_disabled(self):
+        self.broker.ssl_context = ssl._create_unverified_context()
+        with self.assertRaisesRegex(ValueError, 'TLS verification'):
+            self.make_driver(source_range_v2_enabled=True,
+                             state_path=self.root / 'driver-source-range-bad-tls.sqlite')
+
     def test_source_range_v2_reservation_persists_and_fetches_through_range_client(self):
         self.driver = self.make_driver(source_range_v2_enabled=True,
             state_path=self.root / 'driver-source-range-v2.sqlite')

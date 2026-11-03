@@ -191,7 +191,8 @@ class ReferenceDriver:
         if source_range_v2_enabled:
             from .source_range_transfer import SourceRangeClient
             self.source_range_client = SourceRangeClient(broker.origin,
-                self.path.parent / 'source-range-progress.sqlite', clock=clock)
+                self.path.parent / 'source-range-progress.sqlite',
+                ssl_context=broker.ssl_context, clock=clock)
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if any(path.is_symlink() for path in (self.path, *self.path.parents)):
             raise ValueError('private worker journal required')
