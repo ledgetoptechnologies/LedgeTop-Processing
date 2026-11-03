@@ -23,6 +23,13 @@ validation are required before claiming that partial-fleet admission supports
 fallback between them. The per-node route and browser behavior are not
 qualified by these unit tests.
 
+The separate admission validator in `viewer_service.py` also still rejects
+descriptive string domains such as `positive integer` and `positive float`
+advertised by the current nodes. The planner below recognizes a bounded set
+for comparison, but is not connected to that validator. Consequently this
+candidate cannot be enabled as a general replacement even for valid numeric
+options until the accepted-domain contract is reconciled and tested.
+
 `processing/effective_option_plan.py` is an unmounted, non-authorizing
 proposal for comparing a source and target catalog. Its caller must explicitly
 classify each changed default as a reviewed semantic pin or a node-local
