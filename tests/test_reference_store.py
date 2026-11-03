@@ -312,6 +312,60 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertIsNone(store.claim(reference['jobId'], node_id='cluster', worker_id='local',
                                       worker_instance_id='instance', claim_request_id='missing-evidence'))
 
+    def test_mixed_profile_concurrent_claims_take_distinct_eligible_nodes(self):
+        self.queue.per_node_slots = True
+        self.queue.allowed_profiles.add(VIEWER_PROFILE)
+        inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
+                     dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
+        ready = {'ready': True, 'taskQueueCount': 0, 'maxImages': None,
+                 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024}
+        store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda _: ready)
+        viewer, _ = self.queue.submit({'requestId': 'mixed-viewer', 'environment': 'staging',
+                                       'profile': VIEWER_PROFILE})
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE viewer_tasks(uuid TEXT, job_id TEXT, removed INTEGER)')
+            db.execute('CREATE TABLE viewer_files(uuid TEXT, is_photo INTEGER)')
+            db.execute('INSERT INTO viewer_tasks VALUES(?,?,0)', ('viewer-task', viewer['id']))
+            db.executemany('INSERT INTO viewer_files VALUES(?,1)', [('viewer-task',), ('viewer-task',)])
+        reference, _ = store.submit(self.new_submission())
+        barrier = threading.Barrier(2)
+        def take_viewer():
+            barrier.wait(timeout=5)
+            return self.queue.claim({'workerId': 'viewer', 'nodeId': 'node-2',
+                'profiles': [VIEWER_PROFILE], 'expectedJobId': viewer['id']},
+                allow_viewer_same_priority_skip=True)
+        def take_reference():
+            barrier.wait(timeout=5)
+            return store.claim(reference['jobId'], node_id='cluster', worker_id='reference',
+                               worker_instance_id='instance', claim_request_id='mixed-claim')
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = (pool.submit(take_viewer), pool.submit(take_reference))
+            results = [future.result(timeout=10) for future in futures]
+        self.assertTrue(all(results))
+        self.assertEqual(self.queue.get(viewer['id'])['nodeId'], 'node-2')
+        self.assertEqual(self.queue.get(reference['jobId'])['nodeId'], 'cluster')
+
+    def test_oversized_production_viewer_still_blocks_staging_reference(self):
+        self.queue.per_node_slots = True
+        self.queue.allowed_profiles.add(VIEWER_PROFILE)
+        inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
+                     dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
+        ready = {'ready': True, 'taskQueueCount': 0, 'maxImages': None,
+                 'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024}
+        store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda _: ready)
+        viewer, _ = self.queue.submit({'requestId': 'production-viewer', 'environment': 'production',
+                                       'profile': VIEWER_PROFILE})
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE viewer_tasks(uuid TEXT, job_id TEXT, removed INTEGER)')
+            db.execute('CREATE TABLE viewer_files(uuid TEXT, is_photo INTEGER)')
+            db.execute('INSERT INTO viewer_tasks VALUES(?,?,0)', ('viewer-task', viewer['id']))
+            db.executemany('INSERT INTO viewer_files VALUES(?,1)', [('viewer-task',), ('viewer-task',)])
+        reference, _ = store.submit(self.new_submission())
+        self.assertIsNone(store.next_for_node('cluster'))
+        self.assertIsNone(store.claim(reference['jobId'], node_id='cluster', worker_id='reference',
+                                      worker_instance_id='instance', claim_request_id='priority-claim'))
+        self.assertEqual(self.queue.get(reference['jobId'])['status'], 'queued')
+
     def test_viewer_claim_bypasses_reference_only_if_node_cannot_fit_it(self):
         self.queue.per_node_slots = True
         self.queue.node_photo_limits = {'cluster': 1, 'node-2': None}
