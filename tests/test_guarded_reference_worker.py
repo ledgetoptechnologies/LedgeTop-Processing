@@ -18,7 +18,66 @@ class GuardedWorkerTests(ReferenceEngineWorkerTests):
     def make_guarded(self):
         return self.make_worker(host_mutation_journal=True)
 
-    def test_guarded_real_worker_records_exact_identity_and_blocks_completion(self):
+    def test_completion_checkpoint_restarts_and_exact_receipt_releases(self):
+        self.worker = self.make_guarded()
+        self.engine.action = lambda action, identifier: {'uuid': identifier}
+        self.start()
+        original = NodeGate._save
+        def crash_after_checkpoint(gate, state):
+            original(gate, state)
+            if state.get('hostMutationJournal', {}).get('completion'):
+                raise OSError('synthetic crash after durable gate checkpoint')
+        with patch.object(NodeGate, '_save', crash_after_checkpoint):
+            with self.assertRaises(OSError): self.worker.poll(self.job['jobId'])
+        self.worker = self.make_worker()
+        outbox_id = self.worker.poll(self.job['jobId'])
+        self.assertEqual(self.engine.calls.count('download'), 1)
+        completion = self.outbox.get(outbox_id)
+        with self.assertRaises(WorkerHeld): self.worker.acknowledge_delivery(self.job['jobId'])
+        payload = completion['payload']
+        receipt = dict(type='durable-result-receipt', durable=True, receiptId='receipt-1',
+            storageReceiptId='storage-1', outboxId=outbox_id, payloadSha256=completion['digest'],
+            acceptedObjectIds=[o['id'] for o in payload['resultManifest']['objects']],
+            **{key: payload[key] for key in ('jobId', 'generation', 'environment',
+                'inputManifestSha256', 'pipelineDigest', 'resultManifestSha256')})
+        self.outbox.claim_next()
+        self.outbox.acknowledge(outbox_id, receipt)
+        self.worker.acknowledge_delivery(self.job['jobId'])
+        self.worker.acknowledge_delivery(self.job['jobId'])
+        with NodeGate('physical-engine') as gate:
+            state = gate.snapshot()
+            self.assertIsNone(state['reservation'])
+            self.assertNotIn('hostMutationJournal', state)
+        self.assertTrue((self.scratch / 'jobs/reservation-1/all.zip').exists())
+
+    def test_crash_after_release_replays_durable_tombstone(self):
+        self.worker = self.make_guarded()
+        self.engine.action = lambda action, identifier: {'uuid': identifier}
+        self.start()
+        outbox_id = self.worker.poll(self.job['jobId'])
+        completion = self.outbox.get(outbox_id)
+        payload = completion['payload']
+        receipt = dict(type='durable-result-receipt', durable=True, receiptId='receipt-2',
+            storageReceiptId='storage-2', outboxId=outbox_id, payloadSha256=completion['digest'],
+            acceptedObjectIds=[o['id'] for o in payload['resultManifest']['objects']],
+            **{key: payload[key] for key in ('jobId', 'generation', 'environment',
+                'inputManifestSha256', 'pipelineDigest', 'resultManifestSha256')})
+        self.outbox.claim_next()
+        self.outbox.acknowledge(outbox_id, receipt)
+        original = NodeGate._save
+        def crash_after_release(gate, state):
+            original(gate, state)
+            if state['reservation'] is None:
+                raise OSError('synthetic crash after durable release')
+        with patch.object(NodeGate, '_save', crash_after_release):
+            with self.assertRaises(OSError): self.worker.acknowledge_delivery(self.job['jobId'])
+        self.worker = self.make_worker()
+        self.worker.acknowledge_delivery(self.job['jobId'])
+        with NodeGate('physical-engine') as gate:
+            self.assertIsNone(gate.snapshot()['reservation'])
+        self.assertTrue((self.scratch / 'jobs/reservation-1/all.zip').exists())
+
+    def test_guarded_real_worker_records_exact_identity_and_checkpoints_completion(self):
         self.worker = self.make_guarded()
         self.engine.action = lambda action, identifier: {'success': True, 'uuid': identifier}
         self.assertEqual(self.start(), 'processing')
@@ -41,8 +100,14 @@ class GuardedWorkerTests(ReferenceEngineWorkerTests):
         # Restart with the default disabled does not unguard prior executions.
         self.worker = self.make_worker()
         self.assertEqual(self.start(), 'processing')
-        with self.assertRaises(WorkerHeld): self.worker.poll(self.job['jobId'])
-        self.assertEqual(self.engine.calls, ['initialize', 'upload'])
+        outbox = self.worker.poll(self.job['jobId'])
+        self.assertIsNotNone(outbox)
+        with NodeGate('physical-engine') as gate:
+            state = gate.snapshot()
+            self.assertEqual(state['hostMutationJournal']['completion']['outboxId'], outbox)
+            self.assertIsNotNone(state['reservation']['completionDigest'])
+        self.assertEqual(self.engine.calls.count('initialize'), 1)
+        self.assertEqual(self.engine.calls.count('upload'), 1)
 
     @unittest.skipUnless(hasattr(os, 'fork'), 'requires actual process death')
     def test_crash_during_actual_upload_leaves_pending_no_replay(self):
@@ -109,7 +174,10 @@ class GuardedActualHTTPTests(ReferenceEngineWorkerTests):
             journal.close()
         self.worker = self.make_worker()
         self.assertEqual(self.start(), 'processing' if valid else 'commit_pending')
-        with self.assertRaises(WorkerHeld): self.worker.poll(self.job['jobId'])
+        if valid:
+            self.assertIsNotNone(self.worker.poll(self.job['jobId']))
+        else:
+            with self.assertRaises(WorkerHeld): self.worker.poll(self.job['jobId'])
         self.assertEqual(fixture.counts()['commit'], 1)
 
     def test_http_matching_uuid_acknowledged(self):
