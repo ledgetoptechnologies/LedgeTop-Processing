@@ -132,7 +132,7 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
         legacy=dict(capabilityFingerprint=fixture['capabilities']['capabilityFingerprint'],optionsFingerprint=fixture['capabilities']['engines']['odm']['optionsFingerprint'],allowedOdmOptions=['resolution'],availableEngines=['odm'])
         policy=dict(capabilityFingerprint=legacy['capabilityFingerprint'],optionsFingerprint=legacy['optionsFingerprint'],availableEngines=['odm'],optionDefinitions={'resolution':{'type':'float','domain':{'min':-100,'max':100}},'quality':{'type':'enum','domain':['high','ultra']}})
         token='synthetic-jcs-viewer-token-0001'
-        def make_api(store,policy,authority=None): return PreparedSubmissionAPI(store,credentials=[dict(token=token,principalId='viewer-a',environment='production'),dict(token='synthetic-jcs-other-token-0001',principalId='viewer-b',environment='production'),dict(token='synthetic-jcs-stage-token-0001',principalId='viewer-a',environment='staging')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy},jcs_policies={'production':policy,'staging':policy},expected_authority_id=queue.authority_id if authority is None else authority)
+        def make_api(store,policy,authority=None,copykeys=None): return PreparedSubmissionAPI(store,credentials=[dict(token=token,principalId='viewer-a',environment='production'),dict(token='synthetic-jcs-other-token-0001',principalId='viewer-b',environment='production'),dict(token='synthetic-jcs-stage-token-0001',principalId='viewer-a',environment='staging')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy},jcs_policies={'production':policy,'staging':policy},expected_authority_id=queue.authority_id if authority is None else authority,copy_keys_by_identity=copykeys)
         with self.assertRaises(ValueError):
             PreparedSubmissionAPI(store,credentials=[dict(token=token,principalId='viewer-a',environment='production')],legacy_bearer_tokens=[],policies={'production':legacy,'staging':legacy},jcs_policies={'production':policy,'staging':policy})
         api=make_api(store,policy)
@@ -325,6 +325,27 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
                     self.assertEqual(get(prefix+'/result-manifest','synthetic-jcs-other-token-0001')[0],404)
                     server.api=make_api(ReferenceStore(queue,jcs_runtime_enabled=True),policy)
                     self.assertEqual(get(prefix+'/result-manifest')[1],body)
+                    from tests.viewer_receipt_signer import SyntheticViewerSigner
+                    signer=SyntheticViewerSigner()
+                    pins={'viewer-a':{'production':signer.trusted_keys}}
+                    server.api=make_api(ReferenceStore(queue,jcs_runtime_enabled=True),policy,copykeys=pins)
+                    acceptance=copy.deepcopy(fixture['acceptance'])
+                    acceptance.update(jobId=job['jobId'],generation=job['generation'],environment=job['environment'],inputManifestSha256=job['manifestSha256'],pipelineDigest=job['pipelineDigest'],resultManifestSha256=result['resultManifestSha256'],acceptedObjectIds=[o['id'] for o in result['objects']])
+                    envelope={'acceptance':acceptance,'viewerReceipt':signer.receipt(acceptance,result)}
+                    invalid=copy.deepcopy(envelope); invalid['viewerReceipt']['signature']='A'*86
+                    self.assertEqual(post(invalid,prefix+'/accepted-copies')[0],409)
+                    self.assertEqual(post(envelope,prefix+'/accepted-copies','synthetic-jcs-other-token-0001')[0],404)
+                    code,proof=post(envelope,prefix+'/accepted-copies');self.assertEqual(code,202);self.assertEqual(proof['state'],'verified_held');self.assertTrue(proof['created'])
+                    server.api=make_api(ReferenceStore(queue,jcs_runtime_enabled=True),policy,copykeys=pins)
+                    code,replay=post(envelope,prefix+'/accepted-copies');self.assertEqual(code,202);self.assertFalse(replay['created']);self.assertEqual(proof['proofSha256'],replay['proofSha256'])
+                    altered={'acceptance':acceptance,'viewerReceipt':signer.receipt(acceptance,result)}
+                    self.assertEqual(post(altered,prefix+'/accepted-copies')[0],409)
+                    altered=copy.deepcopy(envelope);altered['viewerReceipt']['signature']='A'*86
+                    self.assertEqual(post(altered,prefix+'/accepted-copies')[0],409)
+                    with queue._db() as db:
+                        self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_viewer_v3_copy_hold').fetchone()[0],1)
+                        self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_acceptances').fetchone()[0],0)
+
 
                 with queue._db() as db:
                     db.execute('UPDATE reference_viewer_v3_policy SET policy_json=? WHERE job_id=?',(original,job['jobId']))

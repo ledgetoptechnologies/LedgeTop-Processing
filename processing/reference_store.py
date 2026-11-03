@@ -51,6 +51,9 @@ _ENVELOPE_V2_SCHEMA = """CREATE TABLE reference_viewer_envelopes_v2 (
  environment TEXT NOT NULL, activation_id TEXT UNIQUE NOT NULL, viewer_task_id TEXT NOT NULL,
  viewer_attempt_id TEXT NOT NULL, envelope_json TEXT NOT NULL, envelope_sha256 TEXT NOT NULL,
  UNIQUE(principal_id, environment, viewer_attempt_id))"""
+_V3_COPY_HOLD_SCHEMA = """CREATE TABLE reference_viewer_v3_copy_hold (
+ job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), envelope_sha256 TEXT NOT NULL,
+ payload_json TEXT NOT NULL, payload_sha256 TEXT NOT NULL)"""
 _V3_POLICY_SCHEMA = """CREATE TABLE reference_viewer_v3_policy (
  job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), policy_json TEXT NOT NULL, policy_sha256 TEXT NOT NULL)"""
 _ENVELOPE_V2_DOMAIN = b'ltds-viewer-prepared-envelope-v2\x00'
@@ -165,6 +168,7 @@ class ReferenceStore:
             self._init_viewer_activation_schema(db)
             self._init_envelope_v2_schema(db)
             self._init_v3_policy_schema(db)
+            self._init_v3_copy_hold_schema(db)
             self._check_jcs_capability(db)
             if db.execute("SELECT 1 FROM reference_viewer_submission_owners WHERE protocol='ltds-viewer-prepared-envelope-jcs-v3' LIMIT 1").fetchone():
                 if not self.jcs_runtime_enabled:
@@ -256,6 +260,19 @@ class ReferenceStore:
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='reference_viewer_v3_policy'").fetchone():
             raise Conflict('unexpected v3 policy trigger')
 
+    @staticmethod
+    def _init_v3_copy_hold_schema(db):
+        row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_viewer_v3_copy_hold'").fetchone()
+        if row is None:
+            db.execute(_V3_COPY_HOLD_SCHEMA)
+            row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_viewer_v3_copy_hold'").fetchone()
+        if ' '.join(row[0].split())!=' '.join(_V3_COPY_HOLD_SCHEMA.split()): raise Conflict('v3 copy hold schema changed')
+        indexes=db.execute('PRAGMA index_list(reference_viewer_v3_copy_hold)').fetchall()
+        if len(indexes)!=1 or not indexes[0]['unique'] or indexes[0]['partial'] or tuple(x['name'] for x in db.execute('PRAGMA index_info('+indexes[0]['name']+')')) != ('job_id',): raise Conflict('v3 copy hold index changed')
+        fks=db.execute('PRAGMA foreign_key_list(reference_viewer_v3_copy_hold)').fetchall()
+        if len(fks)!=1 or (fks[0]['table'],fks[0]['from'],fks[0]['to'])!=('reference_jobs','job_id','job_id'): raise Conflict('v3 copy hold foreign key changed')
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='reference_viewer_v3_copy_hold'").fetchone(): raise Conflict('v3 copy hold trigger changed')
+
     def _check_jcs_capability(self, db):
         if not self.jcs_runtime_enabled and db.execute(
             "SELECT 1 FROM reference_viewer_submission_owners WHERE protocol='ltds-viewer-prepared-envelope-jcs-v3' LIMIT 1").fetchone():
@@ -337,6 +354,7 @@ class ReferenceStore:
         used += db.execute("SELECT COALESCE(SUM(length(principal_id)+length(environment)+length(request_digest)+length(protocol)),0) FROM reference_viewer_submission_owners").fetchone()[0]
         used += db.execute("SELECT COALESCE(SUM(length(CAST(envelope_json AS BLOB))+512),0) FROM reference_viewer_envelopes_v2").fetchone()[0]
         used += db.execute("SELECT COALESCE(SUM(length(CAST(policy_json AS BLOB))+64),0) FROM reference_viewer_v3_policy").fetchone()[0]
+        used += db.execute("SELECT COALESCE(SUM(length(CAST(payload_json AS BLOB))+128),0) FROM reference_viewer_v3_copy_hold").fetchone()[0]
         for table, column in (("reference_acceptances", "receipt_json"), ("reference_outbox", "payload_json"),
                               ("reference_viewer_receipts", "receipt_json"),
                               ("reference_viewer_transfers", "acceptance_json"),
@@ -640,6 +658,42 @@ class ReferenceStore:
             except (ValueError,TypeError,KeyError,json.JSONDecodeError):
                 raise Conflict('v3 result evidence invalid') from None
             return dict(binding,schemaVersion=1,view='result-manifest',resultManifest=result)
+
+    def verify_viewer_v3_copy_held(self, submission_id, payload, *, authenticated_principal, authenticated_environment, expected_authority_id, trusted_keys):
+        """Candidate verifies and journals only; it never records acceptance or cleanup authority."""
+        from .prepared_envelope_jcs_candidate import PROTOCOL as JCS_PROTOCOL
+        from .viewer_acceptance_receipt import verify_viewer_acceptance_receipt
+        from .viewer_result_manifest import derive_viewer_result_manifest, validate_viewer_acceptance
+        protocol._uuid(submission_id, 'submission ID')
+        protocol._closed(payload, ('acceptance','viewerReceipt'), 'copy envelope')
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');self._check_jcs_capability(db);self._require_viewer_authority(db,expected_authority_id)
+            found=self._scoped_prepared_job_id(db,submission_id,authenticated_principal,authenticated_environment,JCS_PROTOCOL)
+            if found is None: return None
+            row=self._row(db,found['job_id']);owner=self._submission_owner(db,row)
+            if owner is None: raise Conflict('owner unavailable')
+            prepared=db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?',(row['job_id'],)).fetchone()
+            if prepared is None or self._activation(db,row) is None or not self._v3_result_contract_ready():
+                raise JCSRuntimeUnavailable('v3 copy verification prerequisites unavailable')
+            if row['status']!='succeeded' or row['phase'] not in ('awaiting_acceptance','completed') or not row['result_json']:
+                raise Conflict('result is not ready')
+            try:
+                manifest=derive_viewer_result_manifest(json.loads(row['result_json']),job_id=row['job_id'],generation=row['generation'],environment=row['environment'],pipeline_digest=row['pipeline_digest'])
+                acceptance=validate_viewer_acceptance(payload['acceptance'],result_manifest=manifest,input_manifest_sha256=row['manifest_sha'])
+                if set(acceptance['acceptedObjectIds']) != {item['id'] for item in manifest['objects']}:
+                    raise ValueError('incomplete accepted closure')
+                expected=dict(jobId=row['job_id'],generation=row['generation'],environment=row['environment'],inputManifestSha256=row['manifest_sha'],pipelineDigest=row['pipeline_digest'],resultManifestSha256=manifest['resultManifestSha256'])
+                signed=verify_viewer_acceptance_receipt(payload['viewerReceipt'],trusted_keys=trusted_keys,expected=expected,result_manifest=manifest,accepted_object_ids=acceptance['acceptedObjectIds']).receipt
+                if len({acceptance['receiptId'],acceptance['storageReceiptId'],signed['receiptId'],signed['storageReceiptId']})!=4: raise ValueError('receipt IDs collide')
+            except (ValueError,TypeError,KeyError): raise Conflict('v3 copy signature or binding invalid') from None
+            wire=_json(dict(acceptance=acceptance,viewerReceipt=signed));sha=hashlib.sha256(wire.encode()).hexdigest()
+            prior=db.execute('SELECT * FROM reference_viewer_v3_copy_hold WHERE job_id=?',(row['job_id'],)).fetchone()
+            if prior:
+                if (prior['envelope_sha256'],prior['payload_json'],prior['payload_sha256'])!=(prepared['envelope_sha256'],wire,sha): raise Conflict('v3 held proof differs')
+                return {'state':'verified_held','created':False,'proofSha256':sha}
+            self._quota(db,len(wire.encode())+128)
+            db.execute('INSERT INTO reference_viewer_v3_copy_hold VALUES(?,?,?,?)',(row['job_id'],prepared['envelope_sha256'],wire,sha))
+            return {'state':'verified_held','created':True,'proofSha256':sha}
 
     def get_legacy_job(self, job_id, environment, *, private=False):
         """Environment-only callers cannot inspect principal-owned prepared jobs."""

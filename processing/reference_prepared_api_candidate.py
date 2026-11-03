@@ -21,7 +21,7 @@ def _token(token):
 
 
 class PreparedSubmissionAPI:
-    def __init__(self, store, *, credentials, legacy_bearer_tokens, policies, jcs_policies=None, expected_authority_id=None):
+    def __init__(self, store, *, credentials, legacy_bearer_tokens, policies, jcs_policies=None, expected_authority_id=None, copy_keys_by_identity=None):
         # Sequence rather than dict ensures duplicate credentials cannot be hidden.
         if type(credentials) not in (tuple, list) or not credentials or type(legacy_bearer_tokens) not in (tuple, list):
             raise ValueError('explicit credential inventories required')
@@ -66,6 +66,18 @@ class PreparedSubmissionAPI:
                     if type(name) is not str or not re.fullmatch(r'[a-z][a-z0-9-]{0,79}',name): raise ValueError('invalid option')
                     _validate_definition(definition)
         self._jcs_policies = copy.deepcopy(jcs_policies)
+        from .viewer_acceptance_receipt import validate_trusted_viewer_receipt_keys
+        if copy_keys_by_identity is None: copy_keys_by_identity = {}
+        if type(copy_keys_by_identity) is not dict: raise ValueError('invalid trusted copy registry')
+        self._copy_keys = {}
+        for principal, environments in copy_keys_by_identity.items():
+            p._slug(principal, 'copy principal')
+            if type(environments) is not dict: raise ValueError('invalid trusted copy registry')
+            for environment, keys in environments.items():
+                p._environment(environment)
+                clean=validate_trusted_viewer_receipt_keys(keys)
+                if not clean: raise ValueError('empty trusted copy registry')
+                self._copy_keys[(principal,environment)]=clean
         self.store = store
         self._credentials = tuple(configured)
         self._policies = copy.deepcopy(policies)
@@ -120,7 +132,12 @@ class PreparedSubmissionAPI:
                     authenticated_environment=environment, expected_protocol='ltds-viewer-prepared-envelope-jcs-v3',
                     expected_authority_id=self._expected_authority_id)
                 if owned is None: return Response(404, {'error':'not_found'})
-                return Response(503, {'error':'delivery_verification_unavailable'})
+                keys=self._copy_keys.get((principal,environment)) if delivery[2]=='accepted-copies' else None
+                if keys is None: return Response(503, {'error':'delivery_verification_unavailable'})
+                payload=p.decode_submission(body)
+                held=self.store.verify_viewer_v3_copy_held(delivery[1],payload,authenticated_principal=principal,
+                    authenticated_environment=environment,expected_authority_id=self._expected_authority_id,trusted_keys=keys)
+                return Response(202,dict(held,authorityId=self._expected_authority_id)) if held is not None else Response(404,{'error':'not_found'})
             activation = re.fullmatch(r'/ltds/prepared/v3/submissions/([0-9a-f-]{36})/activation', path) if type(path) is str else None
             if method == 'POST' and activation and self._jcs_policies is not None:
                 request = p.decode_submission(body)
