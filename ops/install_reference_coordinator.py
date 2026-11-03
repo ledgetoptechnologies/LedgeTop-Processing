@@ -158,7 +158,7 @@ def local_clients():
     return env, api, operator
 
 
-def activity(api):
+def activity(api, *, retained_viewer=False):
     if api.json('GET', '/v1/prototype/authority')['authorityId'] != AUTHORITY:
         raise CutoverStopped('queue_authority_changed')
     jobs = api.json('GET', '/v1/prototype/jobs')['jobs']
@@ -174,9 +174,12 @@ def activity(api):
                 raise CutoverStopped('native_viewer_not_idle')
     # This facade intentionally has no /task/list endpoint. Read only aggregate
     # state through the existing owner container; never mistake a 404 for empty.
+    # retained_viewer: an update keeps terminal Viewer tasks; only count the
+    # ones that are not complete. The historical installer still requires none.
+    where = "stage NOT IN ('succeeded','failed','cancelled') OR phase!='complete'" if retained_viewer else 'removed=0'
     query = """import json,sqlite3
 db=sqlite3.connect('file:/prototype-state/jobs.sqlite3?mode=ro',uri=True,timeout=3)
-try: print(json.dumps({'nativeViewerTasks':db.execute('SELECT COUNT(*) FROM viewer_tasks WHERE removed=0').fetchone()[0]}))
+try: print(json.dumps({'nativeViewerTasks':db.execute('SELECT COUNT(*) FROM viewer_tasks WHERE """ + where + """').fetchone()[0]}))
 finally: db.close()
 """
     native = json.loads(docker('exec','--user','10001:10001',NAME,'python','-c',query))
