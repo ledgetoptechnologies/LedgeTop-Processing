@@ -44,6 +44,20 @@ class NodeRoleTests(unittest.TestCase):
                     with patch.dict(os.environ, {'PROCESSING_INVENTORY_LEGACY_HOST_ID':'cluster-pc'}):
                         self.assertEqual(from_environment().node_inventory[0]['maxPhotos'], 1000)
 
+    def test_inventory_cannot_enable_legacy_reference_scheduler(self):
+        # The reference path still has a global slot and fixed cluster/main
+        # routing. Until it implements atomic inventory-aware claims, startup
+        # must not silently combine it with the per-node Viewer scheduler.
+        node = {'id': 'small', 'physicalHostId': 'cluster-pc',
+                'origin': 'http://192.0.2.1:3000', 'tokenEnv': 'SMALL_TOKEN',
+                'maxPhotos': 1000, 'capabilities': ['odm']}
+        env = {'PROCESSING_API_TOKEN': TOKEN, 'PROCESSING_PER_NODE_SLOTS': '1',
+               'PROCESSING_NODE_INVENTORY': json.dumps([node]),
+               'PROCESSING_REFERENCE_CONFIG': '/synthetic/reference.json'}
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(ValueError, 'no reference runtime'):
+                from_environment()
+
     def claim(self, node, profile):
         return self.queue.claim({'workerId': node + '-worker', 'nodeId': node,
                                  'profiles': [profile]})
