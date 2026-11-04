@@ -1014,8 +1014,9 @@ class ViewerService:
                             key=lambda j: (j['environment'] != 'production', jobs.index(j)))
             if not queued or (not self.inventory and queued[0]['profile'] != VIEWER_PROFILE):
                 return
-            if queued[0]['environment'] == 'staging' and any(
-                    j['environment'] == 'production' and j['status'] in ('queued', 'running', 'held') for j in jobs):
+            # Queue-owned fence: each node's answer is rechecked below and at claim.
+            if queued[0]['environment'] == 'staging' and not any(
+                    self.queue.staging_may_claim(node) for node in self.queue.node_ids):
                 return
             first_viewer = next((job for job in queued if job['profile'] == VIEWER_PROFILE
                                  and job['environment'] == queued[0]['environment']), None)

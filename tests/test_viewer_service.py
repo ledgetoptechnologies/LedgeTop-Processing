@@ -470,10 +470,8 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.fleet.max_active, 2)
         self.finish(first)
         self.service.tick()
-        self.assertIsNone(self.task(third)['node_id'])
-        self.finish(second)
-        self.service.tick()
-        self.assertEqual(self.task(third)['node_id'], 'cluster')
+        self.assertEqual(self.task(third)['node_id'], 'cluster')  # Running production keeps only main.
+        self.assertEqual(self.task(second)['job']['status'], 'running')
 
     def test_parallel_transfer_does_not_block_other_node_or_release_its_slot(self):
         self.queue.per_node_slots = True
@@ -837,14 +835,20 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.task(production)['node_id'], 'main')
         self.assertIsNone(self.task(waiting)['node_id'])
 
-    def test_opt_in_staging_waits_while_production_is_running_or_held(self):
+    def test_opt_in_staging_uses_idle_node_beside_running_production(self):
         self.queue.per_node_slots = True
         production = self.submit(environment='production')
         self.service.tick()
         staging = self.submit(environment='staging')
         self.service.tick()
-        self.assertIsNone(self.task(staging)['node_id'])
+        self.assertEqual((self.task(production)['node_id'], self.task(staging)['node_id']), ('cluster', 'main'))
+
+    def test_opt_in_held_production_blocks_staging_on_every_node(self):
+        self.queue.per_node_slots = True
+        production = self.submit(environment='production')
+        self.service.tick()
         self.queue.operator(self.task(production)['job_id'], 'hold', {'note':'inspect'})
+        staging = self.submit(environment='staging')
         self.service.tick()
         self.assertIsNone(self.task(staging)['node_id'])
 
