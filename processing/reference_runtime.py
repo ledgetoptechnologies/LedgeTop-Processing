@@ -6,6 +6,7 @@ initial discovered allowlist admits numeric/boolean options only; string enums
 and CRS/EPSG string settings require a later typed option-value contract.
 """
 from contextlib import contextmanager
+import copy
 from dataclasses import dataclass
 import hashlib
 import hmac
@@ -30,6 +31,7 @@ MAX_CONFIG_BYTES = 64 * 1024
 # This draft schema has not been qualified for upgrade, rollback, or restore.
 # Tests may patch this in an isolated fixture; production must remain closed.
 STAGED_ACK_SCHEMA_QUALIFIED = False
+PREPARED_RUNTIME_SCHEMA_QUALIFIED = False
 _UNSAFE = re.compile(r"\b(file|filename|path|directory|folder|url|uri|endpoint|host|hostname|"
                      r"token|credential|secret|password|key|script|command|upload|download)\b", re.I)
 
@@ -52,6 +54,7 @@ class ReferenceSettings:
     inbound_ca_sha256: str | None = None
     outbound_ca_sha256: str | None = None
     inbound_client_bindings: tuple | None = None
+    prepared_viewer: dict | None = None
 
 
 def _file(path, *, private):
@@ -109,10 +112,10 @@ def _read_ca_bundle(path):
         raise RuntimeConfigurationError('invalid CA bundle') from None
 
 
-def _validated_client_bindings(entries, viewers, workers, staged):
+def _validated_client_bindings(entries, viewers, workers, staged, prepared=None):
     if type(entries) not in (tuple,list) or not entries or len(entries)>64:
         raise RuntimeConfigurationError('explicit inbound client bindings required')
-    expected = list(viewers) + [item['bearer'] for item in workers.values()] + list(staged or {})
+    expected = list(viewers) + [item['bearer'] for item in workers.values()] + list(staged or {}) + [entry['token'] for entry in (prepared or {}).get('principals',())]
     if len(expected)!=len(set(expected)):
         raise RuntimeConfigurationError('ambiguous inbound credential registry')
     pairs=[]
@@ -134,6 +137,30 @@ def _validated_client_bindings(entries, viewers, workers, staged):
             or any(sum(token == item[1] for item in pairs)>2 for token in expected)):
         raise RuntimeConfigurationError('inbound client bindings must cover credentials with at most two certificates')
     return tuple(pairs)
+
+
+def _validated_prepared_candidate(value, *, forbidden_tokens):
+    """Validate only server-owned private config; never read request fields."""
+    from .reference_prepared_api_candidate import PreparedSubmissionAPI
+    p._closed(value, ('authorityId','principals','legacyPolicies','jcsPolicies'), 'prepared candidate config')
+    p._uuid(value['authorityId'], 'prepared authority')
+    principals=value['principals']
+    if type(principals) is not list or not 1 <= len(principals) <= 32:
+        raise RuntimeConfigurationError('bounded prepared principals required')
+    identities=[]; tokens=[]
+    for entry in principals:
+        p._closed(entry, ('token','principalId','environment'), 'prepared principal')
+        token=entry['token'];p._slug(entry['principalId'],'prepared principal');p._environment(entry['environment'])
+        if type(token) is not str or not token.isascii() or not 32<=len(token)<=4096 or any(ord(c)<33 or ord(c)>126 for c in token):
+            raise RuntimeConfigurationError('invalid prepared principal credential')
+        identities.append((entry['principalId'],entry['environment']));tokens.append(token)
+    if len(set(tokens))!=len(tokens) or len(set(identities))!=len(identities) or set(tokens)&set(forbidden_tokens):
+        raise RuntimeConfigurationError('prepared principal scope must be unique')
+    class ValidationStore:
+        jcs_runtime_enabled=True
+    PreparedSubmissionAPI(ValidationStore(),credentials=principals,legacy_bearer_tokens=list(forbidden_tokens),
+        policies=value['legacyPolicies'],jcs_policies=value['jcsPolicies'],expected_authority_id=value['authorityId'])
+    return copy.deepcopy(value)
 
 
 def load_reference_settings(path, config):
@@ -171,6 +198,7 @@ def load_reference_settings(path, config):
         if acceptance_enabled:
             required.add("viewerAcceptance")
         allowed = required | ({"recoveryBindings"} if version in (3, 4, 5, 6) else set())
+        if version == 6: allowed.add('preparedViewer')
         if not required <= set(value) or set(value) - allowed:
             raise RuntimeConfigurationError("runtime configuration fields differ")
         listener = value["listener"]
@@ -310,12 +338,14 @@ def load_reference_settings(path, config):
                 viewer_targets[environment] = {"origin": origin, "keyId": key_id, "secret": secret}
             if len(set(target_secrets)) != len(target_secrets) or not viewer_keys:
                 raise RuntimeConfigurationError("distinct Viewer service keys and receipt pins are required")
+        prepared = (_validated_prepared_candidate(value['preparedViewer'], forbidden_tokens=(*credentials,*legacy))
+                    if version == 6 and 'preparedViewer' in value else None)
         inbound_bindings = (_validated_client_bindings(value['inboundClientBindings'],
-            {token: env for env, token in viewers.items()}, workers, staged) if version == 6 else None)
+            {token: env for env, token in viewers.items()}, workers, staged, prepared) if version == 6 else None)
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
                                  {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery,
                                  viewer_keys, viewer_targets or None, staged, inbound_client_ca,
-                                 inbound_ca_sha256, outbound_ca_sha256, inbound_bindings)
+                                 inbound_ca_sha256, outbound_ca_sha256, inbound_bindings, prepared)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -349,11 +379,22 @@ def discovered_policy(snapshot, config):
 
 
 class _DynamicAPI:
-    def __init__(self, control, config, settings, discover, staged_ack=None):
+    def __init__(self, control, config, settings, discover, staged_ack=None, prepared=None):
         self.control, self.config, self.settings, self.discover, self.staged_ack = control, config, settings, discover, staged_ack
+        self.prepared = prepared
 
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
         from .viewer_staged_ack import ROUTE
+        if type(path) is str and (path.startswith('/ltds/prepared/v2/') or path.startswith('/ltds/prepared/v3/')):
+            if self.prepared is None: return Response(404, {'error':'not_found'})
+            gate=getattr(self.control.viewer.store.queue,'admission_drain',None)
+            if method == 'POST' and gate is not None:
+                from .admission_drain import AdmissionClosed
+                try:
+                    with gate.admit(): return self.prepared.handle(method,path,headers,body,protected_transport=protected_transport)
+                except AdmissionClosed:
+                    return Response(503, {'error':'admission_draining'})
+            return self.prepared.handle(method,path,headers,body,protected_transport=protected_transport)
         if path.startswith(ROUTE):
             if self.staged_ack is None:return Response(404,{'error':'not_found'})
             return self.staged_ack.handle(method,path,headers,body,protected_transport=protected_transport)
@@ -416,10 +457,22 @@ class ReferenceRuntime:
                     # or feature startup can expose the configured authority.
                     RecoveryNodeBinding(**vars(physical))
                 recovery=dict(recovery)
+            prepared = None
+            if settings.prepared_viewer is not None:
+                if not PREPARED_RUNTIME_SCHEMA_QUALIFIED or settings.inbound_client_ca is None:
+                    raise RuntimeConfigurationError('prepared runtime schema and mTLS not qualified')
+                forbidden = list(settings.viewer_bearers) + [item[key] for item in settings.workers.values() for key in ('bearer','resultBearer')]
+                forbidden += list(settings.staged_ack_bearers or {})
+                forbidden += [secret for secret in (config.api_token,config.prototype_operator_token,config.prototype_observer_token,
+                    config.viewer_token,config.viewer_staging_token,config.local_node_token,config.main_node_token) if secret]
+                forbidden += [item['secret'] for item in (settings.viewer_acceptance_targets or {}).values()]
+                prepared = _validated_prepared_candidate(settings.prepared_viewer,forbidden_tokens=forbidden)
+                if prepared['authorityId'] != queue.authority_id:
+                    raise RuntimeConfigurationError('prepared authority mismatch')
             self._inbound_client_bindings = None
             if settings.inbound_client_ca is not None:
                 self._inbound_client_bindings = _validated_client_bindings(settings.inbound_client_bindings,
-                    settings.viewer_bearers, settings.workers, settings.staged_ack_bearers)
+                    settings.viewer_bearers, settings.workers, settings.staged_ack_bearers, prepared)
             elif settings.inbound_client_bindings is not None:
                 raise RuntimeConfigurationError('client bindings require inbound client CA')
             server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -462,7 +515,8 @@ class ReferenceRuntime:
             self.store = ReferenceStore(queue, local_max_photos=config.local_max_photos,
                 local_max_input_bytes=config.local_max_input_bytes, main_node_id=None if inventory else "main",
                 node_inventory=inventory, node_readiness=readiness_cache.get if readiness_cache else None,
-                viewer_required_environments=tuple(settings.viewer_acceptance_targets or ()))
+                viewer_required_environments=tuple(settings.viewer_acceptance_targets or ()),
+                jcs_runtime_enabled=prepared is not None)
             self._streams = threading.BoundedSemaphore(settings.stream_budget["maxConcurrent"])
             proxy = ResultProxy({node: worker["resultOrigin"] for node, worker in settings.workers.items()},
                 worker_bearers={node: worker["resultBearer"] for node, worker in settings.workers.items()},
@@ -515,7 +569,12 @@ class ReferenceRuntime:
                 if staged_tokens & existing or not {binding['environment'] for binding in settings.staged_ack_bearers.values()} <= set(settings.viewer_bearers.values()):
                     raise RuntimeConfigurationError('staged credential scope or separation changed')
                 staged=ViewerStagedAck(viewer_service,settings.staged_ack_bearers)
-            self.api = _DynamicAPI(self.control, config, settings, discover, staged)
+            prepared_api = None
+            if prepared is not None:
+                from .reference_prepared_api_candidate import PreparedSubmissionAPI
+                prepared_api=PreparedSubmissionAPI(self.store,credentials=prepared['principals'],legacy_bearer_tokens=forbidden,
+                    policies=prepared['legacyPolicies'],jcs_policies=prepared['jcsPolicies'],expected_authority_id=prepared['authorityId'])
+            self.api = _DynamicAPI(self.control, config, settings, discover, staged, prepared_api)
         except Exception:
             raise RuntimeConfigurationError("reference TLS runtime initialization failed") from None
 
