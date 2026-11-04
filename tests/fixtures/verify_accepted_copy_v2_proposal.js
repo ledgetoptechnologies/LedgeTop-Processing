@@ -6,7 +6,8 @@ if(!viewer||!path.isAbsolute(viewer))throw new Error('absolute Viewer checkout r
 const p=require(path.join(viewer,'apps/viewer/server/referenceProtocol'));
 const vector=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));
 const {signature,...body}=vector.receipt,bytes=p.canonicalBytes(body);
+const acceptanceSha=crypto.createHash('sha256').update(Buffer.concat([Buffer.from('LTDS-OUTER-ACCEPTANCE-V1\0','ascii'),p.canonicalBytes(vector.acceptance)])).digest('hex');
 const digest=crypto.createHash('sha256').update(bytes).digest('hex');
 const ok=crypto.verify(null,Buffer.concat([Buffer.from('LTDS-VIEWER-ACCEPTED-COPY-ACK-V2\0','ascii'),bytes]),vector.publicKeyPem,Buffer.from(signature,'base64url'));
-if(!ok||digest!==vector.bodyCanonicalSha256)throw new Error('proposal vector mismatch');
+if(!ok||digest!==vector.bodyCanonicalSha256||acceptanceSha!==body.acceptancePayloadSha256)throw new Error('proposal vector mismatch');
 process.stdout.write(JSON.stringify({verified:true,bodyCanonicalSha256:digest}));

@@ -23,7 +23,9 @@ The proposed change below is not yet implemented by either endpoint.
 ## Candidate wire shape
 
 Keep that endpoint and outer closed object `{acceptance,viewerReceipt}`;
-select v2 only through an explicitly negotiated server-owned policy. The
+select v2 only through an explicitly negotiated server-owned policy, durably
+pinned to the prepared submission before acceptance. A v2-bound submission
+must never silently downgrade or fall back to v1 on error. The
 Viewer signs the following closed `viewerReceipt` object (the unsigned fields
 are exactly the v1 fields except protocol/schema version, plus those listed):
 
@@ -32,21 +34,32 @@ are exactly the v1 fields except protocol/schema version, plus those listed):
   `generation`, `environment`, `inputManifestSha256`, `pipelineDigest`,
   `resultManifestSha256`, `acceptedObjectIds`, `objects`, and `acceptedAt`.
 * `coordinatorAuthorityId`, `viewerPrincipalId`: safe ASCII IDs from the
-  authenticated, server-owned binding, not claimed authority from a request.
+  authenticated, server-owned binding. The principal identifies the Viewer
+  acceptance service, never a human. Viewer derives the authority from an
+  independently authenticated Processing peer, not request JSON.
 * `submissionId`, `activationId`, `viewerTaskId`, `viewerAttemptId`: lowercase
   canonical UUIDs bound to the persisted prepared envelope/activation.
 * `preparedEnvelopeSha256`: the exact v3 protocol envelope digest, not an
   arbitrary raw-body hash; compare to stored prepare/activation identity.
-* `acceptanceReceiptId`, `acceptanceStorageReceiptId`: exact outer acceptance
-  IDs, preventing substitution of another otherwise matching unsigned envelope.
+* `acceptanceReceiptId`, `acceptanceStorageReceiptId`: exact outer acceptance IDs.
+* `acceptancePayloadSha256`: lowercase SHA-256 of `ASCII("LTDS-OUTER-ACCEPTANCE-V1") ||
+  0x00 || canonical(acceptance)`, binding all outer fields including IDs,
+  validation version, timestamp, scope and ordered accepted-object IDs. The
+  outer acceptance must be closed, duplicate-free and restricted to the same
+  ASCII/integer canonical profile before computing this digest.
 * `signature`: canonical unpadded base64url encoding of 64 Ed25519 bytes.
 
 Receipt IDs and identifiers use the existing bounded v1 ASCII identifier
 grammar; `generation` is 1..2^53-1, byte sizes are 0..2^53-1, hashes lowercase
 64 hex, timestamps valid UTC millisecond `YYYY-MM-DDTHH:mm:ss.sssZ`.
-All strings in this closed receipt are ASCII. Require `objects` sorted uniquely
-by ID, `acceptedObjectIds` exactly the same ordered IDs, exact full required
-result closure, and exact size/hash/role mapping through the trusted persisted
+All strings in this closed receipt are ASCII. Require unique `objects` and
+`acceptedObjectIds` in the exact same order as the outer acceptance and the
+applicable trusted result-manifest closure. Never silently sort a different
+outer order: the current v1 signer sorts IDs while schema-v2 acceptance can
+require manifest order. For partial versus full TreeDar results, the exact
+required closure/order must be agreed from trusted result policy before
+release; this proposal defaults to the complete designated closure, not a
+caller-selected subset. Require exact size/hash/role mapping through the trusted persisted
 result manifest. Receipt object records remain `{id,byteSize,sha256}` as in
 v1; role is checked through the pinned result manifest digest. Do not allow
 duplicate keys in raw JSON, unexpected properties, duplicate IDs, booleans as
@@ -102,12 +115,17 @@ verified durable result state. Key IDs map to a server-owned pinned Viewer
 public key and issuer, scoped to the principal/environment; reject a key or
 issuer reused across identities unless a separately reviewed rotation policy
 explicitly permits it. Check all these values against the signed body; never
-construct expected values from the receipt. Compare outer acceptance IDs and
-binding/closure against signed values and trusted state. Require four distinct
+construct expected values from the receipt. Reject duplicate keys from the raw
+HTTP bytes before ordinary JSON parsing can collapse them, then compare the
+outer acceptance digest, IDs and binding/closure against signed values and
+trusted state. Require four distinct
 receipt IDs if retaining the current v3 envelope's namespace rule, and require
 the same identity across both receipts and all referenced manifests.
 
-After its agreed filesystem durability barriers and verified copy, Viewer must
+Viewer must ACK only after exact closure and file/directory fsync under an
+agreed persistent-mount and underlying filesystem/ZFS durability boundary;
+mount identity, filesystem guarantees and user-controlled TrueNAS topology
+are not established by a signature. After those barriers and verified copy, Viewer must
 persist the exact receipt bytes, stable receipt IDs and verified copied-object
 inventory in one database transaction before returning/sending it. Database
 and filesystem writes are not assumed to be jointly atomic; crash recovery
@@ -137,7 +155,8 @@ Negative vectors must include scope swaps, changed IDs and object bytes,
 outer acceptance substitution, reordered/partial closure, replay conflict,
 wrong key/domain, duplicate JSON keys, noncanonical signatures, wrong protocol,
 credential revocation/rotation, crash between copy/receipt and every journal
-boundary. They establish interoperability only, not production durability.
+boundary, protocol-negotiation pinning/no fallback, key rotation and revocation
+and ZFS/mount boundaries. They establish interoperability only, not production durability.
 The current synthetic vector signs placeholder manifest digests; it validates
 canonical/signature interoperability and illustrates independent scope checks,
 not actual manifest closure, strict raw JSON parsing, or an implemented v2

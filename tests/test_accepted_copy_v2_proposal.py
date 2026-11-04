@@ -36,20 +36,30 @@ class AcceptedCopyV2ProposalVectors(unittest.TestCase):
     def test_scope_swaps_and_wrong_domain_break_signature(self):
         for field in ('coordinatorAuthorityId','viewerPrincipalId','submissionId','activationId',
                       'viewerTaskId','viewerAttemptId','preparedEnvelopeSha256',
-                      'acceptanceReceiptId','acceptanceStorageReceiptId','resultManifestSha256'):
+                      'acceptanceReceiptId','acceptanceStorageReceiptId','acceptancePayloadSha256','resultManifestSha256'):
             with self.subTest(field=field):
                 changed={**self.body,field:'changed'}
                 with self.assertRaises(InvalidSignature):self.key.verify(self.signature,DOMAIN+canonical_json(changed))
         with self.assertRaises(InvalidSignature):
             self.key.verify(self.signature,b'LTDS-VIEWER-ACCEPTED-COPY-ACK-V1\0'+canonical_json(self.body))
 
-    def test_synthetic_vector_covers_exact_sorted_objects(self):
+    def test_synthetic_vector_preserves_nonlexical_acceptance_order(self):
         objects=self.body['objects']
         self.assertEqual(self.body['acceptedObjectIds'],[v['id'] for v in objects])
-        self.assertEqual(self.body['acceptedObjectIds'],sorted(set(self.body['acceptedObjectIds'])))
+        self.assertEqual(self.body['acceptedObjectIds'],self.vector['acceptance']['acceptedObjectIds'])
+        self.assertNotEqual(self.body['acceptedObjectIds'],sorted(self.body['acceptedObjectIds']))
+        self.assertEqual(len(set(self.body['acceptedObjectIds'])),len(objects))
         self.assertEqual(len({self.body[x] for x in ('receiptId','storageReceiptId','acceptanceReceiptId','acceptanceStorageReceiptId')}),4)
         self.assertEqual(len(self.signature),64)
         self.assertEqual(base64.urlsafe_b64encode(self.signature).decode().rstrip('='),self.receipt['signature'])
+
+    def test_outer_mutation_with_same_ids_changes_signed_digest(self):
+        acceptance=self.vector['acceptance']
+        def digest(value):return hashlib.sha256(b'LTDS-OUTER-ACCEPTANCE-V1\0'+canonical_json(value)).hexdigest()
+        self.assertEqual(digest(acceptance),self.body['acceptancePayloadSha256'])
+        changed={**acceptance,'acceptedAt':'2026-11-04T00:00:01.000Z'}
+        self.assertEqual(changed['receiptId'],acceptance['receiptId'])
+        self.assertNotEqual(digest(changed),self.body['acceptancePayloadSha256'])
 
     def test_valid_signature_is_not_independent_scope_authority(self):
         # This only illustrates a required semantic comparison, not a validator.

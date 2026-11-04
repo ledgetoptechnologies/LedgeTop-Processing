@@ -1,7 +1,24 @@
 {
   "status": "synthetic_proposal_not_for_production",
   "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=\n-----END PUBLIC KEY-----\n",
-  "bodyCanonicalSha256": "caf4016e525b8c25427950f5c318b24a3abdd148669e947de56123bf3bb7dfdf",
+  "bodyCanonicalSha256": "f4e555edbabc6ecf8bb44cb169f4de68baff7d821928e61bc80b01bba1177e5d",
+  "acceptance": {
+    "schemaVersion": 1,
+    "receiptId": "33333333-3333-4333-8333-333333333333",
+    "storageReceiptId": "44444444-4444-4444-8444-444444444444",
+    "jobId": "job-test",
+    "generation": 1,
+    "environment": "staging",
+    "inputManifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "pipelineDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "resultManifestSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "acceptedObjectIds": [
+      "object-b",
+      "object-a"
+    ],
+    "acceptedAt": "2026-11-04T00:00:00.000Z",
+    "validationVersion": "ltds-reference-v1"
+  },
   "receipt": {
     "protocol": "ltds-viewer-accepted-copy-v2",
     "schemaVersion": 2,
@@ -11,6 +28,7 @@
     "storageReceiptId": "22222222-2222-4222-8222-222222222222",
     "acceptanceReceiptId": "33333333-3333-4333-8333-333333333333",
     "acceptanceStorageReceiptId": "44444444-4444-4444-8444-444444444444",
+    "acceptancePayloadSha256": "d004bca0994e2e8c72279f7ac2594728c617a4a66177e96c56e8be1f3d8e56da",
     "coordinatorAuthorityId": "coord-test",
     "viewerPrincipalId": "viewer-test",
     "submissionId": "55555555-5555-4555-8555-555555555555",
@@ -25,23 +43,23 @@
     "pipelineDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "resultManifestSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
     "acceptedObjectIds": [
-      "object-a",
-      "object-b"
+      "object-b",
+      "object-a"
     ],
     "objects": [
-      {
-        "id": "object-a",
-        "byteSize": 3,
-        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-      },
       {
         "id": "object-b",
         "byteSize": 0,
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "id": "object-a",
+        "byteSize": 3,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
       }
     ],
     "acceptedAt": "2026-11-04T00:00:00.000Z",
-    "signature": "WFW4xG-FKs-aLFtMw3G8oScNVKYQpOA6T4No8B65HDVpEOzKW8_gkajxJwFFfsME2JEcu1L3jTPcpjHvidUiAg"
+    "signature": "05peZw4CaVBxbremcbsMNblcfmuEaeQ2BfGF914MfTwTT4EHacuH8NPv5qJWAT7VrHzG5vMKyTIFgX18FzyxAg"
   },
   "negativeCases": [
     {
@@ -75,6 +93,12 @@
       "expected": "reject_scope"
     },
     {
+      "case": "outer-acceptance-digest-swap",
+      "field": "acceptancePayloadSha256",
+      "value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expected": "reject_scope"
+    },
+    {
       "case": "missing-object",
       "field": "acceptedObjectIds",
       "value": [
@@ -86,8 +110,8 @@
       "case": "reordered-objects",
       "field": "acceptedObjectIds",
       "value": [
-        "object-b",
-        "object-a"
+        "object-a",
+        "object-b"
       ],
       "expected": "reject_closure"
     },
