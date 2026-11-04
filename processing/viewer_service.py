@@ -1011,9 +1011,9 @@ class ViewerService:
                 return
             first_viewer = next((job for job in queued if job['profile'] == VIEWER_PROFILE
                                  and job['environment'] == queued[0]['environment']), None)
-            if first_viewer is None:
+            if first_viewer is None and not (self.inventory and any(job['profile'] == VIEWER_PROFILE for job in queued)):
                 return
-            task = self.store.task_for_job(first_viewer['id'])
+            task = self.store.task_for_job(first_viewer['id']) if first_viewer else None
             nodes = {}
             if self.inventory:
                 occupied = {j['nodeId'] for j in jobs if j['status'] in ('running', 'held')}
@@ -1047,14 +1047,23 @@ class ViewerService:
                 held = False
                 top_environment = queued[0]['environment']
                 for candidate in queued:
-                    if candidate['environment'] != top_environment:
-                        break
                     if candidate['profile'] != VIEWER_PROFILE:
                         continue
-                    current = self.store.task_for_job(candidate['id'])
+                    staging = candidate['environment'] == 'staging'
+                    try:
+                        current = self.store.task_for_job(candidate['id'])
+                    except Conflict:
+                        # Corrupt staging stops only staging behind production.
+                        if candidate['environment'] == top_environment:
+                            raise
+                        break
                     uncertain = False
                     for spec, limit, answered in available:
                         if all(maximum is None or current['images_count'] <= maximum for maximum in (spec['maxPhotos'], limit)):
+                            # A node production might use is closed to staging,
+                            # so it neither takes the job nor holds it back.
+                            if staging and not self.queue.staging_may_claim(spec['id']):
+                                continue
                             if not answered:
                                 uncertain = True
                                 continue
@@ -1074,7 +1083,8 @@ class ViewerService:
                     if node_id is not None or held:
                         break
                 if node_id is None:
-                    self.store.update(task['uuid'], phase='waiting_node', error='no_eligible_node')
+                    if task is not None:
+                        self.store.update(task['uuid'], phase='waiting_node', error='no_eligible_node')
                     return
             else:
                 for node, role, origin, token in (

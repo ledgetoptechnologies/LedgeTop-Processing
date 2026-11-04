@@ -88,6 +88,7 @@ class ReferenceStore:
                         or not isinstance(spec.get('capabilities'), (list, tuple))):
                     raise ValueError('invalid reference inventory capability or limit')
             queue.node_scratch_evidence = self._scratch_evidence
+            queue.reference_claim_landing = self._production_claim_landing
         if not isinstance(viewer_required_environments, (tuple, list, set, frozenset)):
             raise ValueError('invalid Viewer acceptance environments')
         self.viewer_required_environments = frozenset(viewer_required_environments)
@@ -377,9 +378,27 @@ class ReferenceStore:
         are checked again in this transaction. A job passes an earlier node only
         when that node is occupied, observed out, or cannot run it. An unknown
         earlier node that might run it stops any later node from taking it;
-        status() bounds how long a node stays unknown. This path is not enabled
-        by runtime configuration.
+        status() bounds how long a node stays unknown. Staging is scanned only
+        when no production job has an assignment, and sees a node only if every
+        queued production job is proven unable to run there. This path is not
+        enabled by runtime configuration.
         """
+        observed = self._inventory_observations(db)
+        if observed is None:
+            return None
+        assigned = self._inventory_assignment(db, 'production', observed)
+        if assigned is None:
+            assigned = self._inventory_assignment(db, 'staging', {
+                name: state if self.queue._staging_may_pass(db, name) else False
+                for name, state in observed.items()})
+        return assigned[1] if assigned and assigned[0] == node_id else None
+
+    def _production_claim_landing(self, db):
+        """Tell Viewer staging that a production reference claim is about to land."""
+        observed = self._inventory_observations(db)
+        return observed is None or self._inventory_assignment(db, 'production', observed) is not None
+
+    def _inventory_observations(self, db):
         occupied = {r['node_id'] for r in db.execute(
             "SELECT node_id FROM jobs WHERE status IN ('running','held')")}
         if not occupied.issubset(set(self.queue.node_ids)):
@@ -390,35 +409,27 @@ class ReferenceStore:
             observed[name] = (False if name in occupied
                 or self.queue._node(db, name)['state'] not in ('active', 'scheduled')
                 or PROFILE not in self.queue.node_profiles(name) else self._observe(name))
-        jobs = db.execute("""SELECT id,profile,environment FROM jobs WHERE status='queued'
-            ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq""").fetchall()
-        if not jobs:
-            return None
-        environment = jobs[0]['environment']
-        if environment == 'staging' and db.execute("""SELECT 1 FROM jobs
-                WHERE environment='production' AND status IN ('queued','running','held') LIMIT 1""").fetchone():
-            return None
+        return observed
+
+    def _inventory_assignment(self, db, environment, observed):
+        """Return (node, row) for the first assignable job, node None while held.
+
+        None means nothing is assignable: every job is waiting, or a barrier
+        stopped the scan. A production barrier is never proof, so it blocks
+        staging through _staging_may_pass.
+        """
+        jobs = db.execute("SELECT id,profile FROM jobs WHERE status='queued' AND environment=? ORDER BY seq",
+                          (environment,)).fetchall()
         foreign_viewer_counts = []
         for job in jobs:
-            if job['environment'] != environment:
-                break
             if job['profile'] == VIEWER_PROFILE:
                 # A Viewer job may be bypassed only on a node that provably
                 # cannot run it by configured capability or photo cap. Missing
                 # or ambiguous Viewer metadata is a barrier, not ineligibility.
-                try:
-                    viewer = db.execute('SELECT uuid FROM viewer_tasks WHERE job_id=? AND removed=0',
-                                        (job['id'],)).fetchall()
-                    if len(viewer) != 1:
-                        return None
-                    counts = db.execute('SELECT COUNT(*),SUM(CASE WHEN is_photo=1 THEN 1 ELSE 0 END),'
-                                        'SUM(CASE WHEN is_photo NOT IN (0,1) OR is_photo IS NULL THEN 1 ELSE 0 END) '
-                                        'FROM viewer_files WHERE uuid=?', (viewer[0]['uuid'],)).fetchone()
-                    if not counts[0] or not counts[1] or counts[2]:
-                        return None
-                    foreign_viewer_counts.append(counts[1])
-                except (KeyError, TypeError, ValueError, sqlite3.Error):
+                photos = self.queue._viewer_photo_count(db, job['id'])
+                if photos is None:
                     return None
+                foreign_viewer_counts.append(photos)
                 continue
             if job['profile'] != PROFILE:
                 break
@@ -442,7 +453,7 @@ class ReferenceStore:
                     continue
                 limit, scratch, output = state
                 if submission['manifest']['totalBytes'] + output <= scratch and (limit is None or photos <= limit):
-                    return row if spec['id'] == node_id and not uncertain else None
+                    return (None if uncertain else spec['id']), row
         return None
 
     def next_for_node(self, node_id):

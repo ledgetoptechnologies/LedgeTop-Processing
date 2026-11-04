@@ -1116,6 +1116,137 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.task(viewer)['node_id'], 'cluster')
         self.assertEqual(self.queue.get(waiting['jobId'])['status'], 'queued')
 
+    def staging_past_production_service(self, name):
+        reports = {node: {'ready': True, 'taskQueueCount': 0, 'maxImages': None, 'outputBudgetBytes': 1024,
+                          'availableScratchBytes': 10 ** 9} for node in ('cluster', 'main')}
+        reference = self.mixed_inventory_service(name, lambda role, origin, token: reports[role],
+                                                 readiness=lambda node: reports[node])
+        return reference, reports
+
+    def production_reference(self, reference, images):
+        from processing import reference_protocol as protocol
+        fixture = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())
+        raw = json.loads(json.dumps(fixture['submission']))
+        raw['submissionId'] = str(uuid.uuid4())
+        manifest = raw['manifest']
+        manifest['objects'] = [{**manifest['objects'][0], 'id': f'image-{i}', 'name': f'image-{i}.jpg',
+                                'byteSize': 3} for i in range(images)]
+        manifest.update(objectCount=images, totalBytes=images * 3)
+        manifest['inputCounts']['images'] = images
+        manifest['sha256'] = protocol.manifest_sha256(manifest)
+        return reference.submit(protocol.validate_submission(raw, environment='production',
+            capability_fingerprint=raw['capabilityFingerprint']))[0]
+
+    def test_staging_viewer_takes_idle_cluster_past_oversized_production_viewer(self):
+        for name, production_first in (('production-first', True), ('staging-first', False)):
+            with self.subTest(order=name):
+                _, reports = self.staging_past_production_service(name)
+                reports['main']['taskQueueCount'] = 1
+                if production_first:
+                    production = self.submit(environment='production', count=2)
+                    staging = self.submit(environment='staging')
+                else:
+                    staging = self.submit(environment='staging')
+                    production = self.submit(environment='production', count=2)
+                self.service.tick()
+                self.assertEqual(self.task(staging)['node_id'], 'cluster')
+                self.assertIsNone(self.task(production)['node_id'])
+                reports['main']['taskQueueCount'] = 0
+                self.service.tick()
+                self.assertEqual(self.task(production)['node_id'], 'main')
+
+    def test_staging_viewer_takes_idle_cluster_past_oversized_production_reference(self):
+        for name, production_first in (('reference-first', True), ('viewer-first', False)):
+            with self.subTest(order=name):
+                reference, reports = self.staging_past_production_service(name)
+                reports['main']['taskQueueCount'] = 1
+                if production_first:
+                    production = self.production_reference(reference, 2)
+                    staging = self.submit(environment='staging')
+                else:
+                    staging = self.submit(environment='staging')
+                    production = self.production_reference(reference, 2)
+                self.service.tick()
+                self.assertEqual(self.task(staging)['node_id'], 'cluster')
+                self.assertEqual(self.queue.get(production['jobId'])['status'], 'queued')
+                reports['main']['taskQueueCount'] = 0
+                self.assertEqual(reference.next_for_node('main')['jobId'], production['jobId'])
+                self.assertIsNotNone(reference.claim(production['jobId'], node_id='main', worker_id='main',
+                    worker_instance_id='instance', claim_request_id='main-claim'))
+
+    def test_staging_viewer_waits_while_production_reference_lands_on_idle_main(self):
+        reference, _ = self.staging_past_production_service('landing-state')
+        production = self.production_reference(reference, 2)
+        staging = self.submit(environment='staging')
+        self.service.tick()
+        self.assertIsNone(self.task(staging)['node_id'])
+        self.assertEqual(reference.next_for_node('main')['jobId'], production['jobId'])
+
+    def test_production_viewer_that_fits_takes_cluster_over_staging(self):
+        for name, production_first in (('fits-production-first', True), ('fits-staging-first', False)):
+            with self.subTest(order=name):
+                _, reports = self.staging_past_production_service(name)
+                reports['main']['taskQueueCount'] = 1
+                if production_first:
+                    production = self.submit(environment='production')
+                    staging = self.submit(environment='staging')
+                else:
+                    staging = self.submit(environment='staging')
+                    production = self.submit(environment='production')
+                self.service.tick()
+                self.assertEqual(self.task(production)['node_id'], 'cluster')
+                self.service.tick()
+                self.assertIsNone(self.task(staging)['node_id'])
+
+    def test_unproven_production_keeps_staging_viewer_off_the_idle_node(self):
+        reference, reports = self.staging_past_production_service('unproven-state')
+        reports['main']['taskQueueCount'] = 1
+        production = self.production_reference(reference, 2)
+        staging = self.submit(environment='staging')
+        with self.queue._db() as db:
+            row = db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?', (production['jobId'],)).fetchone()
+            submission = json.loads(row['input_json'])
+            submission['manifest']['totalBytes'] += 1
+            db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?',
+                       (json.dumps(submission), production['jobId']))
+        self.service.tick()
+        self.assertIsNone(self.task(staging)['node_id'])
+        self.assertEqual(self.fleet.commits, [])
+
+    def test_production_added_during_selection_fences_staging_at_claim(self):
+        _, reports = self.staging_past_production_service('late-production-state')
+        reports['main']['taskQueueCount'] = 1
+        self.submit(environment='production', count=2)
+        staging = self.submit(environment='staging')
+        late = self.initialize()
+        self.upload(late, 'a.jpg')
+        original = self.queue.staging_may_claim
+        committed = []
+        def commit_then_answer(node):
+            answer = original(node)
+            if not committed:
+                committed.append(True)
+                self.service.commit(late)
+            return answer
+        with patch.object(self.queue, 'staging_may_claim', side_effect=commit_then_answer):
+            self.service.tick()
+        self.assertIsNone(self.task(staging)['node_id'])
+        self.assertEqual(self.task(staging)['job']['status'], 'queued')
+
+    def test_corrupt_staging_behind_production_stops_only_staging(self):
+        _, reports = self.staging_past_production_service('corrupt-staging-state')
+        reports['main']['taskQueueCount'] = 1
+        production = self.submit(environment='production', count=2)
+        staging = self.submit(environment='staging')
+        later = self.submit(environment='staging')
+        with self.queue._db() as db:
+            db.execute('DELETE FROM viewer_option_evidence WHERE uuid=?', (staging,))
+        self.service.tick()
+        self.assertIsNone(self.task(later)['node_id'])
+        reports['main']['taskQueueCount'] = 0
+        self.service.tick()
+        self.assertEqual(self.task(production)['node_id'], 'main')
+
     def test_unanswered_node_holds_viewer_overflow_for_a_bounded_time(self):
         from processing import viewer_service
         cluster = [{'role': 'cluster', 'configured': True, 'ready': False, 'reason': 'probe_failed'}]

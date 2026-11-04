@@ -358,9 +358,10 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(self.queue.get(viewer['id'])['nodeId'], 'node-2')
         self.assertEqual(self.queue.get(reference['jobId'])['nodeId'], 'cluster')
 
-    def test_oversized_production_viewer_still_blocks_staging_reference(self):
+    def test_oversized_production_viewer_yields_idle_small_node_to_staging_reference(self):
         self.queue.per_node_slots = True
         self.queue.allowed_profiles.add(VIEWER_PROFILE)
+        self.queue.node_photo_limits = {'cluster': 1, 'node-2': None}
         inventory = [dict(id='cluster', maxPhotos=1, capabilities=['odm']),
                      dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
         ready = {'ready': True, 'taskQueueCount': 0, 'maxImages': None,
@@ -374,10 +375,11 @@ class ReferenceStoreTests(unittest.TestCase):
             db.execute('INSERT INTO viewer_tasks VALUES(?,?,0)', ('viewer-task', viewer['id']))
             db.executemany('INSERT INTO viewer_files VALUES(?,1)', [('viewer-task',), ('viewer-task',)])
         reference, _ = store.submit(self.new_submission())
-        self.assertIsNone(store.next_for_node('cluster'))
-        self.assertIsNone(store.claim(reference['jobId'], node_id='cluster', worker_id='reference',
-                                      worker_instance_id='instance', claim_request_id='priority-claim'))
-        self.assertEqual(self.queue.get(reference['jobId'])['status'], 'queued')
+        self.assertEqual(store.next_for_node('cluster')['jobId'], reference['jobId'])
+        self.assertIsNotNone(store.claim(reference['jobId'], node_id='cluster', worker_id='reference',
+                                         worker_instance_id='instance', claim_request_id='priority-claim'))
+        self.assertEqual(self.queue.get(reference['jobId'])['status'], 'running')
+        self.assertEqual(self.queue.get(viewer['id'])['status'], 'queued')
 
     def test_viewer_claim_bypasses_reference_only_if_node_cannot_fit_it(self):
         self.queue.per_node_slots = True
@@ -986,8 +988,8 @@ class InventorySchedulingTests(unittest.TestCase):
         return self.store.submit(p.validate_submission(raw, environment='staging',
             capability_fingerprint=raw['capabilityFingerprint'], available_engines=('odm', 'treedar')))[0]
 
-    def viewer(self, photos):
-        job, _ = self.queue.submit({'requestId': 'viewer-' + uuid.uuid4().hex[:12], 'environment': 'staging',
+    def viewer(self, photos, environment='staging'):
+        job, _ = self.queue.submit({'requestId': 'viewer-' + uuid.uuid4().hex[:12], 'environment': environment,
                                     'profile': VIEWER_PROFILE})
         with self.queue._db() as db:
             db.execute('INSERT INTO viewer_tasks VALUES(?,?,0)', (job['id'], job['id']))
@@ -1176,6 +1178,179 @@ class InventorySchedulingTests(unittest.TestCase):
         self.assertIsNone(self.store.next_for_node('node-2'))
         self.assertIsNone(self.claim(staging, 'node-2'))
         self.assertEqual((self.status(production), self.status(staging)), ('queued', 'queued'))
+
+    def job_of(self, kind, photos, environment, size=3):
+        return (self.reference(photos, environment=environment, size=size) if kind == 'reference'
+                else self.viewer(photos, environment))
+
+    def claim_any(self, job, node):
+        return self.claim(job, node) if 'jobId' in job else self.claim_viewer(job, node)
+
+    def clear_jobs(self):
+        with self.queue._db() as db:
+            db.execute("UPDATE jobs SET status='failed' WHERE status IN ('queued','running','held')")
+
+    def each_pair(self, check, photos, *, production_kinds=('reference', 'viewer'), before=None):
+        """Run check(production, staging) for each job kind in both orderings."""
+        for production_kind in production_kinds:
+            for staging_kind in ('reference', 'viewer'):
+                for production_first in (True, False):
+                    with self.subTest(production=production_kind, staging=staging_kind, first=production_first):
+                        if before:
+                            before()
+                        if production_first:
+                            production = self.job_of(production_kind, photos, 'production')
+                            staging = self.job_of(staging_kind, 1, 'staging')
+                        else:
+                            staging = self.job_of(staging_kind, 1, 'staging')
+                            production = self.job_of(production_kind, photos, 'production')
+                        check(production, staging)
+                    self.clear_jobs()
+
+    def staging_stays_queued(self, staging, node='cluster'):
+        if 'jobId' in staging:
+            self.assertIsNone(self.store.next_for_node(node))
+        self.assertIsNone(self.claim_any(staging, node))
+        self.assertEqual(self.status(staging), 'queued')
+
+    def test_staging_takes_idle_cluster_while_oversized_production_waits_for_main(self):
+        def check(production, staging):
+            self.assertTrue(self.queue.staging_may_claim('cluster'))
+            if 'jobId' in staging:
+                self.assertEqual(self.store.next_for_node('cluster')['jobId'], staging['jobId'])
+            self.assertEqual(self.claim_any(staging, 'cluster')['nodeId'], 'cluster')
+            self.assertEqual(self.status(production), 'queued')
+            with self.queue._db() as db:
+                db.execute("UPDATE jobs SET status='failed' WHERE node_id='node-2'")
+            self.assertEqual(self.claim_any(production, 'node-2')['nodeId'], 'node-2')
+            self.assertEqual(self.status(staging), 'running')
+        self.each_pair(check, 5, before=self.occupy_main)
+
+    def test_unknown_viewer_evidence_keeps_staging_off_the_idle_node(self):
+        def no_files(db, job):
+            db.execute('DELETE FROM viewer_files WHERE uuid=?', (job['id'],))
+        def two_tasks(db, job):
+            db.execute('INSERT INTO viewer_tasks VALUES(?,?,0)', ('second-' + job['id'], job['id']))
+        def ambiguous_file(db, job):
+            db.execute('INSERT INTO viewer_files VALUES(?,NULL)', (job['id'],))
+        def no_task(db, job):
+            db.execute('UPDATE viewer_tasks SET removed=1 WHERE job_id=?', (job['id'],))
+        for damage in (no_files, two_tasks, ambiguous_file, no_task):
+            for kind in ('reference', 'viewer'):
+                with self.subTest(damage=damage.__name__, staging=kind):
+                    self.occupy_main()
+                    production, staging = self.viewer(5, 'production'), self.job_of(kind, 1, 'staging')
+                    self.assertTrue(self.queue.staging_may_claim('cluster'))
+                    with self.queue._db() as db:
+                        damage(db, production)
+                    self.assertFalse(self.queue.staging_may_claim('cluster'))
+                    self.staging_stays_queued(staging)
+                self.clear_jobs()
+
+    def test_unknown_reference_evidence_keeps_staging_off_the_idle_node(self):
+        for kind in ('reference', 'viewer'):
+            with self.subTest(staging=kind):
+                self.occupy_main()
+                production, staging = self.reference(5, environment='production'), self.job_of(kind, 1, 'staging')
+                with self.queue._db() as db:
+                    row = db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?',
+                                     (production['jobId'],)).fetchone()
+                    submission = json.loads(row['input_json'])
+                    submission['manifest']['totalBytes'] += 1
+                    db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?',
+                               (json.dumps(submission), production['jobId']))
+                self.staging_stays_queued(staging)
+            self.clear_jobs()
+
+    def test_scratch_proof_needs_a_current_observation_to_pass_staging(self):
+        for kind in ('reference', 'viewer'):
+            with self.subTest(staging=kind):
+                self.occupy_main()
+                self.reports['cluster'] = self.report(availableScratchBytes=5000)
+                self.reference(1, environment='production', size=100000)
+                staging = self.job_of(kind, 1, 'staging')
+                self.assertTrue(self.queue.staging_may_claim('cluster'))
+                self.reports['cluster'] = None
+                self.assertFalse(self.queue.staging_may_claim('cluster'))
+                self.staging_stays_queued(staging)
+                self.reports['cluster'] = self.report(availableScratchBytes=5000)
+                self.assertEqual(self.claim_any(staging, 'cluster')['nodeId'], 'cluster')
+            self.reports['cluster'] = self.report()
+            self.clear_jobs()
+
+    def test_reported_cap_alone_does_not_pass_staging(self):
+        self.occupy_main()
+        self.reports['cluster'] = self.report(maxImages=1)
+        self.reference(2, environment='production')
+        staging = self.reference(1)
+        self.staging_stays_queued(staging)
+
+    def test_other_queued_profile_proves_nothing_for_staging(self):
+        self.occupy_main()
+        self.queue.submit({'requestId': 'synthetic-production', 'environment': 'production',
+                           'profile': LEGACY_PROFILE})
+        self.staging_stays_queued(self.reference(1))
+
+    def test_production_that_fits_the_node_takes_it_over_staging(self):
+        def check(production, staging):
+            if 'jobId' in production:
+                self.assertEqual(self.store.next_for_node('cluster')['jobId'], production['jobId'])
+            self.assertIsNone(self.claim_any(staging, 'cluster'))
+            self.assertEqual(self.claim_any(production, 'cluster')['nodeId'], 'cluster')
+            self.assertEqual(self.status(staging), 'queued')
+        self.each_pair(check, 1)
+
+    def test_one_fitting_production_job_blocks_staging_past_an_oversized_one(self):
+        self.occupy_main()
+        self.reference(5, environment='production')
+        fits = self.viewer(1, 'production')
+        staging = self.reference(1)
+        self.staging_stays_queued(staging)
+        self.assertEqual(self.claim_viewer(fits, 'cluster')['nodeId'], 'cluster')
+
+    def test_cluster_waits_while_production_lands_on_idle_main(self):
+        def check(production, staging):
+            self.assertFalse(self.queue.staging_may_claim('cluster'))
+            self.staging_stays_queued(staging)
+            self.assertEqual(self.claim(production, 'node-2')['nodeId'], 'node-2')
+            self.staging_stays_queued(staging)
+        self.each_pair(check, 5, production_kinds=('reference',))
+
+    def test_running_or_held_production_still_blocks_staging_on_idle_nodes(self):
+        for kind in ('reference', 'viewer'):
+            for status in ('running', 'held'):
+                with self.subTest(staging=kind, status=status):
+                    running = self.reference(5, environment='production')
+                    self.assertIsNotNone(self.claim(running, 'node-2'))
+                    self.reference(5, environment='production')
+                    staging = self.job_of(kind, 1, 'staging')
+                    if status == 'held':
+                        self.queue.operator(running['jobId'], 'hold', {'note': 'inspect'})
+                    self.assertFalse(self.queue.staging_may_claim('cluster'))
+                    self.staging_stays_queued(staging)
+                self.clear_jobs()
+
+    def test_racing_staging_past_production_keeps_one_job_per_node(self):
+        for round_number in range(12):
+            if round_number % 2:
+                self.occupy_main()
+            jobs = [self.reference(5, environment='production'), self.viewer(5, 'production'),
+                    self.reference(1), self.viewer(1), self.reference(1)]
+            late = self.reference(1, environment='production') if round_number % 3 == 0 else None
+            attempts = [(job, 'cluster') for job in jobs[2:] + ([late] if late else [])]
+            attempts += [(jobs[0], 'node-2')] * 2 + [(jobs[1], 'node-2')] * 2
+            barrier = threading.Barrier(len(attempts))
+            def attempt(item):
+                barrier.wait(timeout=10)
+                return self.claim_any(*item)
+            with ThreadPoolExecutor(max_workers=len(attempts)) as pool:
+                list(pool.map(attempt, attempts))
+            running = [job for job in self.queue.list() if job['status'] == 'running']
+            nodes = [job['nodeId'] for job in running]
+            self.assertEqual(len(nodes), len(set(nodes)))
+            if late:
+                self.assertNotIn('staging', [job['environment'] for job in running if job['nodeId'] == 'cluster'])
+            self.clear_jobs()
 
     def test_racing_mixed_claims_keep_one_job_per_node(self):
         for _ in range(12):

@@ -86,6 +86,19 @@ job it might run from later nodes for one readiness TTL after its last valid
 probe, then counts as unavailable until it answers. Later nodes may idle for that
 TTL, which is the cost of not sending small work to a large node on a routine probe.
 
+Staging may run beside queued production only on a node that no queued
+production job can use. Each such job must be proven unable to run there by the
+same evidence: configured capability, configured photo cap, or, for a reference
+job, hash-verified input bytes against a current scratch observation. Unknown,
+missing or tampered evidence proves nothing and blocks staging, and a reported
+cap alone is not proof. So a staging job can run on an idle cluster while a
+5,000-photo production job waits for main, and production still claims main when
+main is free. Any production job that can run on a node takes it first. A node
+also waits while a production reference job assigned to another node lands.
+Reference and Viewer claims recheck this in the claim transaction. Running or
+held production still blocks staging on every node, so a production job waiting
+behind other production on main leaves the cluster idle.
+
 ClusterODX already handles a NodeODX-compatible single address, node health,
 queue slots, and `maxImages`. We can use it behind an ODM adapter if its actual
 responses pass the current Viewer's probe and task contract. Its capacity-based
