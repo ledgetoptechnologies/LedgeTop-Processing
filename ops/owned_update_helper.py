@@ -1,14 +1,27 @@
 """Owned read-only updater helper container lifecycle."""
 import re
 import uuid
+from contextlib import nullcontext
 
 
-def run_owned_helper(transport, args, *, timeout=60, error_type=ValueError):
+def run_owned_helper(transport, args, *, timeout=60, error_type=ValueError, journal=None):
     """Run an updater helper and reconcile its daemon-side lifetime.
 
     A timeout of the Docker CLI does not stop the container. Never remove a
     container without checking both its operation-unique name and label.
     """
+    with journal if journal is not None else nullcontext() as record:
+        return _run_owned_helper(transport, args, timeout=timeout, error_type=error_type, journal=record)
+
+
+def _run_owned_helper(transport, args, *, timeout, error_type, journal):
+    if journal is not None:
+        try:
+            previous = journal.read()
+        except FileNotFoundError:
+            previous = None
+        if previous is not None and previous['phase'] != 'resolved':
+            raise error_type('prior_helper_requires_inspection')
     operation = uuid.uuid4().hex
     name = 'ledgetop-update-helper-' + operation
     label = 'io.ledgetop.update-helper=' + operation
@@ -21,6 +34,9 @@ def run_owned_helper(transport, args, *, timeout=60, error_type=ValueError):
         return ids
     if listed():
         raise error_type('helper_identity_already_exists')
+    if journal is not None:
+        journal.write(operation, 'create_pending')
+    created = None
     try:
         # Split create from start: if the create client times out, a late
         # daemon-side create may leave a stopped container, but cannot start a
@@ -33,6 +49,9 @@ def run_owned_helper(transport, args, *, timeout=60, error_type=ValueError):
                 or (item.get('Config', {}).get('Labels') or {}).get('io.ledgetop.update-helper') != operation
                 or item.get('State', {}).get('Running') is not False):
             raise error_type('helper_identity_ambiguous')
+        if journal is not None:
+            journal.write(operation, 'created', created)
+            journal.write(operation, 'start_pending', created)
         return transport.docker('start', '--attach', created, timeout=timeout)
     finally:
         ids = listed()
@@ -57,4 +76,6 @@ def run_owned_helper(transport, args, *, timeout=60, error_type=ValueError):
                         raise error_type('helper_cleanup_unconfirmed') from None
                 if listed():
                     raise error_type('helper_cleanup_unconfirmed')
+        if journal is not None and journal.read()['phase'] in ('created', 'start_pending'):
+            journal.write(operation, 'resolved', created)
 

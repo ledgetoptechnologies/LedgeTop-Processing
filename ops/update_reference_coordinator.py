@@ -334,9 +334,12 @@ print(json.dumps(counts))
     return legacy.BACKUP.replace('print(json.dumps(counts))',extra)
 
 
-def run_owned_helper(transport, args, *, timeout=60):
+def run_owned_helper(transport, args, *, timeout=60, journal_root=None):
     from ops.owned_update_helper import run_owned_helper as run
-    return run(transport, args, timeout=timeout, error_type=Stopped)
+    if journal_root is not None:
+        from ops.durable_helper_journal import HelperJournal
+    return run(transport, args, timeout=timeout, error_type=Stopped,
+               journal=HelperJournal(journal_root) if journal_root is not None else None)
 
 
 def copy_backup(transport,root,state):
@@ -357,7 +360,7 @@ fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     return json.loads(run_owned_helper(transport,('--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
         '--cap-drop','ALL','--security-opt','no-new-privileges',
         '--mount','type=volume,src='+VOLUME+',dst=/source,readonly',
-        '--mount','type=bind,src='+str(destination)+',dst=/backup','--entrypoint','python',state['image'],'-c',backup_script()),timeout=120))
+        '--mount','type=bind,src='+str(destination)+',dst=/backup','--entrypoint','python',state['image'],'-c',backup_script()),timeout=120,journal_root=root))
 
 
 class ReferenceCoordinatorUpdate:
@@ -400,7 +403,7 @@ class ReferenceCoordinatorUpdate:
             if self.t.docker('ps','--filter','volume='+VOLUME,'--format','{{.ID}}').strip():raise Stopped('offline_volume_has_owner')
             raw=run_owned_helper(self.t,('--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
                 '--cap-drop','ALL','--security-opt','no-new-privileges','--mount','type=volume,src='+VOLUME+',dst=/source,readonly',
-                '--entrypoint','python',state['image'],'-c',code))
+                '--entrypoint','python',state['image'],'-c',code),journal_root=self.root)
         else:raw=self.t.docker('exec','--user','10001:10001',container or state['old']['containerId'],'python','-c',code)
         result=json.loads(raw)
         if result['authorityId']!=AUTHORITY or result['tables']['jobs']['count']!=12:raise Stopped('reviewed_idle_history_required')
@@ -410,7 +413,7 @@ class ReferenceCoordinatorUpdate:
         raw=run_owned_helper(self.t,('--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
             '--cap-drop','ALL','--security-opt','no-new-privileges','--mount',
             'type=bind,src='+str(legacy.TLS_MOUNT)+',dst=/run/processing-reference,readonly',
-            '--entrypoint','python',state['image'],'-c',TLS_CENSUS))
+            '--entrypoint','python',state['image'],'-c',TLS_CENSUS),journal_root=self.root)
         return json.loads(raw)
 
     def cluster_idle(self,state):

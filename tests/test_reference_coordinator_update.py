@@ -72,7 +72,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.gates=Gates();self.transport=self.make_transport()
         # Container lifecycle is exercised separately by
         # test_update_owned_helper; this fixture supplies synthetic census I/O.
-        self.helper_patch=patch.object(module,'run_owned_helper',side_effect=lambda t,args,timeout=60:t.docker('run',*args,timeout=timeout))
+        self.helper_patch=patch.object(module,'run_owned_helper',side_effect=lambda t,args,timeout=60,journal_root=None:t.docker('run',*args,timeout=timeout))
         self.helper_patch.start();self.addCleanup(self.helper_patch.stop)
         self.operation=self.root/'operation';self.operation.mkdir(mode=0o700)
         self.updater=module.ReferenceCoordinatorUpdate(self.operation,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda state:None)
