@@ -14,7 +14,7 @@ from processing import reference_protocol as p
 from processing import viewer_copy_journal_candidate as j
 from processing import viewer_copy_v2_candidate as v
 
-VIEWER_REV='ad0bf46611de44545825db9147e90b68195902ab'
+VIEWER_REV='3c7f727c9408238742b5fa422136658133cb3f83'
 PATHS=('apps/viewer/server/referenceProtocol.js','apps/viewer/server/referenceReceiptV2Candidate.js',
        'apps/viewer/test/helpers/accepted-copy-v2-candidate-fixture.js')
 
@@ -38,6 +38,11 @@ class CrossLanguageNegativeTests(unittest.TestCase):
         with self.assertRaises(v.CandidateRejected):v._verify_v2_for_fixtures(p.canonical_json(altered),**kwargs)
         altered=json.loads(raw);altered['acceptance']['acceptedAt']='2026-11-04T00:00:02.000Z'
         with self.assertRaises(v.CandidateRejected):v._verify_v2_for_fixtures(p.canonical_json(altered),**kwargs)
+        for field in ('providerTaskId','sourceManifestSha256','derivedManifestSha256',
+                      'sourceReceiptSha256','derivedReceiptSha256'):
+            changed=json.loads(raw);changed['viewerReceipt'][field]='1'*64
+            with self.subTest(field=field), self.assertRaises(v.CandidateRejected):
+                v._verify_v2_for_fixtures(p.canonical_json(changed),**kwargs)
         bad=deepcopy(kwargs)
         bad['trusted_keys'][fixture['viewerReceipt']['keyId']]['publicKeyPem']=Ed25519PrivateKey.from_private_bytes(bytes(range(1,33))).public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode()
         with self.assertRaises(v.CandidateRejected):v._verify_v2_for_fixtures(raw,**bad)

@@ -21,12 +21,14 @@ ACCEPTANCE_DOMAIN=b'LTDS-OUTER-ACCEPTANCE-V1\0'
 FIELDS=frozenset(('protocol','schemaVersion','issuerId','keyId','receiptId','storageReceiptId',
     'acceptanceReceiptId','acceptanceStorageReceiptId','acceptancePayloadSha256',
     'coordinatorAuthorityId','viewerPrincipalId','submissionId','activationId','viewerTaskId',
-    'viewerAttemptId','preparedEnvelopeSha256','jobId','generation','environment',
-    'inputManifestSha256','pipelineDigest','resultManifestSha256','acceptedObjectIds','objects',
+    'viewerAttemptId','preparedEnvelopeSha256','providerTaskId','jobId','generation','environment',
+    'inputManifestSha256','pipelineDigest','resultManifestSha256','sourceManifestSha256',
+    'derivedManifestSha256','sourceReceiptSha256','derivedReceiptSha256','acceptedObjectIds','objects',
     'acceptedAt','signature'))
 BINDINGS=frozenset(('coordinatorAuthorityId','viewerPrincipalId','submissionId','activationId',
-    'viewerTaskId','viewerAttemptId','preparedEnvelopeSha256','jobId','generation','environment',
-    'inputManifestSha256','pipelineDigest','resultManifestSha256'))
+    'viewerTaskId','viewerAttemptId','preparedEnvelopeSha256','providerTaskId','jobId','generation','environment',
+    'inputManifestSha256','pipelineDigest','resultManifestSha256','sourceManifestSha256',
+    'derivedManifestSha256','sourceReceiptSha256','derivedReceiptSha256'))
 
 class CandidateUnavailable(RuntimeError): pass
 class CandidateRejected(ValueError): pass
@@ -68,10 +70,13 @@ def _verify_v2_for_fixtures(raw, *, expected, result_manifest, trusted_keys):
         if type(receipt) is not dict or set(receipt)!=FIELDS or not _ascii_tree(envelope):raise ValueError('closed ascii object required')
         if type(expected) is not dict or set(expected)!=BINDINGS or not _ascii_tree(expected):raise ValueError('independent binding required')
         if receipt['protocol']!='ltds-viewer-accepted-copy-v2' or type(receipt['schemaVersion']) is not int or receipt['schemaVersion']!=2:raise ValueError('wrong protocol')
-        for field in ('issuerId','keyId','receiptId','storageReceiptId','acceptanceReceiptId','acceptanceStorageReceiptId','coordinatorAuthorityId','viewerPrincipalId','jobId'):
+        for field in ('issuerId','keyId','receiptId','storageReceiptId','acceptanceReceiptId','acceptanceStorageReceiptId','coordinatorAuthorityId','viewerPrincipalId','providerTaskId','jobId'):
             p._slug(receipt[field],field)
         for field in ('submissionId','activationId','viewerTaskId','viewerAttemptId'):p._uuid(receipt[field],field)
-        for field in ('preparedEnvelopeSha256','acceptancePayloadSha256','inputManifestSha256','pipelineDigest','resultManifestSha256'):p._hash(receipt[field],field)
+        for field in ('preparedEnvelopeSha256','acceptancePayloadSha256','inputManifestSha256','pipelineDigest','resultManifestSha256',
+                      'sourceManifestSha256','derivedManifestSha256','sourceReceiptSha256','derivedReceiptSha256'):
+            p._hash(receipt[field],field)
+        if receipt['providerTaskId'] != receipt['jobId']:raise ValueError('provider task binding mismatch')
         p._integer(receipt['generation'],'generation');p._environment(receipt['environment'])
         timestamp=receipt['acceptedAt']
         if type(timestamp) is not str or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z',timestamp):raise ValueError('invalid timestamp')

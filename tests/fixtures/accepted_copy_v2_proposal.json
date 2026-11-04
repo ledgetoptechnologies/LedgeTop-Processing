@@ -1,7 +1,7 @@
 {
   "status": "synthetic_proposal_not_for_production",
   "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=\n-----END PUBLIC KEY-----\n",
-  "bodyCanonicalSha256": "f4e555edbabc6ecf8bb44cb169f4de68baff7d821928e61bc80b01bba1177e5d",
+  "bodyCanonicalSha256": "c91b2e5d03e9f3b73aa0f071dc60664672d5368c7e3a85834baf97a3dc9f5c06",
   "acceptance": {
     "schemaVersion": 1,
     "receiptId": "33333333-3333-4333-8333-333333333333",
@@ -36,12 +36,17 @@
     "viewerTaskId": "77777777-7777-4777-8777-777777777777",
     "viewerAttemptId": "88888888-8888-4888-8888-888888888888",
     "preparedEnvelopeSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "providerTaskId": "job-test",
     "jobId": "job-test",
     "generation": 1,
     "environment": "staging",
     "inputManifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "pipelineDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "resultManifestSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "sourceManifestSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "derivedManifestSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "sourceReceiptSha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "derivedReceiptSha256": "0000000000000000000000000000000000000000000000000000000000000000",
     "acceptedObjectIds": [
       "object-b",
       "object-a"
@@ -59,7 +64,7 @@
       }
     ],
     "acceptedAt": "2026-11-04T00:00:00.000Z",
-    "signature": "05peZw4CaVBxbremcbsMNblcfmuEaeQ2BfGF914MfTwTT4EHacuH8NPv5qJWAT7VrHzG5vMKyTIFgX18FzyxAg"
+    "signature": "gP0mIGnHp5_d8GMmJ8ZbgGHBeIonC_4hwKl36K-yZIikZGx9N7IxfWr4v_5PEaWnZYv9FUpySmRXd31Pey1VBQ"
   },
   "negativeCases": [
     {
@@ -84,6 +89,36 @@
       "case": "envelope-swap",
       "field": "preparedEnvelopeSha256",
       "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "expected": "reject_scope"
+    },
+    {
+      "case": "provider-task-swap",
+      "field": "providerTaskId",
+      "value": "other-job",
+      "expected": "reject_scope"
+    },
+    {
+      "case": "source-manifest-swap",
+      "field": "sourceManifestSha256",
+      "value": "1111111111111111111111111111111111111111111111111111111111111111",
+      "expected": "reject_scope"
+    },
+    {
+      "case": "derived-manifest-swap",
+      "field": "derivedManifestSha256",
+      "value": "1111111111111111111111111111111111111111111111111111111111111111",
+      "expected": "reject_scope"
+    },
+    {
+      "case": "source-receipt-swap",
+      "field": "sourceReceiptSha256",
+      "value": "1111111111111111111111111111111111111111111111111111111111111111",
+      "expected": "reject_scope"
+    },
+    {
+      "case": "derived-receipt-swap",
+      "field": "derivedReceiptSha256",
+      "value": "1111111111111111111111111111111111111111111111111111111111111111",
       "expected": "reject_scope"
     },
     {
