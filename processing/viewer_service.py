@@ -862,6 +862,18 @@ class ViewerService:
                     self.store.update(identifier, error='commit_ack_uncertain')
             else:
                 self._hold(current, 'engine_submission_uncertain')
+
+    def _transfer_claimed_task(self, identifier, job_id):
+        """Thread entry: no tick remains to hold a failure that escapes here."""
+        try:
+            self._send_claimed_task(identifier)
+        except Exception:
+            # No traceback: a chained engine error may name a credentialed route.
+            logging.getLogger(__name__).error('Viewer transfer failed; inspection required')
+            try:
+                self.store.hold_reconciliation_error(job_id)
+            except Exception:
+                pass  # The next tick holds a running job no sender owns.
         finally:
             with self._lock:
                 self._dispatch_threads.pop(identifier, None)
@@ -1127,7 +1139,7 @@ class ViewerService:
                 if self._parallel_dispatch:
                     if not self.queue.per_node_slots:
                         raise Conflict('parallel dispatch requires per-node slots')
-                    thread = threading.Thread(target=self._send_claimed_task, args=(task['uuid'],),
+                    thread = threading.Thread(target=self._transfer_claimed_task, args=(task['uuid'], job['id']),
                                               name='viewer-node-transfer', daemon=True)
                     self._dispatch_threads[task['uuid']] = (job['id'], thread)
                     try:

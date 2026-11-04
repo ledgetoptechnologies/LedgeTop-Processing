@@ -76,6 +76,10 @@ def task_fenced(method):
         # A control request can hold the scheduler's service lock. In the
         # isolated parallel mode it must not wait for a slow upload while
         # holding that lock; callers get a retryable conflict instead.
+        if self.queue.parallel_viewer_uploads and method.__name__ == 'update':
+            # Broker state, never input: one store-locked transaction. A same-
+            # task request must not fail the owner's write into a false hold.
+            return method(self, identifier, *args, **kwargs)
         blocking = not self.queue.parallel_viewer_uploads or method.__name__ == 'upload'
         with self._task_fence(identifier, blocking=blocking, upload=method.__name__ == 'upload'):
             return method(self, identifier, *args, **kwargs)
