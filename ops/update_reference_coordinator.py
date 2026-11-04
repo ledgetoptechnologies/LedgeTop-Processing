@@ -1068,10 +1068,32 @@ class ReferenceCoordinatorUpdate:
 
     def rollback(self,state):
         self.validate(state)
-        if any(name.startswith('reference_viewer_activation') or name in ('reference_viewer_submission_owners','reference_viewer_envelopes_v2','reference_viewer_v3_copy_hold','reference_viewer_v3_policy') for name in state.get('drained',{}).get('tables',{})):
-            raise Stopped('prepared_schema_rollback_unqualified')
         if state.get('reopeningStarted') or state.get('pendingPlan'):raise Stopped('reopen_or_schedule_uncertainty_prevents_rollback')
         with self.gate_factory() as gates:
+            if any(name.startswith('reference_viewer_activation') or name in ('reference_viewer_submission_owners','reference_viewer_envelopes_v2','reference_viewer_v3_copy_hold','reference_viewer_v3_policy') for name in state.get('drained',{}).get('tables',{})):
+                # Do not stop a running candidate or start the predecessor on
+                # an unqualified prepared schema. A stopped exact candidate may
+                # be retained only through the existing gates/sole-owner checks.
+                self.check(state,gates)
+                item=self.candidate(state)
+                old=self.t.inspected(OLD_ID)
+                if (old.get('Id')!=OLD_ID or old.get('Image')!=OLD_IMAGE
+                        or old.get('State',{}).get('Running') is not False):
+                    raise Stopped('prepared_schema_owner_uncertain')
+                if item is not None:
+                    if type(item.get('State',{}).get('Running')) is not bool:
+                        raise Stopped('prepared_candidate_state_uncertain')
+                    verified=state.get('verification')
+                    if (item['State']['Running'] is False
+                            and state.get('replacementRetained') is not True
+                            and not (state.get('replacementStarted') is True
+                                     and type(verified) is dict
+                                     and all(verified.get(key) is True for key in
+                                             ('tlsVerified','workerAuthoritiesVerified','nativeProductionCredentialsRejected'))
+                                     and verified.get('referenceEnvironment')=='staging')):
+                        raise Stopped('prepared_candidate_restart_unverified')
+                    self.retain(state,gates,item)
+                raise Stopped('prepared_schema_rollback_unqualified')
             self.check(state,gates);self.rollback_config(state);item=self.candidate(state)
             old=self.t.inspected(OLD_ID)
             if old['State']['Running']:

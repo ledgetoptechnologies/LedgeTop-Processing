@@ -1151,6 +1151,57 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
         self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
 
+    def test_prepared_rollback_keeps_running_candidate_without_stopping(self):
+        self.fail_after_start();before=len(self.transport.calls)
+        with self.assertRaisesRegex(module.Stopped,'prepared_schema_rollback_unqualified'):
+            self.updater.rollback(self.state)
+        self.assertEqual(self.transport.calls[before:],[])
+        self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
+        self.assertTrue(self.state['replacementRetained'])
+
+    def test_prepared_rollback_restarts_only_exact_stopped_candidate(self):
+        self.fail_after_start();self.transport.containers[NEW_ID]['State']['Running']=False
+        self.state.update(replacementStarted=True,verification={'tlsVerified':True,'workerAuthoritiesVerified':True,'nativeProductionCredentialsRejected':True,'referenceEnvironment':'staging'})
+        before=len(self.transport.calls)
+        with self.assertRaisesRegex(module.Stopped,'prepared_schema_rollback_unqualified'):
+            self.updater.rollback(self.state)
+        self.assertEqual([call[0] for call in self.transport.calls[before:]],['start'])
+        self.assertEqual(self.transport.calls[-1][-1],NEW_ID)
+        self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
+
+    def test_prepared_rollback_absent_candidate_or_running_predecessor_never_starts(self):
+        self.fail_after_start();before=len(self.transport.calls)
+        candidate=self.transport.containers.pop(NEW_ID)
+        with self.assertRaises(module.Stopped):self.updater.rollback(self.state)
+        self.assertEqual(self.transport.calls[before:],[])
+        self.transport.containers[NEW_ID]=candidate
+        self.transport.containers[module.OLD_ID]['State']['Running']=True
+        with self.assertRaises(module.Stopped):self.updater.rollback(self.state)
+        self.assertEqual(self.transport.calls[before:],[])
+
+    def test_prepared_candidate_unknown_start_ack_reconciles_without_replay(self):
+        self.fail_after_start();self.transport.containers[NEW_ID]['State']['Running']=False
+        self.state.update(replacementStarted=True,verification={'tlsVerified':True,'workerAuthoritiesVerified':True,'nativeProductionCredentialsRejected':True,'referenceEnvironment':'staging'})
+        self.transport.loss='start';before=len(self.transport.calls)
+        with self.assertRaises(OSError):self.updater.rollback(self.state)
+        self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertEqual(self.state['phase'],'retain_start_pending')
+        with self.assertRaisesRegex(module.Stopped,'prepared_schema_rollback_unqualified'):
+            self.updater.rollback(self.state)
+        self.assertEqual([call[0] for call in self.transport.calls[before:]],['start'])
+        self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
+
+    def test_prepared_rollback_wont_start_unverified_stopped_candidate(self):
+        self.fail_after_start();self.transport.containers[NEW_ID]['State']['Running']=False
+        before=len(self.transport.calls)
+        with self.assertRaisesRegex(module.Stopped,'prepared_candidate_restart_unverified'):
+            self.updater.rollback(self.state)
+        self.assertEqual(self.transport.calls[before:],[])
+        self.assertFalse(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
+
     def test_online_new_owned_receipt_refuses_before_any_candidate_stop(self):
         self.fail_after_start()
         with self.queue._db() as db:db.execute("INSERT INTO owned_maintenance_schedules VALUES('new','main','a','b','{}','{}')")
