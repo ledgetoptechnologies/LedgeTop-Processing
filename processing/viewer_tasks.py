@@ -79,7 +79,7 @@ def task_fenced(method):
         # A control request can hold the scheduler's service lock. In either
         # isolated parallel mode it must not wait for a fenced request while
         # holding that lock; callers get a retryable conflict instead.
-        parallel = self.parallel_dispatch or self.queue.parallel_viewer_uploads
+        parallel = self.queue.viewer_outbound_parallel or self.queue.parallel_viewer_uploads
         if parallel and method.__name__ in ('update', 'hold'):
             # Broker state, never input: one store-locked transaction. A same-
             # task request must not fail the owner's write into a false hold.
@@ -91,6 +91,10 @@ def task_fenced(method):
 
 
 class TaskStore:
+    @property
+    def parallel_dispatch(self):
+        return self.queue.viewer_outbound_parallel
+
     def __init__(self, queue, directory, max_input_bytes=20 * 1024 ** 3):
         if type(max_input_bytes) is not int or not 1 <= max_input_bytes <= 10 ** 15:
             raise ValueError('positive input limit required')
@@ -104,7 +108,6 @@ class TaskStore:
         if os.name != 'nt' and self.root.stat().st_mode & 0o077:
             raise ValueError('private input directory required')
         self.max_input_bytes = max_input_bytes
-        self.parallel_dispatch = False  # Outbound only; ViewerService sets it.
         self._lock = queue._viewer_store_lock
         # Claim credentials are stored in this shared database. Tighten the
         # exact existing, owned database before creating or updating secret
@@ -544,8 +547,12 @@ class TaskStore:
             raise ValueError('invalid input length')
         if length > self.max_input_bytes:
             raise InputLimitExceeded('task input ceiling exceeded')
-        with (nullcontext() if self.queue.parallel_viewer_uploads else self._lock):
-            with self.queue._db() as db:
+        # Keep exactly one inbound stream when outbound parallel dispatch is
+        # enabled, without holding the store lock across slow body reads.
+        outer = (nullcontext() if self.queue.parallel_viewer_uploads else
+                 self.queue._viewer_serial_upload_lock if self.queue.viewer_outbound_parallel else self._lock)
+        with outer:
+            with self._lock, self.queue._db() as db:
                 self._reservation(db,identifier,environment,capability)
                 row = self._row(db, identifier)
                 if row['stage'] != 'uploading' or row['job_id']:
@@ -580,7 +587,7 @@ class TaskStore:
                     output.flush()
                     os.fsync(output.fileno())
                 value = digest.hexdigest()
-                with self.queue._db() as db:
+                with self._lock, self.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE')
                     self._reservation(db,identifier,environment,capability)
                     row = self._row(db, identifier)

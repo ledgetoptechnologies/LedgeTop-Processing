@@ -528,11 +528,20 @@ class ViewerServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'requires per-node slots'):
             ViewerService(self.queue, self.config, engines=self.engines, probe=self.probe)
         self.queue.per_node_slots = True
-        parallel = ViewerService(self.queue, self.config, engines=self.engines, probe=self.probe)
+        with self.assertRaisesRegex(ValueError, 'outbound modes differ'):
+            ViewerService(self.queue, self.config, engines=self.engines, probe=self.probe)
+        parallel_root = self.root / 'parallel'
+        parallel_queue = Queue(parallel_root, node_ids=('cluster', 'main'), treedar_node_ids=('main',),
+                               viewer_enabled=True, per_node_slots=True, viewer_outbound_parallel=True)
+        self.config.prototype_state_dir = str(parallel_root)
         try:
-            self.assertTrue(parallel._parallel_dispatch)
+            parallel = ViewerService(parallel_queue, self.config, engines=self.engines, probe=self.probe)
+            try:
+                self.assertTrue(parallel._parallel_dispatch)
+            finally:
+                parallel.close()
         finally:
-            parallel.close()
+            parallel_queue.close()
 
     def test_parallel_uncertain_upload_holds_its_node_and_other_can_run(self):
         self.queue.per_node_slots = True

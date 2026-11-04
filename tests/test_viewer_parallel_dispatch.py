@@ -77,10 +77,22 @@ class Harness(unittest.TestCase):
 
     def open_queue(self):
         self.queue = Queue(self.root / 'state', node_ids=('cluster', 'main'), treedar_node_ids=('main',),
-                           viewer_enabled=True, per_node_slots=self.parallel)
+                           viewer_enabled=True, per_node_slots=self.parallel,
+                           viewer_outbound_parallel=self.parallel)
         self.service = ViewerService(self.queue, self.config, engines=self.engines, probe=self.probe)
         self.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(item) for item in OPTIONS]}
         self.service._selected_options = lambda _node: [dict(item) for item in OPTIONS]
+
+    def test_second_service_cannot_change_queue_upload_mode(self):
+        if not self.parallel:
+            self.skipTest('parallel queue required')
+        other = SimpleNamespace(**vars(self.config))
+        other.viewer_parallel_dispatch = False
+        with self.assertRaisesRegex(ValueError, 'outbound modes differ'):
+            ViewerService(self.queue, other, engines=self.engines, probe=self.probe)
+        self.assertTrue(self.queue.viewer_outbound_parallel)
+        with self.assertRaises(AttributeError):
+            self.queue.viewer_outbound_parallel = False
 
     def tearDown(self):
         self.release.set()
@@ -185,6 +197,39 @@ class FlagOffTests(Harness):
 
 
 class ParallelDispatchTests(Harness):
+    def test_stalled_inbound_allows_other_node_dispatch_and_same_task_cancel_refuses(self):
+        ready = self.submit()
+        incoming = str(uuid.uuid4())
+        self.service.initialize(incoming, 'Synthetic stalled input', REQUEST_OPTIONS, None, 'production')
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        class SlowInput(io.BytesIO):
+            def read(inner, size=-1):
+                entered.set()
+                if not release.wait(WAIT): raise RuntimeError('fixture input timed out')
+                return super().read(size)
+        def upload():
+            try: self.service.upload(incoming, 'photo.jpg', SlowInput(b'owned'), 5)
+            except BaseException as error: errors.append(error)
+        thread = threading.Thread(target=upload)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(WAIT))
+            finished, result = returns(lambda: self.service.cancel(incoming), timeout=2)
+            self.assertTrue(finished)
+            self.assertIsInstance(result, Conflict)
+            finished, result = returns(self.service.tick, timeout=2)
+            self.assertTrue(finished)
+            self.assertIsNone(result)
+            self.phase(ready, 'processing')
+            self.assertEqual(self.task(ready)['job']['status'], 'running')
+            self.assertIsNone(self.task(incoming)['job_id'])
+        finally:
+            release.set()
+            thread.join(WAIT)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+
     def fenced(self, identifier):
         """Keep a late multipart request's fence open on another thread."""
         release, entered = threading.Event(), threading.Event()
@@ -199,8 +244,8 @@ class ParallelDispatchTests(Harness):
         self.addCleanup(release.set)
         return release
 
-    def test_flag_keeps_inbound_uploads_on_the_store_lock(self):
-        """Inbound parallelism stays off until shared disk is reserved."""
+    def test_flag_allows_unrelated_reads_during_serial_inbound_upload(self):
+        """Inbound parallelism stays off while unrelated store reads proceed."""
         self.assertFalse(self.queue.parallel_viewer_uploads)
         entered, release = threading.Event(), threading.Event()
         class SlowStream(io.BytesIO):
@@ -209,17 +254,19 @@ class ParallelDispatchTests(Harness):
                 release.wait(WAIT)
                 return super().read(size)
         identifier = str(uuid.uuid4())
+        other = str(uuid.uuid4())
         self.service.initialize(identifier, 'Synthetic survey', REQUEST_OPTIONS, None, 'production')
+        self.service.initialize(other, 'Other synthetic survey', REQUEST_OPTIONS, None, 'production')
         upload = threading.Thread(target=self.service.upload,
                                   args=(identifier, 'photo.jpg', SlowStream(b'owned'), 5), daemon=True)
         upload.start()
         self.addCleanup(upload.join, WAIT)
         self.addCleanup(release.set)
         self.assertTrue(entered.wait(WAIT))
-        reader = threading.Thread(target=self.service.store.task, args=(identifier,), daemon=True)
+        reader = threading.Thread(target=self.service.store.task, args=(other,), daemon=True)
         reader.start()
-        reader.join(0.1)
-        self.assertTrue(reader.is_alive())
+        reader.join(WAIT)
+        self.assertFalse(reader.is_alive())
         release.set()
         reader.join(WAIT)
         upload.join(WAIT)
@@ -522,7 +569,7 @@ root,identifier,point=Path(sys.argv[1]),sys.argv[2],sys.argv[3]
 config=SimpleNamespace(prototype_state_dir=str(root/'state'),viewer_max_input_bytes=10**9,viewer_max_archive_bytes=10**6,
  local_node_url='http://synthetic-cluster.invalid:3000',local_node_token='a',main_node_url='http://synthetic-main.invalid:3000',
  main_node_token='b',local_max_photos=2,local_max_input_bytes=10**9,viewer_parallel_dispatch=True)
-queue=Queue(root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True,
+queue=Queue(root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True,viewer_outbound_parallel=True,
  per_node_slots=True)
 fleet=FakeFleet();engines={name:FakeEngine(name,fleet) for name in ('cluster','main')}
 def die(*_):os._exit(73)

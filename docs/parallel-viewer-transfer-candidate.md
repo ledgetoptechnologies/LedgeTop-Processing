@@ -28,11 +28,15 @@ An explicit `afterJobId` maintenance plan for the already-claimed task allows
 that task to finish submitting; node update remains blocked while it runs.
 
 The flag does not enable parallel inbound uploads (`parallel-inbound-candidate.md`),
-which stay blocked until shared disk reservation exists. Inbound
-`TaskStore.upload` therefore still holds the store-wide lock while reading and
-syncing a file, with or without the flag: a stalled upload can block the
-scheduler, both nodes and a sender's next phase write. The sender waits rather
-than holds, but this remains a deployment blocker. Broker `update` and `hold`
+which stay blocked until shared disk reservation exists. When the flag is on,
+one Queue-owned mutex serializes inbound file streams, while store locks cover
+only the preflight and publication transactions. A stalled inbound stream no
+longer holds the store lock during reads and file sync. Same-task controls
+still conflict rather than wait. This mutex is process-local: it neither
+reserves global disk capacity nor fences another process or external writer.
+The Queue fixes this mode at construction and rejects a mismatched service.
+The existing ability to inject a different TaskStore is not newly qualified.
+Broker `update` and `hold`
 writes bypass the per-task fence under the flag, so a same-task request cannot
 force a false hold or stall a claim; other same-task controls get a retryable
 conflict rather than wait for a fenced request.
@@ -43,3 +47,13 @@ filesystem writers; it does not reserve shared disk space. Node identity and
 storage authority, mixed-version migration, real-engine and real-upload tests,
 and the newer reference path remain unresolved. Do not deploy or activate it
 without qualifying those.
+
+The revised three-module synthetic regression ran 193 tests on Linux with
+one skipped, using fake engines and pinned test dependencies. It does not
+establish real HTTP upload behavior, global capacity, or cross-process fencing.
+
+An additional owned-child test uses a real loopback HTTP listener and partial
+multipart request: shutdown retains Queue authority until the client half-closes,
+then exits and leaves no committed partial input. Node readiness is stubbed.
+It does not establish a hard shutdown deadline, abrupt process/power loss, a
+real engine, or production network and filesystem behavior.
