@@ -25,6 +25,7 @@ IDENTITY_UNAVAILABLE = 'engine_identity_unavailable'
 RESULT_CHANGED = 'engine_result_changed'
 _BOUND_FIELDS = ('dateCreated', 'imagesCount', 'options')
 CUSTODY_NAME = '.ledgetop-custody.json'
+CUSTODY_LEGACY_BACKUP = '.ledgetop-custody-legacy-v1.json'
 CUSTODY_VERSION = 1
 CUSTODY_STATES = ('pending', 'deferred', 'verified', 'refused', 'abandoned')
 # Nothing automatic leaves these. An operator retry leaves the last two.
@@ -35,6 +36,34 @@ CUSTODY_ACTIONS_KEPT = 8
 # No table or file is added, a sidecar failure cannot lose it, and a query lists it.
 # Only ``verified`` clears it, so that query is also the list of what is not.
 CUSTODY_INTENT = 'eager_custody_pending'
+
+
+def migrate_legacy_custody(record, identity):
+    """Convert the old seven-field v1 format to an explicit inspection hold.
+
+    The old and new formats both called themselves version 1.  Shape and exact
+    typed task identity are therefore required; no old ``verified`` assertion
+    is accepted as evidence of custody.  The caller must preserve the original
+    record and restore the durable intent before publishing this conversion.
+    """
+    keys = {'version', 'identity', 'state', 'reason', 'result', 'archive', 'checked'}
+    if (type(record) is not dict or set(record) != keys
+            or type(record['version']) is not int or record['version'] != 1
+            or type(record['identity']) is not dict or set(record['identity']) != set(identity)
+            or any(type(record['identity'][key]) is not type(value) or record['identity'][key] != value
+                   for key, value in identity.items())
+            or record['state'] not in ('pending', 'deferred', 'unavailable', 'verified')
+            or (record['reason'] is not None and type(record['reason']) is not str)
+            or type(record['result']) is not dict
+            or (record['archive'] is not None and type(record['archive']) is not dict)
+            or type(record['checked']) is not bool):
+        raise ValueError('legacy custody requires inspection')
+    # Preserve original values for inspection; even previously verified bytes
+    # are not trusted until a separate operator-directed revalidation.
+    return {**new_custody(identity, {}), 'state': 'refused',
+            'reason': 'legacy_custody_requires_inspection',
+            'result': record['result'], 'archive': record['archive'],
+            'checked': record['checked']}
 
 
 def new_adoption(identity):

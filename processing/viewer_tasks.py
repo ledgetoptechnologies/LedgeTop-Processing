@@ -23,8 +23,8 @@ from functools import wraps
 
 from .maintenance import Conflict
 from .viewer_output_log import OUTPUT_LOG_MAX_FILE_BYTES, OUTPUT_LOG_NAME, upgrade_output_log, valid_output_log
-from .viewer_result_adoption import (ADOPTION_MAX_FILE_BYTES, ADOPTION_NAME, CUSTODY_INTENT, CUSTODY_NAME, valid_adoption,
-                                     valid_custody)
+from .viewer_result_adoption import (ADOPTION_MAX_FILE_BYTES, ADOPTION_NAME, CUSTODY_INTENT, CUSTODY_NAME,
+                                     CUSTODY_LEGACY_BACKUP, migrate_legacy_custody, valid_adoption, valid_custody)
 
 
 class OptionEvidenceConflict(Conflict):
@@ -779,6 +779,11 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             return [tuple(row) for row in db.execute("SELECT rowid,uuid FROM viewer_tasks WHERE error=? AND phase='complete' AND stage='succeeded' AND rowid>? ORDER BY rowid LIMIT ?",(CUSTODY_INTENT,after,limit))]
 
+    def legacy_custody_page(self, after, limit):
+        """Advisory active-row census; historical incarnations need separate review."""
+        with self._lock, self.queue._db() as db:
+            return [tuple(row) for row in db.execute("SELECT rowid,uuid FROM viewer_tasks WHERE phase='complete' AND stage='succeeded' AND rowid>? ORDER BY rowid LIMIT ?", (after, limit))]
+
     def custody_task(self, identifier):
         """A task for its custody only, which outlives Viewer's remove."""
         with self._lock, self.queue._db() as db:
@@ -789,6 +794,86 @@ class TaskStore:
             rows=db.execute("SELECT * FROM viewer_tasks WHERE job_id=? AND error=? AND phase='complete' AND stage='succeeded' LIMIT 2",(job_id,CUSTODY_INTENT)).fetchall()
             if len(rows)!=1:raise Conflict('no result custody is owed')
             return self._task(db,rows[0])
+
+    def legacy_custody_task_for_job(self, job_id):
+        """Find one completed task without assuming its older intent survived."""
+        with self._lock, self.queue._db() as db:
+            rows = db.execute("SELECT * FROM viewer_tasks WHERE job_id=? AND phase='complete' AND stage='succeeded' LIMIT 2", (job_id,)).fetchall()
+            if len(rows) != 1:
+                raise Conflict('legacy custody identity unavailable')
+            job = self._job(db, rows[0])
+            if not self._legacy_custody_job_matches(job, rows[0]):
+                raise Conflict('legacy custody job unavailable')
+            return self._task(db, rows[0])
+
+    @staticmethod
+    def _legacy_custody_job_matches(job, row):
+        if (not job or job['status'] != 'succeeded' or job['profile'] != VIEWER_PROFILE
+                or job['node_id'] != row['node_id'] or job['environment'] != row['environment']):
+            return False
+        try:
+            result = json.loads(job['result'])
+        except (TypeError, ValueError):
+            return False
+        expected = {'engineTaskId': row['engine_uuid'], 'nodeId': row['node_id'],
+                    'environment': row['environment'], 'cancelled': False}
+        # Canonical JSON distinguishes boolean false from integer zero.
+        try:
+            return canonical(result) == canonical(expected)
+        except (TypeError, ValueError):
+            return False
+
+    def migrate_legacy_custody(self, task, note):
+        """Restore a durable hold, preserve old evidence, then convert its format.
+
+        Caller must hold the service's per-task transfer lock and admission gate.
+        A crash at any point leaves either the original sidecar or an explicit
+        refusal with the durable intent set. It never asserts downstream custody.
+        """
+        if type(note) is not str or not 1 <= len(note) <= 256 or not note.isascii() or not note.isprintable():
+            raise ValueError('operator custody note required')
+        identity = {'task': task['uuid'], 'generation': task['generation'], 'job': task['job_id'],
+                    'node': task['node_id'], 'engine': task['engine_uuid']}
+        if (type(identity['generation']) is not int or identity['generation'] < 1
+                or any(type(identity[k]) is not str or not identity[k] for k in ('task', 'job', 'node', 'engine'))):
+            raise Conflict('legacy custody identity unavailable')
+        with self._lock:
+            record = self._read_task_file(task, CUSTODY_NAME, ADOPTION_MAX_FILE_BYTES, 'result custody')
+            try:
+                converted = migrate_legacy_custody(record, identity)
+            except (ValueError, TypeError):
+                raise Conflict('legacy custody requires inspection') from None
+            converted['operator'] = [{'action': 'migrate-legacy', 'by': 'operator_credential',
+                                      'note': note, 'legacyState': record['state']}]
+            backup = self._read_task_file(task, CUSTODY_LEGACY_BACKUP, ADOPTION_MAX_FILE_BYTES, 'legacy custody backup')
+            if backup is not None and canonical(backup) != canonical(record):
+                raise Conflict('legacy custody backup differs')
+            # Commit the hold first; a crash cannot leave a migrated or legacy
+            # record hidden by the older cleared-intent behavior.
+            with self.queue._db() as db:
+                db.execute('BEGIN IMMEDIATE')
+                row = self._row(db, task['uuid'], removed=True)
+                if (any(type(row[k]) is not type(task[k]) or row[k] != task[k]
+                        for k in ('generation', 'job_id', 'node_id', 'engine_uuid', 'environment'))
+                        or row['phase'] != 'complete' or row['stage'] != 'succeeded'
+                        or row['error'] not in (None, CUSTODY_INTENT)):
+                    raise Conflict('legacy custody identity changed')
+                job = self._job(db, row)
+                if not self._legacy_custody_job_matches(job, row):
+                    raise Conflict('legacy custody job changed')
+                db.execute('UPDATE viewer_tasks SET error=? WHERE uuid=?', (CUSTODY_INTENT, task['uuid']))
+            if backup is None:
+                # Never replace an independently created backup. A crash may
+                # leave a partial backup; retain it and require inspection.
+                path = Path(task['directory']) / CUSTODY_LEGACY_BACKUP
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+                with os.fdopen(descriptor, 'wb') as stream:
+                    stream.write(canonical(record).encode())
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                sync_directory(path.parent)
+            self.save_custody(task, converted)
+        return converted
 
     def settle_custody(self, task):
         """The result is verified, so nothing is owed. Repeating this changes nothing."""

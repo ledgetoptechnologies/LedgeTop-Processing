@@ -1379,6 +1379,9 @@ class EagerCustody(unittest.TestCase):
         self.assertEqual(post({}, startup.env['PROCESSING_API_TOKEN']), 404)
         self.assertEqual(post(on, startup.env['PROCESSING_API_TOKEN']), 401)
         self.assertEqual(post(on, 'o' * 32), 409)  # Authorized, and no such custody is owed.
+        migration = '/v1/prototype/jobs/%s/custody/migrate-legacy' % uuid.uuid4()
+        self.assertEqual(post(on, startup.env['PROCESSING_API_TOKEN'], migration), 401)
+        self.assertEqual(post(on, 'o' * 32, migration), 409)
 
     def test_no_failure_or_length_of_time_abandons_anything(self):
         identifier = self.owed(read_unavailable=True)

@@ -1632,6 +1632,33 @@ class ViewerService:
             entry.update(attempts=record['attempts'], abandoned=record['abandoned'], operatorActions=record['operator'])
         return entry
 
+    def legacy_custody_census(self, after=0, limit=CUSTODY_PAGE_DEFAULT):
+        """Advisory format inventory, never authority to delete or cut over."""
+        from .viewer_result_adoption import (CUSTODY_NAME, ADOPTION_MAX_FILE_BYTES,
+                                             migrate_legacy_custody, valid_custody)
+        if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= CUSTODY_PAGE_MAX:
+            raise ValueError('invalid legacy custody page')
+        page = self.store.legacy_custody_page(after, limit + 1)
+        entries = []
+        for _, identifier in page[:limit]:
+            state = 'inspection_required'
+            try:
+                task = self.store.custody_task(identifier)
+                identity = self._adoption_identity(task)
+                record = self.store._read_task_file(task, CUSTODY_NAME, ADOPTION_MAX_FILE_BYTES, 'result custody')
+                if record is None:
+                    state = 'missing'
+                elif valid_custody(record, identity):
+                    state = 'current'
+                else:
+                    migrate_legacy_custody(record, identity)
+                    state = 'legacy'
+            except (Conflict, KeyError, ValueError, TypeError):
+                pass
+            entries.append({'taskId': identifier, 'format': state})
+        return {'advisoryOnly': True, 'historicalIncarnationsNotInspected': True,
+                'entries': entries, 'next': page[limit - 1][0] if len(page) > limit else None}
+
     def custody_action(self, job_id, action, request):
         """Operator only: stop owing a result, or evaluate it again now.
 
@@ -1641,7 +1668,8 @@ class ViewerService:
         note = request.get('note') if type(request) is dict and set(request) == {'note'} else None
         if type(note) is not str or not 1 <= len(note) <= 256 or not note.isascii() or not note.isprintable():
             raise ValueError('operator custody note required')
-        task = self.store.custody_task_for_job(job_id)
+        task = (self.store.legacy_custody_task_for_job(job_id) if action == 'migrate-legacy'
+                else self.store.custody_task_for_job(job_id))
         identifier = task['uuid']
         with self._lock:
             lock = self._downloads.setdefault(identifier, threading.Lock())
@@ -1650,6 +1678,11 @@ class ViewerService:
         try:
             gate = getattr(self.queue, 'admission_drain', None)
             with gate.admit() if gate is not None else nullcontext():
+                if action == 'migrate-legacy':
+                    self.store.migrate_legacy_custody(task, note)
+                    self._forget_eager(identifier)
+                    logging.getLogger(__name__).warning('Viewer legacy result custody held for inspection')
+                    return self._eager_entry(identifier)
                 record = self.store.custody(task) or new_custody(self._adoption_identity(task), {})
                 if record['state'] == 'verified':
                     raise Conflict('result custody is verified')
