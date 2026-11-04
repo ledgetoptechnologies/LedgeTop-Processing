@@ -1,7 +1,9 @@
 import hashlib
+import copy
 import io
 import json
 import os
+import pickle
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -84,6 +86,11 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
             self.make_client().download_object(grant=grant, object_id='not-in-grant',
                                                destination=self.root / 'unknown.bin')
         self.assertEqual(self.calls, [])
+        for restored in (copy.deepcopy(grant), pickle.loads(pickle.dumps(grant))):
+            self.assertEqual(restored, grant)
+            self.assertEqual(restored.object_for(self.obj.id), self.obj)
+            with self.assertRaises(TypeError):
+                restored._object_index[self.obj.id] = self.obj
 
     def make_client(self, opener=None):
         return SourceRangeClient("https://broker.example", self.root / "progress.sqlite",

@@ -206,6 +206,13 @@ class ValidatedSourceGrant:
             raise TransferError('source object is outside grant')
         return self._object_index.get(object_id)
 
+    def __reduce__(self):
+        # Rebuild the derived proxy rather than attempting to serialize it.
+        # This preserves the value object's prior deepcopy/pickle behavior.
+        return (type(self), (self.identity, self.expires, self.objects,
+                self.chunk_bytes, self.request_budget, self.byte_budget,
+                self.attempt_budget, self.token))
+
 
 def validate_source_grant(grant, *, job, clock=time.time, allow_expired=False):
     """Validate a closed v2 grant against the immutable queued job envelope."""
