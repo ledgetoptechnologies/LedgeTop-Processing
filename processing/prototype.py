@@ -104,6 +104,8 @@ class Queue(Maintenance):
                        for value in node_photo_limits.values())):
             raise ValueError('node photo limits must cover the configured nodes')
         self.node_photo_limits = dict(node_photo_limits) if node_photo_limits is not None else None
+        # ReferenceStore supplies current (scratch, output) evidence for a node.
+        self.node_scratch_evidence = None
         if type(per_node_slots) is not bool:
             raise ValueError("per_node_slots must be boolean")
         self.per_node_slots = per_node_slots
@@ -295,31 +297,46 @@ class Queue(Maintenance):
         for job in prior:
             if job['profile'] == VIEWER_PROFILE:
                 continue  # ViewerService separately checks node eligibility.
-            if job['profile'] != REFERENCE_PROFILE or self.node_photo_limits is None:
-                return False
-            limit = self.node_photo_limits[node_id]
-            if limit is None:
-                return False
-            try:
-                row = db.execute('SELECT input_json,manifest_sha FROM reference_jobs WHERE job_id=?',
-                                 (job['id'],)).fetchone()
-                if not row:
-                    return False
-                from . import reference_protocol as protocol
-                submission = json.loads(row['input_json'])
-                manifest = submission['manifest']
-                count = manifest['inputCounts']['images']
-                objects = manifest['objects']
-                if (type(count) is not int or count < 0 or count <= limit
-                        or type(objects) is not list or not 0 < len(objects) <= protocol.MAX_OBJECTS
-                        or any(type(obj) is not dict or obj.get('kind') not in ('image', 'lidar', 'auxiliary') for obj in objects)
-                        or count != sum(obj['kind'] == 'image' for obj in objects)
-                        or protocol.manifest_sha256(manifest) != row['manifest_sha']
-                        or manifest.get('sha256') != row['manifest_sha']):
-                    return False
-            except (sqlite3.Error, ValueError, TypeError, KeyError, AttributeError):
+            if job['profile'] != REFERENCE_PROFILE or not self._reference_ineligible(db, job, node_id):
                 return False
         return True
+
+    def _reference_ineligible(self, db, job, node_id):
+        """Prove a queued reference job cannot run here; uncertainty proves nothing.
+
+        Proof is a configured capability or photo cap, or known input bytes
+        against a current scratch observation. A reported cap is not proof.
+        """
+        limit = self.node_photo_limits[node_id] if self.node_photo_limits is not None else None
+        capabilities = self.node_capabilities[node_id] if self.node_capabilities is not None else None
+        if limit is None and capabilities is None and self.node_scratch_evidence is None:
+            return False
+        try:
+            row = db.execute('SELECT input_json,manifest_sha FROM reference_jobs WHERE job_id=?',
+                             (job['id'],)).fetchone()
+            if not row:
+                return False
+            from . import reference_protocol as protocol
+            submission = json.loads(row['input_json'])
+            manifest, pipeline = submission['manifest'], submission['pipeline']
+            count, total = manifest['inputCounts']['images'], manifest['totalBytes']
+            objects = manifest['objects']
+            if (type(count) is not int or count < 0 or type(total) is not int or total < 0
+                    or type(objects) is not list or not 0 < len(objects) <= protocol.MAX_OBJECTS
+                    or any(type(obj) is not dict or obj.get('kind') not in ('image', 'lidar', 'auxiliary') for obj in objects)
+                    or count != sum(obj['kind'] == 'image' for obj in objects)
+                    or protocol.manifest_sha256(manifest) != row['manifest_sha']
+                    or manifest.get('sha256') != row['manifest_sha']):
+                return False
+            if limit is not None and count > limit:
+                return True
+            if capabilities is not None and any(pipeline[kind]['requested'] is True and kind not in capabilities
+                                                for kind in ('odm', 'treedar')):
+                return True
+            evidence = self.node_scratch_evidence(node_id) if self.node_scratch_evidence is not None else None
+            return evidence is not None and total + evidence[1] > evidence[0]
+        except (sqlite3.Error, ValueError, TypeError, KeyError, AttributeError):
+            return False
 
     def viewer_skip_is_safe(self, job_id, node_id):
         """Advisory selection; claim rechecks against current queue state."""

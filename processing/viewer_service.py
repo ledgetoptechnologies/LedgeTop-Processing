@@ -32,6 +32,9 @@ from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
 from .viewer_limits import MAX_UPLOAD_BYTES
 
+# A silent node holds overflow this long, matching the readiness cache TTL.
+UNANSWERED_NODE_SECONDS = 30
+
 
 class EngineUnavailable(OSError):
     pass
@@ -197,6 +200,7 @@ class ViewerService:
             raise ValueError('guarded task clients require guard readiness and a callable factory')
         self._guarded_engine_factory = guarded_engine_factory
         self._guard_probe = guard_probe
+        self._unanswered = {}
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -1018,6 +1022,7 @@ class ViewerService:
                 available = []
                 for spec in self.inventory:
                     if 'odm' not in spec['capabilities'] or spec['id'] in occupied:
+                        self._unanswered.pop(spec['id'], None)
                         continue
                     if not self._guard_ready(spec['id']):
                         continue
@@ -1025,14 +1030,21 @@ class ViewerService:
                         continue
                     report = self.probe(spec['id'], spec['origin'], spec['token'])
                     if not isinstance(report, dict) or 'maxImages' not in report:
+                        # Silence is not busy: hold overflow past this node for
+                        # a bounded time, then treat it as unavailable.
+                        first = self._unanswered.setdefault(spec['id'], time.monotonic())
+                        if time.monotonic() - first < UNANSWERED_NODE_SECONDS:
+                            available.append((spec, None, False))
                         continue
+                    self._unanswered.pop(spec['id'], None)
                     limit = report.get('maxImages')
                     if (report.get('ready') is not True or type(report.get('taskQueueCount')) is not int
                             or report['taskQueueCount'] != 0
                             or (limit is not None and (type(limit) is not int or limit < 1))):
                         continue
-                    available.append((spec, limit))
+                    available.append((spec, limit, True))
                 node_id = None
+                held = False
                 top_environment = queued[0]['environment']
                 for candidate in queued:
                     if candidate['environment'] != top_environment:
@@ -1040,8 +1052,12 @@ class ViewerService:
                     if candidate['profile'] != VIEWER_PROFILE:
                         continue
                     current = self.store.task_for_job(candidate['id'])
-                    for spec, limit in available:
+                    uncertain = False
+                    for spec, limit, answered in available:
                         if all(maximum is None or current['images_count'] <= maximum for maximum in (spec['maxPhotos'], limit)):
+                            if not answered:
+                                uncertain = True
+                                continue
                             if not self.queue.viewer_skip_is_safe(candidate['id'], spec['id']):
                                 continue
                             try:
@@ -1051,9 +1067,11 @@ class ViewerService:
                                 # A node that returned with changed options is
                                 # ineligible for this task; try the next node.
                                 continue
-                            task, node_id = current, spec['id']
+                            held = uncertain
+                            if not held:
+                                task, node_id = current, spec['id']
                             break
-                    if node_id is not None:
+                    if node_id is not None or held:
                         break
                 if node_id is None:
                     self.store.update(task['uuid'], phase='waiting_node', error='no_eligible_node')

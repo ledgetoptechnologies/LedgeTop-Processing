@@ -74,6 +74,18 @@ specified and tested.
 - Engine adapters publish comparable capabilities and health, but have their
   own input, output, progress, cancellation, and cleanup methods.
 
+With a configured node inventory, one job runs per node. The scheduler scans
+production before staging and gives each node the earliest queued job eligible
+for it, in configured node order, so a 5,000-photo job waits for a large node
+without blocking later work a small node can run. A job passes an earlier node
+only when that node is occupied, observed busy or not ready, or proven unable to
+run it by configured capability, configured photo cap, or known input bytes
+against a current scratch observation; a node-reported cap alone proves nothing.
+A node in an unknown state (probe in flight, failed, or no observation) holds any
+job it might run from later nodes for one readiness TTL after its last valid
+probe, then counts as unavailable until it answers. Later nodes may idle for that
+TTL, which is the cost of not sending small work to a large node on a routine probe.
+
 ClusterODX already handles a NodeODX-compatible single address, node health,
 queue slots, and `maxImages`. We can use it behind an ODM adapter if its actual
 responses pass the current Viewer's probe and task contract. Its capacity-based

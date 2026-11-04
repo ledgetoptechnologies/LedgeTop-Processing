@@ -60,8 +60,9 @@ class WorkerReadinessPoller:
                     raise ValueError('worker identity mismatch')
                 self._cache.publish(node, body['observation'], ticket=ticket)
             except Exception:
-                # begin() already invalidated the prior observation. A newer
-                # poll, if any, owns its own ticket and must remain untouched.
+                # begin() already invalidated the prior observation, so the
+                # node is unknown, not busy, until its TTL lapses. A newer poll,
+                # if any, owns its own ticket and must remain untouched.
                 continue
 
     def start(self):

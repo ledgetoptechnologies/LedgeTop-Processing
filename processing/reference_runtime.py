@@ -344,7 +344,7 @@ class ReferenceRuntime:
                                                                ssl_context=worker_context)
             self.store = ReferenceStore(queue, local_max_photos=config.local_max_photos,
                 local_max_input_bytes=config.local_max_input_bytes, main_node_id=None if inventory else "main",
-                node_inventory=inventory, node_readiness=readiness_cache.get if readiness_cache else None,
+                node_inventory=inventory, node_readiness=readiness_cache.status if readiness_cache else None,
                 viewer_required_environments=tuple(settings.viewer_acceptance_targets or ()))
             self._streams = threading.BoundedSemaphore(settings.stream_budget["maxConcurrent"])
             proxy = ResultProxy({node: worker["resultOrigin"] for node, worker in settings.workers.items()},

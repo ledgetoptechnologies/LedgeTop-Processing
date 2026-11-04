@@ -50,6 +50,41 @@ class NodeReadinessTests(unittest.TestCase):
             cache.publish('small', report, ticket=ticket)
         self.assertIsNone(cache.get('small'))
 
+    def test_status_separates_unknown_from_expired_and_keeps_ticket_fencing(self):
+        now = [100.0]
+        cache = NodeReadiness(('small',), ttl_seconds=5, clock=lambda: now[0])
+        report = {'ready': True, 'taskQueueCount': 0, 'maxImages': None,
+                  'availableScratchBytes': 1000, 'outputBudgetBytes': 100}
+        expired = {'ready': False, 'reason': 'readiness_expired'}
+        self.assertIsNone(cache.status('small'))  # Startup is bounded the same way.
+        now[0] = 105
+        self.assertEqual(cache.status('small'), expired)
+        cache.publish('small', report, ticket=cache.begin('small'))
+        self.assertEqual(cache.status('small'), report)
+        older = cache.begin('small')
+        self.assertIsNone(cache.get('small'))
+        self.assertIsNone(cache.status('small'))  # Mid-probe: unknown, never busy.
+        newer = cache.begin('small')
+        with self.assertRaises(ValueError):
+            cache.publish('small', report, ticket=older)
+        self.assertIsNone(cache.status('small'))
+        now[0] = 109.9  # A probe that never resolves does not refresh the evidence.
+        cache.begin('small')
+        self.assertIsNone(cache.status('small'))
+        now[0] = 110
+        self.assertEqual(cache.status('small'), expired)
+        cache.begin('small')
+        self.assertEqual(cache.status('small'), expired)
+        now[0] = 111
+        cache.publish('small', report, ticket=cache.begin('small'))
+        self.assertEqual(cache.status('small'), report)
+        cache.invalidate('small')
+        self.assertIsNone(cache.status('small'))
+        now[0] = 99
+        self.assertIsNone(cache.status('small'))
+        with self.assertRaises(ValueError):
+            cache.status('other')
+
 
 if __name__ == '__main__':
     unittest.main()
