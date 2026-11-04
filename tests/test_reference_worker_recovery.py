@@ -85,7 +85,7 @@ class LargeRecoveryFixture:
         serverctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);serverctx.load_cert_chain(cert,key)
         self.server=create_reference_http_server(self.api,ssl_context=serverctx);thread=threading.Thread(target=self.server.serve_forever);thread.start()
         def stop():self.server.shutdown();thread.join(5);self.server.server_close()
-        self.stack.callback(stop);context=ssl.create_default_context(cafile=str(cert))
+        self.stack.callback(stop);context=ssl.create_default_context(cafile=str(cert));context.minimum_version=ssl.TLSVersion.TLSv1_2
         self.policy=ClaimStatePolicy('https://127.0.0.1:'+str(self.server.server_port),h.policy.authority_id,'main','main-worker','instance-one','worker-main',tls_trust_sha256(context))
         self.client=ClaimStateClient(self.policy,WorkerCredential('worker-main',fixtures.WORKER),ssl_context=context)
         binding=dict(origin=self.policy.origin,nodeId='main',workerId='main-worker',workerInstanceId='instance-one',authorityId=h.policy.authority_id,engineId=h.policy.engine_id,gateOrigin=h.policy.coordinator_origin,gateGeneration=1,outputBudget=output,environments=sorted(h.policy.allowed_environments))
