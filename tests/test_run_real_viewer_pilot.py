@@ -41,17 +41,55 @@ class LauncherTests(unittest.TestCase):
                 (state['data']/'pilot-receipt.json').write_text(json.dumps(receipt))
                 (state['data']/'pilot-complete.json').write_text(json.dumps(complete))
                 return SimpleNamespace(returncode=0)
+            if cmd[:2]==['git','archive']:
+                kw['stdout'].write(b'synthetic git archive')
+                return SimpleNamespace(returncode=0)
             raise AssertionError(cmd)
         def output(cmd,**kw):
             return json.dumps([{'Id':'c'*64,'Name':'/'+state['name'],'Image':m.IMAGE,
                 'Config':{'Labels':{'ltds.pilot.owner':state['owner']}}}])
-        patches=[patch.object(m,'source_status',return_value=True),patch.object(m,'converter_status',return_value=True),
-                 patch.object(m,'sample_size',return_value=100),patch.object(m,'remote_snapshot',return_value={}),
-                 patch.object(m,'read_staging_token',return_value=secret),patch.object(m,'prepare',side_effect=prepare),
+        preflight=SimpleNamespace(source_status=lambda _:True,converter_status=lambda _:True,sample_size=lambda _:100,REMOTE='fake')
+        pinned={'preflight':preflight,'input':SimpleNamespace(prepare=prepare),'worker':b'fake'}
+        patches=[patch.object(m,'FIXED_REGISTRY',self.args.registry),patch.object(m,'verify_registry_acl'),
+                 patch.object(m,'load_pinned',return_value=pinned),patch.object(m,'remote_snapshot',return_value={}),
+                 patch.object(m,'read_staging_token',return_value=secret),
                  patch.object(m.subprocess,'run',side_effect=run),patch.object(m.subprocess,'check_output',side_effect=output)]
         for p in patches:p.start()
         self.addCleanup(lambda:[p.stop() for p in reversed(patches)])
         return calls,state,secret
+    def test_other_registry_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError,'fixed_registry_required'):
+            m.verify_registry_acl(self.args.registry)
+
+    def test_pinned_git_objects_match_expected_hashes(self):
+        pinned=m.load_pinned(ROOT.parent)
+        self.assertIn(b'live_pilot_not_qualified',pinned['worker'])
+
+    def test_mutated_pinned_object_rejected(self):
+        with patch.object(m.subprocess,'check_output',return_value=b'altered'):
+            with self.assertRaisesRegex(RuntimeError,'processing_source_mismatch'):
+                m.load_pinned(self.args.processing)
+
+    def test_viewer_archive_excludes_ignored_node_modules(self):
+        import tarfile
+        repo=self.args.viewer
+        subprocess.run(['git','init','-q'],cwd=repo,check=True)
+        subprocess.run(['git','config','user.name','Synthetic'],cwd=repo,check=True)
+        subprocess.run(['git','config','user.email','synthetic@example.invalid'],cwd=repo,check=True)
+        app=repo/'apps'/'viewer';app.mkdir(parents=True)
+        (app/'package.json').write_text('{}')
+        (repo/'.gitignore').write_text('node_modules/\n')
+        subprocess.run(['git','add','.'],cwd=repo,check=True)
+        subprocess.run(['git','commit','-qm','fixture'],cwd=repo,check=True)
+        rev=subprocess.check_output(['git','rev-parse','HEAD'],cwd=repo,text=True).strip()
+        ignored=app/'node_modules';ignored.mkdir();(ignored/'evil.js').write_text('not in committed tree')
+        out=self.args.parent/'archive.tar'
+        with patch.object(m,'PINNED_VIEWER',rev):m.write_viewer_archive(repo,out)
+        with tarfile.open(out) as tar:
+            names=tar.getnames()
+        self.assertIn('apps/viewer/package.json',names)
+        self.assertFalse(any('node_modules' in x for x in names))
+
     def test_one_shot_token_stdin_and_no_automatic_cleanup(self):
         calls,state,secret=self.exercise()
         with redirect_stdout(io.StringIO()):m.launch(self.args)

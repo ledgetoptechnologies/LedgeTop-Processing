@@ -5,6 +5,9 @@ Each host-local registry is one-shot and retains its record even on failure.
 An interrupted supervisor never stops or removes its container or node task.
 """
 import argparse
+import base64
+import hashlib
+import types
 import json
 import os
 from pathlib import Path
@@ -12,9 +15,55 @@ import subprocess
 import sys
 import uuid
 
-from advisory_live_pilot_preflight import REMOTE, converter_status, sample_size, source_status
-from prepare_pilot_input import prepare
-from run_real_viewer_pilot_fake import IMAGE
+PINNED_PROCESSING='625eb26132fd0042de490b63b9afc240d284f8c8'
+PINNED_VIEWER='ad0bf46611de44545825db9147e90b68195902ab'
+IMAGE='sha256:e7add2a490bb17d97b485b8641bd88455fff7839ade0f5eba493c3508124d413'
+FIXED_REGISTRY=(Path(r'C:\Users\fstor\.codex\ledgetop-processing-pilot-registry') if os.name=='nt'
+                else Path('/home/bkoltz/.local/share/ledgetop-processing-pilot-registry'))
+PINNED_FILES={
+ 'tests/real_viewer_pilot.js':'00d95a5b5ac8a07c133a0e63247a675e31b65b3ce86e015b97f33671360f6b11',
+ 'tests/advisory_live_pilot_preflight.py':'cf7a939c34a799d50cae90ea27c3bbcf910e5bf10e8586973c490d8b8b4df3fe',
+ 'tests/prepare_pilot_input.py':'aa91fd69b70dc92fa8fc67f64e8f90bb4da169dc1f6e3811d79b4ba867ab9f1a',
+}
+
+
+def load_pinned(processing):
+    blobs={}
+    for name,digest in PINNED_FILES.items():
+        raw=subprocess.check_output(['git','show',PINNED_PROCESSING+':'+name],cwd=processing,timeout=15)
+        if hashlib.sha256(raw).hexdigest()!=digest:raise RuntimeError('processing_source_mismatch')
+        blobs[name]=raw
+    result={}
+    for name,key in (('tests/advisory_live_pilot_preflight.py','preflight'),('tests/prepare_pilot_input.py','input')):
+        module=types.ModuleType('_pinned_'+key)
+        exec(compile(blobs[name],name,'exec'),module.__dict__)
+        result[key]=module
+    result['worker']=blobs['tests/real_viewer_pilot.js']
+    return result
+
+
+def verify_registry_acl(registry):
+    if registry!=FIXED_REGISTRY:raise RuntimeError('fixed_registry_required')
+    if os.name=='posix':
+        st=registry.lstat()
+        if st.st_uid!=os.geteuid() or st.st_mode & 0o077:raise RuntimeError('registry_acl_unverified')
+        return
+    if os.name!='nt':raise RuntimeError('registry_acl_unverified')
+    # No ACL changes are made. Only the current user, SYSTEM and local admins
+    # may have ACEs; inherited permissions are not accepted for the registry.
+    path=str(FIXED_REGISTRY).replace("'","''")
+    script=("$ErrorActionPreference='Stop'; $a=Get-Acl -LiteralPath '"+path+"'; "
+       "$me=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
+       "$owner=([Security.Principal.NTAccount]$a.Owner).Translate([Security.Principal.SecurityIdentifier]).Value; "
+       "$ok=$a.AreAccessRulesProtected -and $owner -eq $me; $mine=$false; "
+       "foreach($r in $a.Access){$sid=$r.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value; "
+       "if($sid -notin @($me,'S-1-5-18','S-1-5-32-544')){$ok=$false}; "
+       "if($sid -eq $me -and $r.AccessControlType -eq 'Allow' -and "
+       "(($r.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq "
+       "[Security.AccessControl.FileSystemRights]::FullControl)){$mine=$true}}; "
+       "if($ok -and $mine){exit 0}else{exit 1}")
+    if subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',script],
+                      capture_output=True,timeout=15).returncode:raise RuntimeError('registry_acl_unverified')
 
 # Reads the already configured staging credential remotely and returns it only
 # to the local launcher over authenticated SSH. Never put the token in argv,
@@ -57,8 +106,8 @@ def checked_dir(path):
     return path
 
 
-def remote_snapshot(input_bytes):
-    result=subprocess.run(SSH+['python3','-'],input=REMOTE,text=True,capture_output=True,timeout=30,check=True)
+def remote_snapshot(input_bytes, remote_script):
+    result=subprocess.run(SSH+['python3','-'],input=remote_script,text=True,capture_output=True,timeout=30,check=True)
     data=json.loads(result.stdout)
     bools=('remoteOk','coordinatorIdentity','nodeIdentity','stagingBinding','providerExpected','optionsAvailable','nodeExpected','engineOnlyProcess')
     if any(data.get(k) is not True for k in bools):raise RuntimeError('remote_identity_or_binding_unverified')
@@ -73,6 +122,12 @@ def remote_snapshot(input_bytes):
     return data
 
 
+def write_viewer_archive(viewer, archive):
+    with archive.open('xb') as out:
+        subprocess.run(['git','archive','--format=tar',PINNED_VIEWER,'apps/viewer'],cwd=viewer,stdout=out,timeout=60,check=True)
+        out.flush();os.fsync(out.fileno())
+
+
 def read_staging_token():
     # stdout is held only in this subprocess result and is never printed.
     result=subprocess.run(SSH+['python3','-'],input=TOKEN_READER,capture_output=True,text=True,timeout=20,check=True)
@@ -85,32 +140,39 @@ def read_staging_token():
 def launch(a):
     processing=checked_dir(a.processing);viewer=checked_dir(a.viewer);cache=checked_dir(a.cache)
     converter=checked_dir(a.converter);photos=checked_dir(a.photos);registry=checked_dir(a.registry)
-    parent=checked_dir(a.parent)
-    if not source_status(viewer) or not converter_status(converter):raise RuntimeError('source_or_converter_mismatch')
+    verify_registry_acl(registry)
+    pinned=load_pinned(processing);preflight=pinned['preflight'];prepare=pinned['input'].prepare
+    if not preflight.source_status(viewer) or not preflight.converter_status(converter):raise RuntimeError('source_or_converter_mismatch')
     if subprocess.run(['docker','image','inspect',IMAGE],capture_output=True,timeout=15).returncode:
         raise RuntimeError('pinned_runtime_missing')
-    if any(p==photos or photos in p.parents or p in photos.parents for p in (registry,parent)):
+    if registry==photos or photos in registry.parents or registry in photos.parents:
         raise RuntimeError('test_storage_overlaps_source')
-    size=sample_size(photos);remote_snapshot(size)
+    size=preflight.sample_size(photos);remote_snapshot(size,preflight.REMOTE)
     # Launcher marker persists on success, failure, crash and uncertain create.
     # This guards only this exact host registry, not other submitters/hosts.
     owner=uuid.uuid4().hex;name='ltds-real-pilot-'+owner
     marker=registry/'launcher.json'
     exclusive_json(marker,{'schemaVersion':1,'owner':owner,'containerName':name,'state':'claimed'})
-    data=parent/('pilot-'+owner)
+    data=registry/('pilot-'+owner)
     prepared=prepare(photos,data,25)
     exclusive_json(data/'launch-intent.json',{'schemaVersion':1,'owner':owner,
         'sampleOwner':prepared['owner'],'containerName':name,'runtimeImage':IMAGE})
     # Repeat immediately before creation; this is a snapshot, not a reservation.
-    remote_snapshot(prepared['bytes']);token=read_staging_token()
-    script=('mkdir /tmp/deps && cp /viewer/apps/viewer/package.json /viewer/apps/viewer/package-lock.json /tmp/deps/ '
+    remote_snapshot(prepared['bytes'],preflight.REMOTE);token=read_staging_token()
+    # Archive exact tracked Viewer commit. Ignored node_modules and local files
+    # are excluded and cannot override the npm ci lockfile installation.
+    archive=data/'viewer-source.tar'
+    write_viewer_archive(viewer, archive)
+    worker=base64.b64encode(pinned['worker']).decode('ascii')
+    script=('mkdir /tmp/deps && tar -xf /viewer-source.tar -C /tmp/deps '
+        '&& cp /tmp/deps/apps/viewer/package.json /tmp/deps/apps/viewer/package-lock.json /tmp/deps/ '
         '&& npm ci --prefix /tmp/deps --omit=dev --offline --ignore-scripts --no-audit --no-fund --cache /npm-cache --logs-max=0 '
-        '&& mkdir /tmp/deps/apps && cp -R /viewer/apps/viewer /tmp/deps/apps/viewer '
-        '&& exec node tests/real_viewer_pilot.js')
+        '&& printf %s '+worker+' | base64 -d > /tmp/pilot-worker.js '
+        '&& exec node /tmp/pilot-worker.js')
     cmd=['docker','create','--interactive','--name',name,'--label','ltds.pilot.owner='+owner,
         '--network','bridge','--read-only','--memory','1536m','--cpus','1','--pids-limit','96',
-        '--tmpfs','/tmp:rw,nosuid,nodev,size=512m,mode=1777','--user','10001:10001','--workdir','/processing']
-    for src,dst,ro in ((processing,'/processing',True),(viewer,'/viewer',True),(cache,'/npm-cache',True),
+        '--tmpfs','/tmp:rw,nosuid,nodev,size=512m,mode=1777','--user','10001:10001','--workdir','/tmp']
+    for src,dst,ro in ((archive,'/viewer-source.tar',True),(cache,'/npm-cache',True),
         (converter,'/opt/obj2tiles',True),(data,'/pilot',False),(registry,'/pilot-registry',False)):
         cmd+=['--mount',f'type=bind,src={src},dst={dst}'+(',readonly' if ro else '')]
     for value in ('NODE_PATH=/tmp/deps/node_modules','LD_LIBRARY_PATH=/opt/obj2tiles','VIEWER_SOURCE=/tmp/deps',
@@ -157,7 +219,7 @@ def launch(a):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    for name in ('processing','viewer','cache','converter','photos','registry','parent'):
+    for name in ('processing','viewer','cache','converter','photos','registry'):
         p.add_argument('--'+name,type=Path,required=True)
     try:launch(p.parse_args())
     except Exception as exc:
