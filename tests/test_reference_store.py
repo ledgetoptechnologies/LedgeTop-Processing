@@ -228,7 +228,7 @@ class ReferenceStoreTests(unittest.TestCase):
                   'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024}
         store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda _: report)
 
-        def submit(count):
+        def submit(count, environment='production'):
             raw = copy.deepcopy(self.fixture['submission'])
             raw['submissionId'] = str(uuid.uuid4())
             manifest = raw['manifest']
@@ -237,7 +237,7 @@ class ReferenceStoreTests(unittest.TestCase):
             manifest.update(objectCount=count, totalBytes=count * 3,
                             inputCounts={'images': count, 'lidarObjects': 0, 'points': 0})
             manifest['sha256'] = p.manifest_sha256(manifest)
-            return store.submit(p.validate_submission(raw, environment='production',
+            return store.submit(p.validate_submission(raw, environment=environment,
                 capability_fingerprint=raw['capabilityFingerprint']))[0]
 
         def claim(job, node):
@@ -256,9 +256,21 @@ class ReferenceStoreTests(unittest.TestCase):
             'status': 'succeeded', 'result': {}})
         self.assertIsNone(store.next_for_node('cluster'))
         self.assertEqual(self.queue.get(large['jobId'])['status'], 'queued')
+        # A later compatible production job may use the free small node;
+        # the older large job still cannot run there. Staging stays queued.
+        staging = submit(20, environment='staging')
+        later_small = submit(50)
+        self.assertEqual(store.next_for_node('cluster')['jobId'], later_small['jobId'])
+        self.assertIsNone(claim(staging, 'cluster'))
+        third_claim = claim(later_small, 'cluster')
+        self.assertIsNotNone(third_claim)
+        self.assertEqual(self.queue.get(large['jobId'])['status'], 'queued')
+        self.assertEqual(self.queue.get(staging['jobId'])['status'], 'queued')
         self.queue.complete(medium['jobId'], {'claimToken': second_claim['claimToken'],
             'status': 'succeeded', 'result': {}})
         self.assertEqual(store.next_for_node('node-2')['jobId'], large['jobId'])
+        self.assertIsNotNone(claim(large, 'node-2'))
+        self.assertEqual(self.queue.get(staging['jobId'])['status'], 'queued')
 
     def test_candidate_inventory_racing_claims_do_not_share_a_slot(self):
         self.queue.per_node_slots = True
