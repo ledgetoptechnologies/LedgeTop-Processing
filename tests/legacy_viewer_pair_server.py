@@ -37,11 +37,11 @@ def synthetic_assets():
           'bufferViews':views,'buffers':[{'byteLength':len(blob)}]}
     header=json.dumps(desc,separators=(',',':')).encode();header+=b' '*((-len(header))%4)
     glb=struct.pack('<III',0x46546c67,2,12+8+len(header)+8+len(blob))+struct.pack('<II',len(header),0x4e4f534a)+header+struct.pack('<II',len(blob),0x004e4942)+blob
-    obj=b'mtllib materials/model.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\nusemtl surface\nf 1/1/1 2/2/1 3/3/1\nf 1/1/1 3/3/1 4/4/1\n'
+    obj=b'mtllib model.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\nusemtl surface\nf 1/1/1 2/2/1 3/3/1\nf 1/1/1 3/3/1 4/4/1\n'
     return {'odm_texturing/odm_textured_model_geo.glb':glb,
             'odm_texturing/odm_textured_model_geo.obj':obj,
-            'odm_texturing/materials/model.mtl':b'newmtl surface\nmap_Kd ../textures/model.png\n',
-            'odm_texturing/textures/model.png':png,
+            'odm_texturing/model.mtl':b'newmtl surface\nmap_Kd model.png\n',
+            'odm_texturing/model.png':png,
             'entwine_pointcloud/ept.json':b'{}',
             '3d_tiles/model/tileset.json':b'{}'}
 

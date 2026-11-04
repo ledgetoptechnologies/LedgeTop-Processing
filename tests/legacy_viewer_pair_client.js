@@ -83,7 +83,7 @@ async function main() {
       const receipt=processing.getAttemptTransferProvenance(attempt.id)?.archive;
       const final=processing.getAttempt(attempt.id);
       assert.ok(receipt && Array.isArray(receipt.archiveFiles) && receipt.archiveFiles.length===6);
-      const expectedNames=new Set(['odm_texturing/odm_textured_model_geo.glb','odm_texturing/odm_textured_model_geo.obj','odm_texturing/materials/model.mtl','odm_texturing/textures/model.png','entwine_pointcloud/ept.json','3d_tiles/model/tileset.json']);
+      const expectedNames=new Set(['odm_texturing/odm_textured_model_geo.glb','odm_texturing/odm_textured_model_geo.obj','odm_texturing/model.mtl','odm_texturing/model.png','entwine_pointcloud/ept.json','3d_tiles/model/tileset.json']);
       for(const file of receipt.archiveFiles){
         assert.ok(expectedNames.delete(file.relativePath));
         const bytes=fs.readFileSync(path.join(dataRoot,'models',task.id,attempt.id,file.relativePath));
