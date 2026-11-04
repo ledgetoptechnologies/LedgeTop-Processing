@@ -85,3 +85,65 @@ j._journal_fixture(db,raw,expected=f.expected,result_manifest=f.manifest,trusted
         self.assertEqual(self.db.execute('SELECT COUNT(*) FROM fixture_ids').fetchone()[0],0)
         self.assertEqual(self.write(),'stored')
 
+    def test_process_exit_after_commit_before_response_replays(self):
+        self.db.close()
+        script="""import os,sys
+from tests.test_viewer_copy_v2_candidate import ViewerCopyV2CandidateTests
+from processing import reference_protocol as p
+from processing import viewer_copy_journal_candidate as j
+f=ViewerCopyV2CandidateTests('test_valid_full_closure_and_public_api_disabled');f.setUp()
+db=j._open_fixture(sys.argv[1],sys.argv[2])
+raw=p.canonical_json({'acceptance':f.a,'viewerReceipt':f.r})
+j._journal_fixture(db,raw,expected=f.expected,result_manifest=f.manifest,trusted_keys=f.pins)
+os._exit(32)
+"""
+        try:
+            child=subprocess.run([sys.executable,'-c',script,str(self.path),self.owner_token],
+                timeout=10,check=False,capture_output=True)
+            self.assertEqual(child.returncode,32);self.assertEqual(child.stdout,b'')
+        finally:self.db=j._open_fixture(self.path,self.owner_token)
+        self.assertEqual(self.write(),'replay')
+        with self.assertRaises(j.JournalConflict):self.write(b' '+self.raw())
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM fixture_copies').fetchone()[0],1)
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM fixture_ids').fetchone()[0],4)
+
+    def test_concurrent_identical_writers_have_one_record(self):
+        self.db.close()
+        script="""import sys,time
+from pathlib import Path
+from tests.test_viewer_copy_v2_candidate import ViewerCopyV2CandidateTests
+from processing import reference_protocol as p
+from processing import viewer_copy_journal_candidate as j
+f=ViewerCopyV2CandidateTests('test_valid_full_closure_and_public_api_disabled');f.setUp()
+db=j._open_fixture(sys.argv[1],sys.argv[2])
+Path(sys.argv[3]).touch()
+deadline=time.monotonic()+5
+while not Path(sys.argv[4]).exists():
+ if time.monotonic()>deadline:raise TimeoutError('barrier')
+ time.sleep(.01)
+raw=p.canonical_json({'acceptance':f.a,'viewerReceipt':f.r})
+print(j._journal_fixture(db,raw,expected=f.expected,result_manifest=f.manifest,trusted_keys=f.pins),flush=True)
+db.close()
+"""
+        children=[]
+        try:
+            for index in range(2):
+                children.append(subprocess.Popen([sys.executable,'-c',script,str(self.path),self.owner_token,
+                    str(self.path.parent/('ready'+str(index))),str(self.path.parent/'go')],stdout=subprocess.PIPE,stderr=subprocess.PIPE))
+            import time
+            deadline=time.monotonic()+5
+            while not all((self.path.parent/('ready'+str(i))).exists() for i in range(2)):
+                if time.monotonic()>deadline:raise TimeoutError('writers not ready')
+                time.sleep(.01)
+            (self.path.parent/'go').touch()
+            results=[child.communicate(timeout=10) for child in children]
+            self.assertEqual([child.returncode for child in children],[0,0],str(results))
+            self.assertEqual(sorted(out.decode().strip() for out,err in results),['replay','stored'])
+        finally:
+            for child in children:
+                if child.poll() is None:child.kill()
+                child.communicate(timeout=5)
+            self.db=j._open_fixture(self.path,self.owner_token)
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM fixture_copies').fetchone()[0],1)
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM fixture_ids').fetchone()[0],4)
+
