@@ -771,11 +771,18 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, task['uuid'])
-            if (row['generation'] != task['generation'] or row['error'] != CUSTODY_UNAVAILABLE
+            if (row['generation'] != task['generation'] or row['error'] not in (None, CUSTODY_UNAVAILABLE)
                     or row['phase'] != 'complete' or row['stage'] != 'succeeded'
                     or row['job_id'] != task['job_id'] or row['node_id'] != task['node_id']
                     or row['engine_uuid'] != task['engine_uuid']):
                 raise Conflict('custody identity changed')
+            if row['error'] is None:
+                # Legacy builds cleared the intent for unavailable sidecars.
+                current = dict(row)
+                current['directory'] = str(self._directory(row))
+                record = self.custody(current)
+                if record is None or record['state'] != 'unavailable':
+                    raise Conflict('legacy custody requires inspection')
             db.execute('UPDATE viewer_tasks SET error=? WHERE uuid=?', (CUSTODY_INTENT, task['uuid']))
 
     def adopt_held_task(self, task, result, reasons):
@@ -1152,6 +1159,13 @@ class TaskStore:
             self._reservation(db,identifier,None,None)
             row = self._row(db, identifier, removed=True)
             if row['error'] in (CUSTODY_INTENT, CUSTODY_UNAVAILABLE):
+                raise Conflict('result custody must be resolved before removal')
+            # Previous builds could clear the sentinel while leaving a hold.
+            # Check even if eager custody is currently disabled.
+            current = dict(row)
+            current['directory'] = str(self._directory(row))
+            record = self.custody(current)
+            if record is not None and record['state'] != 'verified':
                 raise Conflict('result custody must be resolved before removal')
             self._reject_guarded_pending_action(row)
             job = self._job(db, row)

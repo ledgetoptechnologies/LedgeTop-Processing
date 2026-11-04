@@ -1280,6 +1280,35 @@ class EagerCustody(unittest.TestCase):
         self.assertEqual(self.custody(identifier), {'state': 'verified'})
         self.assertTrue(self.service.remove(identifier)['success'])
 
+    def test_legacy_hold_and_direct_download_reconcile_only_after_operator_retry(self):
+        identifier = self.finished(wait=False)
+        task = self.fixture.task(identifier)
+        engine = self.engine(identifier)
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
+            self.service.tick()
+        engine_task = engine.tasks.pop(task['engine_uuid'])
+        for _ in range(ENGINE_MISSING_POLLS):
+            self.settle()
+        # Simulate the prior version's settled database with its sidecar retained.
+        with self.fixture.queue._db() as db:
+            db.execute('UPDATE viewer_tasks SET error=NULL WHERE uuid=?', (identifier,))
+        self.restart()
+        with self.assertRaises(Conflict):
+            self.service.remove(identifier)
+        self.service._eager_custody = False
+        with self.assertRaises(Conflict):
+            self.service.remove(identifier)
+        self.service._eager_custody = True
+        engine.tasks[task['engine_uuid']] = engine_task
+        stream, _ = self.service.download(identifier)
+        stream.close()
+        with self.assertRaises(Conflict):
+            self.service.remove(identifier)
+        self.service.operator(task['job_id'], 'retry-custody', {'note': 'inspect recovered result'})
+        self.settle()
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
+        self.assertTrue(self.service.remove(identifier)['success'])
+
     def test_operator_retry_refuses_changed_result_and_keeps_hold(self):
         identifier = self.finished(wait=False)
         task = self.fixture.task(identifier)

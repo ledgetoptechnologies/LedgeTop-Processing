@@ -71,9 +71,15 @@ identity remains held. The operator note is emitted in the application log;
 this is not a durable audit journal. Other refusal reasons require inspection and
 have no retry route here. This policy is candidate-only and has not been deployed.
 
-Existing unavailable rows whose original intent was already cleared by an older
-build require a separate migration and review. A local verified archive is not a
-downstream Viewer acceptance; it does not authorize deleting the last copy.
+Legacy rows whose intent was cleared remain blocked from removal when their
+identity-bound sidecar is unavailable or pending, even if eager custody is off.
+An operator retry can restore the database intent lazily for an eligible legacy
+unavailable sidecar. A Viewer download alone does not settle that hold: the
+operator retry must recheck the original engine result before the archive can be
+verified. A missing sidecar cannot establish whether a legacy row was ever held;
+upgrade still needs a separate census and review, including previously removed
+tasks. A local verified archive is not downstream Viewer acceptance and does not
+authorize deleting the last copy.
 
 ## What a verified receipt means
 
