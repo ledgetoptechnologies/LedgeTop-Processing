@@ -95,9 +95,10 @@ cap alone is not proof. So a staging job can run on an idle cluster while a
 5,000-photo production job waits for main, and production still claims main when
 main is free. Any production job that can run on a node takes it first. A node
 also waits while a production reference job assigned to another node lands.
-Reference and Viewer claims recheck this in the claim transaction. Running or
-held production still blocks staging on every node, so a production job waiting
-behind other production on main leaves the cluster idle.
+Reference and Viewer claims recheck this in the claim transaction. A running
+production job keeps only its own node, so staging can use another idle node
+that no queued production job can use. Held production still blocks staging on
+every node until it is resolved.
 
 ClusterODX already handles a NodeODX-compatible single address, node health,
 queue slots, and `maxImages`. We can use it behind an ODM adapter if its actual
