@@ -197,6 +197,39 @@ class FlagOffTests(Harness):
 
 
 class ParallelDispatchTests(Harness):
+    def test_stalled_inbound_allows_other_node_dispatch_and_same_task_cancel_refuses(self):
+        ready = self.submit()
+        incoming = str(uuid.uuid4())
+        self.service.initialize(incoming, 'Synthetic stalled input', REQUEST_OPTIONS, None, 'production')
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        class SlowInput(io.BytesIO):
+            def read(inner, size=-1):
+                entered.set()
+                if not release.wait(WAIT): raise RuntimeError('fixture input timed out')
+                return super().read(size)
+        def upload():
+            try: self.service.upload(incoming, 'photo.jpg', SlowInput(b'owned'), 5)
+            except BaseException as error: errors.append(error)
+        thread = threading.Thread(target=upload)
+        thread.start()
+        try:
+            self.assertTrue(entered.wait(WAIT))
+            finished, result = returns(lambda: self.service.cancel(incoming), timeout=2)
+            self.assertTrue(finished)
+            self.assertIsInstance(result, Conflict)
+            finished, result = returns(self.service.tick, timeout=2)
+            self.assertTrue(finished)
+            self.assertIsNone(result)
+            self.phase(ready, 'processing')
+            self.assertEqual(self.task(ready)['job']['status'], 'running')
+            self.assertIsNone(self.task(incoming)['job_id'])
+        finally:
+            release.set()
+            thread.join(WAIT)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+
     def fenced(self, identifier):
         """Keep a late multipart request's fence open on another thread."""
         release, entered = threading.Event(), threading.Event()
