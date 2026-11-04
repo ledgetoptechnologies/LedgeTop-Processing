@@ -26,6 +26,7 @@ import sqlite3
 import ssl
 import stat
 import time
+from types import MappingProxyType
 from urllib.error import HTTPError
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_opener
@@ -188,6 +189,22 @@ class ValidatedSourceGrant:
     byte_budget: int
     attempt_budget: int
     token: str = field(repr=False)
+    _object_index: object = field(init=False, repr=False, compare=False, hash=False)
+
+    def __post_init__(self):
+        # A grant is immutable and reused across many object downloads. Build
+        # its lookup once; never silently collapse duplicate object IDs.
+        if type(self.objects) is not tuple or any(type(obj) is not SourceObject for obj in self.objects):
+            raise TransferError('invalid source object closure')
+        index = {obj.id: obj for obj in self.objects}
+        if len(index) != len(self.objects):
+            raise TransferError('invalid source object closure')
+        object.__setattr__(self, '_object_index', MappingProxyType(index))
+
+    def object_for(self, object_id):
+        if type(object_id) is not str:
+            raise TransferError('source object is outside grant')
+        return self._object_index.get(object_id)
 
 
 def validate_source_grant(grant, *, job, clock=time.time, allow_expired=False):
@@ -633,7 +650,7 @@ class SourceRangeClient:
             raise TransferError("validated v2 source grant required")
         if grant_provider is not None and not callable(grant_provider):
             raise TransferError("invalid source grant provider")
-        obj = next((item for item in grant.objects if item.id == object_id), None)
+        obj = grant.object_for(object_id)
         if obj is None:
             raise TransferError("source object is outside grant")
         identity = grant.identity
