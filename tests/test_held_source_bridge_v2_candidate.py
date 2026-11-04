@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
+import tempfile
 import unittest
 import uuid
 
@@ -14,6 +16,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from processing import reference_protocol as p
 from processing.held_source_bridge_v2_candidate import verify, DOMAIN, PROTOCOL
+from processing.held_source_bridge_journal_candidate import initialize, stage
 from processing.held_viewer_snapshot_verifier_candidate import DOMAIN as LOCAL_DOMAIN
 from processing.large_paged_manifest_candidate import build, _digest
 from processing.viewer_paged_frame_candidate import verify as verify_source, VERSION as SOURCE_VERSION, DOMAIN as SOURCE_DOMAIN
@@ -77,6 +80,28 @@ class HeldSourceBridgeTests(unittest.TestCase):
             intent_bytes=intent, local_signature=signature, source_frames=source, selected_frames=selected,
             evidence_frames=evidence, file_frames=generated, processing_closure=closure, processing_pages=pages)
         self.assertEqual(verify(**args), {'state':'held_bridge_not_authorized'})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'bridge.sqlite'
+            db = sqlite3.connect(path)
+            initialize(db)
+            for point in ('statement','proof','intent','signature','source','selected','evidence','file'):
+                def fault(at):
+                    if at == point: raise OSError('synthetic crash')
+                with self.subTest(crash=point), self.assertRaises(ValueError):
+                    stage(db,arguments=args,_fault=fault)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM held_source_bridge_v2').fetchone()[0],0)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM held_source_bridge_blobs_v2').fetchone()[0],0)
+            self.assertEqual(stage(db,arguments=args),{'state':'held_bridge_journaled','created':True})
+            db.close()
+            db = sqlite3.connect(path)
+            try:
+                self.assertEqual(stage(db,arguments={**args,'now_ms':1893456600000}),
+                                 {'state':'held_bridge_journaled','created':False})
+                with self.assertRaises(ValueError):stage(db,arguments={**args,'file_frames':generated[:-1]})
+                changed = copy.deepcopy(outer); changed['expiresAt'] = '2030-01-01T00:11:00.000Z'
+                with self.assertRaises(ValueError):stage(db,arguments={**args,'statement_bytes':signed(changed)})
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM held_source_bridge_v2').fetchone()[0],1)
+            finally: db.close()
         for mutation in ({'outer_key':Ed25519PrivateKey.generate().public_key()},
                          {'local_key':Ed25519PrivateKey.generate().public_key()},
                          {'context':{**context,'principalId':'other'}}, {'now_ms':1893456600000},
