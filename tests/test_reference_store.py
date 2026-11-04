@@ -17,7 +17,8 @@ from processing.reference_failure import FailureReceiver
 from processing.reference_recovery import SCHEMA as RECOVERY_SCHEMA
 from processing.reference_store import ClaimReleased, MAX_CLAIM_RELEASES_PER_JOB, ReferenceStore, PROFILE
 from processing.reference_terminal import TerminalService
-from tests.reference_activation_fixture import activate_reference_job, prepare_reference_job
+from tests.reference_activation_fixture import (activate_reference_job, activated_prepared_v3_job,
+                                                prepare_reference_job)
 from processing.source_range_transfer import CHUNK_BYTES, source_version_for_manifest
 
 
@@ -529,7 +530,8 @@ class ReferenceStoreTests(unittest.TestCase):
                      dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
         ready = {'ready': True, 'taskQueueCount': 0, 'maxImages': None,
                  'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024}
-        store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda _: ready)
+        store = ReferenceStore(self.queue, jcs_runtime_enabled=True, node_inventory=inventory,
+                               node_readiness=lambda _: ready)
         viewer, _ = self.queue.submit({'requestId': 'production-viewer', 'environment': 'production',
                                        'profile': VIEWER_PROFILE})
         with self.queue._db() as db:
@@ -537,7 +539,7 @@ class ReferenceStoreTests(unittest.TestCase):
             db.execute('CREATE TABLE viewer_files(uuid TEXT, is_photo INTEGER)')
             db.execute('INSERT INTO viewer_tasks VALUES(?,?,0)', ('viewer-task', viewer['id']))
             db.executemany('INSERT INTO viewer_files VALUES(?,1)', [('viewer-task',), ('viewer-task',)])
-        reference, _ = store.submit(self.new_submission())
+        reference = activated_prepared_v3_job(store, self.fixture, self.new_submission())
         self.assertEqual(store.next_for_node('cluster')['jobId'], reference['jobId'])
         self.assertIsNotNone(store.claim(reference['jobId'], node_id='cluster', worker_id='reference',
                                          worker_instance_id='instance', claim_request_id='priority-claim'))
@@ -1110,6 +1112,10 @@ class InventorySchedulingTests(unittest.TestCase):
     """Synthetic queues for "earliest job eligible for each available node"."""
 
     def setUp(self):
+        # Only exercises post-activation mechanics with a synthetic future grant.
+        ready = patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)
+        ready.start()
+        self.addCleanup(ready.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.queue = Queue(self.directory.name, node_ids=('cluster', 'node-2'), treedar_node_ids=('node-2',),
                            viewer_enabled=True, reference_enabled=True, per_node_slots=True,
@@ -1118,7 +1124,7 @@ class InventorySchedulingTests(unittest.TestCase):
         self.inventory = [dict(id='cluster', maxPhotos=2, capabilities=['odm']),
                           dict(id='node-2', maxPhotos=None, capabilities=['odm', 'treedar'])]
         self.reports = {'cluster': self.report(), 'node-2': self.report()}
-        self.store = ReferenceStore(self.queue, node_inventory=self.inventory,
+        self.store = ReferenceStore(self.queue, jcs_runtime_enabled=True, node_inventory=self.inventory,
                                     node_readiness=lambda node: self.reports[node])
         self.fixture = json.loads((Path(__file__).resolve().parents[1] /
                                   'contracts/reference-v1.contract.json').read_text())
@@ -1144,8 +1150,8 @@ class InventorySchedulingTests(unittest.TestCase):
         manifest.update(objectCount=images, totalBytes=images * size)
         manifest['inputCounts']['images'] = images
         manifest['sha256'] = p.manifest_sha256(manifest)
-        return (store or self.store).submit(p.validate_submission(raw, environment=environment,
-            capability_fingerprint=raw['capabilityFingerprint']))[0]
+        return activated_prepared_v3_job(store or self.store, self.fixture, p.validate_submission(
+            raw, environment=environment, capability_fingerprint=raw['capabilityFingerprint']))
 
     def treedar(self):
         raw = copy.deepcopy(self.fixture['submission'])
@@ -1157,8 +1163,9 @@ class InventorySchedulingTests(unittest.TestCase):
         raw['pipeline']['odm'].update(requested=False)
         raw['pipeline']['treedar'].update(requested=True, inputObjectIds=['image-1'],
                                           provenanceReceiptId='trusted-ingestion-receipt')
-        return self.store.submit(p.validate_submission(raw, environment='staging',
-            capability_fingerprint=raw['capabilityFingerprint'], available_engines=('odm', 'treedar')))[0]
+        return activated_prepared_v3_job(self.store, self.fixture, p.validate_submission(
+            raw, environment='staging', capability_fingerprint=raw['capabilityFingerprint'],
+            available_engines=('odm', 'treedar')), engines=('odm', 'treedar'))
 
     def viewer(self, photos, environment='staging'):
         job, _ = self.queue.submit({'requestId': 'viewer-' + uuid.uuid4().hex[:12], 'environment': environment,
@@ -1268,7 +1275,8 @@ class InventorySchedulingTests(unittest.TestCase):
         cache = NodeReadiness(('cluster', 'node-2'), ttl_seconds=30, clock=clock)
         for node in cache.node_ids:
             cache.publish(node, self.report(), ticket=cache.begin(node))
-        return cache, ReferenceStore(self.queue, node_inventory=self.inventory, node_readiness=cache.status)
+        return cache, ReferenceStore(self.queue, jcs_runtime_enabled=True, node_inventory=self.inventory,
+                                    node_readiness=cache.status)
 
     def test_routine_probe_of_idle_cluster_does_not_overflow_to_main(self):
         cache, store = self.polled(lambda: 100.0)
@@ -1315,7 +1323,8 @@ class InventorySchedulingTests(unittest.TestCase):
     def test_startup_without_observation_is_bounded(self):
         now = [100.0]
         cache = NodeReadiness(('cluster', 'node-2'), ttl_seconds=30, clock=lambda: now[0])
-        store = ReferenceStore(self.queue, node_inventory=self.inventory, node_readiness=cache.status)
+        store = ReferenceStore(self.queue, jcs_runtime_enabled=True, node_inventory=self.inventory,
+                               node_readiness=cache.status)
         job = self.reference(1, store=store)
         now[0] = 129
         cache.publish('node-2', self.report(), ticket=cache.begin('node-2'))

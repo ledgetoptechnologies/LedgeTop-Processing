@@ -27,6 +27,7 @@ from processing.maintenance import Conflict
 from processing.odx_smoke_worker import SmokeError
 from processing.prototype import PROFILE, VIEWER_PROFILE, Queue
 from processing.viewer_service import EngineUnavailable, ViewerService
+from tests.reference_activation_fixture import activated_prepared_v3_job
 
 
 OPTIONS = [{'name': name, 'type': 'bool', 'value': False}
@@ -1081,7 +1082,13 @@ class ViewerServiceTests(unittest.TestCase):
         self.service = ViewerService(self.queue, self.config, engines=self.engines, probe=probe)
         self.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(item) for item in OPTIONS]}
         self.service._selected_options = lambda _: [dict(item) for item in OPTIONS]
-        return ReferenceStore(self.queue, node_inventory=inventory, node_readiness=readiness) if readiness else None
+        if not readiness:
+            return None
+        # Only exercises post-activation mechanics with a synthetic future grant.
+        ready = patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)
+        ready.start()
+        self.addCleanup(ready.stop)
+        return ReferenceStore(self.queue, jcs_runtime_enabled=True, node_inventory=inventory, node_readiness=readiness)
 
     def test_viewer_uses_idle_node_behind_reference_exceeding_its_scratch(self):
         from processing import reference_protocol as protocol
@@ -1101,8 +1108,8 @@ class ViewerServiceTests(unittest.TestCase):
             manifest.update(objectCount=images, totalBytes=images * size)
             manifest['inputCounts']['images'] = images
             manifest['sha256'] = protocol.manifest_sha256(manifest)
-            return reference.submit(protocol.validate_submission(raw, environment='production',
-                capability_fingerprint=raw['capabilityFingerprint']))[0]
+            return activated_prepared_v3_job(reference, fixture, protocol.validate_submission(
+                raw, environment='production', capability_fingerprint=raw['capabilityFingerprint']))
         running = submit(2, 3)
         self.assertIsNotNone(reference.claim(running['jobId'], node_id='main', worker_id='main',
             worker_instance_id='instance', claim_request_id='main-claim'))
@@ -1134,8 +1141,8 @@ class ViewerServiceTests(unittest.TestCase):
         manifest.update(objectCount=images, totalBytes=images * 3)
         manifest['inputCounts']['images'] = images
         manifest['sha256'] = protocol.manifest_sha256(manifest)
-        return reference.submit(protocol.validate_submission(raw, environment='production',
-            capability_fingerprint=raw['capabilityFingerprint']))[0]
+        return activated_prepared_v3_job(reference, fixture, protocol.validate_submission(
+            raw, environment='production', capability_fingerprint=raw['capabilityFingerprint']))
 
     def test_staging_viewer_takes_idle_cluster_past_oversized_production_viewer(self):
         for name, production_first in (('production-first', True), ('staging-first', False)):
