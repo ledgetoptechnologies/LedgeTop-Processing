@@ -12,10 +12,14 @@ from .viewer_paged_frame_candidate import _pairs
 
 class BoundBridgeTrust:
     """Provision only from trusted server configuration, never request data."""
-    def __init__(self, *, outer, local_key_entries, revocation_epoch):
+    def __init__(self, *, outer, local_key_entries, revocation_epoch, max_selected_bytes, max_object_bytes):
         if type(outer) is not ServerSnapshotTrust:
             raise ValueError('configured scoped outer trust required')
         p._integer(revocation_epoch, 'revocation epoch', allow_zero=True)
+        p._integer(max_selected_bytes, 'maximum selected bytes')
+        p._integer(max_object_bytes, 'maximum object bytes')
+        if max_object_bytes > max_selected_bytes:
+            raise ValueError('object limit exceeds selected total limit')
         if type(local_key_entries) is not list or any(
                 type(entry) is not dict or entry.get('purpose') != 'held-viewer-snapshot' for entry in local_key_entries):
             raise ValueError('configured local Viewer trust required')
@@ -26,6 +30,8 @@ class BoundBridgeTrust:
         self.outer = outer
         self.local_keys = MappingProxyType(registry)
         self.revocation_epoch = revocation_epoch
+        self.max_selected_bytes = max_selected_bytes
+        self.max_object_bytes = max_object_bytes
 
 
 def inspect(store, submission_id, *, authenticated_principal, authenticated_environment, trust,
@@ -96,7 +102,8 @@ def inspect(store, submission_id, *, authenticated_principal, authenticated_envi
                 preparedEnvelopeSha256=digest, datasetId=normalized['manifest']['id'],
                 datasetManifestSha256=statement['datasetManifestSha256'], processingManifestSha256=normalized['manifestSha256'],
                 pipelineDigest=normalized['pipelineDigest'], processingClosureSha256=statement['processingClosureSha256'],
-                revocationEpoch=trust.revocation_epoch, localIssuerId=bridge['issuerId'], localKeyId=bridge['keyId'])
+                revocationEpoch=trust.revocation_epoch, localIssuerId=bridge['issuerId'], localKeyId=bridge['keyId'],
+                maxSelectedBytes=trust.max_selected_bytes, maxObjectBytes=trust.max_object_bytes)
             arguments = dict(statement_bytes=statement_bytes, outer_key=outer_key, local_key=local_key,
                 context=context, now_ms=now, intent_bytes=intent_bytes, local_signature=local_signature,
                 source_frames=source_frames, selected_frames=selected_frames, evidence_frames=evidence_frames,

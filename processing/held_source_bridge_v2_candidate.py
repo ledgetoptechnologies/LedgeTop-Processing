@@ -23,7 +23,8 @@ BRIDGE_FIELDS = ('protocol', 'snapshotId', 'issuerId', 'keyId', 'intentSha256', 
 CONTEXT_FIELDS = ('issuerId', 'keyId', 'principalId', 'environment', 'coordinatorAuthorityId', 'jobId',
                   'generation', 'submissionId', 'activationId', 'viewerTaskId', 'viewerAttemptId',
                   'preparedEnvelopeSha256', 'datasetId', 'datasetManifestSha256', 'pipelineDigest',
-                  'processingManifestSha256', 'processingClosureSha256', 'revocationEpoch', 'localIssuerId', 'localKeyId')
+                  'processingManifestSha256', 'processingClosureSha256', 'revocationEpoch', 'localIssuerId', 'localKeyId',
+                  'maxSelectedBytes', 'maxObjectBytes')
 
 
 def verify(*, statement_bytes, outer_key, local_key, context, now_ms, intent_bytes, local_signature,
@@ -46,7 +47,7 @@ def verify(*, statement_bytes, outer_key, local_key, context, now_ms, intent_byt
             raise ValueError()
         statement = json.loads(statement_bytes.decode('utf8'), object_pairs_hook=_pairs,
                                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
-        p._closed(statement, (*V1_FIELDS, 'processingManifestSha256', 'viewerHeldSource'), 'bridge statement')
+        p._closed(statement, (*V1_FIELDS, 'processingManifestSha256', 'selectedTotalBytes', 'viewerHeldSource'), 'bridge statement')
         if (p.canonical_json(statement) != statement_bytes or statement['protocol'] != PROTOCOL
                 or type(statement['schemaVersion']) is not int or statement['schemaVersion'] != 2):
             raise ValueError()
@@ -58,7 +59,7 @@ def verify(*, statement_bytes, outer_key, local_key, context, now_ms, intent_byt
             raise ValueError()
         outer_key.verify(decoded, DOMAIN + p.canonical_json({k: v for k, v in statement.items() if k != 'signature'}))
         for key in CONTEXT_FIELDS:
-            if key not in ('revocationEpoch', 'localIssuerId', 'localKeyId') and statement[key] != context[key]:
+            if key not in ('revocationEpoch', 'localIssuerId', 'localKeyId', 'maxSelectedBytes', 'maxObjectBytes') and statement[key] != context[key]:
                 raise ValueError()
         p._environment(context['environment']); p._uuid(context['coordinatorAuthorityId'], 'authority')
         for key in ('submissionId', 'activationId', 'viewerTaskId', 'viewerAttemptId'):
@@ -68,6 +69,12 @@ def verify(*, statement_bytes, outer_key, local_key, context, now_ms, intent_byt
         for key in ('preparedEnvelopeSha256', 'datasetManifestSha256', 'pipelineDigest', 'processingManifestSha256', 'processingClosureSha256'):
             p._hash(context[key], key)
         p._integer(context['generation'], 'generation'); p._integer(context['revocationEpoch'], 'epoch', allow_zero=True)
+        for key in ('maxSelectedBytes', 'maxObjectBytes'):
+            p._integer(context[key], key)
+        p._integer(statement['selectedTotalBytes'], 'selected bytes')
+        if (statement['selectedTotalBytes'] > context['maxSelectedBytes']
+                or statement['selectedTotalBytes'] != processing_closure.get('totalBytes')):
+            raise ValueError()
         times = []
         for key in ('issuedAt', 'expiresAt'):
             value = statement[key]
@@ -130,6 +137,9 @@ def verify(*, statement_bytes, outer_key, local_key, context, now_ms, intent_byt
             input_manifest_sha256=statement['inputManifestSha256'], processing_closure=processing_closure,
             processing_pages=processing_pages, closure_sha256=context['processingClosureSha256'],
             trusted_binding=binding, expected_binding_sha256=binding_digest(binding))
+        if any(obj['byteSize'] > context['maxObjectBytes']
+               for page in processing_pages for obj in page['body']['objects']):
+            raise ValueError()
         return {'state': 'held_bridge_not_authorized'}
     except Exception:
         raise ValueError('held_bridge_invalid') from None

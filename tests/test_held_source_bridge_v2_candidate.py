@@ -60,7 +60,8 @@ class HeldSourceBridgeTests(unittest.TestCase):
             preparedEnvelopeSha256='a'*64, datasetId=local['datasetId'],
             datasetManifestSha256=local['datasetManifestSha256'], pipelineDigest='b'*64,
             processingManifestSha256='c'*64, processingClosureSha256=_digest(closure), revocationEpoch=1,
-            localIssuerId='synthetic-issuer', localKeyId='synthetic-key')
+            localIssuerId='synthetic-issuer', localKeyId='synthetic-key',
+            maxSelectedBytes=200*1024**3, maxObjectBytes=2*1024**3)
         outer_private = Ed25519PrivateKey.generate()
         def pair(payload):
             return (hashlib.sha256(payload).hexdigest(), len(payload)) if payload is not None else (None, None)
@@ -69,7 +70,7 @@ class HeldSourceBridgeTests(unittest.TestCase):
                               ('selectedFrameStream',selected),('gcpEvidenceStream',evidence),('gcpFileStream',generated)):
             bridge[name+'Sha256'], bridge[name+'ByteCount'] = pair(payload)
         g = local['gcp']
-        outer = {k:v for k,v in context.items() if k not in ('revocationEpoch','localIssuerId','localKeyId')}
+        outer = {k:v for k,v in context.items() if k not in ('revocationEpoch','localIssuerId','localKeyId','maxSelectedBytes','maxObjectBytes')}
         outer.update(protocol=PROTOCOL, schemaVersion=2, snapshotId=local['snapshotId'],
             sourcePageHashes=local['sourcePageHashes'], sourcePageBytes=[len(x)-1 for x in source.splitlines(keepends=True)],
             sourceCount=local['sourceCount'], selectedPageHashes=local['selectedPageHashes'],
@@ -78,7 +79,7 @@ class HeldSourceBridgeTests(unittest.TestCase):
             gcpEvidencePageHashes=g['evidencePageHashes'], gcpEvidencePageBytes=g['evidencePageBytes'],
             gcpEvidencePageCount=g['evidencePageCount'], gcpEvidenceByteCount=g['evidenceByteCount'],
             gcpEvidenceSha256=g['evidenceSha256'], issuedAt='2030-01-01T00:00:00.000Z',
-            expiresAt='2030-01-01T00:10:00.000Z', viewerHeldSource=bridge)
+            expiresAt='2030-01-01T00:10:00.000Z', selectedTotalBytes=closure['totalBytes'], viewerHeldSource=bridge)
         def signed(value, key=outer_private):
             value=copy.deepcopy(value)
             value['signature']=base64.urlsafe_b64encode(key.sign(DOMAIN+p.canonical_json(value))).decode().rstrip('=')
@@ -122,6 +123,8 @@ class HeldSourceBridgeTests(unittest.TestCase):
                          {'local_key':Ed25519PrivateKey.generate().public_key()},
                          {'context':{**context,'principalId':'other'}}, {'now_ms':1893456600000},
                          {'context':{**context,'processingManifestSha256':'d'*64}},
+                         {'context':{**context,'maxSelectedBytes':1}},
+                         {'context':{**context,'maxObjectBytes':1}},
                          {'selected_frames':selected[:-1]}, {'file_frames':generated[:-1]},
                          {'processing_pages':pages[:-1]}):
             with self.subTest(mutation=list(mutation)), self.assertRaises(ValueError):
@@ -130,13 +133,14 @@ class HeldSourceBridgeTests(unittest.TestCase):
             forged=copy.deepcopy(outer); forged[field]=0 if field=='sourceCount' else '0'*64
             with self.subTest(forged=field), self.assertRaises(ValueError):
                 verify(**{**args,'statement_bytes':signed(forged)})
-        for change in ('source-page-size', 'local-intent-hash', 'gcp-file-size', 'wrong-attempt', 'version'):
+        for change in ('source-page-size', 'local-intent-hash', 'gcp-file-size', 'wrong-attempt', 'version', 'total-bytes'):
             forged=copy.deepcopy(outer)
             if change=='source-page-size': forged['sourcePageBytes'][0] += 1
             elif change=='local-intent-hash': forged['viewerHeldSource']['intentSha256'] = '0'*64
             elif change=='gcp-file-size': forged['viewerHeldSource']['gcpFileStreamByteCount'] += 1
             elif change=='wrong-attempt': forged['viewerAttemptId'] = random_uuid()
-            else: forged['schemaVersion'] = 1
+            elif change=='version': forged['schemaVersion'] = 1
+            else: forged['selectedTotalBytes'] += 1
             with self.subTest(forged=change), self.assertRaises(ValueError):
                 verify(**{**args,'statement_bytes':signed(forged)})
         # A separate photo-only case covers the near-term non-GCP workflow.
@@ -158,7 +162,7 @@ class HeldSourceBridgeTests(unittest.TestCase):
                              ('selectedFrameStream',selected2),('gcpEvidenceStream',None),('gcpFileStream',None)):
             bridge2[name+'Sha256'],bridge2[name+'ByteCount']=pair(payload)
         outer2=copy.deepcopy(outer)
-        outer2.update(snapshotId=local2['snapshotId'],processingClosureSha256=context2['processingClosureSha256'],sourcePageHashes=local2['sourcePageHashes'],
+        outer2.update(snapshotId=local2['snapshotId'],processingClosureSha256=context2['processingClosureSha256'],selectedTotalBytes=closure2['totalBytes'],sourcePageHashes=local2['sourcePageHashes'],
             sourcePageBytes=[len(source_raw)],sourceCount=1,selectedPageHashes=local2['selectedPageHashes'],
             selectedPageBytes=[len(selected_raw)],selectedCount=1,inputManifestSha256=input_sha,viewerHeldSource=bridge2)
         for key in ('gcpEvidenceVersion','gcpEvidencePageHashes','gcpEvidencePageBytes','gcpEvidencePageCount',
@@ -222,7 +226,8 @@ class HeldSourceBridgeTests(unittest.TestCase):
                            issuerId='outer-issuer',keyId='outer-key',purpose='paged-source-snapshot',publicKeyPem=pem(outer_private))
                 outer_trust=ServerSnapshotTrust(authority_id=queue.authority_id,key_entries=[entry],clock_provider=lambda:1893456300000)
                 local_entry=dict(entry,issuerId='synthetic-issuer',keyId='synthetic-key',purpose='held-viewer-snapshot',publicKeyPem=pem(local_private))
-                trust=BoundBridgeTrust(outer=outer_trust,local_key_entries=[local_entry],revocation_epoch=1)
+                trust=BoundBridgeTrust(outer=outer_trust,local_key_entries=[local_entry],revocation_epoch=1,
+                                       max_selected_bytes=200*1024**3,max_object_bytes=2*1024**3)
                 bound_args=dict(authenticated_principal='viewer-a',authenticated_environment='staging',trust=trust,
                     statement_bytes=signed(bound_outer),intent_bytes=intent2,local_signature=signature2,source_frames=source2,
                     selected_frames=selected2,evidence_frames=None,file_frames=None,processing_closure=closure2,processing_pages=pages2)

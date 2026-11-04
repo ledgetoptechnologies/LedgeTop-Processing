@@ -13,7 +13,7 @@ The new statement additionally binds SHA-256 and byte length of the exact local 
 
 ### Proposed v2 wire fields
 
-For joint review, use `protocol` value `ltds-viewer-paged-source-snapshot-v2` and sign `b'LTDS-VIEWER-PAGED-SOURCE-SNAPSHOT-V2\0' + canonical_unsigned_statement` with the configured scoped Ed25519 key. Preserve the v1 field names, set `schemaVersion` to integer `2`, and add `processingManifestSha256` plus one closed `viewerHeldSource` object with exactly:
+For joint review, use `protocol` value `ltds-viewer-paged-source-snapshot-v2` and sign `b'LTDS-VIEWER-PAGED-SOURCE-SNAPSHOT-V2\0' + canonical_unsigned_statement` with the configured scoped Ed25519 key. Preserve the v1 field names, set `schemaVersion` to integer `2`, and add `processingManifestSha256`, `selectedTotalBytes`, plus one closed `viewerHeldSource` object with exactly:
 
 ```
 protocol, snapshotId, issuerId, keyId,
@@ -27,6 +27,8 @@ gcpFileStreamSha256, gcpFileStreamByteCount
 The outer detached signature retains the v1 statement's canonical base64url representation and signs the complete v2 body excluding only `signature`. The local intent and signature travel as exact bytes, separately from the outer statement. `signatureByteCount` must equal 64; intent and stream sizes must be positive integers bounded by the existing frame/intent limits. Each GCP digest/length pair is either both null or both present, and GCP evidence and file pairs are both present exactly when the authenticated local intent declares generated GCP. Digests are lowercase SHA-256 hex of the exact transported bytes, including frame delimiters. The new object links the local evidence but never provisions a key or establishes custody.
 
 In v2, `datasetManifestSha256` is the Viewer's signed dataset inventory hash; `processingManifestSha256` is the different canonical Processing manifest hash and must match the independently authenticated prepared job. They are not interchangeable. The prepared-envelope digest and verified source/selected mapping and Processing closure link the two. The v1 candidate's comparison of dataset hash to Processing manifest hash does not establish this link for real Viewer data.
+
+`selectedTotalBytes` is a signed safe integer equal to the validated processing closure's total. Independently configured server policy must limit both the selected total and each object's size. These checks do not reserve disk or budget transfer requests; actual admission must separately reserve capacity and calculate enough bounded requests for the per-object range transfers, including retries.
 
 The source and selected per-page byte arrays in the outer statement must match the actual canonical frame sizes and the local intent's page hashes, frame totals and counts. Both statements must agree on dataset, task, attempt, input manifest and snapshot ID. The outer `processingClosureSha256` and selected mapping must match the independently verified processing pages, including object IDs, sizes, hashes, order and role. GCP stream/page/content hashes and generated-file metadata are checked against the local statement and the applicable evidence and file validators. All records stay held until a separately reviewed authorization and durable custody protocol succeeds.
 
