@@ -63,7 +63,10 @@ def migrate_legacy_custody(record, identity):
     return {**new_custody(identity, {}), 'state': 'refused',
             'reason': 'legacy_custody_requires_inspection',
             'result': record['result'], 'archive': record['archive'],
-            'checked': record['checked']}
+            # A legacy boolean is not proof that the current receipt, bytes,
+            # engine identity and archive members were checked together.
+            # Preserve it in the backup but force revalidation on any retry.
+            'checked': False}
 
 
 def new_adoption(identity):

@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from processing.maintenance import Conflict
+from processing import viewer_service as service_module
 from processing.viewer_result_adoption import CUSTODY_INTENT, CUSTODY_LEGACY_BACKUP, CUSTODY_NAME
 from tests import test_eager_custody_gap as eager
 
@@ -37,6 +38,10 @@ class LegacyCustodyMigration(unittest.TestCase):
                 self.assertEqual(self.case.fixture.task(self.identifier)['error'], CUSTODY_INTENT)
                 backup = self.case.directory(self.identifier) / CUSTODY_LEGACY_BACKUP
                 self.assertEqual(json.loads(backup.read_text()), self.old)
+                converted = self.service.store.custody(self.case.fixture.task(self.identifier))
+                self.assertFalse(converted['checked'])
+                if state == 'verified':
+                    self.assertTrue(self.old['checked'])
                 # Do not reuse a backup from the previous subcase.
                 backup.unlink()
 
@@ -103,6 +108,16 @@ class LegacyCustodyMigration(unittest.TestCase):
         with self.assertRaises(Conflict):
             self.migrate()
         self.assertIsNone(self.case.fixture.task(self.identifier)['error'])
+
+    def test_legacy_checked_flag_cannot_bypass_archive_member_revalidation(self):
+        self.install('verified')
+        self.assertTrue(self.old['checked'])
+        self.migrate()
+        self.service.custody_action(self.task['job_id'], 'retry', {'note': 'reviewed legacy record'})
+        with patch.object(service_module, '_check_archive_members', wraps=service_module._check_archive_members) as check:
+            self.service._take_eager_custody(self.identifier, None)
+        self.assertGreaterEqual(check.call_count, 1)
+        self.assertTrue(self.service.store.custody(self.case.fixture.task(self.identifier))['checked'])
 
 
 if __name__ == '__main__':
