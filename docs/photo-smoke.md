@@ -30,9 +30,12 @@ shared processing node.
 
 `PROCESSING_PHOTO_SMOKE_ENABLED=1` explicitly enables `odx-photo-smoke-v1`.
 The default remains off, and this profile accepts only staging jobs. Claims can
-declare `profiles`; legacy `{workerId}` claims support only TreeDar. The single
-global slot still chooses production first, then FIFO. A worker with the wrong
-profile cannot bypass that selected job. Priority is nonpreemptive.
+declare `profiles`; legacy `{workerId}` claims support only TreeDar. The shared
+queue chooses production first, then FIFO, and each node has one execution slot.
+Different nodes may run separate eligible jobs concurrently. A worker with the
+wrong profile cannot bypass the selected queue head. Priority is nonpreemptive:
+production work arriving after a staging job has started does not stop that
+staging job, but it will be selected ahead of later queued staging work.
 
 A queued photo job blocks later staging TreeDar jobs when no matching worker is
 available. Do not disable the photo profile until its queue is empty. If disabled

@@ -1,4 +1,4 @@
-"""Durable, single-slot queue for the isolated synthetic TreeDar prototype.
+"""Durable, per-node-slot queue for the isolated synthetic processing prototype.
 
 This is not a Viewer API or a production dataset admission path. A process lock
 prevents a second coordinator from resetting another coordinator's live claims.
@@ -208,12 +208,28 @@ class Queue(Maintenance):
             self._refresh_nodes(db)
             if self._node(db, node_id)['state'] not in ('active', 'scheduled'):
                 return None
-            if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():
+            if db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1",
+                          (node_id,)).fetchone():
                 return None
             row = db.execute("""SELECT * FROM jobs WHERE status='queued'
                 ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
             if not row:
                 return None
+            # Keep the configured node order meaningful when multiple nodes
+            # advertise the same profile: a later node may take the queue head
+            # only when every earlier capable node is occupied or unavailable.
+            for earlier in self.node_ids:
+                if earlier == node_id:
+                    break
+                if row["profile"] not in self.node_profiles(earlier):
+                    continue
+                earlier_state = self._node(db, earlier)["state"]
+                earlier_busy = db.execute(
+                    "SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1",
+                    (earlier,)).fetchone()
+                if (earlier_state in ("active", "scheduled")
+                        and not earlier_busy):
+                    return None
             if row['profile'] == REFERENCE_PROFILE:
                 # Reference claims also persist an idempotent private envelope
                 # and enforce input-dependent routing in ReferenceStore.claim.
