@@ -76,7 +76,10 @@ def task_fenced(method):
         # A control request can hold the scheduler's service lock. In the
         # isolated parallel mode it must not wait for a slow upload while
         # holding that lock; callers get a retryable conflict instead.
-        blocking = not self.queue.parallel_viewer_uploads or method.__name__ == 'upload'
+        parallel = self.parallel_dispatch or self.queue.parallel_viewer_uploads
+        if parallel and method.__name__ in ('update', 'hold'):
+            return method(self, identifier, *args, **kwargs)
+        blocking = not parallel or method.__name__ == 'upload'
         with self._task_fence(identifier, blocking=blocking, upload=method.__name__ == 'upload'):
             return method(self, identifier, *args, **kwargs)
     return call
@@ -96,6 +99,7 @@ class TaskStore:
         if os.name != 'nt' and self.root.stat().st_mode & 0o077:
             raise ValueError('private input directory required')
         self.max_input_bytes = max_input_bytes
+        self.parallel_dispatch = False
         self._lock = queue._viewer_store_lock
         # Claim credentials are stored in this shared database. Tighten the
         # exact existing, owned database before creating or updating secret
@@ -648,6 +652,19 @@ class TaskStore:
                 {'claimToken':row['claim_token'],'status':status,'result':result})
             db.execute("UPDATE viewer_tasks SET stage=?,phase='complete',progress=?,updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
                 (status,100 if status=='succeeded' else row['progress'],row['uuid']))
+
+    @task_fenced
+    def hold(self, identifier, reason):
+        if not isinstance(reason, str) or not ERROR.fullmatch(reason):
+            raise ValueError('error must be a sanitized reason code')
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, identifier)
+            job = db.execute('SELECT status,environment,held_reason FROM jobs WHERE id=?', (row['job_id'],)).fetchone()
+            if job is not None and (job['status'] == 'running' or (job['status'] == 'held' and job['held_reason'] == 'coordinator_restart')):
+                result = json.dumps({'environment': job['environment'], 'operatorAction': 'hold', 'note': reason, 'workerStopped': False})
+                db.execute("UPDATE jobs SET status='held',result=?,held_reason='operator',updated_at=CURRENT_TIMESTAMP WHERE id=?", (result, row['job_id']))
+            db.execute("UPDATE viewer_tasks SET stage='held',phase='held',error=?,updated_at=CURRENT_TIMESTAMP WHERE uuid=?", (reason, identifier))
 
     def hold_reconciliation_error(self, job_id):
         """Hold an unambiguous Viewer job and its task in one transaction."""

@@ -138,6 +138,7 @@ class ViewerService:
         self._dispatch_threads = {}
         if self._parallel_dispatch and not queue.per_node_slots:
             raise ValueError('parallel dispatch requires per-node slots')
+        self.store.parallel_dispatch = self._parallel_dispatch
 
     def _catalog(self):
         if self.inventory:
@@ -708,6 +709,15 @@ class ViewerService:
                 self.store.update(identifier, error='commit_ack_uncertain')
             else:
                 self._hold(current, 'engine_submission_uncertain')
+    def _transfer_claimed_task(self, identifier, job_id):
+        try:
+            self._send_claimed_task(identifier)
+        except Exception:
+            logging.getLogger(__name__).error('Viewer transfer failed; inspection required')
+            try:
+                self.store.hold_reconciliation_error(job_id)
+            except Exception:
+                pass
         finally:
             with self._lock:
                 self._dispatch_threads.pop(identifier, None)
@@ -723,11 +733,7 @@ class ViewerService:
             raise _DispatchInterrupted('dispatch_interrupted_for_shutdown')
 
     def _hold(self, task, reason):
-        job = self.queue.get(task['job_id'])
-        if job and (job['status'] == 'running' or
-                    (job['status'] == 'held' and job['heldReason'] == 'coordinator_restart')):
-            self.queue.operator(task['job_id'], 'hold', {'note': reason})
-        self.store.update(task['uuid'], stage='held', phase='held', error=reason)
+        self.store.hold(task['uuid'], reason)
 
     def _poll(self, task):
         identifier = task['uuid']
@@ -928,7 +934,7 @@ class ViewerService:
                 if self._parallel_dispatch:
                     if not self.queue.per_node_slots:
                         raise Conflict('parallel dispatch requires per-node slots')
-                    thread = threading.Thread(target=self._send_claimed_task, args=(task['uuid'],),
+                    thread = threading.Thread(target=self._transfer_claimed_task, args=(task['uuid'], job['id']),
                                               name='viewer-node-transfer', daemon=True)
                     self._dispatch_threads[task['uuid']] = (job['id'], thread)
                     try:

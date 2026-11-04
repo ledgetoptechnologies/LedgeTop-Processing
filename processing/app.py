@@ -18,6 +18,11 @@ MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    if config.viewer_parallel_dispatch is not False and (
+            config.viewer_parallel_dispatch is not True or not config.per_node_slots):
+        raise ValueError('parallel Viewer dispatch requires per-node slots')
+    if config.viewer_parallel_dispatch and config.reference_config_path:
+        raise ValueError('parallel Viewer dispatch is not qualified with the reference runtime')
     if config.per_node_slots and not config.node_inventory:
         from .config import require_distinct_node_hosts
         require_distinct_node_hosts(config.local_node_url, config.main_node_url)

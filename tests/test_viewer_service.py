@@ -5,6 +5,7 @@ Viewer output ingestion. No network, Docker, real datasets or host writes.
 """
 
 import hashlib
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import sys
@@ -1320,14 +1321,8 @@ else:
     def test_interrupted_hold_resolved_by_operator_recovers_after_restart(self):
         first = self.submit(); self.service.tick()
         self.finish(first, 50)
-        update = self.service.store.update
-        def crash(identifier, **fields):
-            if fields.get('phase') == 'held':
-                raise OSError('synthetic crash after queue hold')
-            return update(identifier, **fields)
-        self.service.store.update = crash
-        with self.assertRaises(OSError):
-            self.service.tick()
+        # Reproduce the split an older two-transaction implementation could leave.
+        self.queue.operator(self.task(first)['job_id'], 'hold', {'note': 'synthetic split hold'})
         task = self.task(first)
         self.assertEqual((task['phase'], task['job']['status']), ('processing', 'held'))
         self.service.close(); self.queue.close(); self.make_queue_service()
@@ -1598,10 +1593,13 @@ else:
         self.service.tick()
         self.service.cancel(identifier)
         self.finish(identifier, 50)
-        with patch.object(self.service.store, 'update', side_effect=OSError('synthetic crash')):
-            with self.assertRaises(OSError):
-                self.service.tick()
-        self.assertEqual(self.task(identifier)['job']['status'], 'held')
+        with self.queue._db() as db:
+            db.execute("CREATE TRIGGER synthetic_hold_failure BEFORE UPDATE OF phase ON viewer_tasks WHEN NEW.phase='held' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.service.tick()
+        self.assertEqual(self.task(identifier)['job']['status'], 'running')
+        with self.queue._db() as db:
+            db.execute('DROP TRIGGER synthetic_hold_failure')
         self.assertIsNone(self.task(next_id)['node_id'])
         self.service.close()
         self.queue.close()
