@@ -26,6 +26,13 @@ data. An unconfigured role is reported separately and does not restrict an
 otherwise valid single-node catalog. This conservative intersection can be
 smaller than the set of flags usable when a future job is pinned to one node.
 
+The reference-runtime candidate now admits typed booleans/numbers, bounded string
+enums and free-text strings up to 4,000 characters. It validates current choice
+arrays and recognized numeric bounds against the fresh definitions before queue
+admission. Unknown domain prose is display metadata and is never evaluated;
+path/file and URL-like settings remain excluded. This candidate change is covered
+by synthetic admission tests; it is not deployed.
+
 The API has `Cache-Control: no-store`; API and optional observer credentials may
 read it. It is discovery-only: `executesWork: false`, `viewerProviderReady: false`
 and `snapshotConsistency: best_effort_read_only`. Info/options are separate reads,

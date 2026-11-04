@@ -25,7 +25,8 @@ from processing.reference_http import create_reference_http_server
 from processing.config import Config, from_environment
 from processing.prototype import Queue, REFERENCE_PROFILE, VIEWER_PROFILE
 from processing.reference_runtime import (
-    ReferenceRuntime, ReferenceSettings, RuntimeConfigurationError, discovered_policy, load_reference_settings,
+    ReferenceRuntime, ReferenceSettings, RuntimeConfigurationError, discovered_policy,
+    load_reference_settings, validate_discovered_option_values,
 )
 from processing.reference_recovery import RecoveryNodeBinding
 
@@ -75,12 +76,14 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.path = self.root / "reference-private.json"
         self.write_config()
         self.snapshot = dict(ready=True, commonOptions=[
-            dict(name="future-quality", type="int", value=3, help="Quality level"),
+            dict(name="future-quality", type="int", value=3, domain="positive int", help="Quality level"),
             dict(name="future-toggle", type="bool", value=False),
             dict(name="input-file", type="string", value=""),
             dict(name="remote-url", type="string", value=""),
             dict(name="password", type="int", value=3),
-            dict(name="safe-enum", type="string", value="high")], nodes=[
+            dict(name="safe-enum", type="enum", value="high", domain=["low", "high"]),
+            dict(name="free-text", type="string", value="default text", domain="Name of project", help="A bounded note"),
+            dict(name="safe-string-choice", type="string", value="first", domain='["first", "second"]')], nodes=[
                 dict(role=role, available=True, capabilitiesSha256="a"*64,
                      engine="odm", engineVersion="synthetic-1") for role in ("local", "main")])
 
@@ -262,7 +265,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertEqual(listed.status,200)
         self.assertEqual(listed.body['environment'],'staging')
         self.assertEqual(listed.body['optionsFingerprint'],before.body['engines']['odm']['optionsFingerprint'])
-        self.assertTrue(all(option['type'] in ('bool','int','float') for option in listed.body['options']))
+        self.assertTrue(all(option['type'] in ('bool','int','float','enum','string') for option in listed.body['options']))
         self.snapshot["commonOptions"].append(dict(name="new-engine-flag", type="bool", value=True))
         after = caps()
         refreshed = runtime.api.handle('GET','/ltds/v1/options',headers,protected_transport=True)
@@ -283,7 +286,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
 
     def test_discovery_allowlist_uses_definitions_and_excludes_string_path_credentials(self):
         first = discovered_policy(self.snapshot, self.config)
-        self.assertEqual(first[2], {"future-quality", "future-toggle"})
+        self.assertEqual(first[2], {"future-quality", "future-toggle", "safe-enum", "free-text", "safe-string-choice"})
         reordered = copy.deepcopy(self.snapshot)
         reordered["commonOptions"].reverse()
         reordered["nodes"].reverse()
@@ -291,6 +294,53 @@ class ReferenceRuntimeTests(unittest.TestCase):
         changed = copy.deepcopy(self.snapshot)
         changed["nodes"][0]["engineVersion"] = "synthetic-2"
         self.assertNotEqual(first[0], discovered_policy(changed, self.config)[0])
+
+    def test_enum_values_are_checked_against_fresh_engine_choices(self):
+        _, _, allowed = discovered_policy(self.snapshot, self.config)
+        payload = {"pipeline": {"odm": {"options": {"safe-enum": "high"}}}}
+        validate_discovered_option_values(payload, self.snapshot, allowed)
+        payload["pipeline"]["odm"]["options"]["safe-enum"] = "unadvertised"
+        with self.assertRaisesRegex(ValueError, "current engine definition"):
+            validate_discovered_option_values(payload, self.snapshot, allowed)
+        payload["pipeline"]["odm"]["options"]["safe-enum"] = 7
+        with self.assertRaisesRegex(ValueError, "current engine definition"):
+            validate_discovered_option_values(payload, self.snapshot, allowed)
+        payload["pipeline"]["odm"]["options"] = []
+        with self.assertRaisesRegex(ValueError, "current engine definition"):
+            validate_discovered_option_values(payload, self.snapshot, allowed)
+        payload["pipeline"]["odm"]["options"] = {
+            "future-quality": 1, "free-text": "bounded text", "safe-string-choice": "second"}
+        validate_discovered_option_values(payload, self.snapshot, allowed)
+        payload["pipeline"]["odm"]["options"]["future-quality"] = 0
+        with self.assertRaisesRegex(ValueError, "current engine definition"):
+            validate_discovered_option_values(payload, self.snapshot, allowed)
+        payload["pipeline"]["odm"]["options"]["future-quality"] = 1
+        payload["pipeline"]["odm"]["options"]["free-text"] = "x" * 4001
+        with self.assertRaisesRegex(ValueError, "current engine definition"):
+            validate_discovered_option_values(payload, self.snapshot, allowed)
+
+    def test_dynamic_job_admission_accepts_current_enum_and_rejects_unknown_choice(self):
+        queue = Queue(self.config.prototype_state_dir, node_ids=("cluster", "main"), reference_enabled=True)
+        self.addCleanup(queue.close)
+        runtime = self.runtime(queue)
+        headers = {"Authorization": "Bearer " + self.value["viewerBearers"]["staging"]}
+        payload = json.loads((Path(__file__).resolve().parents[1] /
+                              "contracts/reference-v1.contract.json").read_text())["submission"]
+        payload["submissionId"] = str(uuid.uuid4())
+        payload["capabilityFingerprint"] = discovered_policy(self.snapshot, self.config)[0]
+        payload["pipeline"]["odm"]["optionsFingerprint"] = discovered_policy(self.snapshot, self.config)[1]
+        payload["pipeline"]["odm"]["options"] = {
+            "safe-enum": "high", "free-text": "synthetic note", "safe-string-choice": "second"}
+        route = "/ltds/v1/jobs"
+        accepted = runtime.api.handle("POST", route, headers, json.dumps(payload).encode(),
+                                      protected_transport=True)
+        self.assertEqual(accepted.status, 201)
+        payload["submissionId"] = str(uuid.uuid4())
+        payload["pipeline"]["odm"]["options"]["safe-enum"] = "unadvertised"
+        rejected = runtime.api.handle("POST", route, headers, json.dumps(payload).encode(),
+                                      protected_transport=True)
+        self.assertEqual(rejected.status, 400)
+        runtime.close()
 
     def test_listener_only_starts_explicitly_and_stops_before_queue_release(self):
         queue = Queue(self.config.prototype_state_dir, node_ids=("cluster", "main"), reference_enabled=True)
