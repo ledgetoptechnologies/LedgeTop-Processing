@@ -5,6 +5,7 @@ write transaction. Markers and their checked rows are trusted only within that
 boundary; a writer able to rewrite the database can forge them. No existing
 jobs are classified by this module.
 """
+import hashlib
 import sqlite3
 
 from . import reference_protocol as p
@@ -46,12 +47,13 @@ def _snapshot(db, job_id, authority_id, family):
         owner = db.execute('SELECT principal_id,environment,request_digest,protocol FROM reference_viewer_submission_owners WHERE job_id=?', (job_id,)).fetchone()
         envelope = db.execute('SELECT principal_id,environment,viewer_attempt_id,envelope_sha256 FROM reference_viewer_envelopes_v2 WHERE job_id=?', (job_id,)).fetchone()
         activation = db.execute('SELECT 1 FROM reference_viewer_activation WHERE job_id=?', (job_id,)).fetchone()
-        policy = db.execute('SELECT 1 FROM reference_viewer_v3_policy WHERE job_id=?', (job_id,)).fetchone()
+        policy = db.execute('SELECT policy_json,policy_sha256 FROM reference_viewer_v3_policy WHERE job_id=?', (job_id,)).fetchone()
         if family == 'legacy-v1':
             if owner or envelope or activation or policy: raise ValueError('legacy has prepared evidence')
             evidence = (None, None, None)
         elif family == 'prepared-v3':
             if not owner or not envelope or not policy: raise ValueError('prepared evidence missing')
+            if type(policy[0]) is not str or hashlib.sha256(policy[0].encode('utf-8')).hexdigest()!=policy[1]: raise ValueError('prepared policy changed')
             principal, owner_env, owner_digest, protocol = owner
             ep, ee, attempt, envelope_digest = envelope
             p._slug(principal, 'principal'); p._uuid(attempt, 'Viewer attempt'); p._hash(envelope_digest, 'envelope digest')

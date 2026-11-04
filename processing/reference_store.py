@@ -157,6 +157,26 @@ class ReferenceStore:
                 marker = preflight.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_admission_family_candidate'").fetchone()
                 if marker and not admission_family_candidate:
                     raise Conflict('candidate family state requires candidate runtime')
+                if admission_family_candidate:
+                    from .admission_family_candidate import SCHEMA, FamilyHeld, validate_family
+                    if not marker:
+                        raise Conflict('candidate family bootstrap evidence required')
+                    preflight.row_factory = sqlite3.Row
+                    preflight.execute('BEGIN')
+                    shape = preflight.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_admission_family_candidate'").fetchone()
+                    if shape is None or ' '.join(shape[0].split()) != ' '.join(SCHEMA.split()):
+                        raise Conflict('candidate family schema changed')
+                    if preflight.execute('SELECT 1 FROM reference_admission_family_candidate f LEFT JOIN reference_jobs r ON r.job_id=f.job_id WHERE r.job_id IS NULL LIMIT 1').fetchone():
+                        raise Conflict('orphan candidate family evidence')
+                    try:
+                        for entry in preflight.execute('SELECT job_id FROM reference_jobs').fetchall():
+                            validate_family(preflight, entry[0], self.queue.authority_id)
+                            row = self._row(preflight, entry[0])
+                            self._submission_owner(preflight, row)
+                            if preflight.execute('SELECT 1 FROM reference_viewer_activation WHERE job_id=?',(entry[0],)).fetchone():
+                                self._activation(preflight, row)
+                    except FamilyHeld as exc:
+                        raise Conflict('candidate family evidence unavailable') from exc
                 owners = preflight.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_viewer_submission_owners'").fetchone()
                 if owners and not jcs_runtime_enabled and preflight.execute("SELECT 1 FROM reference_viewer_submission_owners WHERE protocol='ltds-viewer-prepared-envelope-jcs-v3' LIMIT 1").fetchone():
                     raise JCSRuntimeUnavailable('JCS durable state requires enabled capable runtime')
@@ -224,7 +244,7 @@ class ReferenceStore:
                 marker = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_admission_family_candidate'").fetchone()
                 try:
                     if marker is None:
-                        initialize_empty(db)
+                        raise FamilyHeld('candidate family bootstrap evidence required')
                     elif ' '.join(marker[0].split()) != ' '.join(SCHEMA.split()):
                         raise FamilyHeld('candidate schema changed')
                     for item in db.execute('SELECT job_id FROM reference_jobs').fetchall():
@@ -380,7 +400,11 @@ class ReferenceStore:
         if self.admission_family_candidate:
             from .admission_family_candidate import FamilyHeld, validate_family
             try:
-                validate_family(db, job_id, self.queue.authority_id)
+                family = validate_family(db, job_id, self.queue.authority_id)
+                if family == 'prepared-v3':
+                    self._submission_owner(db, row)
+                    if db.execute('SELECT 1 FROM reference_viewer_activation WHERE job_id=?',(job_id,)).fetchone():
+                        self._activation(db, row)
             except FamilyHeld as exc:
                 raise Conflict('candidate family evidence unavailable') from exc
         return row

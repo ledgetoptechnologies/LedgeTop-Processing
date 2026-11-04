@@ -18,6 +18,11 @@ class FamilyStoreIntegration(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.queue=Queue(self.temp.name);self.queue.allowed_profiles.add(PROFILE);self.addCleanup(self.queue.close)
+        # Test-only bootstrap, deliberately not automatic in ReferenceStore.
+        ReferenceStore(self.queue,jcs_runtime_enabled=True)
+        from processing.admission_family_candidate import initialize_empty
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE'); initialize_empty(db); db.commit()
         self.store=ReferenceStore(self.queue,jcs_runtime_enabled=True,admission_family_candidate=True)
         self.fixture=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())
         self.raw=copy.deepcopy(self.fixture['submission']);self.raw['submissionId']=str(uuid.uuid4())
@@ -87,6 +92,58 @@ class FamilyStoreIntegration(unittest.TestCase):
         with self.queue._db() as db:
             for table in ('jobs','reference_jobs','reference_viewer_submission_owners','reference_viewer_envelopes_v2','reference_viewer_v3_policy','reference_admission_family_candidate'):
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0],0)
+
+    def test_readonly_preflight_rejects_orphan_marker_without_chmod(self):
+        orphan=str(uuid.uuid4())
+        with self.queue._db() as db:
+            db.execute('PRAGMA foreign_keys=OFF')
+            db.execute('BEGIN IMMEDIATE')
+            db.execute("INSERT INTO reference_admission_family_candidate VALUES(?,?,?,?,?,?,?,?,?)",
+                (orphan,self.queue.authority_id,1,'production','a'*64,'legacy-v1',None,None,None))
+            db.commit()
+        import os
+        path=Path(self.queue.path);before=(path.stat().st_mode,path.stat().st_mtime_ns,path.read_bytes())
+        with self.assertRaisesRegex(Conflict,'orphan'):
+            ReferenceStore(self.queue,jcs_runtime_enabled=True,admission_family_candidate=True)
+        after=(path.stat().st_mode,path.stat().st_mtime_ns,path.read_bytes())
+        self.assertEqual(before,after)
+
+    def test_corrupt_prepared_envelope_or_policy_is_detected(self):
+        response=self.post(self.envelope());self.assertEqual(response.status,201,response.body)
+        job=response.body['jobId']
+        for table,column,value in (('reference_viewer_envelopes_v2','envelope_json','{}'),
+                                   ('reference_viewer_v3_policy','policy_json','{}')):
+            with self.queue._db() as db:
+                db.execute('BEGIN IMMEDIATE')
+                db.execute('UPDATE '+table+' SET '+column+'=? WHERE job_id=?',(value,job))
+                with self.assertRaises(Conflict):self.store._row(db,job)
+                db.rollback()
+
+    def test_corrupt_activation_is_detected(self):
+        envelope=self.envelope();response=self.post(envelope)
+        self.assertEqual(response.status,201,response.body);job=response.body['jobId']
+        found=self.store.find_viewer_envelope_v2(self.raw['submissionId'],authenticated_principal='viewer-a',
+            authenticated_environment='production',expected_protocol=envelope['protocol'])
+        body=dict(activationId=envelope['activationId'],viewerTaskId=envelope['viewerTaskId'],
+            viewerAttemptId=envelope['viewerAttemptId'],envelopeSha256=found['envelopeSha256'])
+        with patch.object(ReferenceStore,'_v3_source_contract_ready',return_value=True), \
+             patch.object(ReferenceStore,'_activation_bound_grant_ready',return_value=True):
+            r=self.api.handle('POST','/ltds/prepared/v3/submissions/'+self.raw['submissionId']+'/activation',
+                {'Authorization':'Bearer '+self.token,'X-LTDS-Expected-Coordinator-Authority':self.queue.authority_id},
+                json.dumps(body).encode(),protected_transport=True)
+            self.assertEqual(r.status,200,r.body)
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');db.execute("UPDATE reference_viewer_activation SET binding_json='{}' WHERE job_id=?",(job,))
+            with self.assertRaises(Conflict):self.store._row(db,job)
+            db.rollback()
+
+    def test_candidate_cannot_bootstrap_itself_from_empty_database(self):
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');db.execute('DROP TABLE reference_admission_family_candidate');db.commit()
+        path=Path(self.queue.path);before=(path.stat().st_mode,path.stat().st_mtime_ns,path.read_bytes())
+        with self.assertRaisesRegex(Conflict,'bootstrap evidence'):
+            ReferenceStore(self.queue,jcs_runtime_enabled=True,admission_family_candidate=True)
+        self.assertEqual(before,(path.stat().st_mode,path.stat().st_mtime_ns,path.read_bytes()))
 
     def test_candidate_disabled_refuses_candidate_state(self):
         with self.assertRaises(Conflict):ReferenceStore(self.queue,jcs_runtime_enabled=True)

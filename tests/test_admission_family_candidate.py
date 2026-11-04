@@ -1,3 +1,4 @@
+import hashlib
 import sqlite3
 import unittest
 import uuid
@@ -15,7 +16,7 @@ class FamilyCandidateTest(unittest.TestCase):
           CREATE TABLE reference_viewer_submission_owners(job_id TEXT PRIMARY KEY,principal_id TEXT,environment TEXT,request_digest TEXT,protocol TEXT);
           CREATE TABLE reference_viewer_envelopes_v2(job_id TEXT PRIMARY KEY,principal_id TEXT,environment TEXT,viewer_attempt_id TEXT,envelope_sha256 TEXT);
           CREATE TABLE reference_viewer_activation(job_id TEXT PRIMARY KEY);
-          CREATE TABLE reference_viewer_v3_policy(job_id TEXT PRIMARY KEY);
+          CREATE TABLE reference_viewer_v3_policy(job_id TEXT PRIMARY KEY,policy_json TEXT,policy_sha256 TEXT);
         ''')
         self.authority = str(uuid.uuid4())
         self.db.execute('INSERT INTO coordinator_identity VALUES(1,?)', (self.authority,))
@@ -31,7 +32,7 @@ class FamilyCandidateTest(unittest.TestCase):
                     (job,'viewer','production',digest,'ltds-viewer-prepared-envelope-jcs-v3'))
                 db.execute('INSERT INTO reference_viewer_envelopes_v2 VALUES(?,?,?,?,?)',
                     (job,'viewer','production',str(uuid.uuid4()),'b'*64))
-                db.execute('INSERT INTO reference_viewer_v3_policy VALUES(?)', (job,))
+                db.execute('INSERT INTO reference_viewer_v3_policy VALUES(?,?,?)', (job,'{}',hashlib.sha256(b'{}').hexdigest()))
             if fail: raise ValueError('synthetic interruption')
         admit_new_job(self.db,job,self.authority,'prepared-v3' if prepared else 'legacy-v1',create)
         return job
