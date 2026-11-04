@@ -4,10 +4,26 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from tests.advisory_live_pilot_preflight import converter_status, sample_size
+from tests.advisory_live_pilot_preflight import converter_status, registry_marker_present, sample_size
 
 
 class AdvisoryPilotPreflightTests(unittest.TestCase):
+    def test_registry_uses_lexists(self):
+        root=Path('example')
+        with patch('tests.advisory_live_pilot_preflight.os.path.lexists',return_value=True) as check:
+            self.assertTrue(registry_marker_present(root))
+            check.assert_called_once_with(root/'active.json')
+
+    def test_registry_counts_dangling_path_as_occupied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            self.assertFalse(registry_marker_present(root))
+            try:
+                (root/'active.json').symlink_to(root/'missing')
+            except (OSError,NotImplementedError):
+                self.skipTest('symlink creation unavailable')
+            self.assertTrue(registry_marker_present(root))
+
     def test_count_is_bounded_and_does_not_copy_sources(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)

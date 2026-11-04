@@ -27,12 +27,15 @@ archive/tiles hashes and `ready_for_review`, rejects repeated invocation against
 the same root and a second root sharing the registry, and removes only its
 verified container. Fixture files and database remain for inspection.
 
-`inspect_real_viewer_pilot.py` is a read-only, owner-bound database inspector;
-it cannot resume or clean a pilot. `advisory_live_pilot_preflight.py` checks a
+`inspect_real_viewer_pilot.py` is an owner-bound inspector for a pilot whose
+writers were independently confirmed stopped and SQLite fully checkpointed. It
+refuses WAL/shared-memory/journal sidecars and opens an immutable database to
+avoid creating them; it cannot prove writers are stopped or resume/clean work.
+`advisory_live_pilot_preflight.py` checks a
 point-in-time sample of the expected local source/converter and cluster
 identity, stage-token binding, queue and free space without copying photos or
 printing credentials. It deliberately reports the registry ACL, external
-writers, actual processing disk requirements and custody as unverified. It
+writers, the pilot storage filesystem, actual processing disk requirements and custody as unverified. It
 does not attest readiness or enable the worker's live path.
 
 **No live launcher or automated recovery is implemented. Do not point the

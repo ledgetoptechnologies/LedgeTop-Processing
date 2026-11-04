@@ -26,6 +26,20 @@ class InspectPilotTests(unittest.TestCase):
             self.assertEqual(result['submissionPhase'],'committed')
             self.assertEqual(result['jobs'],[{'type':'reconcile','status':'pending'}])
             self.assertEqual(dbpath.read_bytes(),before)
+            # An open WAL-backed writer must not be silently ignored or cause
+            # the inspector to create/mutate shared-memory sidecars.
+            writer=sqlite3.connect(dbpath)
+            try:
+                self.assertEqual(writer.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower(),'wal')
+                writer.execute('BEGIN');writer.execute('UPDATE processing_attempts SET status=?',('running',))
+                wal=Path(str(dbpath)+'-wal');shm=Path(str(dbpath)+'-shm')
+                self.assertTrue(wal.exists());self.assertTrue(shm.exists())
+                wal_before=wal.stat();shm_before=shm.stat()
+                with self.assertRaisesRegex(ValueError,'checkpointed'):inspect(root,registry)
+                self.assertEqual((wal.stat().st_size,wal.stat().st_mtime_ns),(wal_before.st_size,wal_before.st_mtime_ns))
+                self.assertEqual((shm.stat().st_size,shm.stat().st_mtime_ns),(shm_before.st_size,shm_before.st_mtime_ns))
+            finally:
+                writer.rollback();writer.close()
             (registry/'active.json').write_text(json.dumps({'owner':'b'*32}))
             with self.assertRaises(ValueError):inspect(root,registry)
 

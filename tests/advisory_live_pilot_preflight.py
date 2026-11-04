@@ -78,6 +78,11 @@ def sample_size(source):
     return sum(p.stat().st_size for p in images[:25])
 
 
+def registry_marker_present(registry):
+    # A dangling symlink is still an occupied/unsafe marker path.
+    return os.path.lexists(registry/'active.json')
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     for arg in ('viewer','converter','photos','registry'):p.add_argument('--'+arg,type=Path,required=True)
@@ -90,9 +95,9 @@ def main():
     except (ValueError,TypeError):remote={'remoteOk':False,'reason':'invalid_remote_response'}
     free=shutil.disk_usage(a.registry).free
     print(json.dumps({'advisoryOnly':True,'liveLaunchEnabled':False,'viewerSourceExactAndClean':source_status(a.viewer),
-      'converterDigestMatch':converter_status(a.converter),'inputCount':25,'inputBytes':size,'localFreeBytes':free,
-      'registryMarkerPresent':(a.registry/'active.json').exists(),'registryOwnershipAndAclVerified':False,
-      'remote':remote,'notVerified':['registry ownership and ACL','cross-host duplicate fencing','external writers',
+      'converterDigestMatch':converter_status(a.converter),'inputCount':25,'inputBytes':size,'registryFilesystemFreeBytes':free,
+      'registryMarkerPresent':registry_marker_present(a.registry),'registryOwnershipAndAclVerified':False,
+      'remote':remote,'notVerified':['registry ownership and ACL','pilot storage filesystem and capacity','cross-host duplicate fencing','external writers',
        'actual processing disk requirement','durable result custody','recovery','live Viewer deployment']}))
 
 

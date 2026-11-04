@@ -1,5 +1,6 @@
-"""Read-only inspection of a persisted pilot; never resumes or mutates work."""
+"""Inspect a confirmed-stopped, checkpointed pilot; never resume or clean."""
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -27,7 +28,13 @@ def inspect(root, registry):
             raise ValueError('pilot identity invalid') from None
     dbpath=root/'viewer.sqlite'
     if dbpath.is_symlink() or not dbpath.is_file():raise ValueError('pilot database unavailable')
-    db=sqlite3.connect(dbpath.as_uri()+'?mode=ro',uri=True,timeout=5)
+    sidecars=[Path(str(dbpath)+s) for s in ('-wal','-shm','-journal')]
+    if any(os.path.lexists(p) for p in sidecars):raise ValueError('pilot database is not cleanly checkpointed')
+    before=dbpath.stat()
+    # Immutable mode avoids creating SQLite shared-memory/lock files. It can
+    # miss uncheckpointed WAL state; require a stopped, checkpointed pilot.
+    # An operator must independently prove no writer can reopen this database.
+    db=sqlite3.connect(dbpath.as_uri()+'?mode=ro&immutable=1',uri=True,timeout=5)
     try:
         row=db.execute('SELECT id,task_id,provider_task_id,status,submission_phase,uploaded_file_count,error_code FROM processing_attempts WHERE id=?',
                        (receipt.get('attemptId'),)).fetchone()
@@ -38,10 +45,13 @@ def inspect(root, registry):
         jobs=[{'type':safe(r[0]),'status':safe(r[1])} for r in db.execute('SELECT job_type,status FROM processing_jobs WHERE attempt_id=? ORDER BY created_at,id',(row[0],))]
         complete=(root/'pilot-complete.json').is_file() and not (root/'pilot-complete.json').is_symlink()
         # Data, raw error text, endpoint and credentials are never emitted.
+        after=dbpath.stat()
+        if ((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)
+                or any(os.path.lexists(p) for p in sidecars)):raise ValueError('pilot database changed during inspection')
         return {'owner':owner['owner'],'attemptId':row[0],'providerTaskId':row[2],
                 'status':safe(row[3]),'submissionPhase':safe(row[4]),'uploadedFileCount':row[5],
                 'errorCode':safe(row[6]),'jobs':jobs,'completeMarkerPresent':complete,
-                'recovery':'inspection_only_no_resume_or_cleanup'}
+                'recovery':'inspection_only_no_resume_or_cleanup','writerStoppedNotVerified':True}
     finally: db.close()
 
 
