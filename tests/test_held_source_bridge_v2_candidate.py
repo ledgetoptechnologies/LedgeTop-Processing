@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from processing import reference_protocol as p
 from processing.held_source_bridge_v2_candidate import verify, DOMAIN, PROTOCOL
-from processing.held_source_bridge_journal_candidate import initialize, stage
+from processing.held_source_bridge_journal_candidate import initialize, stage, _stage
 from processing.held_viewer_snapshot_verifier_candidate import DOMAIN as LOCAL_DOMAIN
 from processing.large_paged_manifest_candidate import build, _digest
 from processing.viewer_paged_frame_candidate import verify as verify_source, VERSION as SOURCE_VERSION, DOMAIN as SOURCE_DOMAIN
@@ -53,7 +53,7 @@ class HeldSourceBridgeTests(unittest.TestCase):
             activationId=random_uuid(), viewerTaskId=local['taskId'], viewerAttemptId=local['attemptId'],
             preparedEnvelopeSha256='a'*64, datasetId=local['datasetId'],
             datasetManifestSha256=local['datasetManifestSha256'], pipelineDigest='b'*64,
-            processingClosureSha256=_digest(closure), revocationEpoch=1,
+            processingManifestSha256='c'*64, processingClosureSha256=_digest(closure), revocationEpoch=1,
             localIssuerId='synthetic-issuer', localKeyId='synthetic-key')
         outer_private = Ed25519PrivateKey.generate()
         def pair(payload):
@@ -82,10 +82,16 @@ class HeldSourceBridgeTests(unittest.TestCase):
             intent_bytes=intent, local_signature=signature, source_frames=source, selected_frames=selected,
             evidence_frames=evidence, file_frames=generated, processing_closure=closure, processing_pages=pages)
         self.assertEqual(verify(**args), {'state':'held_bridge_not_authorized'})
+        self.assertNotEqual(context['datasetManifestSha256'],context['processingManifestSha256'])
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/'bridge.sqlite'
             db = sqlite3.connect(path)
             initialize(db)
+            db.execute('BEGIN IMMEDIATE')
+            self.assertTrue(_stage(db,arguments=args,_owned=True)['created'])
+            db.rollback()
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM held_source_bridge_v2').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM held_source_bridge_blobs_v2').fetchone()[0],0)
             with self.assertRaises(ValueError):stage(db,arguments=args,max_journal_bytes=1)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM held_source_bridge_v2').fetchone()[0],0)
             for point in ('statement','proof','intent','signature','source','selected','evidence','file'):
@@ -109,6 +115,7 @@ class HeldSourceBridgeTests(unittest.TestCase):
         for mutation in ({'outer_key':Ed25519PrivateKey.generate().public_key()},
                          {'local_key':Ed25519PrivateKey.generate().public_key()},
                          {'context':{**context,'principalId':'other'}}, {'now_ms':1893456600000},
+                         {'context':{**context,'processingManifestSha256':'d'*64}},
                          {'selected_frames':selected[:-1]}, {'file_frames':generated[:-1]},
                          {'processing_pages':pages[:-1]}):
             with self.subTest(mutation=list(mutation)), self.assertRaises(ValueError):

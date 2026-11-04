@@ -23,7 +23,7 @@ BRIDGE_FIELDS = ('protocol', 'snapshotId', 'issuerId', 'keyId', 'intentSha256', 
 CONTEXT_FIELDS = ('issuerId', 'keyId', 'principalId', 'environment', 'coordinatorAuthorityId', 'jobId',
                   'generation', 'submissionId', 'activationId', 'viewerTaskId', 'viewerAttemptId',
                   'preparedEnvelopeSha256', 'datasetId', 'datasetManifestSha256', 'pipelineDigest',
-                  'processingClosureSha256', 'revocationEpoch', 'localIssuerId', 'localKeyId')
+                  'processingManifestSha256', 'processingClosureSha256', 'revocationEpoch', 'localIssuerId', 'localKeyId')
 
 
 def verify(*, statement_bytes, outer_key, local_key, context, now_ms, intent_bytes, local_signature,
@@ -44,7 +44,7 @@ def verify(*, statement_bytes, outer_key, local_key, context, now_ms, intent_byt
             raise ValueError()
         statement = json.loads(statement_bytes.decode('utf8'), object_pairs_hook=_pairs,
                                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
-        p._closed(statement, (*V1_FIELDS, 'viewerHeldSource'), 'bridge statement')
+        p._closed(statement, (*V1_FIELDS, 'processingManifestSha256', 'viewerHeldSource'), 'bridge statement')
         if (p.canonical_json(statement) != statement_bytes or statement['protocol'] != PROTOCOL
                 or type(statement['schemaVersion']) is not int or statement['schemaVersion'] != 2):
             raise ValueError()
@@ -63,7 +63,7 @@ def verify(*, statement_bytes, outer_key, local_key, context, now_ms, intent_byt
             p._uuid(context[key], key)
         for key in ('issuerId', 'keyId', 'principalId', 'jobId', 'datasetId', 'localIssuerId', 'localKeyId'):
             p._slug(context[key], key)
-        for key in ('preparedEnvelopeSha256', 'datasetManifestSha256', 'pipelineDigest', 'processingClosureSha256'):
+        for key in ('preparedEnvelopeSha256', 'datasetManifestSha256', 'pipelineDigest', 'processingManifestSha256', 'processingClosureSha256'):
             p._hash(context[key], key)
         p._integer(context['generation'], 'generation'); p._integer(context['revocationEpoch'], 'epoch', allow_zero=True)
         times = []

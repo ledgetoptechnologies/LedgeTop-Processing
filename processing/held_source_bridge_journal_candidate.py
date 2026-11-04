@@ -41,13 +41,13 @@ def initialize(db):
         db.rollback(); raise ValueError('held_bridge_journal_unavailable') from None
 
 
-def stage(db, *, arguments, max_journal_bytes=128*1024*1024, max_snapshots=128, _fault=None):
+def _stage(db, *, arguments, max_journal_bytes=128*1024*1024, max_snapshots=128, _fault=None, _owned=False):
     """Verify and atomically retain exact evidence; repeat only exact replays.
 
     `arguments` is supplied by a trusted caller, not a request decoder. This
     candidate does not bind to a coordinator job or confer any authorization.
     """
-    if (db.in_transaction or type(arguments) is not dict or type(max_journal_bytes) is not int
+    if (db.in_transaction != _owned or type(arguments) is not dict or type(max_journal_bytes) is not int
             or not 1 <= max_journal_bytes <= 1024*1024*1024 or type(max_snapshots) is not int
             or not 1 <= max_snapshots <= 10000):
         raise ValueError('held_bridge_stage_unavailable')
@@ -78,7 +78,9 @@ def stage(db, *, arguments, max_journal_bytes=128*1024*1024, max_snapshots=128, 
             if args[name] is not None: payloads[kind] = args[name]
         proof_hash = hashlib.sha256(proof_wire).hexdigest()
         issuer, snapshot = statement['issuerId'], statement['snapshotId']
-        _durability(db); db.execute('BEGIN IMMEDIATE'); _schema(db)
+        _durability(db)
+        if not _owned: db.execute('BEGIN IMMEDIATE')
+        _schema(db)
         old = db.execute('SELECT statement,proof_digest FROM held_source_bridge_v2 WHERE issuer=? AND snapshot=?',
                          (issuer, snapshot)).fetchone()
         if old:
@@ -91,7 +93,7 @@ def stage(db, *, arguments, max_journal_bytes=128*1024*1024, max_snapshots=128, 
             # held status only and re-verifies both signatures and closure.
             issued = datetime.strptime(statement['issuedAt'], '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=timezone.utc)
             verify(**{**args, 'now_ms': int(issued.timestamp() * 1000)})
-            db.commit()
+            if not _owned: db.commit()
             return {'state':'held_bridge_journaled', 'created':False}
         verify(**args)
         # Bound this journal's logical bytes under the same write lock as the
@@ -108,8 +110,13 @@ def stage(db, *, arguments, max_journal_bytes=128*1024*1024, max_snapshots=128, 
         for kind, wire in payloads.items():
             db.execute('INSERT INTO held_source_bridge_blobs_v2 VALUES(?,?,?,?)', (issuer, snapshot, kind, wire))
             if _fault: _fault(kind)
-        db.commit()
+        if not _owned: db.commit()
         return {'state':'held_bridge_journaled', 'created':True}
     except Exception:
-        if db.in_transaction: db.rollback()
+        if not _owned and db.in_transaction: db.rollback()
         raise ValueError('held_bridge_stage_unavailable') from None
+
+
+def stage(db, **kwargs):
+    """Dedicated-transaction entry point for synthetic tests only."""
+    return _stage(db, **kwargs)
