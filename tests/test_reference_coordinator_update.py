@@ -1221,6 +1221,47 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.assertFalse(self.transport.containers[NEW_ID]['State']['Running'])
         self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
 
+    def test_unprepared_baseline_with_stopped_candidate_and_prepared_disk_never_starts(self):
+        self.fail_after_start();self.transport.containers[NEW_ID]['State']['Running']=False
+        prepared={'reference_viewer_activation','reference_viewer_submission_owners',
+                  'reference_viewer_activation_schema','reference_viewer_envelopes_v2',
+                  'reference_viewer_v3_copy_hold','reference_viewer_v3_policy'}
+        for name in prepared:self.state['drained']['tables'].pop(name,None)
+        self.state['drained']['schema']=[r for r in self.state['drained']['schema'] if r[2] not in prepared]
+        before=len(self.transport.calls)
+        with self.assertRaisesRegex(module.Stopped,'offline_rollback_refused'):
+            self.updater.rollback(self.state)
+        self.assertEqual(self.transport.calls[before:],[])
+        self.assertFalse(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
+
+    def test_unprepared_baseline_offline_census_failure_never_starts_candidate(self):
+        self.fail_after_start();self.transport.containers[NEW_ID]['State']['Running']=False
+        prepared={'reference_viewer_activation','reference_viewer_submission_owners',
+                  'reference_viewer_activation_schema','reference_viewer_envelopes_v2',
+                  'reference_viewer_v3_copy_hold','reference_viewer_v3_policy'}
+        for name in prepared:self.state['drained']['tables'].pop(name,None)
+        before=len(self.transport.calls)
+        with patch.object(self.updater,'census',side_effect=OSError('synthetic unavailable')):
+            with self.assertRaisesRegex(module.Stopped,'offline_rollback_refused'):
+                self.updater.rollback(self.state)
+        self.assertEqual(self.transport.calls[before:],[])
+        self.assertFalse(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
+
+    def test_unprepared_baseline_running_candidate_is_never_stopped_for_census(self):
+        self.fail_after_start()
+        prepared={'reference_viewer_activation','reference_viewer_submission_owners',
+                  'reference_viewer_activation_schema','reference_viewer_envelopes_v2',
+                  'reference_viewer_v3_copy_hold','reference_viewer_v3_policy'}
+        for name in prepared:self.state['drained']['tables'].pop(name,None)
+        before=len(self.transport.calls)
+        with self.assertRaisesRegex(module.Stopped,'candidate_running_rollback_held'):
+            self.updater.rollback(self.state)
+        self.assertEqual(self.transport.calls[before:],[])
+        self.assertTrue(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
+
     def test_online_new_owned_receipt_refuses_before_any_candidate_stop(self):
         self.fail_after_start()
         with self.queue._db() as db:db.execute("INSERT INTO owned_maintenance_schedules VALUES('new','main','a','b','{}','{}')")

@@ -1100,6 +1100,10 @@ class ReferenceCoordinatorUpdate:
                 raise Stopped('prepared_schema_rollback_unqualified')
             self.check(state,gates);self.rollback_config(state);item=self.candidate(state)
             old=self.t.inspected(OLD_ID)
+            if type(old.get('State',{}).get('Running')) is not bool:
+                raise Stopped('rollback_predecessor_state_uncertain')
+            if item is not None and type(item.get('State',{}).get('Running')) is not bool:
+                raise Stopped('rollback_candidate_state_uncertain')
             if old['State']['Running']:
                 if state['phase']!='rollback_start_old_pending' or old['Name']!='/'+NAME:
                     raise Stopped('unexpected_running_predecessor')
@@ -1107,14 +1111,14 @@ class ReferenceCoordinatorUpdate:
                 # the lost ACK without an offline helper or another start.
                 return self.finish_rollback(state,gates)
             if item is not None and item['State']['Running']:
-                _env,api,_operator=self.t.local_clients();self.activity(state,api)
-                compatible(self.census(state,container=item['Id']),state['drained'],allow_owned=True,allow_viewer_additions=True,allow_migration=True)
-                self.save(state,'rollback_stop_pending')
-                self.mutation(state,gates,'stop','--time','-1',item['Id'],timeout=60)
-                if self.t.inspected(item['Id'])['State']['Running']:raise Stopped('candidate_not_confirmed_stopped')
+                # Stopping first would risk an outage if the required offline
+                # census is unavailable or reveals unqualified prepared state.
+                self.retain_running_only(state,gates,item)
+                raise Stopped('candidate_running_rollback_held')
             try:compatible(self.census(state,offline=True),state['drained'],allow_owned=True,allow_migration=True)
             except Exception:
-                if item is not None:self.retain(state,gates,item)
+                # A failed census cannot prove that it is safe to restart even
+                # this operation's candidate on an unknown schema.
                 raise Stopped('offline_rollback_refused') from None
             old=self.t.inspected(OLD_ID)
             if old['Image']!=OLD_IMAGE or old['Name'] not in ('/'+NAME,'/'+state['rollbackName']):raise Stopped('exact_old_reference_rollback_only')
