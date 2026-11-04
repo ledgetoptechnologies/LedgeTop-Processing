@@ -1245,6 +1245,34 @@ class EagerCustody(unittest.TestCase):
         self.assertEqual(engine.download_calls, 1)
         self.assertTrue(self.service.remove(identifier)['success'])
 
+    def test_remove_rejects_malformed_verified_sidecar_without_db_sentinel(self):
+        identifier = self.finished()
+        task = self.fixture.task(identifier)
+        record = self.service.store.custody(task)
+        for changes in ({'checked': False}, {'archive': None}, {'archive': {'bytes': 4, 'sha256': 'bad'}}):
+            self.service.store.save_custody(task, {**record, **changes})
+            with self.assertRaises(Conflict):
+                self.service.remove(identifier)
+        self.service.store.save_custody(task, record)
+        self.assertTrue(self.service.remove(identifier)['success'])
+
+    def test_remove_rechecks_archive_and_receipt(self):
+        identifier = self.finished()
+        directory = self.directory(identifier)
+        receipt = directory / 'all.zip.receipt'
+        saved_receipt = receipt.read_bytes()
+        receipt.write_bytes(b'{}')
+        with self.assertRaises(Conflict):
+            self.service.remove(identifier)
+        receipt.write_bytes(saved_receipt)
+        archive = directory / 'all.zip'
+        saved_archive = archive.read_bytes()
+        archive.write_bytes(b'x' * len(saved_archive))
+        with self.assertRaises(Conflict):
+            self.service.remove(identifier)
+        archive.write_bytes(saved_archive)
+        self.assertTrue(self.service.remove(identifier)['success'])
+
     def test_unavailable_custody_blocks_remove_across_restart(self):
         identifier = self.finished(wait=False)
         task = self.fixture.task(identifier)

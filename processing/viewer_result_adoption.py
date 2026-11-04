@@ -14,6 +14,7 @@ a code 40 being fetched, ``verified`` a result in custody, ``refused`` a reason.
 import hashlib
 import json
 import math
+import re
 
 ADOPTION_NAME = '.ledgetop-adopt.json'
 ADOPTION_VERSION = 1
@@ -68,7 +69,15 @@ def valid_custody(record, identity):
             and record['state'] in CUSTODY_STATES
             and (record['reason'] is None or type(record['reason']) is str)
             and type(record['result']) is dict
-            and (record['archive'] is None or type(record['archive']) is dict))
+            and (record['archive'] is None or type(record['archive']) is dict)
+            and (record['state'] != 'verified' or (
+                record['checked'] is True and record['reason'] is None
+                and set(record['result']) == {'dateCreated', 'imagesCount', 'options', 'processingTime'}
+                and evidence_complete(record['result'])
+                and type(record['archive']) is dict and set(record['archive']) == {'bytes', 'sha256'}
+                and type(record['archive']['bytes']) is int and record['archive']['bytes'] >= 4
+                and type(record['archive']['sha256']) is str
+                and re.fullmatch(r'[a-f0-9]{64}', record['archive']['sha256']) is not None)))
 
 
 def _options_digest(options):

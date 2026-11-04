@@ -1131,7 +1131,17 @@ class ViewerService:
         with self._lock:
             # Deliberately retain engine results and all local bytes. Viewer has
             # no successful-ingestion ACK; remove is also its upload-reset route.
-            return self.store.remove(identifier)
+            return self.store.remove(identifier, self._validate_removal_custody)
+
+    def _validate_removal_custody(self, task, record):
+        """Revalidate local bytes; this does not acknowledge Viewer ingestion."""
+        path = Path(task['directory']) / 'all.zip'
+        if task['archive_path'] != str(path):
+            raise Conflict('archive path requires inspection')
+        receipt = self._archive_receipt(task, path.with_suffix('.zip.receipt'))
+        if record['archive'] != {'bytes': receipt['bytes'], 'sha256': receipt['sha256']}:
+            raise Conflict('archive receipt differs from custody record')
+        self._verify_archive(path, receipt).close()
 
     def operator(self, identifier, action, request):
         """Serialize operator state changes with Viewer engine mutations."""
@@ -1719,7 +1729,7 @@ class ViewerService:
                 except EngineUnavailable:
                     raise _CustodyRefused('archive_members_unreadable') from None
             receipt = self._archive_receipt(task, receipt_path)
-            self.store.save_custody(task, {**record, 'state': 'verified', 'reason': None,
+            self.store.save_custody(task, {**record, 'state': 'verified', 'reason': None, 'checked': True,
                 'archive': {'bytes': receipt['bytes'], 'sha256': receipt['sha256']}})
             if self._log_retention:
                 try:

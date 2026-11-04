@@ -81,6 +81,11 @@ upgrade still needs a separate census and review, including previously removed
 tasks. A local verified archive is not downstream Viewer acceptance and does not
 authorize deleting the last copy.
 
+Removal of a task with a verified custody sidecar requires a checked, complete
+sidecar plus an identity-bound receipt and a fresh archive hash check. Older
+verified sidecars with `checked: false` require inspection; they are not silently
+upgraded. Rehashing can take time for large archives.
+
 ## What a verified receipt means
 
 A result is bound by the engine's `uuid`, node, `dateCreated`, `imagesCount`,

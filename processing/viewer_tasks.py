@@ -1153,7 +1153,7 @@ class TaskStore:
             return {'success':True,'uuid':identifier}
 
     @task_fenced
-    def remove(self, identifier):
+    def remove(self, identifier, validate_custody=None):
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,None,None)
@@ -1167,6 +1167,10 @@ class TaskStore:
             record = self.custody(current)
             if record is not None and record['state'] != 'verified':
                 raise Conflict('result custody must be resolved before removal')
+            if record is not None:
+                if validate_custody is None:
+                    raise Conflict('result custody requires verification before removal')
+                validate_custody(current, record)
             self._reject_guarded_pending_action(row)
             job = self._job(db, row)
             if job and job['status'] in ('running', 'held'):
