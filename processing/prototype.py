@@ -106,6 +106,7 @@ class Queue(Maintenance):
         self.node_photo_limits = dict(node_photo_limits) if node_photo_limits is not None else None
         # ReferenceStore supplies current (scratch, output) evidence for a node.
         self.node_scratch_evidence = None
+        self.reference_claim_landing = None
         if type(per_node_slots) is not bool:
             raise ValueError("per_node_slots must be boolean")
         self.per_node_slots = per_node_slots
@@ -338,6 +339,53 @@ class Queue(Maintenance):
         except (sqlite3.Error, ValueError, TypeError, KeyError, AttributeError):
             return False
 
+    def _viewer_photo_count(self, db, job_id):
+        """Return a Viewer job's photo count; missing or ambiguous metadata gives None."""
+        try:
+            tasks = db.execute('SELECT uuid FROM viewer_tasks WHERE job_id=? AND removed=0', (job_id,)).fetchall()
+            if len(tasks) != 1:
+                return None
+            counts = db.execute('SELECT COUNT(*),SUM(CASE WHEN is_photo=1 THEN 1 ELSE 0 END),'
+                                'SUM(CASE WHEN is_photo NOT IN (0,1) OR is_photo IS NULL THEN 1 ELSE 0 END) '
+                                'FROM viewer_files WHERE uuid=?', (tasks[0]['uuid'],)).fetchone()
+            return None if not counts[0] or not counts[1] or counts[2] else counts[1]
+        except (KeyError, TypeError, ValueError, sqlite3.Error):
+            return None
+
+    def _viewer_ineligible(self, db, job, node_id):
+        """Prove a queued Viewer job cannot run here by configured capability or cap."""
+        count = self._viewer_photo_count(db, job['id'])
+        if count is None:
+            return False
+        limit = self.node_photo_limits[node_id] if self.node_photo_limits is not None else None
+        capabilities = self.node_capabilities[node_id] if self.node_capabilities is not None else None
+        return (limit is not None and count > limit) or (capabilities is not None and 'odm' not in capabilities)
+
+    def _staging_may_pass(self, db, node_id):
+        """Prove staging on this node takes nothing queued production could use.
+
+        Running or held production still blocks staging on every node. Queued
+        production blocks it unless each job is proven unable to run here.
+        """
+        if db.execute("SELECT 1 FROM jobs WHERE environment='production' AND status IN ('running','held') LIMIT 1").fetchone():
+            return False
+        queued = db.execute("SELECT * FROM jobs WHERE status='queued' AND environment='production'").fetchall()
+        if queued and not self.per_node_slots:
+            return False
+        proofs = {REFERENCE_PROFILE: self._reference_ineligible, VIEWER_PROFILE: self._viewer_ineligible}
+        return all(job['profile'] in proofs and proofs[job['profile']](db, job, node_id) for job in queued)
+
+    def _staging_may_claim(self, db, node_id):
+        """Also wait, as a reference claim would, for production about to land elsewhere."""
+        landing = self.reference_claim_landing
+        return self._staging_may_pass(db, node_id) and not (landing is not None and landing(db))
+
+    def staging_may_claim(self, node_id):
+        """Advisory selection; claim rechecks against current queue state."""
+        self._known_node(node_id)
+        with self._db() as db:
+            return self._staging_may_claim(db, node_id)
+
     def viewer_skip_is_safe(self, job_id, node_id):
         """Advisory selection; claim rechecks against current queue state."""
         self._known_node(node_id)
@@ -380,14 +428,12 @@ class Queue(Maintenance):
                 return None
             if allow_viewer_same_priority_skip and self.per_node_slots and expected_job and row['id'] != expected_job:
                 candidate = db.execute("SELECT * FROM jobs WHERE id=? AND status='queued'", (expected_job,)).fetchone()
-                if (candidate is None or candidate['profile'] != VIEWER_PROFILE
-                        or candidate['environment'] != row['environment']):
+                if candidate is None or candidate['profile'] != VIEWER_PROFILE:
                     return None
                 if not self._viewer_skip_is_safe(db, candidate, node_id):
                     return None
                 row = candidate
-            if (row['environment'] == 'staging' and db.execute(
-                    "SELECT 1 FROM jobs WHERE environment='production' AND status IN ('queued','running','held') LIMIT 1").fetchone()):
+            if row['environment'] == 'staging' and not self._staging_may_claim(db, node_id):
                 return None
             if row['profile'] == REFERENCE_PROFILE:
                 # Reference claims also persist an idempotent private envelope
