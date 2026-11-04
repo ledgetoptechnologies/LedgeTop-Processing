@@ -1,6 +1,7 @@
 # Parallel inbound upload candidate
 
-This candidate is off by default and has no environment or deployment switch.
+This candidate is off by default and has no deployment switch of its own;
+`PROCESSING_VIEWER_PARALLEL_DISPATCH=1` enables it with the outbound candidate.
 It is an isolated test of queue-owned per-task upload fencing, not permission
 to enable parallel uploads. Mutating operations on the same task serialize
 across `TaskStore` instances sharing one `Queue`; unrelated task IO can
