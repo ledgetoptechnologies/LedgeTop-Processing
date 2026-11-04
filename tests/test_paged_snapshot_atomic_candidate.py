@@ -49,6 +49,13 @@ class AtomicSnapshotTests(unittest.TestCase):
   with self.queue._db() as db:initialize_v2(db)
   with self.assertRaises(ValueError):pin_prepared(self.store,self.env['submission']['submissionId'],authenticated_principal='viewer-a',authenticated_environment='staging',expected_authority_id=self.queue.authority_id)
   self.assertEqual(self.counts(),(1,1,3))
+ def test_another_v2_job_pin_blocks_legacy_journal(self):
+  from processing.held_source_bridge_journal_candidate import initialize as initialize_v2
+  with self.queue._db() as db:
+   initialize_v2(db)
+   db.execute('INSERT INTO held_source_protocol_policy_v2 VALUES (?,?)',('different-job','ltds-viewer-paged-source-snapshot-v2'))
+  with self.assertRaises(SnapshotHeld):self.run_stage()
+  self.assertEqual(self.counts(),(0,0,0))
  def test_failure_each_phase_rolls_back_all(self):
   for phase in ('journal','frames','evidence'):
    def fault(at):

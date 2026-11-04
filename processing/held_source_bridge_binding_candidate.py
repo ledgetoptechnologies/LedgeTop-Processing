@@ -49,8 +49,9 @@ class BoundBridgeTrust:
 def pin_prepared(store, submission_id, *, authenticated_principal, authenticated_environment, expected_authority_id):
     """Pin a prepared, inactive job by trusted local policy; never a request route.
 
-    This blocks the candidate v1 journal for this job only. It does not provide
-    cross-job, cross-version snapshot uniqueness and is not an activation gate.
+    This conservatively blocks the candidate v1 journal globally once any v2
+    job is pinned. Other legacy consumers are not covered; this is not an
+    activation gate or a replacement for a shared cross-version identity ledger.
     """
     from . import paged_snapshot_journal_candidate as legacy
     try:

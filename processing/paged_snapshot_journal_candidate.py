@@ -158,7 +158,10 @@ def inspect(store,submission_id,raw,*,principal,environment,trust,stage_bundle=N
    if v2names:
     from .held_source_bridge_journal_candidate import _schema as v2_schema
     v2_schema(db)
-    if db.execute('SELECT 1 FROM held_source_protocol_policy_v2 WHERE job_id=?',(row['job_id'],)).fetchone():raise ValueError('v2 protocol required')
+    # V1 does not bind the local source snapshot identity. Until a shared
+    # cross-version ledger exists, coexistence could replay a v2 source into
+    # another v1 job; hold all v1 writes once any v2 job is pinned.
+    if db.execute('SELECT 1 FROM held_source_protocol_policy_v2 LIMIT 1').fetchone():raise ValueError('v2 protocol required')
    envelope=db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?',(row['job_id'],)).fetchone()
    policy=db.execute('SELECT * FROM reference_viewer_v3_policy WHERE job_id=?',(row['job_id'],)).fetchone()
    if envelope is None or policy is None:raise ValueError()
