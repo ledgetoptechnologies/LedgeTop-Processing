@@ -96,6 +96,9 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.backup_patch.start();self.addCleanup(self.backup_patch.stop)
         self.probe=patch.object(module,'owned_api_probe',return_value={'operatorLookupVerified':True})
         self.probe.start();self.addCleanup(self.probe.stop)
+        # Source stays unpinned; this fixture has no tree, the empty manifest.
+        self.pin=patch.object(module,'REVIEWED_PILOT_JOURNALS_SHA256',module.digest([]))
+        self.pin.start();self.addCleanup(self.pin.stop)
         self.state=self.updater.prepare(TARGET,SOURCE,MAIN)
 
     def retain_viewer_tasks(self,indices=range(2),stages=()):
@@ -119,6 +122,227 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         observed={path.relative_to(self.volume).as_posix():path.read_bytes()
                   for path in (self.volume/'viewer-tasks').rglob('*') if path.is_file()}
         self.assertEqual(observed,self.retained)
+
+    def pilot_tree(self):
+        """The shape of the live tree, with synthetic opaque (unparseable) bytes."""
+        self.journals={}
+        for directory,names in (('run-a',('cluster.json','child-start-1','child-exit-1')),('run-b',('main.json','.cancel-intent')),('run-c',())):
+            base=self.volume/'pilot-journals'/directory;base.mkdir(parents=True,mode=0o700)
+            for name in names:
+                content=b'\xff{not json '+name.encode();(base/name).write_bytes(content);(base/name).chmod(0o600)
+                self.journals['pilot-journals/'+directory+'/'+name]=content
+        (self.volume/'pilot-journals').chmod(0o700)
+
+    def pilot_digest(self):return module.volume_census(self.volume,uid=os.geteuid())['pilotJournals']['sha256']
+
+    def pilot_prepare(self,name='pilot-operation'):
+        """A fresh operation over the current tree under a pin of that same tree."""
+        operation=self.root/name;operation.mkdir(mode=0o700)
+        self.updater=module.ReferenceCoordinatorUpdate(operation,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda state:None)
+        pin=patch.object(module,'REVIEWED_PILOT_JOURNALS_SHA256',self.pilot_digest());pin.start();self.addCleanup(pin.stop)
+        self.state=self.updater.prepare(TARGET,SOURCE,MAIN)
+        self.operation=operation;return self.state
+
+    def assert_pilot_bytes(self,root=None):
+        base=root or self.volume
+        observed={path.relative_to(base).as_posix():path.read_bytes() for path in (base/'pilot-journals').rglob('*') if path.is_file()}
+        self.assertEqual(observed,self.journals)
+
+    def test_pilot_journal_manifest_binds_exact_tree_without_parsing(self):
+        self.pilot_tree()
+        census=module.volume_census(self.volume,uid=os.geteuid())
+        rows=sorted([[item['path'],item['mode'],item.get('bytes'),item.get('sha256')] for item in census['files'] if item['path'].startswith('pilot-journals')],key=lambda row:row[0])
+        self.assertEqual(len(rows),9)
+        self.assertEqual(census['pilotJournals'],dict(files=5,bytes=sum(map(len,self.journals.values())),sha256=module.digest(rows)))
+        self.assertEqual(self.pilot_prepare()['baseline']['pilotJournals'],census['pilotJournals'])
+        # An empty directory and a directory mode are bound by the digest too.
+        (self.volume/'pilot-journals/run-d').mkdir(mode=0o700)
+        self.assertNotEqual(self.pilot_digest(),census['pilotJournals']['sha256'])
+        (self.volume/'pilot-journals/run-d').rmdir()
+        self.assertEqual(self.pilot_digest(),census['pilotJournals']['sha256'])
+
+    def test_pilot_journal_census_refusals(self):
+        self.pilot_tree()
+        census=lambda:module.volume_census(self.volume,uid=os.geteuid())
+        root=self.volume/'pilot-journals';base=root/'run-a';record=base/'cluster.json'
+        def add(path,content=b'x',mode=0o600):
+            path.write_bytes(content);path.chmod(mode);return lambda:path.unlink()
+        def symlink():(base/'link').symlink_to(record);return lambda:(base/'link').unlink()
+        def directory_symlink():(root/'link').symlink_to(base);return lambda:(root/'link').unlink()
+        def hardlink():os.link(record,base/'second');return lambda:(base/'second').unlink()
+        def depth_three():
+            (base/'deep').mkdir(mode=0o700);add(base/'deep'/'file')
+            return lambda:shutil.rmtree(base/'deep')
+        def depth_two_directory():(base/'deep').mkdir(mode=0o700);return lambda:(base/'deep').rmdir()
+        def depth_one_file():return add(root/'file')
+        def fifo():os.mkfifo(base/'pipe',0o600);return lambda:(base/'pipe').unlink()
+        def file_mode():record.chmod(0o640);return lambda:record.chmod(0o600)
+        def special_mode():record.chmod(0o4600);return lambda:record.chmod(0o600)
+        def directory_mode():base.chmod(0o750);return lambda:base.chmod(0o700)
+        def readonly_directory():base.chmod(0o500);return lambda:base.chmod(0o700)
+        def top_mode():root.chmod(0o755);return lambda:root.chmod(0o700)
+        def too_many():
+            names=[root/'run-c'/('n'+str(index)) for index in range(60)]
+            for path in names:add(path)
+            return lambda:[path.unlink() for path in names]
+        def too_large():return add(base/'large',b'x'*65537)
+        def too_much():
+            names=[root/'run-c'/('n'+str(index)) for index in range(17)]
+            for path in names:add(path,b'x'*65536)
+            return lambda:[path.unlink() for path in names]
+        def sibling():return add(self.volume/'pilot-journals-other')
+        for make in (symlink,directory_symlink,hardlink,depth_three,depth_two_directory,depth_one_file,fifo,file_mode,special_mode,
+                     directory_mode,readonly_directory,top_mode,too_many,too_large,too_much,sibling):
+            with self.subTest(case=make.__name__):
+                undo=make()
+                try:
+                    with self.assertRaises(AssertionError):census()
+                finally:undo()
+                census()
+        # The exact limits are inside the rule: 64 files, 64 KiB each.
+        undo=add(base/'limit',b'x'*65536)
+        names=[root/'run-c'/('n'+str(index)) for index in range(58)]
+        for path in names:add(path)
+        self.assertEqual(census()['pilotJournals']['files'],64)
+        undo();[path.unlink() for path in names]
+
+    def test_pilot_journal_wrong_owner_refused(self):
+        self.pilot_tree()
+        real=Path.lstat;target=self.volume/'pilot-journals/run-a/cluster.json'
+        for field in (4,5):
+            def lstat(path,*args,**kwargs):
+                value=real(path,*args,**kwargs)
+                if path!=target:return value
+                fields=list(value);fields[field]+=1;return os.stat_result(fields)
+            with self.subTest(field=field),patch.object(Path,'lstat',lstat):
+                with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
+
+    def assert_pilot_prepare_holds(self,reason,pin):
+        operation=self.root/('held-'+__import__('uuid').uuid4().hex);operation.mkdir(mode=0o700)
+        updater=module.ReferenceCoordinatorUpdate(operation,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda state:None)
+        with patch.object(module,'REVIEWED_PILOT_JOURNALS_SHA256',pin):
+            with self.assertRaisesRegex(module.Stopped,reason):updater.prepare(TARGET,SOURCE,MAIN)
+        held=json.loads((operation/'checkpoint.json').read_text())
+        self.assertEqual(held['phase'],'pilot_journals_held')
+        self.assertNotIn('baseline',held)
+        self.assertEqual(held['observedPilotJournals']['sha256'],self.pilot_digest())
+        self.assertEqual(self.transport.calls,[])
+        with patch.object(module,'REVIEWED_PILOT_JOURNALS_SHA256',held['observedPilotJournals']['sha256']):
+            with self.assertRaisesRegex(module.Stopped,'prepared_operation_only_no_replay'):updater.activate(held)
+
+    def test_unpinned_or_wrong_pilot_journal_pin_holds_prepare(self):
+        self.assert_pilot_prepare_holds('reviewed_pilot_journals_required',None)
+        self.assert_pilot_prepare_holds('reviewed_pilot_journals_changed','0'*64)
+        self.pilot_tree()
+        self.assert_pilot_prepare_holds('reviewed_pilot_journals_required',None)
+        self.assert_pilot_prepare_holds('reviewed_pilot_journals_changed','1'*64)
+        # A pin of the empty manifest does not accept a tree, nor the reverse.
+        self.assert_pilot_prepare_holds('reviewed_pilot_journals_changed',module.digest([]))
+        pinned=self.pilot_digest();shutil.rmtree(self.volume/'pilot-journals')
+        self.assert_pilot_prepare_holds('reviewed_pilot_journals_changed',pinned)
+
+    def test_source_keeps_pilot_journals_unpinned_and_activation_unreviewed(self):
+        self.pin.stop()
+        try:self.assertIsNone(module.REVIEWED_PILOT_JOURNALS_SHA256)
+        finally:self.pin.start()
+        self.assertIs(module.ACTIVATION_REVIEWED,False)
+
+    def test_activation_rechecks_the_pilot_journal_pin(self):
+        for pin,reason in ((None,'reviewed_pilot_journals_required'),('2'*64,'reviewed_pilot_journals_changed')):
+            with self.subTest(pin=pin),patch.object(module,'REVIEWED_PILOT_JOURNALS_SHA256',pin):
+                with self.assertRaisesRegex(module.Stopped,reason):self.activate()
+        self.assertEqual(self.transport.calls,[])
+        self.assertTrue(self.transport.containers[module.OLD_ID]['State']['Running'])
+
+    def test_pilot_journal_changes_after_baseline_hold_with_exact_equality(self):
+        self.pilot_tree();self.pilot_prepare()
+        baseline=self.state['baseline'];base=self.volume/'pilot-journals/run-a';record=base/'cluster.json'
+        census=lambda:module.volume_census(self.volume,uid=os.geteuid())
+        def changed():
+            content=record.read_bytes();record.write_bytes(content[:-1]+bytes([content[-1]^1]))
+            return lambda:record.write_bytes(self.journals['pilot-journals/run-a/cluster.json'])
+        def added():(base/'added').write_bytes(b'x');(base/'added').chmod(0o600);return lambda:(base/'added').unlink()
+        def removed():record.unlink();return lambda:(record.write_bytes(self.journals['pilot-journals/run-a/cluster.json']),record.chmod(0o600))
+        def mode():record.chmod(0o400);return lambda:record.chmod(0o600)
+        options=({},dict(allow_owned=True,allow_migration=True),dict(allow_owned=True,allow_viewer_additions=True,allow_migration=True),dict(ignore_nodes=True))
+        for make in (changed,added,removed,mode):
+            undo=make()
+            try:
+                for kwargs in options:
+                    with self.subTest(case=make.__name__,options=kwargs):
+                        with self.assertRaisesRegex(module.Stopped,'full_census_changed'):module.compatible(census(),baseline,**kwargs)
+            finally:undo()
+            module.compatible(census(),baseline)
+
+    def test_pilot_journal_byte_changed_during_drain_blocks_before_stop(self):
+        self.pilot_tree();self.pilot_prepare()
+        record=self.volume/'pilot-journals/run-b/main.json'
+        original=self.operator.json
+        def mutate(method,route,payload=None,**kwargs):
+            value=original(method,route,payload,**kwargs)
+            if route.endswith('/schedule'):record.write_bytes(b'Y'+record.read_bytes()[1:])
+            return value
+        with patch.object(self.operator,'json',side_effect=mutate):
+            with self.assertRaisesRegex(module.Stopped,'full_census_changed'):self.activate()
+        self.assertFalse(any(call[0]=='stop' for call in self.transport.calls))
+        self.assertTrue(self.transport.containers[module.OLD_ID]['State']['Running'])
+
+    def test_pilot_journal_file_added_while_stopped_refuses_rollback(self):
+        self.pilot_tree();self.pilot_prepare()
+        self.transport.loss='start'
+        with self.assertRaises(OSError):self.activate()
+        self.transport.containers[NEW_ID]['State']['Running']=False
+        added=self.volume/'pilot-journals/run-c/late';added.write_bytes(b'x');added.chmod(0o600)
+        with self.assertRaises(module.Stopped):self.updater.rollback(self.state)
+        self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
+
+    def test_pilot_journals_survive_update_byte_identical(self):
+        self.pilot_tree();self.pilot_prepare()
+        self.assertEqual(self.activate()['phase'],'completed')
+        self.assert_pilot_bytes()
+        self.assertEqual(self.pilot_digest(),self.state['baseline']['pilotJournals']['sha256'])
+
+    def test_pilot_journals_survive_rollback_byte_identical(self):
+        self.pilot_tree();self.pilot_prepare()
+        self.transport.loss='start'
+        with self.assertRaises(OSError):self.activate()
+        self.assertEqual(self.updater.rollback(self.state)['phase'],'rolled_back')
+        self.assert_pilot_bytes()
+        self.assertEqual(self.pilot_digest(),self.state['baseline']['pilotJournals']['sha256'])
+
+    def test_actual_backup_copies_pilot_journals_byte_for_byte(self):
+        self.pilot_tree()
+        destination=self.root/'pilot-backup';destination.mkdir(mode=0o700)
+        proof=self.run_actual_backup(destination)
+        before=module.volume_census(self.volume,uid=os.geteuid(),offline=True)
+        copied=module.volume_census(destination,uid=os.geteuid(),offline=True)
+        self.assertEqual(proof['fullCensusSha256'],module.digest(before))
+        self.assert_pilot_bytes(destination)
+        self.assertEqual(copied['pilotJournals'],before['pilotJournals'])
+        before.pop('rootMode');copied.pop('rootMode');self.assertEqual(copied,before)
+        # The helper's own comparison refuses a source it cannot reproduce.
+        (self.volume/'pilot-journals/run-a/cluster.json').chmod(0o666)
+        refused=self.root/'pilot-refused-backup';refused.mkdir(mode=0o700)
+        with self.assertRaises(AssertionError):self.run_actual_backup(refused)
+
+    def test_every_volume_census_passes_the_reviewed_timeout(self):
+        self.assertEqual(module.CENSUS_TIMEOUT,module.BACKUP_TIMEOUT)
+        real=self.transport.docker;seen=[]
+        def docker(*args,**kwargs):
+            if args[0] in ('run','exec') and 'def volume_census' in str(args[-1]):seen.append((args[0],kwargs.get('timeout')))
+            return real(*args,**kwargs)
+        with patch.object(self.transport,'docker',side_effect=docker):
+            self.assertEqual(self.activate()['phase'],'completed')
+            self.updater.census(self.state,container=NEW_ID)
+            self.transport.containers[NEW_ID]['State']['Running']=False
+            self.updater.census(self.state,offline=True)
+        self.assertEqual({action for action,_timeout in seen},{'run','exec'})
+        self.assertEqual({timeout for _action,timeout in seen},{module.CENSUS_TIMEOUT})
+        self.assertGreater(len(seen),5)
+        # Source guard: every census docker call sits in census() and passes it.
+        source=inspect.getsource(module.ReferenceCoordinatorUpdate.census)
+        self.assertEqual(source.count('self.t.docker(\'run\'')+source.count('self.t.docker(\'exec\''),2)
+        self.assertEqual(source.count(',timeout=CENSUS_TIMEOUT)'),2)
 
     def test_retained_terminal_viewer_tasks_are_hashed_and_survive_update(self):
         census=self.state['baseline']

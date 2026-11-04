@@ -52,12 +52,21 @@ TMPFS = {'/tmp': 'rw,nosuid,nodev,noexec,size=64m,mode=1777'}
 # The retained Viewer tasks add about 1.2 GB that the backup copies once and
 # hashes twice; 120 seconds covered only the empty historical volume.
 BACKUP_TIMEOUT = 900
+# Every volume census reads those same bytes, online at --cpus 0.5, and a timeout
+# after stop is needs_inspection. It reuses the reviewed backup budget unchanged.
+CENSUS_TIMEOUT = BACKUP_TIMEOUT
 LABEL = 'org.ledgetop.reference.update'
 MODE = 'reference-to-reference-v1'
 # The 693cb7e predecessor pins and the /tmp tmpfs are new and not yet reviewed
 # against the live host. Explicit preparation, immutable argument binding and
 # every live fence remain; activation and rollback stay refused until review.
 ACTIVATION_REVIEWED = False
+# Manifest digest of the opaque pilot-journals tree, pinned by a human reviewer
+# from the live read-only census. None holds preparation and activation, as does
+# any other value; an absent tree is the digest of the empty manifest, not a
+# special case. A hash cannot show a pilot finished: see the pre-live audit in
+# docs/reference-coordinator-update.md.
+REVIEWED_PILOT_JOURNALS_SHA256 = None
 class Stopped(ValueError):pass
 
 
@@ -155,6 +164,9 @@ def volume_census(root, *, uid=10001, offline=False):
         return hashlib.sha256(encode(value)).hexdigest()
     allowed = {'jobs', 'sqlite_sequence', 'coordinator_identity', 'coordinator_authority_lease', 'nodes', 'viewer_tasks', 'viewer_files', 'viewer_incarnations', 'reference_jobs', 'reference_acceptances', 'reference_outbox', 'reference_claims', 'reference_worker_receipts', 'reference_transfer_grants', 'reference_worker_failures', 'reference_terminal_acceptances', 'owned_maintenance_schedules', 'reference_viewer_receipts', 'reference_viewer_transfers', 'viewer_reservations', 'viewer_option_evidence', 'viewer_full_option_evidence', 'reference_released_claims', 'viewer_guarded_dispatch_checkpoint', 'viewer_guarded_dispatch_history'}
     files = []
+    journals = []
+    journal_files = 0
+    journal_bytes = 0
     for path in sorted(root.rglob('*')):
         relative = path.relative_to(root).as_posix()
         info = path.lstat()
@@ -164,13 +176,32 @@ def volume_census(root, *, uid=10001, offline=False):
         # retained terminal Viewer task directories. Those are client inputs
         # and results: every byte is hashed so update and rollback preserve them.
         retained = relative.startswith('viewer-tasks/')
-        if not (relative in ('jobs.sqlite3', 'coordinator.lock', 'viewer-tasks', 'viewer-spool') or retained):
+        # Operator pilot records with no writer in this source: pilot-journals,
+        # depth-1 directories and depth-2 files only. Directories are exactly
+        # 0700 because the backup must write into them; files have no group,
+        # other or special bits, which its umask could not reproduce. Their
+        # bytes are opaque: hashed like the rest of the tree, never parsed.
+        parts = relative.split('/')
+        journal = parts[0] == 'pilot-journals'
+        if journal:
+            directory = stat.S_ISDIR(info.st_mode)
+            mode = stat.S_IMODE(info.st_mode)
+            if not (len(parts) <= 3 and directory == (len(parts) < 3) and (mode == 0o700 if directory else not mode & 0o7077)):
+                raise AssertionError('pilot journal outside reviewed tree')
+        if not (relative in ('jobs.sqlite3', 'coordinator.lock', 'viewer-tasks', 'viewer-spool') or retained or journal):
             raise AssertionError()
         if stat.S_ISDIR(info.st_mode):
             files.append(dict(path=relative, kind='directory', mode=stat.S_IMODE(info.st_mode)))
+            if journal:
+                journals.append([relative, stat.S_IMODE(info.st_mode), None, None])
         else:
-            if not (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and (info.st_size <= (21474836480 if retained else 67108864))):
+            if not (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and (info.st_size <= (21474836480 if retained else 65536 if journal else 67108864))):
                 raise AssertionError()
+            if journal:
+                journal_files += 1
+                journal_bytes += info.st_size
+                if journal_files > 64 or journal_bytes > 1048576:
+                    raise AssertionError('pilot journals exceed reviewed bounds')
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
             try:
                 before = os.fstat(fd)
@@ -192,6 +223,8 @@ def volume_census(root, *, uid=10001, offline=False):
             finally:
                 os.close(fd)
             files.append(dict(path=relative, kind='file', mode=stat.S_IMODE(info.st_mode), bytes=size, sha256=h.hexdigest()))
+            if journal:
+                journals.append([relative, stat.S_IMODE(info.st_mode), size, h.hexdigest()])
     if not any((item['path'] == 'jobs.sqlite3' for item in files)):
         raise AssertionError()
     uri = 'file:' + str(root / 'jobs.sqlite3') + '?mode=ro' + ('&immutable=1' if offline else '')
@@ -314,7 +347,9 @@ def volume_census(root, *, uid=10001, offline=False):
                     raise AssertionError('orphaned Viewer task row')
         node_columns = [row[1] for row in db.execute('PRAGMA table_info(nodes)')]
         nodes = {row[0]: dict(zip(node_columns, row)) for row in db.execute('SELECT * FROM nodes ORDER BY id')}
-        return dict(authorityId=authority, schema=objects, tables=tables, files=files, nodeRows=nodes, rootMode=stat.S_IMODE(root_info.st_mode), sqliteQuickCheck='ok')
+        journals.sort(key=lambda row: row[0])
+        pilot = dict(files=journal_files, bytes=journal_bytes, sha256=sha(journals))
+        return dict(authorityId=authority, schema=objects, tables=tables, files=files, pilotJournals=pilot, nodeRows=nodes, rootMode=stat.S_IMODE(root_info.st_mode), sqliteQuickCheck='ok')
     finally:
         db.close()
 
@@ -483,6 +518,12 @@ def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, all
     if a!=b:raise Stopped('full_census_changed')
 
 
+def reviewed_pilot_journals(census):
+    """Only a human pin accepts the tree; compatible() never relaxes it."""
+    if REVIEWED_PILOT_JOURNALS_SHA256 is None:raise Stopped('reviewed_pilot_journals_required')
+    if census.get('pilotJournals',{}).get('sha256')!=REVIEWED_PILOT_JOURNALS_SHA256:raise Stopped('reviewed_pilot_journals_changed')
+
+
 TLS_CENSUS = """import hashlib,json,os,stat
 from pathlib import Path
 root=Path('/run/processing-reference');result=[]
@@ -561,7 +602,13 @@ def application_environment(transport, item, *, lease=False):
 
 
 def owned_api_probe(operator):
-    """Only the new authenticated missing-receipt response proves API support."""
+    """Prove the operator lookup path answers on the running coordinator.
+
+    An exact authenticated missing-receipt 404 shows the fixed loopback origin,
+    operator token and receipt lookup work. The 693cb7e predecessor has this
+    route too, so it does not prove the candidate: identity comes from the
+    container, image and sole-owner checks.
+    """
     if operator.origin!='http://127.0.0.1:18080' or operator.node:raise Stopped('fixed_operator_probe_required')
     connection=http.client.HTTPConnection(operator.parsed.hostname,operator.parsed.port,timeout=10)
     try:
@@ -656,8 +703,8 @@ class ReferenceCoordinatorUpdate:
             if self.t.docker('ps','--filter','volume='+VOLUME,'--format','{{.ID}}').strip():raise Stopped('offline_volume_has_owner')
             raw=self.t.docker('run','--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
                 '--cap-drop','ALL','--security-opt','no-new-privileges','--mount','type=volume,src='+VOLUME+',dst=/source,readonly',
-                '--entrypoint','python',state['image'],'-c',code)
-        else:raw=self.t.docker('exec','--user','10001:10001',container or state['old']['containerId'],'python','-c',code)
+                '--entrypoint','python',state['image'],'-c',code,timeout=CENSUS_TIMEOUT)
+        else:raw=self.t.docker('exec','--user','10001:10001',container or state['old']['containerId'],'python','-c',code,timeout=CENSUS_TIMEOUT)
         result=json.loads(raw)
         history_count = state.get('history', {}).get('count')
         if (type(history_count) is not int or history_count < 0 or result['authorityId'] != AUTHORITY
@@ -762,7 +809,12 @@ class ReferenceCoordinatorUpdate:
         for name in (state['rollbackName'],state['failedName']):
             if self.t.docker('ps','--all','--filter','name=^/'+name+'$','--format','{{.ID}}').strip():raise Stopped('retention_name_exists')
         self.save(state);self.t.candidate_loader(target,operation)
-        self.save(state,'prepared',baseline=self.census(state),tls=self.tls(state),predecessorConfig=self.predecessor_config(state))
+        baseline=self.census(state)
+        try:reviewed_pilot_journals(baseline)
+        except Stopped:
+            # The observed manifest stays private evidence for the human reviewer.
+            self.save(state,'pilot_journals_held',observedPilotJournals=baseline['pilotJournals']);raise
+        self.save(state,'prepared',baseline=baseline,tls=self.tls(state),predecessorConfig=self.predecessor_config(state))
         return state
 
     def check(self,state,gates):
@@ -885,6 +937,7 @@ class ReferenceCoordinatorUpdate:
     def activate(self,state):
         self.validate(state)
         if state['phase']!='prepared':raise Stopped('prepared_operation_only_no_replay')
+        reviewed_pilot_journals(state['baseline'])
         self.original(state);_env,api,operator=self.t.local_clients();self.activity(state,api)
         compatible(self.census(state),state['baseline'])
         with self.gate_factory() as gates:
@@ -897,8 +950,9 @@ class ReferenceCoordinatorUpdate:
                     payload=dict(expectedRevision=current['revision'],targetImage=state['engineImages'][identifier],drainAt=stamp,notBefore=stamp,afterJobId=None)
                     self.save(state,'schedule_pending',pendingPlan=dict(nodeId=identifier,payload=payload))
                     self.check(state,gates)
-                    # Old e2 has no durable caller correlation. Any lost ACK is
-                    # held, even when readback happens to have the same target.
+                    # This legacy route has no durable caller correlation; the
+                    # updater does not use schedule-owned, though 693cb7e has it.
+                    # Any lost ACK is held, even when readback has the same target.
                     plan=operator.json('POST','/v1/prototype/nodes/'+identifier+'/schedule',payload)['node']
                     if (plan['id']!=identifier or plan['state']!='draining' or plan['targetImage']!=payload['targetImage']
                             or type(plan['planId']) is not str or str(uuid.UUID(plan['planId']))!=plan['planId']):raise Stopped('exact_schedule_ack_required')
