@@ -8,7 +8,6 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .viewer_limits import EAGER_CUSTODY_MAX_BYTES, EAGER_CUSTODY_RESERVE_BYTES
 
 ADMISSION_DRAIN_QUALIFIED = False
 
@@ -46,8 +45,8 @@ class Config:
     viewer_log_retention: bool = False
     viewer_lost_result_adopt: bool = False
     viewer_eager_result_custody: bool = False
-    viewer_eager_custody_reserve_bytes: int = EAGER_CUSTODY_RESERVE_BYTES
-    viewer_eager_custody_max_bytes: int = EAGER_CUSTODY_MAX_BYTES
+    viewer_eager_custody_reserve_bytes: int | None = None
+    viewer_eager_custody_max_bytes: int | None = None
 
 
 def parse_node_inventory(raw, environment):
@@ -200,6 +199,14 @@ def from_environment() -> Config:
     eager_result_custody = os.environ.get('PROCESSING_VIEWER_EAGER_RESULT_CUSTODY', '0')
     if eager_result_custody not in ('0', '1'):
         raise ValueError('PROCESSING_VIEWER_EAGER_RESULT_CUSTODY must be 0 or 1')
+    # No default fits an unknown filesystem, so an operator states both, and this
+    # runs before any lease or state exists. See docs/eager-result-custody.md.
+    eager_reserve, eager_max = (
+        None if os.environ.get(name) is None else _positive_int(os.environ[name], name, 2 ** 53 - 1)
+        for name in ('PROCESSING_VIEWER_EAGER_CUSTODY_RESERVE_BYTES', 'PROCESSING_VIEWER_EAGER_CUSTODY_MAX_BYTES'))
+    if eager_result_custody == '1' and (eager_reserve is None or eager_max is None):
+        raise ValueError('PROCESSING_VIEWER_EAGER_RESULT_CUSTODY requires PROCESSING_VIEWER_EAGER_CUSTODY_RESERVE_BYTES '
+                         'and PROCESSING_VIEWER_EAGER_CUSTODY_MAX_BYTES')
     if inventory and (per_node_slots != '1' or os.environ.get('PROCESSING_REFERENCE_CONFIG')):
         raise ValueError('inventory requires per-node slots and no reference runtime')
     lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
@@ -266,8 +273,6 @@ def from_environment() -> Config:
         viewer_log_retention=log_retention == '1',
         viewer_lost_result_adopt=lost_result_adopt == '1',
         viewer_eager_result_custody=eager_result_custody == '1',
-        viewer_eager_custody_reserve_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_EAGER_CUSTODY_RESERVE_BYTES', str(EAGER_CUSTODY_RESERVE_BYTES)),
-                                                         'PROCESSING_VIEWER_EAGER_CUSTODY_RESERVE_BYTES', 2 ** 53 - 1),
-        viewer_eager_custody_max_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_EAGER_CUSTODY_MAX_BYTES', str(EAGER_CUSTODY_MAX_BYTES)),
-                                                     'PROCESSING_VIEWER_EAGER_CUSTODY_MAX_BYTES', 2 ** 53 - 1),
+        viewer_eager_custody_reserve_bytes=eager_reserve,
+        viewer_eager_custody_max_bytes=eager_max,
     )

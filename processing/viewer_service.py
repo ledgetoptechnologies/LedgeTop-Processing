@@ -35,7 +35,7 @@ from .policy import plan
 from .prototype import VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
-from .viewer_limits import EAGER_CUSTODY_MAX_BYTES, EAGER_CUSTODY_RESERVE_BYTES, MAX_UPLOAD_BYTES
+from .viewer_limits import MAX_UPLOAD_BYTES
 from .viewer_result_adoption import (CUSTODY_INTENT, CUSTODY_NAME, IDENTITY_UNAVAILABLE, RESULT_CHANGED, bound_evidence,
                                      custody_refusal, engine_evidence, evidence_complete, identity_refusal, new_adoption,
                                      new_custody)
@@ -390,8 +390,12 @@ class ViewerService:
         # Prototype only, absent leaves a normal result on the engine until the
         # Viewer's first download. As above, only the file is the record.
         self._eager_custody = getattr(config, 'viewer_eager_result_custody', False) is True
-        self._eager_reserve = getattr(config, 'viewer_eager_custody_reserve_bytes', EAGER_CUSTODY_RESERVE_BYTES)
-        self._eager_max_bytes = getattr(config, 'viewer_eager_custody_max_bytes', EAGER_CUSTODY_MAX_BYTES)
+        self._eager_reserve = getattr(config, 'viewer_eager_custody_reserve_bytes', None)
+        self._eager_max_bytes = getattr(config, 'viewer_eager_custody_max_bytes', None)
+        if self._eager_custody and not all(type(value) is int and value > 0
+                                           for value in (self._eager_reserve, self._eager_max_bytes)):
+            raise ValueError('eager result custody requires explicit reserve and maximum bytes')
+        self._eager_free_seen = None
         self._eager_threads = {}
         self._eager_due = {}
         self._eager_failures = {}
@@ -405,6 +409,13 @@ class ViewerService:
         if self._parallel_dispatch and not queue.per_node_slots:
             raise ValueError('parallel dispatch requires per-node slots')
         self.store.parallel_dispatch = self._parallel_dispatch
+        if self._eager_custody:
+            try:
+                free = self._eager_free(self.store.root)
+            except OSError:
+                free = None  # Each fetch reads this again and defers while it cannot.
+            logging.getLogger(__name__).warning('Viewer result custody on: reserve %d, maximum %d, free %s bytes',
+                                                self._eager_reserve, self._eager_max_bytes, free)
 
     def _guard_ready(self, node_id):
         if not self._require_guard:
@@ -1566,6 +1577,18 @@ class ViewerService:
                     pass
         return total
 
+    def _eager_free(self, directory):
+        """Free bytes on the filesystem that holds this directory, as a fetch sees them."""
+        free = shutil.disk_usage(directory).free
+        self._eager_free_seen = {'bytes': free, 'observedAt': int(time.time())}
+        return free
+
+    def eager_custody_status(self):
+        """The policy in force, its last reading and what is still owed; no paths."""
+        return {'reserveBytes': self._eager_reserve, 'maxBytes': self._eager_max_bytes,
+                'fileLimitBytes': CENSUS_RETAINED_FILE_BYTES, 'lastFree': self._eager_free_seen,
+                'pendingTasks': len(self.store.pending_custody()), 'resumeScanned': self._eager_scanned}
+
     def _eager_stop(self, closing):
         def stop():
             if self._stop.is_set() or (closing is not None and closing.is_set()):
@@ -1573,7 +1596,7 @@ class ViewerService:
 
         return stop
 
-    def _eager_guard(self, closing):
+    def _eager_guard(self, task, closing):
         """Refuse before any write that a drain, the budget or the disk forbids."""
         used = self._eager_custody_bytes()
         stop = self._eager_stop(closing)
@@ -1585,7 +1608,11 @@ class ViewerService:
                 raise _CustodyRefused('archive_exceeds_census_limit')
             if used + max(expected, 1) > self._eager_max_bytes:
                 raise _CustodyDeferred('custody_budget_exceeded')
-            if shutil.disk_usage(self.store.root).free + reclaimable < self._eager_reserve + expected - total:
+            try:
+                free = self._eager_free(task['directory'])
+            except OSError:
+                raise _CustodyDeferred('free_space_unavailable') from None
+            if free + reclaimable < self._eager_reserve + expected - total:
                 raise _CustodyDeferred('insufficient_scratch')
 
         return stop, guard
@@ -1607,7 +1634,7 @@ class ViewerService:
             # The record came before that download, so this read closes the bracket.
             self._eager_result(task, record)
         elif not complete:
-            stop, check = self._eager_guard(closing)
+            stop, check = self._eager_guard(task, closing)
             try:
                 stale = partial.lstat().st_size
             except FileNotFoundError:

@@ -197,6 +197,9 @@ def make_handler(config: Config):
                     self._reply(404, {"error": "prototype_disabled"})
                 elif self.path == "/v1/prototype/authority":
                     self._reply(200, {"authorityId": queue.authority_id})
+                elif (self.path == "/v1/prototype/result-custody" and self.viewer_service is not None
+                        and getattr(config, 'viewer_eager_result_custody', False) is True):
+                    self._reply(200, {"resultCustody": self.viewer_service.eager_custody_status()})
                 elif self.path == "/v1/prototype/jobs":
                     self._reply(200, {"jobs": queue.list(), "mode": "bounded_photo_test" if config.photo_smoke_enabled else "synthetic_prototype"})
                 elif self.path == "/v1/prototype/nodes":

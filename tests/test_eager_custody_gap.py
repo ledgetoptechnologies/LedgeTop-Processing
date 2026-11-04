@@ -19,15 +19,16 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 import uuid
 import zipfile
 
 from processing.admission_drain import AdmissionClosed, AdmissionDrain
-from processing.app import CoordinatorService
+from processing.app import CoordinatorService, make_handler
 from processing.config import Config, from_environment
 from processing.maintenance import Conflict
 from processing.prototype import Queue
-from processing.viewer_limits import EAGER_CUSTODY_MAX_BYTES, EAGER_CUSTODY_RESERVE_BYTES
 from processing.viewer_result_adoption import (CUSTODY_INTENT, CUSTODY_NAME, IDENTITY_MISMATCH, IDENTITY_UNAVAILABLE,
                                                RESULT_CHANGED)
 from processing import viewer_service as service_module
@@ -35,6 +36,7 @@ from processing.viewer_service import (CENSUS_RETAINED_FILE_BYTES, EAGER_DEFERRE
                                        ENGINE_MISSING_POLLS, EngineUnavailable, NODE_LOST_POLLS, NativeEngine)
 from processing.viewer_tasks import TaskStore
 from tests import test_viewer_parallel_dispatch as startup_fixture, test_viewer_service as viewer_fixture
+from tests.test_service import start_server
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -107,8 +109,8 @@ class NormalCompletionCustody(unittest.TestCase):
         with patch.dict(os.environ, environment, clear=True):
             config = from_environment()
             self.assertIs(config.viewer_eager_result_custody, False)
-            self.assertEqual(config.viewer_eager_custody_reserve_bytes, EAGER_CUSTODY_RESERVE_BYTES)
-            self.assertEqual(config.viewer_eager_custody_max_bytes, EAGER_CUSTODY_MAX_BYTES)
+            self.assertIsNone(config.viewer_eager_custody_reserve_bytes)
+            self.assertIsNone(config.viewer_eager_custody_max_bytes)
         self.assertIs(Config('t' * 32, '', '', 800, 20000).viewer_eager_result_custody, False)
         with patch.dict(os.environ, {**environment, 'PROCESSING_VIEWER_EAGER_RESULT_CUSTODY': '1',
                                      'PROCESSING_VIEWER_EAGER_CUSTODY_RESERVE_BYTES': '7',
@@ -122,6 +124,31 @@ class NormalCompletionCustody(unittest.TestCase):
             with patch.dict(os.environ, {**environment, key: value}, clear=True):
                 with self.assertRaises(ValueError):
                     from_environment()
+
+    def test_on_without_a_stated_capacity_refuses_before_any_state(self):
+        startup = startup_fixture.StartupTests('test_invalid_values_refuse')
+        startup.setUp()
+        self.addCleanup(startup.doCleanups)
+        reserve, maximum = 'PROCESSING_VIEWER_EAGER_CUSTODY_RESERVE_BYTES', 'PROCESSING_VIEWER_EAGER_CUSTODY_MAX_BYTES'
+        on = {**startup.env, 'PROCESSING_VIEWER_EAGER_RESULT_CUSTODY': '1'}
+        for sizes in ({}, {reserve: '7'}, {maximum: '9'}, {reserve: '', maximum: '9'}, {reserve: '7', maximum: '0'},
+                      {reserve: '-1', maximum: '9'}, {reserve: '7', maximum: '9x'}):
+            with self.subTest(sizes), patch.dict(os.environ, {**on, **sizes}, clear=True):
+                with self.assertRaises(ValueError):
+                    from_environment()
+        finished = subprocess.run([sys.executable, '-m', 'processing.app'], cwd=ROOT, capture_output=True, timeout=60,
+                                  env={**on, 'PATH': os.environ.get('PATH', '')})
+        self.assertNotEqual(finished.returncode, 0)
+        self.assertFalse(startup.state.exists())
+
+    def test_a_service_built_without_stated_capacity_refuses(self):
+        fixture = self.fixture
+        fixture.config.viewer_eager_result_custody = True
+        for values in ((None, None), (1, None), (None, 1), (0, 1), (1, True)):
+            with self.subTest(values):
+                fixture.config.viewer_eager_custody_reserve_bytes, fixture.config.viewer_eager_custody_max_bytes = values
+                with self.assertRaisesRegex(ValueError, 'explicit reserve and maximum'):
+                    service_module.ViewerService(fixture.queue, fixture.config, engines=fixture.engines)
 
     def test_census_limit_constant_matches_the_updater(self):
         source = (ROOT / 'ops' / 'update_reference_coordinator.py').read_text()
@@ -587,6 +614,79 @@ class EagerCustody(unittest.TestCase):
         with usage(1 + len(engine.archive)):
             self.settle()
         self.assertEqual(self.custody(identifier), {'state': 'verified'})
+
+    def test_free_space_is_read_where_the_archive_lives_and_held_to_the_reserve(self):
+        identifier = self.finished(wait=False)
+        size = len(self.engine(identifier).archive)
+        seen = []
+
+        def probe(free):
+            return patch('processing.viewer_service.shutil.disk_usage',
+                         lambda path: seen.append(str(path)) or SimpleNamespace(free=free))
+
+        self.service._eager_reserve = 1000
+        with probe(999):  # Below the reserve before a byte moves.
+            self.service.tick()
+            self.join()
+        self.assertEqual(self.custody(identifier), {'state': 'deferred', 'reason': 'insufficient_scratch'})
+        self.assertEqual(self.engine(identifier).download_calls, 0)
+        self.assertEqual(set(seen), {str(self.directory(identifier))})
+        self.assertEqual(self.service.eager_custody_status()['lastFree']['bytes'], 999)
+        with probe(1000 + size):  # Exactly enough to keep the reserve afterwards.
+            self.settle()
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
+        self.assertEqual(self.service.eager_custody_status()['lastFree']['bytes'], 1000 + size)
+
+    def test_an_unreadable_filesystem_defers(self):
+        identifier = self.finished(wait=False)
+        with patch('processing.viewer_service.shutil.disk_usage', side_effect=OSError('synthetic statvfs failure')):
+            self.service.tick()
+            self.join()
+        self.assertEqual(self.custody(identifier), {'state': 'deferred', 'reason': 'free_space_unavailable'})
+        self.assertEqual(self.engine(identifier).download_calls, 0)
+        self.settle()
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
+
+    def test_status_reports_the_policy_and_what_is_owed(self):
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
+            self.finished()
+        status = self.service.eager_custody_status()
+        self.assertEqual(set(status['lastFree']), {'bytes', 'observedAt'})
+        self.assertEqual({key: status[key] for key in status if key != 'lastFree'},
+                         {'reserveBytes': 1, 'maxBytes': 1024 ** 3, 'fileLimitBytes': CENSUS_RETAINED_FILE_BYTES,
+                          'pendingTasks': 1, 'resumeScanned': False})
+
+    def test_status_route_exists_only_with_the_flag(self):
+        startup = startup_fixture.StartupTests('test_invalid_values_refuse')
+        startup.setUp()
+        self.addCleanup(startup.doCleanups)
+        startup.state.mkdir()
+
+        def read(sizes):
+            with patch.dict(os.environ, {**startup.env, **sizes}, clear=True):
+                handler = make_handler(from_environment())
+            server = start_server(handler)
+            try:
+                request = Request('http://127.0.0.1:%d/v1/prototype/result-custody' % server.server_port,
+                                  headers={'Authorization': 'Bearer ' + startup.env['PROCESSING_API_TOKEN']})
+                try:
+                    with urlopen(request, timeout=5) as response:
+                        return response.status, json.load(response)
+                except HTTPError as error:
+                    return error.code, None
+            finally:
+                server.shutdown()
+                server.server_close()
+                handler.viewer_service.close()
+                handler.prototype_queue.close()
+
+        self.assertEqual(read({})[0], 404)
+        status, body = read({'PROCESSING_VIEWER_EAGER_RESULT_CUSTODY': '1',
+                             'PROCESSING_VIEWER_EAGER_CUSTODY_RESERVE_BYTES': '7',
+                             'PROCESSING_VIEWER_EAGER_CUSTODY_MAX_BYTES': '9'})
+        self.assertEqual(status, 200)
+        self.assertEqual((body['resultCustody']['reserveBytes'], body['resultCustody']['maxBytes']), (7, 9))
+        self.assertGreater(body['resultCustody']['lastFree']['bytes'], 0)
 
     def test_disk_filling_during_the_transfer_defers_and_frees_the_partial(self):
         identifier = self.finished(wait=False)
