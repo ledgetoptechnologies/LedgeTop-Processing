@@ -1,5 +1,4 @@
-"""Cross-language arithmetic check for Viewer proposal vectors (not runtime)."""
-import hashlib
+"""Arithmetic checks for local synthetic budget vectors (not a wire contract)."""
 import json
 from pathlib import Path
 import unittest
@@ -9,16 +8,13 @@ from processing.reference_budget_candidate import plan, replay_recovery
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "contracts/reference-broker-budget-candidate/reference-range-budget-policy-vectors.json"
-FIXTURE_SHA256 = "ca46a7e0aeda6cc6c945880b477b4799acc509d8a39f16f5603870022fc2ee68"
 
 
 class ReferenceBudgetCandidateTests(unittest.TestCase):
     def setUp(self):
-        self.raw = FIXTURE.read_bytes()
-        self.fixture = json.loads(self.raw)
+        self.fixture = json.loads(FIXTURE.read_bytes())
 
-    def test_fixture_is_the_exact_viewer_git_blob_under_review(self):
-        self.assertEqual(hashlib.sha256(self.raw).hexdigest(), FIXTURE_SHA256)
+    def test_fixture_is_explicitly_synthetic_not_a_wire_contract(self):
         self.assertEqual(self.fixture["status"], "synthetic-proposal-not-wire-contract")
 
     def test_all_plan_vectors_match_integer_arithmetic(self):

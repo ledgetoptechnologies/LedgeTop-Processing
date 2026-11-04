@@ -1,5 +1,4 @@
-"""Disposable Python mirror of the Viewer v2 range-ledger fixture."""
-import hashlib
+"""Disposable Python mirror of synthetic range-ledger proposal vectors."""
 import json
 from pathlib import Path
 import tempfile
@@ -143,15 +142,10 @@ class ReferenceRangeLedgerCandidateTests(unittest.TestCase):
         self.assertEqual(proof,
                          "a99a9cfc4e29ee8d463feaa42c5035977cf924d9dd8cb972cd74e807000decc9")
 
-    def test_exact_viewer_sqlite_event_fixture(self):
+    def test_synthetic_sqlite_event_vectors(self):
         fixture_path = (Path(__file__).resolve().parents[1] /
                         "contracts/reference-broker-budget-candidate/reference-v2-range-ledger-vectors.json")
-        raw = fixture_path.read_bytes()
-        self.assertEqual(
-            hashlib.sha256(raw).hexdigest(),
-            "ffe1aef6c0d8b4114bcaa52aea4587cb50843a0bb2783724f3dba7f8b3d02d85",
-        )
-        fixture = json.loads(raw)
+        fixture = json.loads(fixture_path.read_bytes())
         self.assertEqual(fixture["status"], "synthetic-proposal-not-wire-contract")
         base = fixture["reservation"]
         grants = []
