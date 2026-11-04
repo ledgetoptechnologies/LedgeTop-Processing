@@ -1297,6 +1297,7 @@ class EagerCustody(unittest.TestCase):
         fixture.assert_no_custody_files(identifier)
         self.assertEqual(fixture.custody(identifier)['state'], 'fetching')
 
+    @unittest.skipIf(os.name == 'nt', "Winsock's shutdown never wakes a blocked recv; see the next test")
     def test_app_shutdown_closes_the_queue_only_after_a_woken_fetch_exits(self):
         identifier = self.finished(wait=False)
         origin = self.stalled(identifier)
@@ -1310,6 +1311,99 @@ class EagerCustody(unittest.TestCase):
         stop.set()
         self.assertEqual(coordinator_for(self.service, queue).run(stop), 0)
         self.assertEqual(closed, [False])
+
+    @unittest.skipUnless(os.name == 'nt', 'only Winsock leaves this read unwoken')
+    def test_a_read_windows_cannot_wake_keeps_authority_and_exits_nonzero(self):
+        identifier = self.finished(wait=False)
+        origin = self.stalled(identifier)
+        self.service.tick()
+        fetch = self.blocked_in_recv(origin, self.service._eager_threads, identifier)
+        self.assertFalse(self.service._fetch_sockets)
+        queue = self.fixture.queue
+        original, closed = queue.close, []
+        queue.close = lambda: (closed.append(fetch.is_alive()), original())
+        self.addCleanup(setattr, queue, 'close', original)
+        stop = threading.Event()
+        stop.set()
+        coordinator = coordinator_for(self.service, queue)
+        with patch('processing.app.RESULT_WRITER_GRACE_SECONDS', 0.1):
+            self.assertEqual(coordinator.run(stop), 2)
+        self.assertEqual((coordinator.health()['reason'], closed), ('result_fetch_drain_failed', []))
+        self.assertTrue(fetch.is_alive())
+        origin.close()  # What the read's own timeout would do; authority is then released.
+        fetch.join(10)
+        self.assertFalse(self.service.custody_writers_alive())
+        original()
+
+    def test_shutdown_retains_authority_while_eager_fetch_is_blocked(self):
+        identifier = self.finished(wait=False)
+        blocked = Blocked(self.engine(identifier))
+        self.addCleanup(blocked.undo)
+        self.service.tick()
+        self.assertTrue(blocked.reading.wait(5))
+        fetch = self.service._eager_threads[identifier]
+        original_join = threading.Thread.join
+
+        def shorten_join(thread, timeout=None):
+            if thread is fetch and timeout is not None:
+                return original_join(thread, min(timeout, 0.05))
+            return original_join(thread, timeout)
+
+        with patch.object(threading.Thread, 'join', new=shorten_join):
+            with self.assertRaisesRegex(RuntimeError, 'retain queue ownership'):
+                self.service.close()
+        done = threading.Event()
+        waiter = threading.Thread(target=lambda: (self.service.wait_for_transfers(), done.set()))
+        waiter.start()
+        try:
+            self.assertFalse(done.wait(0.2), 'shutdown wait ignored active eager fetch')
+            blocked.undo()
+            waiter.join(5)
+            self.assertTrue(done.is_set(), 'shutdown wait did not finish after fetch exited')
+        finally:
+            blocked.undo()
+            waiter.join(5)
+        self.assertFalse(fetch.is_alive())
+
+    def test_shutdown_waits_for_all_three_kinds_of_writer(self):
+        for kind in ('dispatch', 'adopt', 'eager'):
+            with self.subTest(kind):
+                release, done = threading.Event(), threading.Event()
+                writer = threading.Thread(target=release.wait, args=(10,), daemon=True)
+                writer.start()
+                registry = {'dispatch': self.service._dispatch_threads, 'adopt': self.service._adopt_threads,
+                            'eager': self.service._eager_threads}[kind]
+                registry['synthetic'] = ('job', writer) if kind == 'dispatch' else writer
+                waiter = threading.Thread(target=lambda: (self.service.wait_for_transfers(), done.set()))
+                waiter.start()
+                self.assertFalse(done.wait(0.1), kind)
+                release.set()
+                writer.join(5)
+                del registry['synthetic']
+                waiter.join(5)
+                self.assertTrue(done.is_set(), kind)
+
+    def test_writer_grace_ends_the_wait_only_for_a_result_fetch(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        writer = threading.Thread(target=release.wait, args=(10,), daemon=True)
+        writer.start()
+        self.service._eager_threads['synthetic'] = writer
+        self.addCleanup(self.service._eager_threads.pop, 'synthetic', None)
+        self.service.wait_for_transfers(0.05)
+        self.assertTrue(self.service.custody_writers_alive())
+        del self.service._eager_threads['synthetic']
+        self.service._dispatch_threads['synthetic'] = ('job', writer)
+        self.addCleanup(self.service._dispatch_threads.pop, 'synthetic', None)
+        done = threading.Event()
+        waiter = threading.Thread(target=lambda: (self.service.wait_for_transfers(0.05), done.set()), daemon=True)
+        waiter.start()
+        self.assertFalse(done.wait(0.3), 'a grace released a sender that can mutate an engine')
+        release.set()
+        writer.join(5)
+        del self.service._dispatch_threads['synthetic']
+        waiter.join(5)
+        self.assertTrue(done.is_set())
 
     def test_close_reports_a_writer_it_could_not_stop(self):
         identifier = self.finished(wait=False)

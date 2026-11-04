@@ -381,6 +381,10 @@ def make_handler(config: Config):
     return Handler
 
 
+# An engine read times out at 60: a fetch nothing could wake has ended by then.
+RESULT_WRITER_GRACE_SECONDS = 60
+
+
 class CoordinatorService:
     """Supervise listeners and drain every queue consumer before unlocking state.
 
@@ -532,10 +536,10 @@ class CoordinatorService:
                 thread = getattr(service, '_thread', None)
                 if thread is not None:
                     thread.join()  # close()'s legacy ten-second join is insufficient.
-                service.wait_for_transfers()  # Keep queue authority until senders actually exit.
-            # A custody writer past its bounded join cannot be stopped from here.
-            # Keep the queue lock and lease and exit nonzero: process death, which
-            # also ends that daemon thread, is what releases them.
+                service.wait_for_transfers(RESULT_WRITER_GRACE_SECONDS)  # Keep queue authority until writers exit.
+            # A result writer past that grace cannot be stopped from here. Keep the
+            # queue lock and lease and exit nonzero: process death, which also ends
+            # that daemon thread, is what releases them.
             if service is not None and hasattr(service, 'custody_writers_alive') and service.custody_writers_alive():
                 self._failed('result_fetch_drain_failed', stop)
             elif self.handler.prototype_queue:

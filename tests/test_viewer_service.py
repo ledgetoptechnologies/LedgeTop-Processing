@@ -3863,6 +3863,56 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
             self.queue.close = original_queue_close
         self.assertFalse(fetch.is_alive(), 'result fetch leaked after the test released its engine response')
 
+    def test_app_shutdown_holds_authority_through_the_grace_until_a_fetch_exits(self):
+        from processing.app import CoordinatorService
+
+        identifier, _, engine_task = self.adoptable()
+        self.report_finished(identifier, engine_task)
+        fetch_entered, release_fetch = threading.Event(), threading.Event()
+        engine = self.engine_for(identifier)
+        original_download = engine.download
+
+        def blocked_download(task_id):
+            fetch_entered.set()
+            self.assertTrue(release_fetch.wait(10))
+            return original_download(task_id)
+
+        engine.download = blocked_download
+        self.addCleanup(release_fetch.set)
+        task = self.task(identifier)
+        self.service._review_held_result(task, self.service._read_status(task))
+        self.assertTrue(fetch_entered.wait(2))
+        fetch = self.service._adopt_threads[identifier]
+        original_join = threading.Thread.join
+
+        def bounded_close(thread, timeout=None):  # Only close's ten seconds; the grace below is real.
+            return original_join(thread, 0.05 if thread is fetch and timeout == 10 else timeout)
+
+        class Server:
+            daemon_threads = block_on_close = False
+            stopped = threading.Event()
+            serve_forever = lambda self, **_kwargs: self.stopped.wait(5)
+            shutdown = lambda self: self.stopped.set()
+            server_close = lambda self: None
+
+        handler = SimpleNamespace(viewer_service=self.service, reference_listener=None,
+                                  prototype_queue=self.queue, lifecycle_service=None)
+        coordinator, stop, result, closed = CoordinatorService(Server(), handler), threading.Event(), [], []
+        original_queue_close = self.queue.close
+        self.queue.close = lambda: (closed.append(fetch.is_alive()), original_queue_close())
+        self.addCleanup(setattr, self.queue, 'close', original_queue_close)
+        stop.set()
+        with (patch.object(threading.Thread, 'join', new=bounded_close),
+              patch('processing.app.RESULT_WRITER_GRACE_SECONDS', 8)):
+            running = threading.Thread(target=lambda: result.append(coordinator.run(stop)))
+            running.start()
+            original_join(running, 0.3)
+            self.assertTrue(running.is_alive(), 'shutdown released a custody writer early')
+            self.assertEqual(closed, [])
+            release_fetch.set()
+            original_join(running, 5)
+        self.assertEqual((result, closed), ([2], [False]))  # Late, so reported, and held until it left.
+
     def test_custody_completes_an_incomplete_snapshot(self):
         self.service._log_retention = True
         identifier, engine, engine_task = self.adoptable()

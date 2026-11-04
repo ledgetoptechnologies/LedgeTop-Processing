@@ -784,7 +784,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
                 self._thread.join(timeout=0.01)
                 closed.set()
 
-            def wait_for_transfers(self):
+            def wait_for_transfers(self, writer_grace=None):
                 pass  # This fixture owns no transfer workers.
 
         handler.viewer_service = Dispatcher()

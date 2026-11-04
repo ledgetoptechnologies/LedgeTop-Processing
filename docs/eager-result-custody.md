@@ -76,8 +76,17 @@ no new table, column or file, so the update census allowlist does not change. A
 restart resumes every task holding it, without a limit; a task finished before the
 flag has none and is not backfilled.
 
-Shutdown wakes every custody read, including one blocked on a socket, and waits for
-it. If a writer still survives its ten-second join, the coordinator keeps the queue
-lock and authority lease, reports `result_fetch_drain_failed` and exits 2. Process
-death then ends that writer and releases both. Exit 2 here is a safe stop, not a
+Shutdown wakes every custody read, including one blocked on a socket, then waits
+for every dispatch, adoption and custody writer before the queue closes. A dispatch
+is waited out however long it takes. A result fetch gets ten seconds and then a
+sixty-second grace, which covers the engine read timeout. If one still survives, the
+coordinator keeps the queue lock and authority lease, reports
+`result_fetch_drain_failed` and exits 2. Process death then ends that writer and
+releases both. Any fetch that outlasts the ten seconds makes the exit 2, even if it
+leaves in the grace and the queue closes normally. Exit 2 here is a safe stop, not a
 corrupted state: restart after checking the engine, and the fetch resumes.
+
+The socket wake is Linux behaviour. On Windows `os.dup` refuses a Winsock handle, and
+`shutdown` on any handle of a socket leaves a blocked `recv` asleep; only closing every
+handle wakes it, which a reader thread cannot safely have done to it. A blocked fetch
+there ends at the read timeout or takes the fail-safe exit above. Production is Linux.

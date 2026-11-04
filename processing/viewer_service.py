@@ -154,6 +154,9 @@ def _response_socket(response):
 
     Taken by the reading thread, so the descriptor cannot have been reused, and
     private so a shutdown never touches the buffered reader that thread may hold.
+    Windows has none: ``os.dup`` refuses a Winsock handle, and even a ``socket.dup``
+    handle's shutdown leaves a blocked recv asleep. There a fetch runs to its read
+    timeout, or the coordinator keeps authority and exits nonzero.
     """
     try:
         duplicate = os.dup(response.fileno())
@@ -2302,22 +2305,28 @@ class ViewerService:
             fetches = list(self._adopt_threads.values()) + list(self._eager_threads.values())
         for thread in transfers + fetches:
             thread.join(timeout=10)
-        if any(thread.is_alive() for thread in transfers):
-            raise RuntimeError('active Viewer transfer did not stop; retain queue ownership')
-        if any(thread.is_alive() for thread in fetches):
-            raise RuntimeError('result fetch did not stop; retain queue ownership')
+        if any(thread.is_alive() for thread in transfers + fetches):
+            raise RuntimeError('active Viewer transfer or result fetch did not stop; retain queue ownership')
 
-    def wait_for_transfers(self):
-        """Keep coordinator authority until every task-owned sender exits.
+    def wait_for_transfers(self, writer_grace=None):
+        """Keep coordinator authority until every task-owned writer exits.
 
-        No lock is held while waiting: senders need it for their final cleanup.
+        No lock is held while waiting: writers need it for their final cleanup.
         A caller may terminate the process, but must not release queue authority
-        in a still-running process with a sender able to mutate an engine.
+        in a still-running process with a writer alive. A dispatch can mutate an
+        engine, so it is always waited out. A result fetch writes only here, so
+        ``writer_grace`` seconds may end the wait for one; it stays alive, and
+        ``custody_writers_alive`` tells the caller to keep authority and exit.
         """
+        waited = False
         while True:
             with self._lock:
                 transfers = [thread for _, thread in self._dispatch_threads.values()]
-            if not transfers:
+                fetches = list(self._adopt_threads.values()) + list(self._eager_threads.values())
+            if not transfers and (waited or not fetches):
                 return
             for thread in transfers:
                 thread.join()
+            for thread in fetches:
+                thread.join(writer_grace)
+            waited = writer_grace is not None
