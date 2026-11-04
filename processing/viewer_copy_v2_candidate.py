@@ -10,6 +10,7 @@ from datetime import datetime
 import hashlib
 import re
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
 
 from . import reference_protocol as p
 from .viewer_acceptance_receipt import validate_trusted_viewer_receipt_keys, _load_key
@@ -42,6 +43,21 @@ def _ascii_tree(value):
     if type(value) is dict:return all(type(k) is str and _ascii_tree(k) and _ascii_tree(v) for k,v in value.items())
     return False
 
+def _scoped_keys(registry, expected):
+    if type(registry) is not dict or not 1 <= len(registry) <= 32:raise ValueError('invalid scope registry')
+    keys={}; owners={}; issuers={}
+    for key_id, entry in registry.items():
+        p._slug(key_id,'key id')
+        p._closed(entry,('issuerId','publicKeyPem','coordinatorAuthorityId','viewerPrincipalId','environment'),'scope key')
+        scope=(entry['coordinatorAuthorityId'],entry['viewerPrincipalId'],entry['environment'])
+        p._slug(scope[0],'authority');p._slug(scope[1],'principal');p._environment(scope[2])
+        clean=validate_trusted_viewer_receipt_keys({key_id:{'issuerId':entry['issuerId'],'publicKeyPem':entry['publicKeyPem']}})[key_id]
+        public=_load_key(clean['publicKeyPem']).public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo)
+        if (public in owners and owners[public]!=scope) or (clean['issuerId'] in issuers and issuers[clean['issuerId']]!=scope):raise ValueError('cross-scope signer')
+        owners[public]=scope;issuers[clean['issuerId']]=scope
+        keys[key_id]=(clean,scope)
+    return keys
+
 def _verify_v2_for_fixtures(raw, *, expected, result_manifest, trusted_keys):
     """Fixture-only verification; expected and pins must be independently supplied."""
     try:
@@ -64,6 +80,9 @@ def _verify_v2_for_fixtures(raw, *, expected, result_manifest, trusted_keys):
         manifest=validate_viewer_result_manifest(result_manifest,job_id=expected['jobId'],generation=expected['generation'],environment=expected['environment'],pipeline_digest=expected['pipelineDigest'])
         if manifest['resultManifestSha256']!=expected['resultManifestSha256']:raise ValueError('result mismatch')
         accepted=validate_viewer_acceptance(acceptance,result_manifest=manifest,input_manifest_sha256=expected['inputManifestSha256'])
+        outer_time=accepted['acceptedAt']
+        if type(outer_time) is not str or not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z',outer_time):raise ValueError('invalid outer timestamp')
+        datetime.fromisoformat(outer_time.replace('Z','+00:00'))
         ids=[item['id'] for item in manifest['objects']]
         objects=[{'id':item['id'],'byteSize':item['byteSize'],'sha256':item['sha256']} for item in manifest['objects']]
         if type(receipt['objects']) is not list:raise ValueError('objects must be a list')
@@ -74,13 +93,15 @@ def _verify_v2_for_fixtures(raw, *, expected, result_manifest, trusted_keys):
         if (receipt['acceptanceReceiptId'],receipt['acceptanceStorageReceiptId'])!=(accepted['receiptId'],accepted['storageReceiptId']):raise ValueError('outer identity mismatch')
         if len({receipt['receiptId'],receipt['storageReceiptId'],accepted['receiptId'],accepted['storageReceiptId']})!=4:raise ValueError('receipt collision')
         if hashlib.sha256(ACCEPTANCE_DOMAIN+p.canonical_json(acceptance)).hexdigest()!=receipt['acceptancePayloadSha256']:raise ValueError('outer digest mismatch')
-        keys=validate_trusted_viewer_receipt_keys(trusted_keys)
-        if receipt['keyId'] not in keys or keys[receipt['keyId']]['issuerId']!=receipt['issuerId']:raise ValueError('untrusted signer')
+        keys=_scoped_keys(trusted_keys,expected)
+        if receipt['keyId'] not in keys:raise ValueError('untrusted signer')
+        key,scope=keys[receipt['keyId']]
+        if key['issuerId']!=receipt['issuerId'] or scope!=(expected['coordinatorAuthorityId'],expected['viewerPrincipalId'],expected['environment']):raise ValueError('untrusted scope')
         signature=receipt['signature']
         if type(signature) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{86}',signature):raise ValueError('invalid signature')
         decoded=base64.urlsafe_b64decode(signature+'==')
         if len(decoded)!=64 or base64.urlsafe_b64encode(decoded).decode().rstrip('=')!=signature:raise ValueError('noncanonical signature')
-        _load_key(keys[receipt['keyId']]['publicKeyPem']).verify(decoded,DOMAIN+p.canonical_json({k:v for k,v in receipt.items() if k!='signature'}))
+        _load_key(key['publicKeyPem']).verify(decoded,DOMAIN+p.canonical_json({k:v for k,v in receipt.items() if k!='signature'}))
         return deepcopy(receipt)
     except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, InvalidSignature, OverflowError) as error:
         raise CandidateRejected('fixture copy proof rejected') from error

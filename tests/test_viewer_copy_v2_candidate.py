@@ -17,7 +17,8 @@ class ViewerCopyV2CandidateTests(unittest.TestCase):
         vector=json.loads(VECTOR.read_text(encoding='utf8'))
         self.r=vector['receipt']; self.a=vector['acceptance']
         self.key=Ed25519PrivateKey.from_private_bytes(bytes(range(32))) # public fixture key
-        self.pins={self.r['keyId']:{'issuerId':self.r['issuerId'],'publicKeyPem':vector['publicKeyPem']}}
+        self.pins={self.r['keyId']:{'issuerId':self.r['issuerId'],'publicKeyPem':vector['publicKeyPem'],
+            'coordinatorAuthorityId':self.r['coordinatorAuthorityId'],'viewerPrincipalId':self.r['viewerPrincipalId'],'environment':self.r['environment']}}
         self.manifest={'schemaVersion':1,'jobId':self.r['jobId'],'generation':1,'environment':'staging',
             'pipelineDigest':self.r['pipelineDigest'],'engineVersions':{'odm':'synthetic'},
             'objects':[{'id':'object-b','role':'report','byteSize':0,'sha256':hashlib.sha256(b'').hexdigest()},
@@ -78,3 +79,19 @@ class ViewerCopyV2CandidateTests(unittest.TestCase):
         self.r['objects'][0]['byteSize']=False
         self.rebind()
         with self.assertRaises(c.CandidateRejected):self.verify()
+
+    def test_key_scope_and_cross_identity_reuse_rejected(self):
+        key=self.r['keyId']; saved=self.pins[key]['viewerPrincipalId']
+        self.pins[key]['viewerPrincipalId']='other'
+        with self.assertRaises(c.CandidateRejected):self.verify()
+        self.pins[key]['viewerPrincipalId']=saved
+        self.pins['other-key']=deepcopy(self.pins[key]);self.pins['other-key']['environment']='production'
+        with self.assertRaises(c.CandidateRejected):self.verify()
+        self.pins['other-key']['publicKeyPem']=Ed25519PrivateKey.from_private_bytes(bytes(range(1,33))).public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+        with self.assertRaises(c.CandidateRejected):self.verify() # issuer reused across scopes
+
+    def test_signed_outer_timestamp_requires_utc_milliseconds(self):
+        for timestamp in ('2026-11-04T00:00:01Z','2026-11-04T00:00:01.000+00:00','2026-11-04T00:00:01.0000Z'):
+            with self.subTest(timestamp=timestamp):
+                self.a['acceptedAt']=timestamp;self.rebind()
+                with self.assertRaises(c.CandidateRejected):self.verify()

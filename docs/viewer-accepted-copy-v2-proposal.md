@@ -132,9 +132,11 @@ persist the exact receipt bytes, stable receipt IDs and verified copied-object
 inventory in one database transaction before returning/sending it. Database
 and filesystem writes are not assumed to be jointly atomic; crash recovery
 must reconcile their boundary. A retry
-replays the same bytes, not a fresh signature/ID/time. Processing journals the
-exact canonical payload and bound authority/principal/submission before
-acknowledging. Exact replay returns the original durable outcome; changed bytes,
+replays the same bytes, not a fresh signature/ID/time. Canonical JSON is used
+for signature and acceptance digest calculations; it does not make two different
+raw HTTP encodings the same replay. Processing journals the exact accepted raw
+envelope bytes and bound authority/principal/submission before acknowledging.
+Exact-byte replay returns the original durable outcome; changed bytes,
 same receipt/storage IDs in a different scope, different binding, or conflicting
 acceptance is a conflict/hold, with no replacement. Lost response or uncertain
 commit is resolved by authenticated scoped receipt lookup, not by making a new
