@@ -10,8 +10,12 @@ For isolated local validation, install the test-only pinned dependencies in a
 dedicated environment, then run:
 
 ```
+python -m pip install --require-hashes --only-binary=:all: -r tests/requirements-receipt-foundation.txt
 python -m unittest tests.test_reference_protocol tests.test_viewer_result_manifest tests.test_viewer_acceptance_receipt -v
 ```
+
+The locked wheel hashes cover Linux x86-64 Python 3.10 used by CI and Windows
+x86-64 Python 3.10 and 3.13; other platforms need separately reviewed hashes.
 
 The test vectors contain synthetic data and public test signing material.
 The runtime container intentionally does not install the test dependency: it
