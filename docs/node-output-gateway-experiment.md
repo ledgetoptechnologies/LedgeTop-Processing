@@ -16,7 +16,10 @@ ownership and a restart occurring between observations are held, but an
 untrusted host-local process with control of Docker or the port is outside this
 experiment's boundary. The response body has a wall-clock deadline, but the
 HTTP header read is subject only to socket timeouts and still needs a strict
-wall-clock bound. No
+wall-clock bound. The gateway limits concurrent client connections and sets an
+idle timeout for incoming request headers; a trickling client can still hold a
+slot without an absolute request deadline. It rejects ambiguous HTTP response
+framing and truncated bodies instead of interpreting partial JSON as log output. No
 authenticated remote transport, supervision, retained log, real-node task
 integration, deployment, or cleanup policy is supplied. Do not use this
 container epoch to assert that output is complete or processing is running.

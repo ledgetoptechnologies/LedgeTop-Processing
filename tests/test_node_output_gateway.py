@@ -1,11 +1,13 @@
 import http.client
 import json
+import socket
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
-from processing.node_output_gateway import OutputGateway, Unavailable, docker_incarnation
+from processing.node_output_gateway import BoundedHTTPServer, OutputGateway, Unavailable, docker_incarnation
 
 TASK = '11111111-1111-4111-8111-111111111111'
 TOKEN = 'test-only-' + 'x' * 32
@@ -71,6 +73,65 @@ class GatewayTests(unittest.TestCase):
             obj['NetworkSettings']['Ports']['3000/tcp'][0]['HostIp'] = '127.0.0.1'
             Result.stdout = json.dumps([obj]).encode()
             self.assertEqual(docker_incarnation('nodeodm', 3001)[0], 'a' * 64)
+
+    def test_incomplete_and_ambiguous_framing_never_return_lines(self):
+        class FramingBackend(BaseHTTPRequestHandler):
+            wire = b''
+            def log_message(self, *args): pass
+            def do_GET(self):
+                self.connection.sendall(self.wire)
+                self.close_connection = True
+        server = ThreadingHTTPServer(('127.0.0.1', 0), FramingBackend)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        gateway = OutputGateway('nodeodm', server.server_port, TOKEN, inspect=self.inspect)
+        header = b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n'
+        try:
+            for framing, body in (
+                (b'Content-Length: 100\r\n', b'[]'),
+                (b'Transfer-Encoding: chunked\r\n', b'2\r\n[]\r\n'),
+                (b'', b'[]'),
+                (b'Content-Length: 2\r\nTransfer-Encoding: chunked\r\n', b'2\r\n[]\r\n0\r\n\r\n'),
+            ):
+                with self.subTest(framing=framing):
+                    FramingBackend.wire = header + framing + b'\r\n' + body
+                    with self.assertRaises(Unavailable):
+                        gateway.read(TASK, 0)
+            FramingBackend.wire = header + b'Transfer-Encoding: chunked\r\n\r\n2\r\n[]\r\n0\r\n\r\n'
+            self.assertEqual(gateway.read(TASK, 0)['lines'], [])
+        finally:
+            server.shutdown(); thread.join(timeout=5); server.server_close()
+            self.assertFalse(thread.is_alive())
+
+    def test_slow_header_connection_is_limited_and_eventually_expires(self):
+        server = BoundedHTTPServer(('127.0.0.1', 0), self.gateway.handler(),
+                                   max_connections=1, client_timeout=0.3)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        slow = socket.create_connection(server.server_address, timeout=2)
+        try:
+            slow.sendall(b'GET / HTTP/1.1\r\nHost:')
+            time.sleep(0.05)
+            second = socket.create_connection(server.server_address, timeout=2)
+            try:
+                second.sendall(b'GET / HTTP/1.1\r\nHost: localhost\r\n\r\n')
+                try:
+                    data = second.recv(32)
+                except ConnectionResetError:
+                    data = b''
+                self.assertEqual(data, b'')
+            finally:
+                second.close()
+            time.sleep(0.4)
+            check = http.client.HTTPConnection(*server.server_address, timeout=2)
+            try:
+                check.request('GET', '/')
+                self.assertEqual(check.getresponse().status, 401)
+            finally:
+                check.close()
+        finally:
+            slow.close(); server.shutdown(); thread.join(timeout=5); server.server_close()
+            self.assertFalse(thread.is_alive())
 
 
 if __name__ == '__main__': unittest.main()

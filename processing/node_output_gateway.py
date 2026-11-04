@@ -14,6 +14,7 @@ import os
 import posixpath
 import re
 import subprocess
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -78,6 +79,18 @@ class OutputGateway:
             response = client.getresponse()
             if response.status != 200 or 'application/json' not in response.getheader('Content-Type', ''):
                 raise Unavailable('engine output unavailable')
+            lengths = response.headers.get_all('Content-Length', [])
+            transfers = response.headers.get_all('Transfer-Encoding', [])
+            if lengths and transfers or len(lengths) > 1 or len(transfers) > 1:
+                raise Unavailable('ambiguous engine response framing')
+            if transfers:
+                if transfers[0].strip().lower() != 'chunked' or not response.chunked:
+                    raise Unavailable('ambiguous engine response framing')
+            elif lengths:
+                if not re.fullmatch(r'0|[1-9][0-9]*', lengths[0]) or int(lengths[0]) > LIMIT:
+                    raise Unavailable('invalid engine response length')
+            else:
+                raise Unavailable('ambiguous engine response framing')
             chunks = []
             remaining_bytes = LIMIT + 1
             while remaining_bytes:
@@ -93,7 +106,7 @@ class OutputGateway:
                 chunks.append(part)
                 remaining_bytes -= len(part)
             raw = b''.join(chunks)
-            if len(raw) > LIMIT:
+            if len(raw) > LIMIT or (lengths and len(raw) != int(lengths[0])):
                 raise Unavailable('engine output unavailable')
             lines = json.loads(raw)
             if not isinstance(lines, list) or any(not isinstance(item, str) for item in lines):
@@ -143,6 +156,37 @@ class OutputGateway:
         return Handler
 
 
+class BoundedHTTPServer(ThreadingHTTPServer):
+    """Limit connections before authentication, including slow request headers."""
+    daemon_threads = True
+
+    def __init__(self, address, handler, *, max_connections=16, client_timeout=5):
+        self._slots = threading.BoundedSemaphore(max_connections)
+        self._client_timeout = client_timeout
+        super().__init__(address, handler)
+
+    def get_request(self):
+        request, address = super().get_request()
+        request.settimeout(self._client_timeout)
+        return request, address
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--container', required=True)
@@ -153,7 +197,7 @@ def main():
                             os.environ.get('LT_NODEODM_TOKEN', ''))
     if not 1024 <= args.listen_port <= 65535:
         parser.error('invalid listen port')
-    server = ThreadingHTTPServer(('127.0.0.1', args.listen_port), gateway.handler())
+    server = BoundedHTTPServer(('127.0.0.1', args.listen_port), gateway.handler())
     try:
         server.serve_forever()
     finally:
