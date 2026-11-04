@@ -60,6 +60,21 @@ Each task's info carries `ledgetopResultCustody`:
 `unavailable` ends the attempts and proves nothing about the job: Viewer's download
 works as it did before.
 
+Generic Viewer removal is refused while eager custody is pending or marked
+unavailable. An operator may request `POST /v1/prototype/jobs/<job-id>/retry-custody`
+with `{"note":"inspection summary"}` and the operator credential only when the
+reason is `engine_task_missing`. The current engine task must again report code 40
+and every required result-identity field must match the original complete
+observation. The operation records a durable retry intent before changing the
+sidecar; it does not reassign or reprocess the job. A changed or unavailable
+identity remains held. The operator note is emitted in the application log;
+this is not a durable audit journal. Other refusal reasons require inspection and
+have no retry route here. This policy is candidate-only and has not been deployed.
+
+Existing unavailable rows whose original intent was already cleared by an older
+build require a separate migration and review. A local verified archive is not a
+downstream Viewer acceptance; it does not authorize deleting the last copy.
+
 ## What a verified receipt means
 
 A result is bound by the engine's `uuid`, node, `dateCreated`, `imagesCount`,
