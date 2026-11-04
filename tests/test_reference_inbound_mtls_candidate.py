@@ -35,21 +35,31 @@ class InboundMTLSTests(unittest.TestCase):
             resultOrigin='https://'+name+'.example',resultBearer='read-'+name+'x'*32) for name in ('cluster','main')}
         self.token='viewer-token-'+'x'*32
 
+    def bindings(self):
+        fingerprint=lambda name:hashlib.sha256(ssl.PEM_cert_to_DER_cert((self.root/(name+'.pem')).read_text())).hexdigest()
+        return ((fingerprint('client'),self.token),(fingerprint('other'),self.workers['cluster']['bearer']),
+                ('a'*64,self.workers['main']['bearer']))
+
     def runtime(self, inbound=None):
         pins={} if inbound is None else dict(inbound_ca_sha256=hashlib.sha256(Path(inbound).read_bytes()).hexdigest(),
-            outbound_ca_sha256=hashlib.sha256(Path(self.listener['clientCA']).read_bytes()).hexdigest())
+            outbound_ca_sha256=hashlib.sha256(Path(self.listener['clientCA']).read_bytes()).hexdigest(),
+            inbound_client_bindings=self.bindings())
         settings=ReferenceSettings(self.listener,{self.token:'staging'},self.workers,dict(maxConcurrent=1,maxObjectBytes=1000),inbound_client_ca=inbound,**pins)
         runtime=ReferenceRuntime(self.queue,self.config,settings,discover=lambda:{'ready':False})
         runtime.start();self.addCleanup(runtime.close)
         return runtime
 
-    def request(self,runtime,cert=None,token=None):
+    def request(self,runtime,cert=None,token=None,path='/ltds/v1/capabilities'):
         context=ssl.create_default_context(cafile=str(self.root/'server.pem'))
         if cert:context.load_cert_chain(str(self.root/(cert+'.pem')),str(self.root/(cert+'.key')))
         conn=http.client.HTTPSConnection('127.0.0.1',runtime._server.server_port,context=context,timeout=3)
         try:
-            conn.request('GET','/ltds/v1/capabilities',headers={'Authorization':'Bearer '+(token or self.token)})
-            response=conn.getresponse();response.read();return response.status
+            conn.request('GET',path,headers={'Authorization':'Bearer '+(token or self.token)})
+            response=conn.getresponse();body=response.read()
+            if response.status==401:
+                self.assertNotIn((token or self.token).encode(),body)
+                self.assertNotIn(hashlib.sha256(ssl.PEM_cert_to_DER_cert((self.root/'client.pem').read_text())).hexdigest().encode(),body)
+            return response.status
         finally:conn.close()
 
     def test_explicit_inbound_ca_requires_trusted_client_and_bearer(self):
@@ -61,6 +71,17 @@ class InboundMTLSTests(unittest.TestCase):
             with self.subTest(cert=cert),self.assertRaises((ssl.SSLError,ConnectionError,OSError)):
                 self.request(runtime,cert)
 
+    def test_other_trusted_client_cannot_use_viewer_bearer(self):
+        bundle=self.root/'combined.pem'
+        bundle.write_text((self.root/'client.pem').read_text()+(self.root/'other.pem').read_text())
+        runtime=self.runtime(str(bundle))
+        self.assertNotEqual(self.request(runtime,'client'),401)
+        self.assertEqual(self.request(runtime,'other'),401)
+        self.assertEqual(self.request(runtime,'client',self.workers['cluster']['bearer']),401)
+        worker=self.workers['cluster']['bearer']
+        self.assertEqual(self.request(runtime,'other',worker,path='/ltds/worker/v1/authority'),200)
+        self.assertEqual(self.request(runtime,'client',worker,path='/ltds/worker/v1/authority'),401)
+
     def test_swapped_disjoint_inbound_ca_after_settings_is_refused(self):
         from dataclasses import replace
         from processing.reference_runtime import RuntimeConfigurationError, load_reference_settings
@@ -68,7 +89,8 @@ class InboundMTLSTests(unittest.TestCase):
         configfile=self.root/'reference.json'
         configfile.write_text(json.dumps(dict(schemaVersion=6,listener={**self.listener,'port':19443},
             viewerBearers={'staging':self.token},workers=self.workers,
-            streamBudget=dict(maxConcurrent=1,maxObjectBytes=1000),inboundClientCA=str(inbound))))
+            streamBudget=dict(maxConcurrent=1,maxObjectBytes=1000),inboundClientCA=str(inbound),
+            inboundClientBindings=[dict(certificateSha256=fp,bearer=token) for fp,token in self.bindings()])))
         if os.name!='nt':configfile.chmod(0o600)
         settings=load_reference_settings(str(configfile),self.config)
         settings=replace(settings,listener=dict(settings.listener,port=0))
@@ -116,8 +138,18 @@ class InboundConfigurationTests(unittest.TestCase):
             '-subj','/CN=other-certificate','-out',str(same_key)],check=True,capture_output=True,timeout=15)
         fixture.value['inboundClientCA']=str(same_key);fixture.write_config()
         with self.assertRaises(RuntimeConfigurationError):fixture.settings()
-        fixture.value['inboundClientCA']=str(separate);fixture.write_config()
+        fixture.value['inboundClientCA']=str(separate)
+        basebindings=[dict(certificateSha256=hex(i+1)[2:]*64,bearer=token)
+                      for i,token in enumerate([fixture.value['viewerBearers']['staging'],
+                          *[item['bearer'] for item in fixture.value['workers'].values()]])]
+        fixture.value['inboundClientBindings']=basebindings;fixture.write_config()
         self.assertEqual(fixture.settings().inbound_client_ca,str(separate))
+        # Missing, duplicate and unknown mappings all fail closed.
+        for bad in (basebindings[:-1],basebindings+[basebindings[0]],
+                    [*basebindings[:-1],dict(basebindings[-1],bearer='unknown-token-'+'x'*32)]):
+            fixture.value['inboundClientBindings']=bad;fixture.write_config()
+            with self.assertRaises(RuntimeConfigurationError):fixture.settings()
+        fixture.value['inboundClientBindings']=basebindings
         # Version 6 may retain the entire v5 feature set and recovery binding.
         from tests.viewer_receipt_signer import SyntheticViewerSigner
         signer=SyntheticViewerSigner()
@@ -126,7 +158,8 @@ class InboundConfigurationTests(unittest.TestCase):
         fixture.value=fixture.recovery_config();fixture.value.update(schemaVersion=6,
             inboundClientCA=str(separate),viewerReceiptKeys=signer.trusted_keys,
             viewerAcceptance={'staging':{'origin':'https://viewer.example','keyId':'viewer-service-v1','secretFile':str(secret)}},
-            stagedAckPrincipals=[{'environment':'staging','principalId':'viewer-a','bearer':base64.urlsafe_b64encode(b'z'*32).decode().rstrip('=')}])
+            stagedAckPrincipals=[{'environment':'staging','principalId':'viewer-a','bearer':base64.urlsafe_b64encode(b'z'*32).decode().rstrip('=')}],
+            inboundClientBindings=[*basebindings,dict(certificateSha256='f'*64,bearer=base64.urlsafe_b64encode(b'z'*32).decode().rstrip('='))])
         fixture.write_config();loaded=fixture.settings()
         self.assertIsNotNone(loaded.recovery_bindings);self.assertTrue(loaded.viewer_receipt_keys)
         self.assertTrue(loaded.viewer_acceptance_targets);self.assertTrue(loaded.staged_ack_bearers)

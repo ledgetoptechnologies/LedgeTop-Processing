@@ -1,5 +1,7 @@
 """Explicitly started, protected HTTP listener for reference metadata only."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
+import hmac
 import ipaddress
 import json
 import math
@@ -27,7 +29,8 @@ def _protected(connection):
     return _loopback(connection.getsockname()[0]) and _loopback(connection.getpeername()[0])
 
 
-def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=None, request_timeout=10):
+def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=None, request_timeout=10,
+                                 client_cert_bindings=None):
     """Create a listener; caller must explicitly call serve_forever().
 
     Plaintext LAN/wildcard binding is forbidden. TLS is supplied by a real
@@ -41,6 +44,19 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
         raise ValueError("TLS requires a server SSLContext")
     if ssl_context is not None and ssl_context.protocol == ssl.PROTOCOL_TLS_CLIENT:
         raise ValueError("TLS requires a server SSLContext")
+    bindings = None
+    if client_cert_bindings is not None:
+        if (ssl_context is None or ssl_context.verify_mode != ssl.CERT_REQUIRED
+                or type(client_cert_bindings) not in (tuple,list) or not client_cert_bindings):
+            raise ValueError('required client certificate bindings unavailable')
+        bindings = tuple(client_cert_bindings)
+        if (any(type(item) not in (tuple,list) or len(item)!=2 or type(item[0]) is not str
+                or re.fullmatch(r'[a-f0-9]{64}',item[0]) is None
+                or type(item[1]) is not str or not 32 <= len(item[1]) <= 4096 for item in bindings)
+                or len({item[0] for item in bindings}) != len(bindings)
+                or len({item[1] for item in bindings}) != len(bindings)):
+            raise ValueError('invalid client certificate bindings')
+        bindings = tuple((item[0],item[1]) for item in bindings)
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     # Check before creating a socket, including hostname resolution. The actual
     # bound address is checked again below to avoid trusting a name alone.
@@ -171,6 +187,20 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                 if len(self.headers.get_all(name, [])) > 1:
                     self._error(400, "duplicate_header")
                     return
+            if bindings is not None:
+                authorization = self.headers.get('Authorization', '')
+                if not isinstance(self.connection,ssl.SSLSocket) or not authorization.startswith('Bearer '):
+                    self._error(401, 'unauthorized'); return
+                peer = self.connection.getpeercert(binary_form=True)
+                if not peer:
+                    self._error(401, 'unauthorized'); return
+                fingerprint = hashlib.sha256(peer).hexdigest()
+                bearer = authorization[7:]
+                if not bearer.isascii() or not 32 <= len(bearer) <= 4096:
+                    self._error(401, 'unauthorized'); return
+                if not any(hmac.compare_digest(fingerprint, expected) and hmac.compare_digest(bearer, token)
+                           for expected,token in bindings):
+                    self._error(401, 'unauthorized'); return
             lengths = self.headers.get_all("Content-Length", [])
             if not lengths and self.command == "POST":
                 self._error(411, "content_length_required")

@@ -51,6 +51,7 @@ class ReferenceSettings:
     inbound_client_ca: str | None = None
     inbound_ca_sha256: str | None = None
     outbound_ca_sha256: str | None = None
+    inbound_client_bindings: tuple | None = None
 
 
 def _file(path, *, private):
@@ -108,6 +109,32 @@ def _read_ca_bundle(path):
         raise RuntimeConfigurationError('invalid CA bundle') from None
 
 
+def _validated_client_bindings(entries, viewers, workers, staged):
+    if type(entries) not in (tuple,list) or not entries or len(entries)>64:
+        raise RuntimeConfigurationError('explicit inbound client bindings required')
+    expected = list(viewers) + [item['bearer'] for item in workers.values()] + list(staged or {})
+    if len(expected)!=len(set(expected)):
+        raise RuntimeConfigurationError('ambiguous inbound credential registry')
+    pairs=[]
+    for entry in entries:
+        if type(entry) is dict:
+            p._closed(entry, ('certificateSha256','bearer'), 'inbound certificate binding')
+            fingerprint,token=entry['certificateSha256'],entry['bearer']
+        elif type(entry) in (tuple,list) and len(entry)==2:
+            fingerprint,token=entry
+        else:
+            raise RuntimeConfigurationError('invalid inbound client binding')
+        if (type(fingerprint) is not str or re.fullmatch(r'[a-f0-9]{64}',fingerprint) is None
+                or type(token) is not str or not 32<=len(token)<=4096
+                or not token.isascii() or any(ord(c)<33 or ord(c)>126 for c in token)):
+            raise RuntimeConfigurationError('invalid inbound client binding')
+        pairs.append((fingerprint,token))
+    if (len({v[0] for v in pairs})!=len(pairs) or len({v[1] for v in pairs})!=len(pairs)
+            or {v[1] for v in pairs}!=set(expected)):
+        raise RuntimeConfigurationError('inbound client bindings must uniquely cover credentials')
+    return tuple(pairs)
+
+
 def load_reference_settings(path, config):
     """Read and validate the explicit opt-in, before opening the shared Queue."""
     try:
@@ -135,7 +162,7 @@ def load_reference_settings(path, config):
             raise RuntimeConfigurationError('Viewer acceptance requires receipt keys')
         required = fields | ({"recoveryBindings"} if version == 2 else set())
         if version == 6:
-            required.add('inboundClientCA')
+            required.update(('inboundClientCA','inboundClientBindings'))
         if staged_enabled:
             required.add("stagedAckPrincipals")
         if receipts_enabled:
@@ -282,10 +309,12 @@ def load_reference_settings(path, config):
                 viewer_targets[environment] = {"origin": origin, "keyId": key_id, "secret": secret}
             if len(set(target_secrets)) != len(target_secrets) or not viewer_keys:
                 raise RuntimeConfigurationError("distinct Viewer service keys and receipt pins are required")
+        inbound_bindings = (_validated_client_bindings(value['inboundClientBindings'],
+            {token: env for env, token in viewers.items()}, workers, staged) if version == 6 else None)
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
                                  {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery,
                                  viewer_keys, viewer_targets or None, staged, inbound_client_ca,
-                                 inbound_ca_sha256, outbound_ca_sha256)
+                                 inbound_ca_sha256, outbound_ca_sha256, inbound_bindings)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -386,6 +415,12 @@ class ReferenceRuntime:
                     # or feature startup can expose the configured authority.
                     RecoveryNodeBinding(**vars(physical))
                 recovery=dict(recovery)
+            self._inbound_client_bindings = None
+            if settings.inbound_client_ca is not None:
+                self._inbound_client_bindings = _validated_client_bindings(settings.inbound_client_bindings,
+                    settings.viewer_bearers, settings.workers, settings.staged_ack_bearers)
+            elif settings.inbound_client_bindings is not None:
+                raise RuntimeConfigurationError('client bindings require inbound client CA')
             server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             server_context.minimum_version = ssl.TLSVersion.TLSv1_2
             server_context.load_cert_chain(settings.listener["certificate"], settings.listener["privateKey"])
@@ -497,7 +532,10 @@ class ReferenceRuntime:
             return
         self._viewer_transfer_stop.clear()
         listener = self.settings.listener
-        server = self._server_factory(self.api, listener["host"], listener["port"], ssl_context=self._server_context)
+        server_options = {'ssl_context': self._server_context}
+        if self._inbound_client_bindings is not None:
+            server_options['client_cert_bindings'] = self._inbound_client_bindings
+        server = self._server_factory(self.api, listener["host"], listener["port"], **server_options)
         # Join active requests before releasing the shared queue's authority lock.
         server.daemon_threads, server.block_on_close = False, True
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1},
