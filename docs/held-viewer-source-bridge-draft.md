@@ -38,6 +38,8 @@ The verifier independently checks both configured signatures and their domains, 
 
 Replay records must bind both statement identities and hashes to the authenticated job, generation and activation in one durable transaction. A changed statement, key scope, frame, generation, principal or authority must fail closed; exact replay must be idempotent. A crash or network loss cannot turn an unverified source into a staged input.
 
+The held v2 journal reserves each `(local issuer, local snapshot ID)` and local intent digest only once. A different outer issuer cannot use the same evidence for a second job. This is currently v2-journal-only: a shared v1/v2 anti-downgrade and retry-generation policy is still required before activation.
+
 An authenticated, durable acceptance covering the exact transferred objects is a separate later step. Viewer source data and raw GCP evidence remain retained until that acceptance is verified under an explicit retention policy. Processing-copy cleanup must use its own verified receipt and must not delete Viewer originals.
 
 ## Decisions still requiring review

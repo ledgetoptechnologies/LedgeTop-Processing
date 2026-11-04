@@ -176,6 +176,19 @@ class HeldSourceBridgeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             verify(**{**photo_args,'outer_key':local_private.public_key(),
                       'statement_bytes':signed(outer2,local_private)})
+        # A differently scoped outer signer cannot repurpose the same local
+        # Viewer snapshot for a second job or generation.
+        reused=copy.deepcopy(outer2);reused['issuerId']='other-issuer';reused['jobId']=random_uuid()
+        reused_context={**context2,'issuerId':'other-issuer','jobId':reused['jobId']}
+        reused_args={**photo_args,'statement_bytes':signed(reused),'context':reused_context}
+        self.assertEqual(verify(**reused_args),{'state':'held_bridge_not_authorized'})
+        with tempfile.TemporaryDirectory() as tmp:
+            db=sqlite3.connect(Path(tmp)/'replay.sqlite');initialize(db)
+            try:
+                self.assertTrue(stage(db,arguments=photo_args)['created'])
+                with self.assertRaises(ValueError):stage(db,arguments=reused_args)
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM held_source_bridge_v2').fetchone()[0],1)
+            finally:db.close()
         # Two valid distinct snapshots cannot race past the journal count cap.
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'concurrent.sqlite'

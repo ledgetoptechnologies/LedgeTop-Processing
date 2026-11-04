@@ -8,7 +8,10 @@ from . import reference_protocol as p
 from .held_source_bridge_v2_candidate import verify
 from .paged_frame_receiver_candidate import _durability
 
-JOURNAL = 'CREATE TABLE held_source_bridge_v2 (issuer TEXT NOT NULL, snapshot TEXT NOT NULL, statement BLOB NOT NULL, proof_digest TEXT NOT NULL, PRIMARY KEY(issuer,snapshot))'
+JOURNAL = ('CREATE TABLE held_source_bridge_v2 (issuer TEXT NOT NULL, snapshot TEXT NOT NULL, '
+           'local_issuer TEXT NOT NULL, local_snapshot TEXT NOT NULL, intent_sha TEXT NOT NULL, '
+           'job_id TEXT NOT NULL, generation INTEGER NOT NULL, statement BLOB NOT NULL, proof_digest TEXT NOT NULL, '
+           'PRIMARY KEY(issuer,snapshot), UNIQUE(local_issuer,local_snapshot), UNIQUE(intent_sha))')
 BLOBS = 'CREATE TABLE held_source_bridge_blobs_v2 (issuer TEXT NOT NULL, snapshot TEXT NOT NULL, kind TEXT NOT NULL, wire BLOB NOT NULL, PRIMARY KEY(issuer,snapshot,kind))'
 MARKER = 'CREATE TABLE held_source_bridge_marker_v2 (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=2))'
 
@@ -104,8 +107,10 @@ def _stage(db, *, arguments, max_journal_bytes=128*1024*1024, max_snapshots=128,
         if (count >= max_snapshots or statements_bytes + blob_bytes + len(args['statement_bytes'])
                 + sum(len(wire) for wire in payloads.values()) > max_journal_bytes):
             raise ValueError()
-        db.execute('INSERT INTO held_source_bridge_v2 VALUES(?,?,?,?)',
-                   (issuer, snapshot, args['statement_bytes'], proof_hash))
+        local = statement['viewerHeldSource']
+        db.execute('INSERT INTO held_source_bridge_v2 VALUES(?,?,?,?,?,?,?,?,?)',
+                   (issuer, snapshot, local['issuerId'], local['snapshotId'], local['intentSha256'],
+                    statement['jobId'], statement['generation'], args['statement_bytes'], proof_hash))
         if _fault: _fault('statement')
         for kind, wire in payloads.items():
             db.execute('INSERT INTO held_source_bridge_blobs_v2 VALUES(?,?,?,?)', (issuer, snapshot, kind, wire))
