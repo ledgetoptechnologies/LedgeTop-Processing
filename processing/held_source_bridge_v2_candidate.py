@@ -27,7 +27,8 @@ CONTEXT_FIELDS = ('issuerId', 'keyId', 'principalId', 'environment', 'coordinato
 
 
 def verify(*, statement_bytes, outer_key, local_key, context, now_ms, intent_bytes, local_signature,
-           source_frames, selected_frames, evidence_frames, file_frames, processing_closure, processing_pages):
+           source_frames, selected_frames, evidence_frames, file_frames, processing_closure, processing_pages,
+           max_future_skew_ms=60000):
     """Inspect exact bytes against independently supplied keys/context; always held.
 
     Callers must provision keys, context and time from trusted server state. This
@@ -37,6 +38,7 @@ def verify(*, statement_bytes, outer_key, local_key, context, now_ms, intent_byt
         p._closed(context, CONTEXT_FIELDS, 'bridge context')
         if (not isinstance(outer_key, Ed25519PublicKey) or not isinstance(local_key, Ed25519PublicKey)
                 or type(now_ms) is not int or type(statement_bytes) is not bytes
+                or type(max_future_skew_ms) is not int or not 0 <= max_future_skew_ms <= 60000
                 or not 0 < len(statement_bytes) <= 65536):
             raise ValueError()
         if outer_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw) == local_key.public_bytes(
@@ -73,7 +75,7 @@ def verify(*, statement_bytes, outer_key, local_key, context, now_ms, intent_byt
                 raise ValueError()
             times.append(datetime.strptime(value, '%Y-%m-%dT%H:%M:%S.%fZ').replace(tzinfo=timezone.utc))
         issued, expires = (int(t.timestamp() * 1000) for t in times)
-        if not (0 < expires - issued <= 900000 and issued <= now_ms + 60000 and now_ms < expires):
+        if not (0 < expires - issued <= 900000 and issued <= now_ms + max_future_skew_ms and now_ms < expires):
             raise ValueError()
         bridge = statement['viewerHeldSource']; p._closed(bridge, BRIDGE_FIELDS, 'held bridge')
         if (bridge['protocol'] != 'ltds-viewer-held-source-snapshot-v1'

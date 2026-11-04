@@ -16,9 +16,15 @@ from concurrent.futures import ThreadPoolExecutor
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
+from cryptography.hazmat.primitives import serialization
 from processing import reference_protocol as p
 from processing.held_source_bridge_v2_candidate import verify, DOMAIN, PROTOCOL
 from processing.held_source_bridge_journal_candidate import initialize, stage, _stage
+from processing.held_source_bridge_binding_candidate import BoundBridgeTrust, inspect as inspect_bound
+from processing.paged_snapshot_journal_candidate import ServerSnapshotTrust
+from processing.prepared_envelope_jcs_candidate import PROTOCOL as PREPARED
+from processing.prototype import Queue
+from processing.reference_store import ReferenceStore, PROFILE
 from processing.held_viewer_snapshot_verifier_candidate import DOMAIN as LOCAL_DOMAIN
 from processing.large_paged_manifest_candidate import build, _digest
 from processing.viewer_paged_frame_candidate import verify as verify_source, VERSION as SOURCE_VERSION, DOMAIN as SOURCE_DOMAIN
@@ -184,6 +190,53 @@ class HeldSourceBridgeTests(unittest.TestCase):
             db=sqlite3.connect(path)
             try:self.assertEqual(db.execute('SELECT COUNT(*) FROM held_source_bridge_v2').fetchone()[0],1)
             finally:db.close()
+        # Bind the same photo-only evidence to a real synthetic prepared job.
+        with tempfile.TemporaryDirectory() as tmp:
+            queue=Queue(tmp);queue.allowed_profiles.add(PROFILE)
+            try:
+                store=ReferenceStore(queue,jcs_runtime_enabled=True)
+                with queue._db() as db:initialize(db)
+                fixture=json.loads((ROOT/'contracts/reference-v1.contract.json').read_text())
+                submission=copy.deepcopy(fixture['submission'])
+                submission['submissionId']=random_uuid()
+                manifest=submission['manifest']
+                manifest.update(id=local2['datasetId'],objects=[objects[0]],objectCount=1,totalBytes=objects[0]['byteSize'],
+                                inputCounts={'images':1,'lidarObjects':0,'points':0})
+                manifest['sha256']=p.manifest_sha256(manifest)
+                prepared=dict(schemaVersion=3,protocol=PREPARED,submission=submission,viewerTaskId=local2['taskId'],
+                              viewerAttemptId=local2['attemptId'],activationId=random_uuid())
+                policy=dict(capabilityFingerprint=fixture['capabilities']['capabilityFingerprint'],
+                    optionsFingerprint=fixture['capabilities']['engines']['odm']['optionsFingerprint'],
+                    availableEngines=['odm'],optionDefinitions={})
+                job,_=store.prepare_viewer_envelope_jcs_v3(json.dumps(prepared).encode(),authenticated_principal='viewer-a',
+                    authenticated_environment='staging',trusted_policy=policy,expected_authority_id=queue.authority_id)
+                found=store.find_viewer_envelope_v2(submission['submissionId'],authenticated_principal='viewer-a',
+                    authenticated_environment='staging',expected_protocol=PREPARED,expected_authority_id=queue.authority_id)
+                bound_outer=copy.deepcopy(outer2)
+                bound_outer.update(coordinatorAuthorityId=queue.authority_id,jobId=job['jobId'],generation=job['generation'],
+                    submissionId=submission['submissionId'],activationId=prepared['activationId'],
+                    preparedEnvelopeSha256=found['envelopeSha256'],processingManifestSha256=manifest['sha256'],
+                    pipelineDigest=p.digest(submission['pipeline']))
+                def pem(key):return key.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+                entry=dict(coordinatorAuthorityId=queue.authority_id,principalId='viewer-a',environment='staging',
+                           issuerId='outer-issuer',keyId='outer-key',purpose='paged-source-snapshot',publicKeyPem=pem(outer_private))
+                outer_trust=ServerSnapshotTrust(authority_id=queue.authority_id,key_entries=[entry],clock_provider=lambda:1893456300000)
+                local_entry=dict(entry,issuerId='synthetic-issuer',keyId='synthetic-key',purpose='held-viewer-snapshot',publicKeyPem=pem(local_private))
+                trust=BoundBridgeTrust(outer=outer_trust,local_key_entries=[local_entry],revocation_epoch=1)
+                bound_args=dict(authenticated_principal='viewer-a',authenticated_environment='staging',trust=trust,
+                    statement_bytes=signed(bound_outer),intent_bytes=intent2,local_signature=signature2,source_frames=source2,
+                    selected_frames=selected2,evidence_frames=None,file_frames=None,processing_closure=closure2,processing_pages=pages2)
+                def fail_after(at):
+                    if at=='source':raise OSError('synthetic crash')
+                with self.assertRaises(ValueError):inspect_bound(store,submission['submissionId'],**bound_args,_fault=fail_after)
+                with queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM held_source_bridge_v2').fetchone()[0],0)
+                self.assertTrue(inspect_bound(store,submission['submissionId'],**bound_args)['created'])
+                self.assertFalse(inspect_bound(store,submission['submissionId'],**bound_args)['created'])
+                for mutation in ({'authenticated_principal':'other'}, {'authenticated_environment':'production'},
+                                 {'processing_pages':[]}, {'statement_bytes':signed({**bound_outer,'jobId':random_uuid()})}):
+                    with self.subTest(bound=list(mutation)),self.assertRaises(ValueError):
+                        inspect_bound(store,submission['submissionId'],**{**bound_args,**mutation})
+            finally:queue.close()
 
 
 if __name__ == '__main__': unittest.main()
