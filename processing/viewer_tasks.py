@@ -501,6 +501,18 @@ class TaskStore:
                 return {'uuid': identifier}
             if row is not None and row['error'] == CUSTODY_INTENT:
                 raise Conflict('task UUID still owes result custody')  # A reset replaces this row.
+            if row is not None:
+                # Older experimental custody builds could clear the DB intent
+                # while leaving an unavailable sidecar.  A removed task's reset
+                # replaces the active row, so fail closed on that legacy record
+                # (or any malformed record) rather than losing its work from the
+                # active custody scan. A missing sidecar still needs the separate
+                # upgrade census; this check cannot establish its provenance.
+                old = dict(row)
+                old['directory'] = str(self._directory(row))
+                custody = self.custody(old)
+                if custody is not None and custody['state'] != 'verified':
+                    raise Conflict('task UUID has unresolved result custody')
             if row is None and db.execute('SELECT COUNT(*) FROM viewer_tasks').fetchone()[0] >= 1000:
                 raise Conflict('task history limit reached')
             generation = row['generation'] + 1 if row is not None else 1

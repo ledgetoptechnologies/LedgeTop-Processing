@@ -5,6 +5,7 @@ import json
 from unittest.mock import patch
 
 from processing.viewer_result_adoption import CUSTODY_INTENT, new_custody, valid_custody
+from processing.maintenance import Conflict
 from tests import test_eager_custody_gap as eager
 
 
@@ -20,6 +21,23 @@ class CustodySemanticBoundaries(unittest.TestCase):
                'result': {}, 'archive': None, 'checked': False}
         self.assertEqual(old['version'], new_custody(identity, {})['version'])
         self.assertFalse(valid_custody(old, identity))
+
+    def test_removed_legacy_unavailable_sidecar_blocks_uuid_reset(self):
+        identifier = self.case.finished()
+        service = self.case.service
+        task = self.case.fixture.task(identifier)
+        directory = self.case.directory(identifier)
+        identity = {'task': task['uuid'], 'generation': task['generation'], 'job': task['job_id'],
+                    'node': task['node_id'], 'engine': task['engine_uuid']}
+        legacy = {'version': 1, 'identity': identity, 'state': 'unavailable', 'reason': 'engine_task_missing',
+                  'result': {}, 'archive': None, 'checked': False}
+        service.store.save_custody(task, legacy)
+        with self.case.fixture.queue._db() as db:
+            db.execute('UPDATE viewer_tasks SET error=NULL WHERE uuid=?', (identifier,))
+        self.assertEqual(service.remove(identifier), {'success': True, 'uuid': identifier})
+        with self.assertRaises(Conflict):
+            service.initialize(identifier, 'Synthetic survey', eager.viewer_fixture.REQUEST_OPTIONS, None, 'production')
+        self.assertTrue(directory.exists())
 
     def test_malformed_verified_sidecar_cannot_clear_pending_intent(self):
         identifier = self.case.finished()
