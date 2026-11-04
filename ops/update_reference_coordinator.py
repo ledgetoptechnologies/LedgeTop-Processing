@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import select
+import shutil
 import socket
 import stat
 import time
@@ -48,6 +49,37 @@ class Stopped(ValueError):pass
 
 def canonical(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
 def digest(value):return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def check_backup_space(root, census):
+    """Reject an obviously undersized backup destination before stopping old.
+
+    This is an admission check, not a reservation: another host process can
+    consume space later, so failures during the actual copy still require the
+    existing guarded inspection/recovery path. File sizes are logical sizes,
+    intentionally including sparse regions; a fixed and per-entry allowance
+    covers some filesystem metadata and operational headroom.
+    """
+    files = census.get('files') if type(census) is dict else None
+    if type(files) is not list:
+        raise Stopped('backup_space_census_invalid')
+    total = 0
+    for item in files:
+        if type(item) is not dict or item.get('kind') not in ('file','directory'):
+            raise Stopped('backup_space_census_invalid')
+        if item['kind'] == 'file':
+            size = item.get('bytes')
+            if type(size) is not int or size < 0:
+                raise Stopped('backup_space_census_invalid')
+            total += size
+    required = total + len(files) * 16384 + 1024 * 1024 * 1024
+    try:
+        free = shutil.disk_usage(root).free
+    except OSError:
+        raise Stopped('backup_space_unavailable') from None
+    if free < required:
+        raise Stopped('backup_space_insufficient_before_stop')
+    return {'logicalBytes': total, 'requiredBytes': required, 'freeBytes': free}
 
 
 def cluster_http_json(route,token,deadline,limit=65536):
@@ -645,6 +677,10 @@ class ReferenceCoordinatorUpdate:
                 self.plans(state,api);self.activity(state,api)
                 drained=self.census(state);self.node_census(state,drained)
                 compatible(drained,state['baseline'],ignore_nodes=True)
+                # Backup is written under the private operation directory. A
+                # known insufficient destination must hold while the current
+                # coordinator is still running, not after it has been stopped.
+                check_backup_space(self.root,drained)
                 self.save(state,'stop_old_pending',drained=drained)
                 self.mutation(state,gates,'stop','--time','-1',OLD_ID,timeout=60)
                 if self.t.inspected(OLD_ID)['State']['Running']:raise Stopped('old_not_confirmed_stopped')

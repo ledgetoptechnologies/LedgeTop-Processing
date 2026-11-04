@@ -385,6 +385,18 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.assertEqual(self.transport.calls,[])
         self.assertTrue(self.transport.old['State']['Running'])
 
+    def test_insufficient_backup_space_holds_before_old_coordinator_stop(self):
+        # The data may fit the per-file census ceiling while the destination
+        # cannot hold a full copy. Simulate that race before any Docker stop.
+        from types import SimpleNamespace
+        with patch.object(module.shutil,'disk_usage',return_value=SimpleNamespace(free=0)):
+            with self.assertRaisesRegex(module.Stopped,'backup_space_insufficient_before_stop'):
+                self.activate()
+        self.assertTrue(self.transport.old['State']['Running'])
+        self.assertFalse(any(call[0] in ('stop','rename','create') for call in self.transport.calls))
+        self.assertEqual(self.state['phase'],'needs_inspection')
+        self.assertFalse((self.operation/'original-state-backup').exists())
+
     def test_private_content_admitted_during_old_stop_blocks_before_backup_or_create(self):
         def late(action):
             if action=='stop':
