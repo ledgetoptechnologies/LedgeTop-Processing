@@ -46,6 +46,7 @@ class ReferenceSettings:
     viewer_receipt_keys: dict | None = None
     viewer_acceptance_targets: dict | None = None
     staged_ack_bearers: dict | None = None
+    inbound_client_ca: str | None = None
 
 
 def _file(path, *, private):
@@ -79,13 +80,15 @@ def load_reference_settings(path, config):
         if len(raw) > MAX_CONFIG_BYTES:
             raise RuntimeConfigurationError("reference configuration exceeds size limit")
         value = p.decode_submission(raw)
-        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3, 4, 5):
+        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3, 4, 5, 6):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         version = value["schemaVersion"]
         fields = {"schemaVersion", "listener", "viewerBearers", "workers", "streamBudget"}
         staged_enabled = version == 5 or (version == 3 and "stagedAckPrincipals" in value)
         receipts_enabled = version in (4, 5) or (version == 3 and not staged_enabled)
         required = fields | ({"recoveryBindings"} if version == 2 else set())
+        if version == 6:
+            required.add('inboundClientCA')
         if staged_enabled:
             required.add("stagedAckPrincipals")
         if receipts_enabled:
@@ -103,6 +106,13 @@ def load_reference_settings(path, config):
             raise RuntimeConfigurationError("invalid TLS listener address")
         for field in ("certificate", "privateKey", "clientCA"):
             _file(listener[field], private=field == "privateKey")
+        inbound_client_ca = None
+        if version == 6:
+            inbound_path, inbound_stat = _file(value['inboundClientCA'], private=False)
+            _, outbound_stat = _file(listener['clientCA'], private=False)
+            if (inbound_stat.st_dev, inbound_stat.st_ino) == (outbound_stat.st_dev, outbound_stat.st_ino):
+                raise RuntimeConfigurationError('inbound and outbound trust files must be distinct')
+            inbound_client_ca = str(inbound_path)
         inventory = getattr(config, 'node_inventory', ())
         if (not config.prototype_state_dir or
                 (inventory and (not config.per_node_slots or
@@ -223,7 +233,7 @@ def load_reference_settings(path, config):
                 raise RuntimeConfigurationError("distinct Viewer service keys and receipt pins are required")
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
                                  {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery,
-                                 viewer_keys, viewer_targets or None, staged)
+                                 viewer_keys, viewer_targets or None, staged, inbound_client_ca)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -327,6 +337,13 @@ class ReferenceRuntime:
             server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             server_context.minimum_version = ssl.TLSVersion.TLSv1_2
             server_context.load_cert_chain(settings.listener["certificate"], settings.listener["privateKey"])
+            if settings.inbound_client_ca is not None:
+                inbound_path, inbound_stat = _file(settings.inbound_client_ca, private=False)
+                _, outbound_stat = _file(settings.listener['clientCA'], private=False)
+                if (inbound_stat.st_dev, inbound_stat.st_ino) == (outbound_stat.st_dev, outbound_stat.st_ino):
+                    raise RuntimeConfigurationError('inbound and outbound trust files must be distinct')
+                server_context.load_verify_locations(cafile=str(inbound_path))
+                server_context.verify_mode = ssl.CERT_REQUIRED
             worker_context = verified_client_context(settings.listener["clientCA"])
             self._server_context = server_context
             inventory = getattr(config, 'node_inventory', ())
