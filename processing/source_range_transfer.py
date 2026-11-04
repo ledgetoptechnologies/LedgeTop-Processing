@@ -630,7 +630,9 @@ class SourceRangeClient:
                     with os.fdopen(fd, "r+b", buffering=0) as stream:
                         fd = None
                         stream.seek(committed)
-                        stream.write(data)
+                        written = stream.write(data)
+                        if written != len(data):
+                            raise TransferError("source range write incomplete")
                         stream.flush()
                         os.fsync(stream.fileno())
                 finally:

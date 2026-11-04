@@ -145,6 +145,48 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
         self.assertEqual(target.read_bytes(), self.body)
         self.assertFalse(partial.exists())
 
+    def test_short_local_write_is_not_committed_and_can_resume(self):
+        import processing.source_range_transfer as transfer_module
+
+        original_fdopen = transfer_module.os.fdopen
+
+        class ShortWriter:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+
+            def write(self, data):
+                partial = data[:len(data) // 2]
+                return self.stream.write(partial)
+
+        def short_fdopen(fd, *args, **kwargs):
+            return ShortWriter(original_fdopen(fd, *args, **kwargs))
+
+        target = self.root / "photo.bin"
+        with patch.object(transfer_module.os, "fdopen", side_effect=short_fdopen):
+            with self.assertRaisesRegex(TransferError, "source range write incomplete"):
+                self.make_client().download_object(grant=self.grant(), object_id=self.obj.id,
+                                                   destination=target)
+
+        with closing(sqlite3.connect(self.root / "progress.sqlite")) as db:
+            committed = db.execute("SELECT committed_bytes FROM source_objects").fetchone()[0]
+            ranges = db.execute("SELECT start,length,state FROM source_ranges ORDER BY start").fetchall()
+        self.assertEqual(committed, 0)
+        self.assertEqual(ranges, [(0, CHUNK_BYTES, "intent")])
+
+        resumed = self.make_client().download_object(grant=self.grant("grant-after-short-write"),
+            object_id=self.obj.id, destination=target)
+        self.assertEqual(resumed.read_bytes(), self.body)
+
     def test_network_attempt_budget_caps_pending_range_replays(self):
         self.transfer["attemptBudget"] = 3
         def fail_second(request, *, timeout):
