@@ -96,7 +96,10 @@ class PreparedCopyV2Candidate:
                 if prior:
                     if (prior['raw'],prior['digest'])!=(body,digest):raise Conflict('copy differs')
                     return Response(202,{'state':'verified_held','created':False})
-                store._check_copy_identity_namespaces(db,set(ids))
+                from .reference_copy_hold_integrity import legacy_reserved_ids
+                if set(ids)&store._held_copy_ids(db):raise Conflict('copy identity held')
+                if set(ids)&legacy_reserved_ids(db,alias_job=row['job_id'],alias_acceptance=envelope['acceptance']):
+                    raise Conflict('copy identity reserved')
                 for item in db.execute('SELECT receipt_id,storage_id,outer_id,outer_storage_id FROM fixture_v3_copy_v2'):
                     if set(ids)&set(item):raise Conflict('copy identity conflict')
                 _fixture_quota(store,db,body=body,job_id=row['job_id'],digest=digest,ids=ids)

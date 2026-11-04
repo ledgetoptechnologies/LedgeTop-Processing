@@ -16,6 +16,12 @@ The fixture census rejects a same-named non-table object, altered table SQL,
 unexpected indexes or triggers, and missing or changed uniqueness indexes.
 This narrow schema check is not a census of all writers or a migration fence.
 
+The candidate v2 path allows a preexisting transfer or acceptance to share its
+outer IDs only when the job and complete acceptance object are identical.
+The existing v1/v3 held-copy writer still uses its previous namespace check;
+it has not acquired this alias behavior and remains hard-held. The fixture
+must not be used to conclude that all receipt versions interoperate.
+
 Before any shared writer can run, a separate design must provide a complete
 inventory of every receipt writer and namespace, durable cross-namespace ID
 ownership and quota accounting checked by every writer in the same SQLite

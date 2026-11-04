@@ -1893,6 +1893,9 @@ class ReferenceStore:
                                   (job_id,)).fetchone()
             if existing:
                 previous = json.loads(existing['acceptance_json'])
+                from .reference_copy_hold_integrity import transfer_collides_held
+                if transfer_collides_held(db,job_id=job_id,acceptance=previous):
+                    raise Conflict('transfer receipt identity held by v3 proof')
                 previous_manifest = json.loads(existing['viewer_manifest_json']) if existing['viewer_manifest_json'] else None
                 if previous_manifest is None:
                     # A never-leased candidate transfer may be upgraded in
@@ -1922,6 +1925,9 @@ class ReferenceStore:
                 if previous_manifest != viewer_manifest:
                     raise ViewerTransferJobConflict('Viewer result manifest changed on durable transfer')
                 return previous
+            from .reference_copy_hold_integrity import transfer_collides_held
+            if transfer_collides_held(db,job_id=job_id,acceptance=checked):
+                raise Conflict('transfer receipt identity held by v3 proof')
             self._quota(db, len(encoded.encode('utf-8')) + len(manifest_encoded.encode('utf-8')))
             db.execute('INSERT INTO reference_viewer_transfers(job_id,receipt_id,acceptance_json,viewer_manifest_json) VALUES(?,?,?,?)',
                        (job_id, checked['receiptId'], encoded, manifest_encoded))

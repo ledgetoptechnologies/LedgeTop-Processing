@@ -35,6 +35,31 @@ class ReceiptNamespaceAuthorityTests(unittest.TestCase):
   self.v2=OdmImportConfirmationStoreV2(self.queue.path,trusted_loader=lambda *_:None)
   self.gate=ReceiptNamespaceGate(self.queue,self.v1,self.v2)
  def digest(self):return hashlib.sha256(Path(self.queue.path).read_bytes()).hexdigest()
+ def test_v2_fixture_gate_exact_same_job_alias_and_conflicts(self):
+  from processing.prepared_v3_copy_v2_candidate import SCHEMA
+  from tests.test_viewer_copy_v2_candidate import ViewerCopyV2CandidateTests
+  f=ViewerCopyV2CandidateTests('test_valid_full_closure_and_public_api_disabled');f.setUp()
+  wire=reference_protocol.canonical_json({'acceptance':f.a,'viewerReceipt':f.r})
+  acceptance=reference_protocol.canonical_json(f.a).decode()
+  with self.queue._db() as db:
+   db.execute(SCHEMA)
+   db.execute('INSERT INTO fixture_v3_copy_v2 VALUES(?,?,?,?,?,?,?)',
+    (f.a['jobId'],wire,hashlib.sha256(wire).hexdigest(),f.r['receiptId'],f.r['storageReceiptId'],f.a['receiptId'],f.a['storageReceiptId']))
+   db.execute('INSERT INTO reference_viewer_transfers(job_id,receipt_id,acceptance_json) VALUES(?,?,?)',
+    (f.a['jobId'],f.a['receiptId'],acceptance))
+  self.assertEqual(self.gate.census()['identities'],4)
+  with self.queue._db() as db:
+   db.execute('INSERT INTO reference_acceptances(receipt_id,job_id,digest,receipt_json) VALUES(?,?,?,?)',
+    (f.a['receiptId'],f.a['jobId'],'a'*64,acceptance))
+  self.assertEqual(self.gate.census()['identities'],4)
+  with self.queue._db() as db:
+   altered=copy.deepcopy(f.a);altered['acceptedAt']='2026-11-04T00:00:02.000Z'
+   db.execute('UPDATE reference_viewer_transfers SET acceptance_json=?',(reference_protocol.canonical_json(altered).decode(),))
+  with self.assertRaises(ReceiptNamespaceHeld):self.gate.census()
+  with self.queue._db() as db:
+   db.execute('UPDATE reference_viewer_transfers SET acceptance_json=?',(acceptance,))
+   db.execute("INSERT INTO viewer_import_confirmations_candidate_v1 VALUES('job-a',1,'production',?,'a','b',X'01')",(f.a['receiptId'],))
+  with self.assertRaises(ReceiptNamespaceHeld):self.gate.census()
  def test_clean_snapshot_is_read_only_and_gate_is_explicit(self):
   before=self.digest();r=self.gate.census()
   self.assertEqual(r,{'state':'local_scan_clear_history_unverified','identities':0,'censusBytes':0});self.assertEqual(self.digest(),before)

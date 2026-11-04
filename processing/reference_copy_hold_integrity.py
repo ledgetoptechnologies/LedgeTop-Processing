@@ -45,6 +45,21 @@ def held_copy_ids(db, *, exclude_job=None):
         except (TypeError,KeyError):raise ValueError('fixture v2 census invalid') from None
         return _held_copy_ids_bounded(db,exclude_job=exclude_job) | extra
 
+def transfer_collides_held(db, *, job_id, acceptance):
+    """Only the exact same-job v2 outer acceptance may reuse its own IDs."""
+    from .fixture_v2_copy_census_candidate import census
+    ids=set(_legacy_acceptance_ids(acceptance.get('receiptId'),acceptance))
+    if acceptance['jobId']!=job_id:raise ValueError('transfer job differs')
+    with bounded_sqlite(db):
+        old=_held_copy_ids_bounded(db)
+        fixture,_=census(db)
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name=? COLLATE NOCASE",('fixture_v3_copy_v2',)).fetchone():
+            row=db.execute('SELECT raw FROM fixture_v3_copy_v2 WHERE job_id=?',(job_id,)).fetchone()
+            if row is not None:
+                proof=p.decode_submission(row[0])
+                if proof['acceptance']==acceptance:fixture-=ids
+        return bool(ids & (old | fixture))
+
 
 def _held_copy_ids_bounded(db, *, exclude_job=None):
     """Validate every retained record before trusting any namespace identity."""
@@ -138,9 +153,15 @@ def _legacy_acceptance_ids(table_id, obj):
     return (checked['receiptId'],checked['storageReceiptId'])
 
 
-def legacy_reserved_ids(db):
+def legacy_reserved_ids(db, *, alias_job=None, alias_acceptance=None):
     """Bound and stream same-database legacy ID namespaces under one transaction."""
-    specs=(('reference_acceptances',('receipt_id','receipt_json')),
+    if (alias_job is None)!=(alias_acceptance is None):raise ValueError('incomplete alias')
+    if alias_job is not None:
+        p._slug(alias_job,'alias job')
+        if type(alias_acceptance) is not dict or alias_acceptance.get('jobId')!=alias_job:raise ValueError('invalid alias')
+        _legacy_acceptance_ids(alias_acceptance.get('receiptId'),alias_acceptance)
+    specs=(('reference_acceptances',('job_id','receipt_id','receipt_json')),
+        ('reference_viewer_transfers',('job_id','receipt_id','acceptance_json')),
         ('reference_viewer_receipts',('receipt_id','storage_receipt_id')),
         ('reference_terminal_acceptances',('receipt_id','storage_receipt_id')),
         ('viewer_import_confirmations_candidate_v1',('confirmation_id',)),
@@ -160,8 +181,10 @@ def legacy_reserved_ids(db):
                 remaining_bytes-=sum(sizes)
                 if remaining_bytes<0: raise ValueError('legacy namespace byte limit')
             for row in db.execute('SELECT '+','.join(fields)+' FROM '+table):
-                if table=='reference_acceptances':
-                    result.update(_legacy_acceptance_ids(row[0],bounded_json(row[1])))
+                if table in ('reference_acceptances','reference_viewer_transfers'):
+                    obj=bounded_json(row[2]);ids=_legacy_acceptance_ids(row[1],obj)
+                    if obj['jobId']!=row[0]:raise ValueError('legacy job identity differs')
+                    if not (alias_job is not None and row[0]==alias_job and obj==alias_acceptance):result.update(ids)
                 else:
                     for value in row:
                         p._slug(value,'legacy receipt ID');result.add(value)

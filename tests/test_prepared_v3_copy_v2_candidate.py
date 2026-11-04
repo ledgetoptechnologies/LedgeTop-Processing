@@ -17,6 +17,7 @@ from processing.reference_prepared_api_candidate import PreparedSubmissionAPI
 from processing.prepared_v3_copy_v2_candidate import PreparedCopyV2Candidate, SCHEMA, migrate, _fixture_quota
 from processing.maintenance import Conflict
 from processing.fixture_v2_copy_census_candidate import _checked_schema
+from processing.reference_copy_hold_integrity import legacy_reserved_ids
 from processing.prepared_envelope_jcs_candidate import PROTOCOL
 from processing import reference_protocol as p
 from tests.test_viewer_service_identity_candidate import AUTH, pem
@@ -24,6 +25,33 @@ from tests.test_viewer_copy_v2_candidate import ViewerCopyV2CandidateTests
 
 
 class CandidateCoordinatorTests(unittest.TestCase):
+    def test_transfer_intent_reserves_both_acceptance_ids(self):
+        fixture=ViewerCopyV2CandidateTests('test_valid_full_closure_and_public_api_disabled');fixture.setUp()
+        with sqlite3.connect(':memory:') as db:
+            db.execute('CREATE TABLE reference_viewer_transfers (job_id TEXT, receipt_id TEXT, acceptance_json TEXT)')
+            db.execute('INSERT INTO reference_viewer_transfers VALUES(?,?,?)',(fixture.a['jobId'],fixture.a['receiptId'],p.canonical_json(fixture.a).decode()))
+            db.execute('BEGIN') if not db.in_transaction else None
+            self.assertTrue({fixture.a['receiptId'],fixture.a['storageReceiptId']} <= legacy_reserved_ids(db))
+
+    def test_exact_outer_alias_only_for_same_job_and_exact_body(self):
+        fixture=ViewerCopyV2CandidateTests('test_valid_full_closure_and_public_api_disabled');fixture.setUp()
+        a=fixture.a;wire=p.canonical_json(a).decode();ids={a['receiptId'],a['storageReceiptId']}
+        with sqlite3.connect(':memory:') as db:
+            db.execute('CREATE TABLE reference_viewer_transfers (job_id TEXT, receipt_id TEXT, acceptance_json TEXT)')
+            db.execute('CREATE TABLE reference_acceptances (job_id TEXT, receipt_id TEXT, receipt_json TEXT)')
+            db.execute('CREATE TABLE reference_viewer_receipts (receipt_id TEXT, storage_receipt_id TEXT)')
+            db.execute('INSERT INTO reference_viewer_transfers VALUES(?,?,?)',(a['jobId'],a['receiptId'],wire))
+            self.assertFalse(ids & legacy_reserved_ids(db,alias_job=a['jobId'],alias_acceptance=a))
+            db.execute('INSERT INTO reference_acceptances VALUES(?,?,?)',(a['jobId'],a['receiptId'],wire))
+            self.assertFalse(ids & legacy_reserved_ids(db,alias_job=a['jobId'],alias_acceptance=a))
+            changed=copy.deepcopy(a);changed['storageReceiptId']='other-storage'
+            self.assertTrue(ids & legacy_reserved_ids(db,alias_job=a['jobId'],alias_acceptance=changed))
+            changed=copy.deepcopy(a);changed['acceptedAt']='2026-11-04T00:00:02.000Z'
+            self.assertTrue(ids & legacy_reserved_ids(db,alias_job=a['jobId'],alias_acceptance=changed))
+            changed=copy.deepcopy(a);changed['jobId']='different-job'
+            self.assertTrue(ids & legacy_reserved_ids(db,alias_job='different-job',alias_acceptance=changed))
+            db.execute('INSERT INTO reference_viewer_receipts VALUES(?,?)',('other-receipt',a['receiptId']))
+            self.assertTrue(ids & legacy_reserved_ids(db,alias_job=a['jobId'],alias_acceptance=a))
     def test_schema_census_rejects_view_mutations_indexes_and_triggers(self):
         for variant in ('view','uppercase_view','uppercase_table','missing_unique','extra_index','trigger'):
             with self.subTest(variant=variant),sqlite3.connect(':memory:') as db:
@@ -154,11 +182,14 @@ class CandidateCoordinatorTests(unittest.TestCase):
         result['resultManifestSha256']=p.digest({k:v for k,v in result.items() if k!='resultManifestSha256'})
         expected=dict(coordinatorAuthorityId=self.queue.authority_id,viewerPrincipalId='viewer-service-a',submissionId=self.envelope['submission']['submissionId'],activationId=activation['activationId'],viewerTaskId=activation['viewerTaskId'],viewerAttemptId=activation['viewerAttemptId'],preparedEnvelopeSha256=activation['envelopeSha256'],jobId=job['jobId'],generation=job['generation'],environment=job['environment'],inputManifestSha256=job['manifestSha256'],pipelineDigest=job['pipelineDigest'],resultManifestSha256=result['resultManifestSha256'])
         acceptance=copy.deepcopy(self.fixture['acceptance']);acceptance.update(jobId=job['jobId'],generation=job['generation'],environment=job['environment'],inputManifestSha256=job['manifestSha256'],pipelineDigest=job['pipelineDigest'],resultManifestSha256=result['resultManifestSha256'],acceptedObjectIds=[o['id'] for o in result['objects']])
+        acceptance.update(receiptId=str(uuid.uuid4()),storageReceiptId=str(uuid.uuid4()))
         script="""const crypto=require('node:crypto');const root=process.argv[1];const p=require(root+'/apps/viewer/server/referenceProtocol');const c=require(root+'/apps/viewer/server/referenceReceiptV2Candidate');let s='';process.stdin.on('data',x=>s+=x);process.stdin.on('end',()=>{const x=JSON.parse(s);const key=crypto.createPrivateKey({key:Buffer.concat([Buffer.from('302e020100300506032b657004220420','hex'),Buffer.alloc(32,1)]),format:'der',type:'pkcs8'}).export({type:'pkcs8',format:'pem'}).toString();const sign=c.createViewerReceiptV2SignerCandidate({issuerId:'issuer-a',keyId:'key-a',privateKeyPem:key});const viewerReceipt=sign(x);process.stdout.write(p.canonicalBytes({acceptance:x.acceptance,viewerReceipt}));});"""
         signed=subprocess.run(['node','-e',script,source],input=json.dumps(dict(expected=expected,acceptance=acceptance,resultManifest=result)),capture_output=True,text=True,timeout=10,check=True).stdout.encode()
         with self.queue._db() as db:
             db.execute(SCHEMA);db.execute("UPDATE jobs SET status='succeeded' WHERE id=?",(job['jobId'],))
             db.execute("UPDATE reference_jobs SET phase='awaiting_acceptance',result_json=? WHERE job_id=?",(p.canonical_json(result).decode(),job['jobId']))
+            db.execute('INSERT INTO reference_viewer_transfers(job_id,receipt_id,acceptance_json,viewer_manifest_json) VALUES(?,?,?,?)',
+                (job['jobId'],acceptance['receiptId'],p.canonical_json(acceptance).decode(),p.canonical_json(result).decode()))
         class Gate:
             def check_in_transaction(self, db):
                 if not db.in_transaction:raise ValueError('transaction required')
@@ -170,4 +201,10 @@ class CandidateCoordinatorTests(unittest.TestCase):
             replay=self.candidate.handle('POST',path+'/accepted-copies-v2',self.headers,signed,protected_transport=True)
             self.assertEqual((replay.status,replay.body['created']),(202,False))
             self.assertEqual(self.candidate.handle('POST',path+'/accepted-copies-v2',self.headers,b' '+signed,protected_transport=True).status,409)
+            self.assertEqual(self.store.ensure_viewer_transfer(job['jobId']),acceptance)
+            with self.queue._db() as db:db.execute('DELETE FROM reference_viewer_transfers WHERE job_id=?',(job['jobId'],))
+            proof=json.loads(signed);collision=proof['acceptance']['receiptId']
+            with patch('processing.reference_store.uuid.uuid4',side_effect=[uuid.UUID(collision),uuid.uuid4()]):
+                with self.assertRaisesRegex(Conflict,'transfer receipt identity held'):
+                    self.store.ensure_viewer_transfer(job['jobId'])
         with self.queue._db() as db:self.assertEqual(db.execute('SELECT raw FROM fixture_v3_copy_v2').fetchone()[0],signed)

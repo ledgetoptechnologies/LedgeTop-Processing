@@ -101,6 +101,7 @@ class ReceiptNamespaceGate:
         try:
             payload_budget('reference_acceptances','receipt_json')
             payload_budget('reference_viewer_v3_copy_hold','payload_json')
+            payload_budget('reference_viewer_transfers','acceptance_json')
             from .viewer_import_confirmation_store import _preflight_stored_json
             for row in rows('reference_acceptances',safe_id('receipt_id')+',receipt_json',True):
                 raw=row[1]
@@ -108,6 +109,18 @@ class ReceiptNamespaceGate:
                 _preflight_stored_json(raw.encode('utf-8'))
                 value=_legacy_receipt(raw,row[0])
                 add(row[0],'acceptance');add(value['storageReceiptId'],'acceptance-storage')
+            for row in rows('reference_viewer_transfers',safe_id('job_id')+','+safe_id('receipt_id')+',acceptance_json',True):
+                raw=row[2]
+                if type(raw) is not str or len(raw.encode('utf-8'))>p.MAX_BODY_BYTES:raise ReceiptNamespaceHeld('receipt_census_limit')
+                _preflight_stored_json(raw.encode('utf-8'))
+                value=_legacy_receipt(raw,row[1])
+                if value['jobId']!=row[0]:raise ReceiptNamespaceHeld('receipt_census_unavailable')
+                accepted=db.execute('SELECT job_id,receipt_json FROM reference_acceptances WHERE receipt_id=?',(row[1],)).fetchone()
+                if accepted is not None:
+                    # Completed transfer and acceptance intentionally share both IDs.
+                    if accepted[0]!=row[0] or _legacy_receipt(accepted[1],row[1])!=value:raise ReceiptNamespaceHeld('receipt_namespace_collision')
+                else:
+                    add(row[1],'transfer-intent');add(value['storageReceiptId'],'transfer-storage-intent')
             for row in rows('reference_viewer_receipts',safe_id('receipt_id')+','+safe_id('storage_receipt_id'),True):
                 add(row[0],'viewer-copy');add(row[1],'viewer-storage')
             for row in rows('reference_terminal_acceptances',safe_id('receipt_id')+','+safe_id('storage_receipt_id'),True):
@@ -120,7 +133,18 @@ class ReceiptNamespaceGate:
             fixture_ids,fixture_bytes=fixture_census(db)
             if fixture_bytes>MAX_BYTES-total:raise ReceiptNamespaceHeld('receipt_census_limit')
             total+=fixture_bytes
-            for value in fixture_ids:add(value,'v2-fixture-held')
+            if fixture_ids:
+                from .reference_copy_hold_integrity import legacy_reserved_ids
+                for row in db.execute('SELECT job_id,raw FROM fixture_v3_copy_v2'):
+                    proof=p.decode_submission(row[1]);acceptance=proof['acceptance'];signed=proof['viewerReceipt']
+                    ids=[signed['receiptId'],signed['storageReceiptId'],acceptance['receiptId'],acceptance['storageReceiptId']]
+                    reserved=legacy_reserved_ids(db,alias_job=row[0],alias_acceptance=acceptance)
+                    if set(ids)&reserved:raise ReceiptNamespaceHeld('receipt_namespace_collision')
+                    for index,value in enumerate(ids):
+                        # Only an exact same-job legacy acceptance/transfer can
+                        # have these outer IDs in the already-scanned set.
+                        if index>=2 and value in seen:continue
+                        add(value,'v2-fixture-held')
             for row in rows('reference_viewer_v3_copy_hold','payload_json',True):
                 raw=row[0]
                 proof=json.loads(raw)
