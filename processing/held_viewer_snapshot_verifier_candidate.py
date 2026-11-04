@@ -93,7 +93,7 @@ def verify_snapshot(*, intent_bytes, signature, public_key, issuer_id, key_id,
             p._closed(gcp, ('evidenceVersion', 'evidencePageHashes', 'evidencePageBytes', 'evidencePageCount',
                 'evidenceByteCount', 'evidenceSha256', 'fileVersion', 'filePageHashes', 'filePageBytes',
                 'filePageCount', 'fileByteCount', 'fileSha256', 'generatedGcp'), 'GCP snapshot')
-            if gcp.get('evidenceVersion') != 'ltds-viewer-gcp-evidence-chunks-v1' or gcp.get('fileVersion') != 'ltds-viewer-generated-gcp-file-chunks-v1': raise ValueError()
+            if gcp.get('evidenceVersion') not in ('ltds-viewer-gcp-evidence-chunks-v1','ltds-viewer-gcp-evidence-chunks-v2') or gcp.get('fileVersion') != 'ltds-viewer-generated-gcp-file-chunks-v1': raise ValueError()
             if (gcp['evidencePageCount'] != len(gcp['evidencePageHashes'])
                     or gcp['filePageCount'] != len(gcp['filePageHashes'])): raise ValueError()
             records = [record for line in source_frames.splitlines()
@@ -105,7 +105,7 @@ def verify_snapshot(*, intent_bytes, signature, public_key, issuer_id, key_id,
                     or gcp['generatedGcp']['sha256'] != gcp['fileSha256']
                     or gcp['generatedGcp']['byteSize'] != gcp['fileByteCount']): raise ValueError()
             verify_evidence(io.BytesIO(evidence_frames), attempt_id=attempt_id, evidence_sha256=gcp['evidenceSha256'],
-                page_hashes=gcp['evidencePageHashes'], page_bytes=gcp['evidencePageBytes'], decoded_bytes=gcp['evidenceByteCount'])
+                page_hashes=gcp['evidencePageHashes'], page_bytes=gcp['evidencePageBytes'], decoded_bytes=gcp['evidenceByteCount'], evidence_version=gcp['evidenceVersion'])
             verify_file(io.BytesIO(file_frames), attempt_id=attempt_id, evidence_sha256=gcp['evidenceSha256'],
                 file_sha256=gcp['fileSha256'], page_hashes=gcp['filePageHashes'], page_bytes=gcp['filePageBytes'],
                 decoded_bytes=gcp['fileByteCount'])

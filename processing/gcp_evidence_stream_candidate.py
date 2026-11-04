@@ -9,6 +9,8 @@ from . import reference_protocol as p
 
 VERSION='ltds-viewer-gcp-evidence-chunks-v1'
 DOMAIN=b'ltds-viewer-gcp-evidence-frame-v1\0'
+VERSION_V2='ltds-viewer-gcp-evidence-chunks-v2'
+DOMAIN_V2=b'ltds-viewer-gcp-evidence-frame-v2\0'
 MAX_LINE=65536
 MAX_PAGE=65535
 MAX_PAGES=512
@@ -50,9 +52,12 @@ def _preflight(raw):
    if commas>7:raise ValueError()
  if quoted or escaped or depth!=0:raise ValueError()
 
-def verify(stream,*,attempt_id,evidence_sha256,page_hashes,page_bytes,decoded_bytes):
+def verify(stream,*,attempt_id,evidence_sha256,page_hashes,page_bytes,decoded_bytes,evidence_version=VERSION):
  """Validate complete evidence stream but confer no trust, custody or authority."""
  try:
+  domains={VERSION:DOMAIN,VERSION_V2:DOMAIN_V2}
+  if evidence_version not in domains:raise ValueError()
+  domain=domains[evidence_version]
   if type(stream) not in (io.BytesIO,io.BufferedReader) or not stream.readable():raise ValueError()
   p._uuid(attempt_id,'attempt');p._hash(evidence_sha256,'evidence digest');p._integer(decoded_bytes,'evidence size')
   if decoded_bytes>MAX_DECODED or type(page_hashes) is not list or type(page_bytes) is not list or not 2<=len(page_hashes)<=MAX_PAGES or len(page_bytes)!=len(page_hashes):raise ValueError()
@@ -68,7 +73,7 @@ def verify(stream,*,attempt_id,evidence_sha256,page_hashes,page_bytes,decoded_by
    line=stream.readline(MAX_LINE+1)
    if type(line) is not bytes or not line.endswith(b'\n') or len(line)>MAX_LINE:raise ValueError()
    raw=line[:-1]
-   if len(raw)!=size or hashlib.sha256(DOMAIN+raw).hexdigest()!=sha:raise ValueError()
+   if len(raw)!=size or hashlib.sha256(domain+raw).hexdigest()!=sha:raise ValueError()
    _preflight(raw)
    obj=json.loads(raw.decode('utf8'),object_pairs_hook=_pairs,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
    if p.canonical_json(obj)!=raw:raise ValueError()
@@ -83,7 +88,7 @@ def verify(stream,*,attempt_id,evidence_sha256,page_hashes,page_bytes,decoded_by
     if len(chunk)!=size_dec or base64.urlsafe_b64encode(chunk).decode().rstrip('=')!=data:raise ValueError()
     decoder.decode(chunk,final=False);content_hash.update(chunk);offset+=len(chunk)
     if offset>decoded_bytes:raise ValueError()
-   if obj['version']!=VERSION or obj['attemptId']!=attempt_id or obj['evidenceSha256']!=evidence_sha256 or type(obj['index']) is not int or obj['index']!=index or type(obj['offset']) is not int:raise ValueError()
+   if obj['version']!=evidence_version or obj['attemptId']!=attempt_id or obj['evidenceSha256']!=evidence_sha256 or type(obj['index']) is not int or obj['index']!=index or type(obj['offset']) is not int:raise ValueError()
    expected_offset=offset if index==len(page_hashes)-1 else offset-len(chunk)
    if obj['offset']!=expected_offset:raise ValueError()
   decoder.decode(b'',final=True)

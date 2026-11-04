@@ -26,6 +26,15 @@ class EvidenceStreamTests(unittest.TestCase):
   return verify(io.BytesIO(wire if raw is None else raw),**args)
  def test_utf8_character_split_across_chunks(self):
   result=self.call();self.assertEqual(result,dict(state='held_evidence_not_authorized',bytes=len(self.data),pages=3))
+ def test_v2_framing_is_separately_domain_pinned(self):
+  from processing.gcp_evidence_stream_candidate import VERSION_V2,DOMAIN_V2
+  pages=[dict(page,version=VERSION_V2) for page in self.pages]
+  raws=[p.canonical_json(page) for page in pages];wire=b''.join(raw+b'\n' for raw in raws)
+  pins=[hashlib.sha256(DOMAIN_V2+raw).hexdigest() for raw in raws];sizes=[len(raw) for raw in raws]
+  args=dict(attempt_id=ATTEMPT,evidence_sha256=self.sha,page_hashes=pins,page_bytes=sizes,decoded_bytes=len(self.data))
+  self.assertEqual(verify(io.BytesIO(wire),**args,evidence_version=VERSION_V2)['state'],'held_evidence_not_authorized')
+  with self.assertRaises(EvidenceHeld):verify(io.BytesIO(wire),**args)
+  with self.assertRaises(EvidenceHeld):verify(io.BytesIO(wire),**args,evidence_version='unknown')
  def test_truncation_reorder_extra_or_untrusted_hash_holds(self):
   wire,pins,sizes=encoded(self.pages)
   for payload in (wire[:-1],b''.join(x+b'\n' for x in reversed([p.canonical_json(v) for v in self.pages])),wire+b'{}\n'):
