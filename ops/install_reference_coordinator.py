@@ -566,10 +566,11 @@ def offline_rollback_precheck(state):
     """Census the stopped owner's volume without constructing a Queue."""
     if docker('ps','--filter','volume='+VOLUME,'--format','{{.ID}}').strip():
         raise CutoverStopped('offline_volume_still_owned')
-    result=json.loads(docker('run','--rm','--pull=never','--network','none','--read-only',
+    from ops.owned_update_helper import run_owned_helper
+    result=json.loads(run_owned_helper(sys.modules[__name__],('--rm','--pull=never','--network','none','--read-only',
         '--user','10001:10001','--cap-drop','ALL','--security-opt','no-new-privileges',
         '--mount','type=volume,src='+VOLUME+',dst=/source,readonly','--entrypoint','python',
-        state['image'],'-c',OFFLINE_ROLLBACK_CENSUS))
+        state['image'],'-c',OFFLINE_ROLLBACK_CENSUS),error_type=CutoverStopped))
     if result!=dict(authorityId=AUTHORITY,history=state['history'],nativeViewerTasks=state['history']['nativeViewerTasks'],referenceJobs=0):
         raise CutoverStopped('offline_downgrade_baseline_changed')
 

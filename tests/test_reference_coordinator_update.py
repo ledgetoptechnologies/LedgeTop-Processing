@@ -72,8 +72,8 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.gates=Gates();self.transport=self.make_transport()
         # Container lifecycle is exercised separately by
         # test_update_owned_helper; this fixture supplies synthetic census I/O.
-        helper=patch.object(module,'run_owned_helper',side_effect=lambda t,args,timeout=60:t.docker('run',*args,timeout=timeout))
-        helper.start();self.addCleanup(helper.stop)
+        self.helper_patch=patch.object(module,'run_owned_helper',side_effect=lambda t,args,timeout=60:t.docker('run',*args,timeout=timeout))
+        self.helper_patch.start();self.addCleanup(self.helper_patch.stop)
         self.operation=self.root/'operation';self.operation.mkdir(mode=0o700)
         self.updater=module.ReferenceCoordinatorUpdate(self.operation,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda state:None)
         self.backup_patch=patch.object(module,'copy_backup',side_effect=self.backup)
@@ -81,6 +81,17 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.probe=patch.object(module,'owned_api_probe',return_value={'operatorLookupVerified':True})
         self.probe.start();self.addCleanup(self.probe.stop)
         self.state=self.updater.prepare(TARGET,SOURCE,MAIN)
+
+    def test_offline_census_timeout_removes_owned_helper_before_inspection_hold(self):
+        self.helper_patch.stop()
+        self.transport.helper_failure=True
+        with self.assertRaisesRegex(TimeoutError,'synthetic helper timeout'):
+            self.activate()
+        self.assertTrue(self.transport.helper_removed)
+        self.assertIsNone(self.transport.helper)
+        self.assertEqual(self.state['phase'],'needs_inspection')
+        self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
+        self.assertNotIn(NEW_ID,self.transport.containers)
 
     def test_viewer_extra_tables_exact_empty_upgrade_and_copy(self):
         with self.queue._db() as db:
@@ -199,7 +210,8 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                         {'Type':'bind','Source':str(module.legacy.TLS_MOUNT),'Destination':'/run/processing-reference','RW':False}])
             def facts(self,item,**kwargs):return module.legacy.facts(item,**kwargs)
             def environment(self):return {key:value for key,value in self.application.items() if key!='PROCESSING_REFERENCE_CONFIG'}
-            def inspected(self,identifier):
+            def inspected(self,identifier,**kwargs):
+                if getattr(self,'helper',None) and identifier==self.helper['Id']:return copy.deepcopy(self.helper)
                 if identifier=='node-odx-gpu':return {'Id':'f'*64,'Image':'sha256:'+'f'*64,'State':{'Running':True}}
                 matches=[item for key,item in self.containers.items() if key.startswith(identifier) or item['Name']=='/'+identifier]
                 if len(matches)!=1:raise module.Stopped('synthetic_identity_unavailable')
@@ -219,7 +231,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                 action=args[0]
                 if action=='ps':
                     if any(str(value).startswith('volume=') for value in args):return '\n'.join(item['Id'] for item in self.containers.values() if item['State']['Running'])
-                    if any(str(value).startswith('label=io.ledgetop.update-helper=') for value in args):return ''
+                    if any(str(value).startswith('label=io.ledgetop.update-helper=') for value in args):return self.helper['Id'] if getattr(self,'helper',None) else ''
                     if any(str(value).startswith('label=') for value in args):return '\n'.join(item['Id'] for item in self.containers.values() if item['Config']['Labels'].get(module.LABEL)==owner.state['operation'])
                     return ''
                 if action in ('run','exec'):
@@ -228,6 +240,20 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                         assert '--network' in args and args[args.index('--network')+1]=='none'
                         assert 'type=volume,src='+module.VOLUME+',dst=/source,readonly' in args
                     return json.dumps(module.volume_census(owner.volume,uid=os.geteuid(),offline=action=='run'))
+                if action=='create' and '--name' in args and 'ledgetop-update-helper-' in args[args.index('--name')+1]:
+                    label=args[args.index('--label')+1].split('=',1)[1]
+                    self.helper_is_offline=any(str(arg).startswith('type=volume,src=') for arg in args)
+                    self.helper={'Id':'b'*64,'Name':'/'+args[args.index('--name')+1],
+                        'Config':{'Labels':{'io.ledgetop.update-helper':label}},'State':{'Running':False}}
+                    return self.helper['Id']
+                if action=='start' and '--attach' in args:
+                    self.helper['State']['Running']=True
+                    if getattr(self,'helper_failure',False) and self.helper_is_offline:raise TimeoutError('synthetic helper timeout')
+                    self.helper=None
+                    if not self.helper_is_offline:return json.dumps([{'path':'runtime.json','uid':10001,'mode':0o600,'sha256':'a'*64}])
+                    return json.dumps(module.volume_census(owner.volume,uid=os.geteuid(),offline=True))
+                if action=='rm' and getattr(self,'helper',None) and args[-1]==self.helper['Id']:
+                    self.helper=None;self.helper_removed=True;return ''
                 assert owner.gates.live and not owner.gates.dead
                 self.calls.append(args)
                 if self.hook:self.hook(action)

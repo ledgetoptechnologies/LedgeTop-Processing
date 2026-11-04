@@ -518,7 +518,8 @@ class ReferenceInstallationTests(unittest.TestCase):
                 return ""
             self.assertEqual(action, "run")
             return json.dumps(census)
-        with patch.object(self.install, "AUTHORITY", queue.authority_id), patch.object(self.install, "docker", docker):
+        with patch.object(self.install, "AUTHORITY", queue.authority_id), patch.object(self.install, "docker", docker), \
+                patch('ops.owned_update_helper.run_owned_helper', side_effect=lambda t,args,**kw: t.docker('run',*args)):
             with self.assertRaises(self.install.CutoverStopped):
                 self.install.offline_rollback_precheck({"history": expected, "image": "synthetic-cached-image"})
 
