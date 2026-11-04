@@ -11,7 +11,7 @@ import threading
 from .config import Config, from_environment
 from .policy import plan
 from .provider import probe_node
-from .prototype import Queue, Conflict
+from .prototype import Queue, Conflict, VIEWER_PROFILE
 from .options import catalog
 
 MAX_BODY = 8192
@@ -195,6 +195,12 @@ def make_handler(config: Config):
                         job, created = queue.submit(request)
                         self._reply(201 if created else 200, {"job": job})
                     elif self.path == "/v1/prototype/claim":
+                        # Viewer jobs are claimed only by the in-process
+                        # dispatcher after live per-node engine admission.
+                        # The generic bearer endpoint cannot bypass that plan.
+                        if VIEWER_PROFILE in request.get("profiles", []):
+                            self._reply(403, {"error": "viewer_dispatch_internal"})
+                            return
                         self._reply(200, {"job": queue.claim(request)})
                     elif self.path.startswith("/v1/prototype/nodes/"):
                         identifier, _, action = self.path[len("/v1/prototype/nodes/"):].rpartition("/")

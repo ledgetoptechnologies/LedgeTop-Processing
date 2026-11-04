@@ -133,8 +133,11 @@ class ViewerService:
         # This is our own 2.x-compatible facade, not an official ClusterODM build.
         self.options()
         jobs = self.queue.list()
+        # Each configured physical node has one serialized engine slot. The
+        # coordinator may therefore execute independently on multiple nodes.
+        parallel = sum(node in self.engines for node in self.queue.node_ids)
         return {'version': '2.4.0', 'engine': 'ledgetop-processing', 'engineVersion': '0.2.0',
-                'maxImages': None, 'maxParallelTasks': 1, 'coordinator': True,
+                'maxImages': None, 'maxParallelTasks': parallel, 'coordinator': True,
                 'taskQueueCount': sum(j['status'] in ('queued', 'running', 'held') for j in jobs)}
 
     def _check_options(self, options):
@@ -309,55 +312,67 @@ class ViewerService:
                 else:
                     self._hold(task, 'submission_interrupted')
             jobs = self.queue.list()
-            if any(j['status'] in ('running', 'held') for j in jobs):
+            # Queue.list is already FIFO by sequence; a stable partition keeps
+            # priority order without quadratic list.index work on large queues.
+            queued = [j for j in jobs if j['status'] == 'queued']
+            production_pending = any(j['environment'] == 'production'
+                                     and j['status'] in ('queued', 'running', 'held') for j in jobs)
+            # Production globally fences staging. Within the active priority
+            # tier, each free node may take the first queued job it can run;
+            # a large job waiting for main does not leave cluster idle.
+            priority_jobs = [j for j in queued if j['environment'] ==
+                             ('production' if production_pending else 'staging')]
+            candidates = [j for j in priority_jobs if j['profile'] == VIEWER_PROFILE]
+            if not candidates:
                 return
-            queued = sorted((j for j in jobs if j['status'] == 'queued'),
-                            key=lambda j: (j['environment'] != 'production', jobs.index(j)))
-            if not queued or queued[0]['profile'] != VIEWER_PROFILE:
-                return
-            task = next((t for t in tasks if t['job_id'] == queued[0]['id']), None)
-            if task is None:
-                raise Conflict('execution metadata unavailable')
             nodes = {}
             for node, role, origin, token in (
                     ('cluster', 'local', self.config.local_node_url, self.config.local_node_token),
                     ('main', 'main', self.config.main_node_url, self.config.main_node_token)):
                 nodes[node] = {**self.probe(role, origin, token),
                                'state': self.queue.get_node(node)['state']}
-            decision = plan(task['images_count'], task['input_bytes'], nodes['cluster'], nodes['main'],
-                            self.config.local_max_photos, self.config.local_max_input_bytes)
-            if decision['decision'] == 'wait':
-                self.store.update(task['uuid'], phase='waiting_node', error=decision['reason'])
+            for queued_job in candidates:
+                task = next((t for t in tasks if t['job_id'] == queued_job['id']), None)
+                if task is None:
+                    raise Conflict('execution metadata unavailable')
+                decision = plan(task['images_count'], task['input_bytes'], nodes['cluster'], nodes['main'],
+                                self.config.local_max_photos, self.config.local_max_input_bytes,
+                                allow_main_fallback=True)
+                if decision['decision'] == 'wait':
+                    self.store.update(task['uuid'], phase='waiting_node', error=decision['reason'])
+                    continue
+                node_id = 'cluster' if decision['decision'] == 'local' else 'main'
+                self._check_options(task['options'])
+                job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': node_id,
+                                       'profiles': [VIEWER_PROFILE], 'expectedJobId': task['job_id']})
+                if not job:
+                    # Another scheduler turn or maintenance transition changed
+                    # queue admission; rediscover from fresh state next tick.
+                    return
+                try:
+                    self.store.update(task['uuid'], stage='running', phase='claimed', node_id=node_id,
+                                      claim_token=job['claimToken'], engine_uuid=str(uuid.uuid4()), error=None)
+                    task = self.store.task(task['uuid'])
+                    engine = self.engines[node_id]
+                    self.store.update(task['uuid'], phase='init_pending')
+                    engine.initialize(task)
+                    self.store.update(task['uuid'], phase='initialized')
+                    for item in task['files']:
+                        self.store.update(task['uuid'], phase='upload_pending')
+                        engine.upload(task['engine_uuid'], item)
+                        self.store.update(task['uuid'], phase='uploaded')
+                    self.store.update(task['uuid'], phase='commit_pending')
+                    engine.action('commit', task['engine_uuid'])
+                    self.store.update(task['uuid'], phase='processing')
+                except Exception:
+                    current = self.store.task(task['uuid'])
+                    if current['phase'] == 'commit_pending':
+                        # Exact assigned engine UUID lets us reconcile a lost commit
+                        # ACK by reads. Never send commit again under uncertainty.
+                        self.store.update(task['uuid'], error='commit_ack_uncertain')
+                    else:
+                        self._hold(current, 'engine_submission_uncertain')
                 return
-            node_id = 'cluster' if decision['decision'] == 'local' else 'main'
-            self._check_options(task['options'])
-            job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': node_id,
-                                   'profiles': [VIEWER_PROFILE], 'expectedJobId': task['job_id']})
-            if not job:
-                return
-            try:
-                self.store.update(task['uuid'], stage='running', phase='claimed', node_id=node_id,
-                                  claim_token=job['claimToken'], engine_uuid=str(uuid.uuid4()), error=None)
-                task = self.store.task(task['uuid'])
-                engine = self.engines[node_id]
-                self.store.update(task['uuid'], phase='init_pending')
-                engine.initialize(task)
-                self.store.update(task['uuid'], phase='initialized')
-                for item in task['files']:
-                    self.store.update(task['uuid'], phase='upload_pending')
-                    engine.upload(task['engine_uuid'], item)
-                    self.store.update(task['uuid'], phase='uploaded')
-                self.store.update(task['uuid'], phase='commit_pending')
-                engine.action('commit', task['engine_uuid'])
-                self.store.update(task['uuid'], phase='processing')
-            except Exception:
-                current = self.store.task(task['uuid'])
-                if current['phase'] == 'commit_pending':
-                    # Exact assigned engine UUID lets us reconcile a lost commit
-                    # ACK by reads. Never send commit again under uncertainty.
-                    self.store.update(task['uuid'], error='commit_ack_uncertain')
-                else:
-                    self._hold(current, 'engine_submission_uncertain')
 
     def start(self):
         if self._thread:

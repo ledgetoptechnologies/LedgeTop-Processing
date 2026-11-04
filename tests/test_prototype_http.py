@@ -6,7 +6,7 @@ from urllib.request import Request, urlopen
 
 from processing.app import make_handler
 from processing.config import Config
-from processing.prototype import PHOTO_PROFILE, PROFILE
+from processing.prototype import PHOTO_PROFILE, PROFILE, VIEWER_PROFILE
 from tests.test_service import TOKEN, start_server
 from tests.test_prototype import submission
 
@@ -77,6 +77,27 @@ class PrototypeHTTPTests(unittest.TestCase):
         _, allowed = self.request('/v1/prototype/claim', {'workerId': 'main-worker',
                                                         'nodeId': 'main', 'profiles': [PROFILE]})
         self.assertEqual(allowed['job']['nodeId'], 'main')
+
+    def test_viewer_claim_is_only_available_to_live_in_process_dispatcher(self):
+        from processing.config import Config
+        self.server.shutdown()
+        self.server.server_close()
+        self.handler.prototype_queue.close()
+        self.handler = make_handler(Config(TOKEN, 'http://127.0.0.1:5000', 'http://127.0.0.1:5001', 1000, 20000,
+            prototype_state_dir=self.directory.name, viewer_enabled=True,
+            prototype_node_ids=('cluster', 'main'),
+            viewer_token='viewer-prod-test-token-123456789012',
+            viewer_staging_token='viewer-stage-test-token-123456789'))
+        self.server = start_server(self.handler)
+        self.origin = f'http://127.0.0.1:{self.server.server_port}'
+        queue = self.handler.prototype_queue
+        job, _ = queue.submit({'requestId': 'viewer-job', 'environment': 'production',
+                               'profile': VIEWER_PROFILE})
+        with self.assertRaises(HTTPError) as caught:
+            self.request('/v1/prototype/claim', {'workerId': 'viewer-dispatch',
+                'nodeId': 'main', 'profiles': [VIEWER_PROFILE], 'expectedJobId': job['id']})
+        self.assertEqual(caught.exception.code, 403)
+        self.assertEqual(queue.get(job['id'])['status'], 'queued')
 
     def test_default_probe_has_no_job_queue(self):
         disabled = start_server(make_handler(Config(TOKEN, "", "", 800, 20000)))

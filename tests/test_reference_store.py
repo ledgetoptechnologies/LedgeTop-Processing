@@ -141,6 +141,38 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.next_for_node("cluster"))
         self.assertEqual(self.store.next_for_node("node-2")["jobId"], job["jobId"])
 
+    def test_reference_workers_claim_one_job_per_node_in_queue_order(self):
+        store = ReferenceStore(self.queue, local_max_photos=1,
+            local_max_input_bytes=20 * 1024**3, main_node_id="node-2")
+        small, _ = store.submit(self.new_submission())
+        large_raw = copy.deepcopy(self.fixture["submission"])
+        large_raw["submissionId"] = str(uuid.uuid4())
+        first = copy.deepcopy(large_raw["manifest"]["objects"][0])
+        first.update(id="image-2", name="image-2.jpg")
+        large_raw["manifest"]["objects"].append(first)
+        large_raw["manifest"]["objectCount"] = 2
+        large_raw["manifest"]["totalBytes"] *= 2
+        large_raw["manifest"]["inputCounts"]["images"] = 2
+        large_raw["manifest"]["sha256"] = p.manifest_sha256(large_raw["manifest"])
+        large_submission = p.validate_submission(large_raw, environment="staging",
+            capability_fingerprint=large_raw["capabilityFingerprint"])
+        large, _ = store.submit(large_submission)
+
+        self.assertEqual(store.next_for_node("cluster")["jobId"], small["jobId"])
+        store.claim(small["jobId"], node_id="cluster", worker_id="cluster-worker",
+            worker_instance_id="cluster-instance", claim_request_id="cluster-claim")
+        # A running cluster job must not suppress the queue head that only the
+        # main node can accept. Each physical node has its own active slot.
+        self.assertEqual(store.next_for_node("node-2")["jobId"], large["jobId"])
+        self.assertIsNotNone(store.claim(large["jobId"], node_id="node-2",
+            worker_id="main-worker", worker_instance_id="main-instance",
+            claim_request_id="main-claim"))
+
+        later_small, _ = store.submit(self.new_submission())
+        self.assertIsNone(store.claim(later_small["jobId"], node_id="cluster",
+            worker_id="cluster-worker", worker_instance_id="cluster-instance",
+            claim_request_id="cluster-second-claim"))
+
     def test_metadata_quota_rolls_back_both_tables(self):
         store = ReferenceStore(self.queue, max_metadata_bytes=1)
         with self.assertRaises(Conflict):
@@ -164,18 +196,20 @@ class ReferenceStoreTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             self.store.get("unknown")
 
-    def test_global_engine_lock_includes_legacy_treedar(self):
+    def test_legacy_treedar_can_run_on_another_idle_node(self):
         job, _ = self.store.submit(self.submission)
         self.reserve(job)
         legacy, _ = self.queue.submit({"requestId": "legacy", "environment": "staging", "profile": LEGACY_PROFILE})
         claim = self.store.get(job["jobId"], private=True)
         self.assertEqual(claim["jobId"], job["jobId"])
-        self.assertIsNone(self.queue.claim({"workerId": "legacy", "profiles": [LEGACY_PROFILE]}))
+        other_node_claim = self.queue.claim({"workerId": "legacy", "profiles": [LEGACY_PROFILE], "nodeId": "node-2"})
+        self.assertEqual(other_node_claim["nodeId"], "node-2")
+        # Per-node serialization remains strict even while another node runs.
+        self.assertIsNone(self.queue.claim({"workerId": "legacy-2", "profiles": [LEGACY_PROFILE], "nodeId": "cluster"}))
         self.store.update_phase(job["jobId"], "held", error="worker_uncertain")
         with self.assertRaises(Conflict):
             self.store.update_phase(job["jobId"], "cancelled")
-        self.assertIsNone(self.queue.claim({"workerId": "legacy", "profiles": [LEGACY_PROFILE]}))
-        self.assertEqual(self.queue.get(legacy["id"])["status"], "queued")
+        self.assertEqual(self.queue.get(legacy["id"])["status"], "running")
 
     def test_restart_preserves_identity_and_holds_uncertain_engine(self):
         job, _ = self.store.submit(self.submission)

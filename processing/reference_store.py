@@ -245,12 +245,17 @@ class ReferenceStore:
             db.execute('BEGIN IMMEDIATE')
             self.queue._refresh_nodes(db)
             if (self.queue._node(db, node_id)['state'] not in ('active', 'scheduled')
-                    or db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone()):
+                    or db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1",
+                                  (node_id,)).fetchone()):
                 return None
             head = db.execute("SELECT id,profile FROM jobs WHERE status='queued' ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq LIMIT 1").fetchone()
             if not head or head['profile'] != PROFILE or PROFILE not in self.queue.node_profiles(node_id):
                 return None
             row = self._row(db, head['id'])
+            if (row['environment'] == 'staging'
+                    and db.execute("SELECT 1 FROM jobs WHERE environment='production' "
+                                   "AND status IN ('queued','running','held') LIMIT 1").fetchone()):
+                return None
             submission = json.loads(row['input_json'])
             if self._required_node(submission) != node_id:
                 return None
@@ -282,12 +287,17 @@ class ReferenceStore:
             self.queue._refresh_nodes(db)
             if self.queue._node(db, node_id)["state"] not in ("active", "scheduled"):
                 return None
-            if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():
+            if db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1",
+                          (node_id,)).fetchone():
                 return None
             head = db.execute("""SELECT id,profile FROM jobs WHERE status='queued'
               ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq LIMIT 1""").fetchone()
             if (not head or head["id"] != job_id or head["profile"] != PROFILE
                     or PROFILE not in self.queue.node_profiles(node_id)):
+                return None
+            if (row['environment'] == 'staging'
+                    and db.execute("SELECT 1 FROM jobs WHERE environment='production' "
+                                   "AND status IN ('queued','running','held') LIMIT 1").fetchone()):
                 return None
             if row["phase"] not in ("queued", "waiting_capacity"):
                 raise Conflict("reference phase cannot be claimed")

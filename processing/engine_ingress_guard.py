@@ -212,7 +212,8 @@ class EngineIngressGuard:
                     self.queue._refresh_nodes(db)
                     row = db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
                     task = db.execute('SELECT * FROM viewer_tasks WHERE job_id=?', (job_id,)).fetchone()
-                    active = db.execute("SELECT id FROM jobs WHERE status IN ('running','held')").fetchall()
+                    active = db.execute("SELECT id FROM jobs WHERE node_id=? AND status IN ('running','held')",
+                                         (binding.node_id,)).fetchall()
                     node = self.queue._node(db, binding.node_id)
                     if (row is None or task is None or len(active) != 1 or active[0]['id'] != job_id
                             or row['status'] != 'running' or row['node_id'] != binding.node_id

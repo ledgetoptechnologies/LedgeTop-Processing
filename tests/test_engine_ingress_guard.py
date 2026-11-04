@@ -20,15 +20,18 @@ class GuardTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name).resolve()
-        self.paths = patch('processing.node_gate.canonical_gate_path', return_value=self.root / 'gate')
+        self.paths = patch('processing.node_gate.canonical_gate_path',
+            side_effect=lambda engine_id: self.root / 'gates' / engine_id)
         self.paths.start()
-        self.queue = Queue(self.root / 'queue', viewer_enabled=True)
+        self.queue = Queue(self.root / 'queue', viewer_enabled=True, node_ids=('cluster', 'main'))
         self.store = TaskStore(self.queue, self.root / 'inputs')
         self.task = str(uuid.uuid4()); self.engine = str(uuid.uuid4())
         self.store.initialize(self.task, 'synthetic guard fixture', [], None, 'production')
         self.store.upload(self.task, 'fixture.jpg', io.BytesIO(b'fixture'), 7)
         self.store.commit(self.task)
-        self.claim = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': 'cluster', 'profiles': [VIEWER_PROFILE]})
+        self.task_job_id = self.store.task(self.task)['job_id']
+        self.claim = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': 'cluster',
+            'profiles': [VIEWER_PROFILE], 'expectedJobId': self.task_job_id})
         self.store.update(self.task, stage='running', phase='init_pending', node_id='cluster',
                           engine_uuid=self.engine, claim_token=self.claim['claimToken'])
         self.calls = []
@@ -102,6 +105,34 @@ class GuardTests(unittest.TestCase):
         self.store.update(self.task, phase='commit_pending')
         self.guard.mutate('POST', '/task/new/commit/' + self.engine, self.headers())
         self.assertEqual(len(self.calls), 3)
+
+    def test_distinct_node_engine_can_mutate_while_cluster_engine_is_running(self):
+        identifier = str(uuid.uuid4())
+        self.store.initialize(identifier, 'second synthetic node job', [], None, 'production')
+        self.store.upload(identifier, 'second.jpg', io.BytesIO(b'second'), 6)
+        self.store.commit(identifier)
+        task_job_id = self.store.task(identifier)['job_id']
+        claim = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': 'main',
+                                  'profiles': [VIEWER_PROFILE], 'expectedJobId': task_job_id})
+        self.assertIsNotNone(claim)
+        engine_uuid = str(uuid.uuid4())
+        self.store.update(identifier, stage='running', phase='init_pending', node_id='main',
+                          engine_uuid=engine_uuid, claim_token=claim['claimToken'])
+        binding = Binding('synthetic-engine-main', 'main', self.queue.authority_id,
+            'http://127.0.0.1:18081', 1, self.server.server_port,
+            'coordinator-' + 'd' * 40, 'management-' + 'e' * 40, 'backend-' + 'f' * 40)
+        with NodeGate(binding.engine_id) as gate:
+            gate.provision('main', binding.coordinator_origin, self.queue.authority_id)
+        guard = EngineIngressGuard(self.queue, binding, owner_pin=self.owner_pin,
+            engine_probe=lambda _: binding.engine_id)
+        headers = {'Authorization': 'Bearer ' + binding.coordinator_secret,
+            'X-LedgeTop-Job': claim['id'], 'X-LedgeTop-Claim': claim['claimToken'],
+            'Set-UUID': engine_uuid}
+        self.assertEqual(guard.mutate('POST', '/task/new/init', list(headers.items()), b'{}'),
+                         (200, b'{"success":true}'))
+        self.assertEqual(self.queue.get(self.claim['id'])['status'], 'running')
+        with NodeGate(binding.engine_id) as gate:
+            self.assertEqual(gate.snapshot()['reservation']['job']['nodeId'], 'main')
 
     def test_database_and_gate_stay_owned_during_forward(self):
         observed = []

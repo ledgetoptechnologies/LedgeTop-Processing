@@ -156,9 +156,17 @@ class RecoveryTests(unittest.TestCase):
             with self.queue._db() as db:db.execute('UPDATE reference_jobs SET phase=?,error=?',(phase,error))
             self.assertEqual(self.call('POST','recover',self.request()).status,409)
 
-    def test_another_occupied_slot_blocks_resume(self):
+    def test_another_node_occupied_slot_does_not_block_resume(self):
         with self.queue._db() as db:
             db.execute("INSERT INTO jobs(id,request_id,environment,profile,status,node_id) VALUES(?,?,'production','treedar-synthetic-v1','held','main')",(str(uuid.uuid4()),str(uuid.uuid4())))
+        self.assertEqual(self.call('POST','recover',self.request()).status,200)
+        with self.queue._db() as db:
+            other = db.execute("SELECT status FROM jobs WHERE node_id='main'").fetchone()
+        self.assertEqual(other['status'], 'held')
+
+    def test_same_node_occupied_slot_still_blocks_resume(self):
+        with self.queue._db() as db:
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status,node_id) VALUES(?,?,'production','treedar-synthetic-v1','held','cluster')",(str(uuid.uuid4()),str(uuid.uuid4())))
         self.assertEqual(self.call('POST','recover',self.request()).status,409)
 
     def test_maintenance_revision_race_refuses_without_touching_job(self):

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from processing.prototype import Queue
 from processing.reference_delivery import DeliveryReceiver, BINDING
-from processing.reference_protocol import digest, validate_submission
+from processing.reference_protocol import digest, manifest_sha256, validate_submission
 from processing.reference_store import ReferenceStore
 from processing.reference_worker_api import ReferenceWorkerAPI, PREFIX
 from processing.reference_failure import FailureOutbox, make_failure
@@ -22,6 +22,7 @@ VIEWER = "synthetic-viewer-token-0003"
 class ReferenceWorkerAPITests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
+        self.extra_queues = []
         self.queue = Queue(self.directory.name, reference_enabled=True)
         self.store = ReferenceStore(self.queue)
         self.fixture = json.loads((Path(__file__).resolve().parents[1] /
@@ -35,6 +36,8 @@ class ReferenceWorkerAPITests(unittest.TestCase):
         self.api = ReferenceWorkerAPI(self.store, DeliveryReceiver(self.store), bearer_workers=self.identities)
 
     def tearDown(self):
+        for queue in reversed(self.extra_queues):
+            queue.close()
         self.queue.close()
         self.directory.cleanup()
 
@@ -88,6 +91,43 @@ class ReferenceWorkerAPITests(unittest.TestCase):
                          {"workerInstanceId": "spoofed"}, {"localPath": "C:/private/input"}):
             self.assertEqual(self.request("POST", "/claim", {**payload, **mutation}).status, 400)
         self.assertNotIn(WORKER, json.dumps(claim))
+
+    def test_main_worker_discovers_and_claims_eligible_head_while_cluster_runs(self):
+        queue = Queue(Path(self.directory.name) / 'multi-node', reference_enabled=True,
+                      node_ids=('cluster', 'main'))
+        self.extra_queues.append(queue)
+        store = ReferenceStore(queue, local_max_photos=1, main_node_id='main')
+        small_raw = copy.deepcopy(self.fixture['submission'])
+        small_raw['submissionId'] = str(uuid.uuid4())
+        small = store.submit(validate_submission(small_raw, environment='production',
+            capability_fingerprint=small_raw['capabilityFingerprint']))[0]
+        large_raw = copy.deepcopy(self.fixture['submission'])
+        large_raw['submissionId'] = str(uuid.uuid4())
+        second = copy.deepcopy(large_raw['manifest']['objects'][0])
+        second.update(id='image-2', name='image-2.jpg')
+        large_raw['manifest']['objects'].append(second)
+        large_raw['manifest']['objectCount'] = 2
+        large_raw['manifest']['totalBytes'] *= 2
+        large_raw['manifest']['inputCounts']['images'] = 2
+        large_raw['manifest']['sha256'] = manifest_sha256(large_raw['manifest'])
+        large = store.submit(validate_submission(large_raw, environment='production',
+            capability_fingerprint=large_raw['capabilityFingerprint']))[0]
+        store.claim(small['jobId'], node_id='cluster', worker_id='cluster-worker',
+            worker_instance_id='cluster-instance', claim_request_id='cluster-claim')
+        api = ReferenceWorkerAPI(store, DeliveryReceiver(store), bearer_workers={
+            WORKER: dict(node_id='cluster', worker_id='cluster-worker', worker_instance_id='cluster-instance'),
+            OTHER: dict(node_id='main', worker_id='main-worker', worker_instance_id='main-instance')})
+
+        discovered = api.handle('GET', PREFIX + '/next', {'Authorization': 'Bearer ' + OTHER},
+                                protected_transport=True)
+        self.assertEqual(discovered.status, 200)
+        self.assertEqual(discovered.body['job']['jobId'], large['jobId'])
+        claimed = api.handle('POST', PREFIX + '/claim', {'Authorization': 'Bearer ' + OTHER},
+            json.dumps({'jobId': large['jobId'], 'claimRequestId': 'main-claim'}).encode(),
+            protected_transport=True)
+        self.assertEqual(claimed.status, 200, claimed.body)
+        self.assertEqual(queue.get(small['jobId'])['status'], 'running')
+        self.assertEqual(queue.get(large['jobId'])['nodeId'], 'main')
 
     def test_terminal_acceptance_relay_requires_exact_worker_claim(self):
         claim = self.claim()

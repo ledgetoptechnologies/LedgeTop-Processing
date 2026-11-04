@@ -198,8 +198,9 @@ class ClaimRecoveryService:
                 return self._receipt(old,state['claim'])
             if not state['eligible'] or request['coordinatorEpoch']!=self._epoch or request['expectedNodeRevision']!=state['node']['revision']:
                 raise Conflict('recovery startup or maintenance state changed')
-            occupied=db.execute("SELECT id FROM jobs WHERE status IN ('running','held')").fetchall()
-            if len(occupied)!=1 or occupied[0]['id']!=job_id:raise Conflict('recovery global slot changed')
+            occupied=db.execute("SELECT id FROM jobs WHERE node_id=? AND status IN ('running','held')",
+                (identity['node_id'],)).fetchall()
+            if len(occupied)!=1 or occupied[0]['id']!=job_id:raise Conflict('recovery node slot changed')
             claim=state['claim'];physical=self.bindings[identity['node_id']];reservation=state['reservation']
             expected={key:claim[key] for key in ('jobId','generation','environment','nodeId','workerId','workerInstanceId',
                 'authorityId','claimRequestId','claimTokenSha256','manifestSha256','pipelineDigest')}
