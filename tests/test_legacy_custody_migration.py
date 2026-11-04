@@ -1,12 +1,19 @@
 """Explicit, fail-closed migration of old same-version custody sidecars."""
 import json
+import os
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
+from processing.app import make_handler
+from processing.config import from_environment
 from processing.maintenance import Conflict
 from processing import viewer_service as service_module
 from processing.viewer_result_adoption import CUSTODY_INTENT, CUSTODY_LEGACY_BACKUP, CUSTODY_NAME
 from tests import test_eager_custody_gap as eager
+from tests import test_viewer_parallel_dispatch as startup_fixture
+from tests.test_service import start_server
 
 
 class LegacyCustodyMigration(unittest.TestCase):
@@ -118,6 +125,46 @@ class LegacyCustodyMigration(unittest.TestCase):
             self.service._take_eager_custody(self.identifier, None)
         self.assertGreaterEqual(check.call_count, 1)
         self.assertTrue(self.service.store.custody(self.case.fixture.task(self.identifier))['checked'])
+
+    def test_http_operator_migrates_legacy_but_api_token_cannot(self):
+        self.install()
+        startup = startup_fixture.StartupTests('test_invalid_values_refuse')
+        startup.setUp()
+        self.addCleanup(startup.doCleanups)
+        startup.state.mkdir()
+        startup.env.update(PROCESSING_PROTOTYPE_OPERATOR_TOKEN='o' * 32,
+                           PROCESSING_VIEWER_EAGER_RESULT_CUSTODY='1',
+                           PROCESSING_VIEWER_EAGER_CUSTODY_RESERVE_BYTES='7',
+                           PROCESSING_VIEWER_EAGER_CUSTODY_MAX_BYTES='9')
+        # Use the real HTTP handler with this test's real ViewerService/Queue;
+        # only construction is substituted to avoid a second engine instance.
+        with patch.dict(os.environ, startup.env, clear=True), patch.object(service_module, 'ViewerService', return_value=self.service):
+            handler = make_handler(from_environment())
+        server = start_server(handler)
+        try:
+            url = 'http://127.0.0.1:%d/v1/prototype/jobs/%s/custody/migrate-legacy' % (server.server_port, self.task['job_id'])
+            def post(token):
+                req = Request(url, data=b'{"note":"reviewed"}', headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+                try:
+                    with urlopen(req, timeout=5) as response:
+                        return response.status, json.loads(response.read())
+                except HTTPError as error:
+                    return error.code, json.loads(error.read())
+            self.assertEqual(post(startup.env['PROCESSING_API_TOKEN'])[0], 401)
+            status, body = post('o' * 32)
+            self.assertEqual(status, 200)
+            self.assertEqual(body['resultCustody']['state'], 'refused')
+            self.assertEqual(self.case.fixture.task(self.identifier)['error'], CUSTODY_INTENT)
+            backup = self.case.directory(self.identifier) / CUSTODY_LEGACY_BACKUP
+            self.assertEqual(json.loads(backup.read_text()), self.old)
+        finally:
+            server.shutdown()
+            server.server_close()
+            handler.prototype_queue.close()
+        self.case.restart()
+        self.assertEqual(self.case.fixture.task(self.identifier)['error'], CUSTODY_INTENT)
+        self.assertEqual(json.loads(backup.read_text()), self.old)
+        self.assertEqual(self.case.service.store.custody(self.case.fixture.task(self.identifier))['state'], 'refused')
 
 
 if __name__ == '__main__':
