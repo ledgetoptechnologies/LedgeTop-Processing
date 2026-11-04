@@ -10,6 +10,13 @@ import json
 import sqlite3
 from pathlib import Path
 
+REFERENCE_TABLES = frozenset({
+    'reference_acceptances', 'reference_claims', 'reference_jobs',
+    'reference_outbox', 'reference_terminal_acceptances',
+    'reference_transfer_grants', 'reference_worker_failures',
+    'reference_worker_receipts',
+})
+
 
 def inspect_snapshot(path):
     path = Path(path).absolute()
@@ -25,7 +32,7 @@ def inspect_snapshot(path):
         if db.execute('PRAGMA quick_check').fetchall() != [('ok',)]:
             raise ValueError('database integrity check failed')
         names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        expected = {'jobs', 'viewer_tasks', 'coordinator_identity', 'coordinator_authority_lease', 'reference_jobs'}
+        expected = {'jobs', 'viewer_tasks', 'coordinator_identity', 'coordinator_authority_lease'} | REFERENCE_TABLES
         if not expected <= names:
             raise ValueError('required tables missing')
         reference = {}
@@ -35,13 +42,18 @@ def inspect_snapshot(path):
             quoted = '"' + name.replace('"', '""') + '"'
             reference[name] = db.execute('SELECT COUNT(*) FROM ' + quoted).fetchone()[0]
         jobs = dict(db.execute('SELECT status, COUNT(*) FROM jobs GROUP BY status'))
-        viewer = dict(db.execute('SELECT phase, COUNT(*) FROM viewer_tasks GROUP BY phase'))
-        if any(not isinstance(value, str) for value in (*jobs, *viewer)):
+        viewer = db.execute('SELECT phase, stage, COUNT(*) FROM viewer_tasks GROUP BY phase, stage').fetchall()
+        if any(not isinstance(value, str) for value in jobs) or any(
+                not isinstance(phase, str) or not isinstance(stage, str) for phase, stage, _ in viewer):
             raise ValueError('unrecognized state')
         authority_count = db.execute('SELECT COUNT(*) FROM coordinator_identity').fetchone()[0]
         lease_count = db.execute('SELECT COUNT(*) FROM coordinator_authority_lease').fetchone()[0]
+        if authority_count != 1 or lease_count != 1:
+            raise ValueError('authority or lease marker missing or ambiguous')
         return {'referenceTableCounts': reference, 'jobStatusCounts': jobs,
-                'viewerPhaseCounts': viewer, 'authorityRows': authority_count,
+                'viewerPhaseStageCounts': [{'phase': phase, 'stage': stage, 'count': count}
+                                           for phase, stage, count in viewer],
+                'authorityRows': authority_count,
                 'authorityLeaseRows': lease_count,
                 'snapshotHasNoReferenceRows': all(count == 0 for count in reference.values()),
                 'snapshotHasNoActiveJobs': not any(count for status, count in jobs.items()

@@ -35,10 +35,13 @@ out. Preserve the reference config and credentials without displaying them.
    immutable image and backup identities, not client data.
 4. Run `python -m ops.reference_inventory_preflight <offline-sqlite-backup>`
    on that backup. It is read-only and advisory. Review every returned count,
-   unknown reference table, terminal Viewer state and authority/lease row; it
+   unknown reference table, Viewer phase **and** stage, and authority/lease row; it
    cannot attest file custody, network clients, the active gates, a stable
    daemon, or that the backup came from the intended live volume. A missing
-   table, WAL/journal beside the backup, or inspection error is a hold.
+   known reference table, authority/lease singleton, WAL/journal beside the
+   backup, or inspection error is a hold. The known eight-table set reflects
+   the observed schema, not a claim that newer tables cannot exist; any
+   additional reference tables are counted as well.
 5. Recheck node identity and inventory order. Explicitly map the existing
    `cluster` physical host and preserve its 1,000-photo maximum; configure the
    main node's own capacity and capabilities. The candidate's durable queue,
