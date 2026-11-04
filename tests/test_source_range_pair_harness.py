@@ -373,13 +373,8 @@ class SourceRangePairHarnessTests(unittest.TestCase):
 
     # Failure classes ------------------------------------------------------
 
-    # Known defect in #342 @ 1c79a8af, found by this test: the unbuffered
-    # stream.write() return value is not checked, so on ENOSPC a short write of a
-    # range is fsynced and committed with the full chunk hash. The next run then
-    # refuses permanently ("committed source bytes are missing or corrupt").
-    # Source bytes are unaffected. Remove expectedFailure when the client checks
-    # the written length before committing.
-    @unittest.expectedFailure
+    # ENOSPC can leave a partial range on disk. The client must keep that range
+    # uncommitted, then reconcile and resume it after space is available.
     def test_destination_enospc_holds_then_resumes_without_recharge(self):
         small = os.environ.get('SOURCE_RANGE_SMALL_TMPFS')
         if not small:
