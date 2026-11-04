@@ -28,7 +28,8 @@ from processing.config import Config, from_environment
 from processing.maintenance import Conflict
 from processing.prototype import Queue
 from processing.viewer_limits import EAGER_CUSTODY_MAX_BYTES, EAGER_CUSTODY_RESERVE_BYTES
-from processing.viewer_result_adoption import CUSTODY_INTENT, CUSTODY_NAME, RESULT_CHANGED
+from processing.viewer_result_adoption import (CUSTODY_INTENT, CUSTODY_NAME, IDENTITY_MISMATCH, IDENTITY_UNAVAILABLE,
+                                               RESULT_CHANGED)
 from processing import viewer_service as service_module
 from processing.viewer_service import (CENSUS_RETAINED_FILE_BYTES, EAGER_DEFERRED_RETRY_SECONDS, EAGER_FETCH_CONCURRENCY,
                                        ENGINE_MISSING_POLLS, EngineUnavailable, NODE_LOST_POLLS, NativeEngine)
@@ -152,6 +153,12 @@ class Blocked:
         self.engine.download = self.original
 
 
+def reported_identity(task):
+    """What NodeODM's info says of a task it ran from these inputs."""
+    return {'dateCreated': 1700000000000, 'imagesCount': task['images_count'],
+            'options': [{'name': item['name'], 'value': item['value']} for item in task['options']]}
+
+
 class StalledOrigin:
     """A real loopback engine that answers a download, then stops sending.
 
@@ -209,7 +216,7 @@ def coordinator_for(service, queue):
 WEDGED_WRITER = """
 import json, sys, threading
 from processing.viewer_service import NativeEngine
-from tests.test_eager_custody_gap import EagerCustody, StalledOrigin, coordinator_for
+from tests.test_eager_custody_gap import EagerCustody, StalledOrigin, coordinator_for, reported_identity
 
 class Opaque:
     def __init__(self, response):
@@ -242,7 +249,8 @@ code = service.run(stop)
 task = case.fixture.task(identifier)
 print(json.dumps({'code': code, 'alive': fetch.is_alive(), 'state': service.health()['state'],
                   'reason': service.health()['reason'], 'root': str(case.fixture.root), 'identifier': identifier,
-                  'engine': task['engine_uuid'], 'node': task['node_id']}), flush=True)
+                  'engine': task['engine_uuid'], 'node': task['node_id'],
+                  'identity': reported_identity(task)}), flush=True)
 sys.stdin.read()
 """
 
@@ -251,7 +259,7 @@ KILLED_AFTER_COMMIT = """
 import json, os, signal
 from unittest.mock import patch
 from processing.viewer_tasks import TaskStore
-from tests.test_eager_custody_gap import EagerCustody
+from tests.test_eager_custody_gap import EagerCustody, reported_identity
 
 case = EagerCustody('test_outage_after_completion_keeps_the_result')
 case.setUp()
@@ -260,7 +268,7 @@ case.service.tick()
 case.fixture.finish(identifier)
 task = case.fixture.task(identifier)
 print(json.dumps({'root': str(case.fixture.root), 'identifier': identifier, 'engine': task['engine_uuid'],
-                  'node': task['node_id']}), flush=True)
+                  'node': task['node_id'], 'identity': reported_identity(task)}), flush=True)
 commit = TaskStore.complete_engine_task
 
 def commit_then_die(*args, **kwargs):
@@ -281,7 +289,19 @@ class EagerCustody(unittest.TestCase):
         self.fixture.config.viewer_eager_result_custody = True
         self.fixture.config.viewer_eager_custody_reserve_bytes = 1
         self.fixture.config.viewer_eager_custody_max_bytes = 1024 ** 3
+        for engine in self.fixture.engines.values():
+            self.reports_identity(engine)
         self.restart()
+
+    @staticmethod
+    def reports_identity(engine):
+        initialize = engine.initialize
+
+        def initialized(task):
+            initialize(task)
+            engine.tasks[task['engine_uuid']].update(processingTime=5000, identity=reported_identity(task))
+
+        engine.initialize = initialized
 
     @property
     def service(self):
@@ -891,6 +911,105 @@ class EagerCustody(unittest.TestCase):
         self.assertNotIn('ledgetopResultCustody', self.service.info(identifier))
         self.assertFalse((self.directory(identifier) / CUSTODY_NAME).exists())
 
+    def engine_task(self, identifier):
+        task = self.fixture.task(identifier)
+        return self.engine(identifier).tasks[task['engine_uuid']]
+
+    def assert_unavailable_and_lazy(self, identifier, reason):
+        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': reason})
+        self.assertEqual(self.record(identifier)['archive'], None)
+        self.assertEqual(self.service.store.pending_custody(), [])
+        self.assert_job_succeeded(identifier)
+        with self.service.download(identifier)[0] as stream:
+            self.assertEqual(stream.read(), self.engine(identifier).archive)
+        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': reason})
+
+    def test_a_code_40_missing_any_evidence_binds_nothing(self):
+        for field in ('dateCreated', 'imagesCount', 'options', 'processingTime'):
+            with self.subTest(field):
+                identifier = self.finished(wait=False)
+                self.engine_task(identifier).pop(field, None)
+                self.engine_task(identifier)['identity'].pop(field, None)
+                self.service.tick()
+                self.join()
+                self.assertEqual(self.engine(identifier).download_calls, 0)
+                self.assert_no_half_archive(identifier)
+                self.assert_unavailable_and_lazy(identifier, IDENTITY_UNAVAILABLE)
+                self.engine(identifier).download_calls = 0
+
+    def test_a_code_40_disagreeing_with_the_submission_binds_nothing(self):
+        for change in ({'imagesCount': 2}, {'options': [{'name': 'pc-ept', 'value': False}]}):
+            with self.subTest(change):
+                identifier = self.finished(wait=False)
+                self.engine_task(identifier)['identity'].update(change)
+                self.service.tick()
+                self.join()
+                self.assertEqual(self.engine(identifier).download_calls, 0)
+                self.assert_unavailable_and_lazy(identifier, IDENTITY_MISMATCH)
+                self.engine(identifier).download_calls = 0
+
+    def test_evidence_vanishing_during_the_transfer_publishes_nothing(self):
+        identifier = self.finished(wait=False)
+        engine = self.engine(identifier)
+        original = engine.download
+
+        def download(task_id):
+            del engine.tasks[task_id]['identity']['dateCreated']
+            return original(task_id)
+
+        engine.download = download
+        self.service.tick()
+        self.join()
+        self.assert_no_half_archive(identifier)
+        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': IDENTITY_UNAVAILABLE})
+        self.assertFalse(self.record(identifier)['checked'])
+
+    def test_a_verified_record_holds_a_complete_checked_binding(self):
+        identifier = self.finished()
+        record = self.record(identifier)
+        self.assertEqual((record['state'], record['checked']), ('verified', True))
+        self.assertTrue(all(value is not None for value in record['result'].values()))
+
+    def test_viewer_bytes_are_verified_only_if_the_same_run_is_still_reported(self):
+        identifier = self.finished(wait=False)
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
+            self.service.tick()
+        with self.service.download(identifier)[0]:
+            pass
+        self.engine_task(identifier)['processingTime'] = 9000
+        self.service.tick()
+        self.join()
+        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': RESULT_CHANGED})
+        self.assertEqual((self.directory(identifier) / 'all.zip').read_bytes(), self.engine(identifier).archive)
+
+    def test_viewer_bytes_with_unreadable_members_are_not_verified(self):
+        identifier = self.finished(wait=False)
+        engine = self.engine(identifier)
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
+            self.service.tick()
+        with patch.object(service_module, '_check_archive_members', side_effect=EngineUnavailable('synthetic_bad_member')):
+            with self.service.download(identifier)[0]:
+                pass
+            self.service.tick()
+            self.join()
+        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': 'archive_members_unreadable'})
+        self.assertEqual((self.directory(identifier) / 'all.zip').read_bytes(), engine.archive)
+
+    def test_adoption_without_a_binding_needs_every_field_the_engine_reports(self):
+        fixture = self.fixture
+        for field in ('options', 'dateCreated'):
+            with self.subTest(field):
+                identifier, engine, engine_task = fixture.adoptable(bind=False)
+                self.assertIsNone(self.service.store.adoption(fixture.task(identifier)))
+                fixture.report_finished(identifier, engine_task)
+                del engine_task['identity'][field]
+                calls = engine.download_calls
+                fixture.observe()
+                self.assertEqual(fixture.custody(identifier), {'state': 'refused', 'reason': IDENTITY_UNAVAILABLE})
+                self.assertEqual(engine.download_calls, calls)
+                fixture.service.operator(fixture.task(identifier)['job_id'], 'resolve', fixture.OPERATOR)
+                self.service.tick()
+
     def test_every_one_of_a_thousand_finished_tasks_resumes_after_a_restart(self):
         with patch.object(self.service, '_advance_eager_custody', lambda: None):
             finished = [self.finished() for _ in range(1000)]
@@ -941,6 +1060,9 @@ class EagerCustody(unittest.TestCase):
             pass
         self.settle()
         self.assertEqual(self.engine(identifier).download_calls, 1)
+        # Those bytes came before any record of the run, so nothing vouches for them.
+        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': 'result_bound_too_late'})
+        self.assertEqual(self.service.store.pending_custody(), [])
 
     @unittest.skipIf(os.name == 'nt', 'needs SIGKILL')
     def test_a_kill_right_after_the_commit_cannot_lose_the_intent(self):
@@ -1132,7 +1254,8 @@ class EagerCustody(unittest.TestCase):
         fixture.queue.close()
         fixture.root, fixture.config.prototype_state_dir = root, str(root / 'state')
         fixture.engines[report['node']].tasks[report['engine']] = {
-            'uuid': report['engine'], 'status': {'code': 40}, 'progress': 100, 'files': {}, 'cancel_requested': False}
+            'uuid': report['engine'], 'status': {'code': 40}, 'progress': 100, 'files': {}, 'cancel_requested': False,
+            'processingTime': 5000, 'identity': report['identity']}
         fixture.make_queue_service()
 
     @unittest.skipIf(os.name == 'nt', 'proves a POSIX flock released by process death')

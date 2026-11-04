@@ -3448,7 +3448,7 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         task = self.task(identifier)
         engine = self.engines[task['node_id']]
         engine_task = engine.tasks[task['engine_uuid']]
-        engine_task['identity'] = {'dateCreated': 1700000000000, 'imagesCount': 1}
+        engine_task['identity'] = {'dateCreated': 1700000000000, 'imagesCount': 1, 'options': REQUEST_OPTIONS}
         self.polls(1)
         del engine.tasks[task['engine_uuid']]
         self.polls(ENGINE_MISSING_POLLS)

@@ -36,8 +36,9 @@ from .prototype import VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
 from .viewer_limits import EAGER_CUSTODY_MAX_BYTES, EAGER_CUSTODY_RESERVE_BYTES, MAX_UPLOAD_BYTES
-from .viewer_result_adoption import (CUSTODY_INTENT, CUSTODY_NAME, RESULT_CHANGED, bound_evidence, engine_evidence,
-                                     identity_refusal, new_adoption, new_custody)
+from .viewer_result_adoption import (CUSTODY_INTENT, CUSTODY_NAME, IDENTITY_UNAVAILABLE, RESULT_CHANGED, bound_evidence,
+                                     custody_refusal, engine_evidence, evidence_complete, identity_refusal, new_adoption,
+                                     new_custody)
 from .viewer_output_log import (OUTPUT_ANCHOR_BYTES, OUTPUT_TAIL_LINES, append_output_tail, archived_output_lines,
                                 consume_output, mark_output, mark_unverifiable, matches_anchor, new_output_log,
                                 output_digest, restart_output, skip_oversized_line)
@@ -1419,7 +1420,11 @@ class ViewerService:
             return
         try:
             if self.store.custody(task) is None:
-                self.store.save_custody(task, new_custody(self._adoption_identity(task), info))
+                record, reason = new_custody(self._adoption_identity(task), info), custody_refusal(task, info)
+                if reason is not None:
+                    record = {**record, 'state': 'unavailable', 'reason': reason}
+                    logging.getLogger(__name__).error('Viewer result custody unavailable: %s', reason)
+                self.store.save_custody(task, record)
         except Exception:
             logging.getLogger(__name__).error('Viewer result custody could not be recorded')
 
@@ -1521,18 +1526,33 @@ class ViewerService:
                 self._eager_threads.pop(identifier, None)
 
     def _record_eager_result(self, task):
-        """Recording failed at completion, so this read is the code 40."""
+        """Recording failed at completion, so this read is the code 40.
+
+        It can bind only bytes fetched after it. Any already here have no first read.
+        """
         info = self._read_status(task)
         if info['status']['code'] != 40:
             raise _CustodyRefused(RESULT_CHANGED)
+        receipt = Path(task['directory']) / 'all.zip.receipt'
+        reason = custody_refusal(task, info)
+        if reason is None and (task['archive_path'] or receipt.exists() or receipt.is_symlink()):
+            reason = 'result_bound_too_late'
+        if reason is not None:
+            raise _CustodyRefused(reason)
         record = new_custody(self._adoption_identity(task), info)
         self.store.save_custody(task, record)
         return record
 
     def _eager_result(self, task, record):
         info = self._read_status(task)
-        if info['status']['code'] != 40 or engine_evidence(info) != record['result']:
+        evidence = engine_evidence(info)
+        if info['status']['code'] != 40:
             raise _CustodyRefused(RESULT_CHANGED)
+        if not evidence_complete(evidence):
+            raise _CustodyRefused(IDENTITY_UNAVAILABLE)
+        reason = RESULT_CHANGED if evidence != record['result'] else custody_refusal(task, info)
+        if reason is not None:
+            raise _CustodyRefused(reason)
 
     def _eager_custody_bytes(self):
         """Measure the disk, as a remembered sum would drift. Outside any lock."""
@@ -1546,13 +1566,17 @@ class ViewerService:
                     pass
         return total
 
-    def _eager_guard(self, closing):
-        """Refuse before any write that a drain, the budget or the disk forbids."""
-        used = self._eager_custody_bytes()
-
+    def _eager_stop(self, closing):
         def stop():
             if self._stop.is_set() or (closing is not None and closing.is_set()):
                 raise _CustodyPaused()
+
+        return stop
+
+    def _eager_guard(self, closing):
+        """Refuse before any write that a drain, the budget or the disk forbids."""
+        used = self._eager_custody_bytes()
+        stop = self._eager_stop(closing)
 
         def guard(total, declared, reclaimable=0):
             stop()
@@ -1577,15 +1601,20 @@ class ViewerService:
         complete = task['archive_path'] or receipt_path.exists() or receipt_path.is_symlink()
         before_publish = guard = None
         started = False
-        if not complete:
+        unchecked = complete and not record['checked']
+        if unchecked:
+            # Viewer's own download, or a crash in one: nothing checked these bytes.
+            # The record came before that download, so this read closes the bracket.
+            self._eager_result(task, record)
+        elif not complete:
             stop, check = self._eager_guard(closing)
             try:
                 stale = partial.lstat().st_size
             except FileNotFoundError:
                 stale = 0
             check(0, None, stale)
-            if record['state'] != 'pending':
-                record = {**record, 'state': 'pending', 'reason': None}
+            if record['state'] != 'pending' or record['checked']:
+                record = {**record, 'state': 'pending', 'reason': None, 'checked': False}
                 self.store.save_custody(task, record)
             self._eager_result(task, record)
 
@@ -1596,8 +1625,11 @@ class ViewerService:
 
             def before_publish(partial):
                 # The same finished run on both sides of the transfer.
+                nonlocal record
                 _check_archive_members(partial, stop)
                 self._eager_result(task, record)
+                record = {**record, 'checked': True}
+                self.store.save_custody(task, record)
 
         try:
             stream, _ = self._archive_stream(task, before_publish, guard)
@@ -1608,6 +1640,11 @@ class ViewerService:
                 partial.unlink(missing_ok=True)
             raise
         with stream:
+            if unchecked:
+                try:
+                    _check_archive_members(Path(task['archive_path'] or path), self._eager_stop(closing))
+                except EngineUnavailable:
+                    raise _CustodyRefused('archive_members_unreadable') from None
             receipt = self._archive_receipt(task, receipt_path)
             self.store.save_custody(task, {**record, 'state': 'verified', 'reason': None,
                 'archive': {'bytes': receipt['bytes'], 'sha256': receipt['sha256']}})
