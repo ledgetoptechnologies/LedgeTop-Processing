@@ -21,7 +21,6 @@ from processing import reference_protocol as p
 from processing.held_source_bridge_v2_candidate import verify, DOMAIN, PROTOCOL
 from processing.held_source_bridge_journal_candidate import initialize, stage, _stage
 from processing.held_source_bridge_binding_candidate import BoundBridgeTrust, inspect as inspect_bound
-from processing.paged_snapshot_journal_candidate import ServerSnapshotTrust
 from processing.prepared_envelope_jcs_candidate import PROTOCOL as PREPARED
 from processing.prototype import Queue
 from processing.reference_store import ReferenceStore, PROFILE
@@ -236,11 +235,16 @@ class HeldSourceBridgeTests(unittest.TestCase):
                     pipelineDigest=p.digest(submission['pipeline']))
                 def pem(key):return key.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode()
                 entry=dict(coordinatorAuthorityId=queue.authority_id,principalId='viewer-a',environment='staging',
-                           issuerId='outer-issuer',keyId='outer-key',purpose='paged-source-snapshot',publicKeyPem=pem(outer_private))
-                outer_trust=ServerSnapshotTrust(authority_id=queue.authority_id,key_entries=[entry],clock_provider=lambda:1893456300000)
+                           issuerId='outer-issuer',keyId='outer-key',purpose='paged-source-snapshot-v2',publicKeyPem=pem(outer_private))
                 local_entry=dict(entry,issuerId='synthetic-issuer',keyId='synthetic-key',purpose='held-viewer-snapshot',publicKeyPem=pem(local_private))
-                trust=BoundBridgeTrust(outer=outer_trust,local_key_entries=[local_entry],revocation_epoch=1,
-                                       max_selected_bytes=200*1024**3,max_object_bytes=2*1024**3)
+                trust_args=dict(authority_id=queue.authority_id,outer_key_entries=[entry],local_key_entries=[local_entry],
+                                clock_provider=lambda:1893456300000,revocation_epoch=1,
+                                max_selected_bytes=200*1024**3,max_object_bytes=2*1024**3)
+                trust=BoundBridgeTrust(**trust_args)
+                with self.assertRaises(ValueError):
+                    BoundBridgeTrust(**{**trust_args,'outer_key_entries':[dict(entry,purpose='paged-source-snapshot')]})
+                with self.assertRaises(ValueError):
+                    BoundBridgeTrust(**{**trust_args,'local_key_entries':[dict(local_entry,publicKeyPem=pem(outer_private))]})
                 bound_args=dict(authenticated_principal='viewer-a',authenticated_environment='staging',trust=trust,
                     statement_bytes=signed(bound_outer),intent_bytes=intent2,local_signature=signature2,source_frames=source2,
                     selected_frames=selected2,evidence_frames=None,file_frames=None,processing_closure=closure2,processing_pages=pages2)
