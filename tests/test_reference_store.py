@@ -1485,22 +1485,40 @@ class InventorySchedulingTests(unittest.TestCase):
             self.assertFalse(self.queue.staging_may_claim('cluster'))
             self.staging_stays_queued(staging)
             self.assertEqual(self.claim(production, 'node-2')['nodeId'], 'node-2')
-            self.staging_stays_queued(staging)
+            self.assertTrue(self.queue.staging_may_claim('cluster'))  # landed: it keeps only its own node
         self.each_pair(check, 5, production_kinds=('reference',))
 
-    def test_running_or_held_production_still_blocks_staging_on_idle_nodes(self):
+    def test_running_production_leaves_other_idle_nodes_to_staging(self):
         for kind in ('reference', 'viewer'):
-            for status in ('running', 'held'):
-                with self.subTest(staging=kind, status=status):
-                    running = self.reference(5, environment='production')
-                    self.assertIsNotNone(self.claim(running, 'node-2'))
-                    self.reference(5, environment='production')
-                    staging = self.job_of(kind, 1, 'staging')
-                    if status == 'held':
-                        self.queue.operator(running['jobId'], 'hold', {'note': 'inspect'})
-                    self.assertFalse(self.queue.staging_may_claim('cluster'))
-                    self.staging_stays_queued(staging)
-                self.clear_jobs()
+            with self.subTest(staging=kind):
+                running = self.reference(5, environment='production')
+                self.assertIsNotNone(self.claim(running, 'node-2'))
+                self.reference(5, environment='production')  # oversized for cluster, waits for main
+                self.job_of(kind, 1, 'staging')
+                self.assertTrue(self.queue.staging_may_claim('cluster'))
+                self.assertFalse(self.queue.staging_may_claim('node-2'))
+            self.clear_jobs()
+
+    def test_running_production_still_yields_to_queued_production_that_fits(self):
+        running = self.reference(5, environment='production')
+        self.assertIsNotNone(self.claim(running, 'node-2'))
+        fitting = self.reference(1, environment='production')  # fits cluster, so it keeps priority
+        staging = self.job_of('reference', 1, 'staging')
+        self.assertFalse(self.queue.staging_may_claim('cluster'))
+        self.assertEqual(self.claim(fitting, 'cluster')['jobId'], fitting['jobId'])
+        self.assertEqual(self.status(staging), 'queued')
+
+    def test_held_production_still_blocks_staging_on_idle_nodes(self):
+        for kind in ('reference', 'viewer'):
+            with self.subTest(staging=kind):
+                held = self.reference(5, environment='production')
+                self.assertIsNotNone(self.claim(held, 'node-2'))
+                self.reference(5, environment='production')
+                staging = self.job_of(kind, 1, 'staging')
+                self.queue.operator(held['jobId'], 'hold', {'note': 'inspect'})
+                self.assertFalse(self.queue.staging_may_claim('cluster'))
+                self.staging_stays_queued(staging)
+            self.clear_jobs()
 
     def test_racing_staging_past_production_keeps_one_job_per_node(self):
         for round_number in range(12):

@@ -364,10 +364,14 @@ class Queue(Maintenance):
     def _staging_may_pass(self, db, node_id):
         """Prove staging on this node takes nothing queued production could use.
 
-        Running or held production still blocks staging on every node. Queued
-        production blocks it unless each job is proven unable to run here.
+        Held production blocks staging on every node until it is resolved. With
+        per-node slots, running production keeps only its own node; one shared
+        slot still waits for it. Queued production blocks staging unless each
+        job is proven unable to run here.
         """
-        if db.execute("SELECT 1 FROM jobs WHERE environment='production' AND status IN ('running','held') LIMIT 1").fetchone():
+        blocking = ('held',) if self.per_node_slots else ('running', 'held')
+        if db.execute("SELECT 1 FROM jobs WHERE environment='production' AND status IN (%s) LIMIT 1"
+                      % ','.join('?' * len(blocking)), blocking).fetchone():
             return False
         queued = db.execute("SELECT * FROM jobs WHERE status='queued' AND environment='production'").fetchall()
         if queued and not self.per_node_slots:
