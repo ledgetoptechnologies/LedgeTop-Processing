@@ -1460,6 +1460,12 @@ class ViewerService:
         if record is None:
             # Survives a restart, as the intent does: it was never written, not lost.
             return {'state': 'pending', 'reason': 'custody_record_unwritten'} if task['error'] == CUSTODY_INTENT else None
+        if record['state'] == 'verified' and task['error'] == CUSTODY_INTENT:
+            # A previous writer left a verified claim but did not settle the
+            # durable intent. Never advertise verified before restart rechecks
+            # its bound receipt and bytes. The note may be lost at restart;
+            # this pending state remains truthful even then.
+            return {'state': 'pending', 'reason': self._eager_notes.get(task['uuid'], 'archive_verification_pending')}
         custody = {'state': record['state']}
         reason = (record['state'] == 'pending' and self._eager_notes.get(task['uuid'])) or record['reason']
         if reason is not None:
@@ -1794,7 +1800,13 @@ class ViewerService:
                     with self._verify_archive(path, receipt):
                         self.store.settle_custody(task)
                 except Conflict:
-                    self._eager_notes[identifier] = 'archive_requires_inspection'
+                    # Persist the refusal so it is visible after restart; if
+                    # the record itself cannot be written, the pending intent
+                    # and conservative status still survive.
+                    try:
+                        self._refuse_eager(task, record, 'archive_requires_inspection')
+                    except Exception:
+                        self._eager_notes[identifier] = 'archive_requires_inspection'
             return None
         try:
             if record is None or record['rebind']:

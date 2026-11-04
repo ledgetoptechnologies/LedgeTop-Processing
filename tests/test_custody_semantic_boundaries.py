@@ -50,6 +50,9 @@ class CustodySemanticBoundaries(unittest.TestCase):
             db.execute('UPDATE viewer_tasks SET error=? WHERE uuid=?', (CUSTODY_INTENT, identifier))
         service._attempt_eager_custody(identifier, None)
         self.assertEqual(self.case.fixture.task(identifier)['error'], CUSTODY_INTENT)
+        self.assertEqual(self.case.custody(identifier), {'state': 'refused', 'reason': 'custody_record_invalid'})
+        self.case.restart()
+        self.assertEqual(self.case.custody(identifier), {'state': 'refused', 'reason': 'custody_record_invalid'})
 
     def test_viewer_first_download_is_recorded_checked_when_verified(self):
         identifier = self.case.finished(wait=False)
@@ -74,8 +77,27 @@ class CustodySemanticBoundaries(unittest.TestCase):
         path.write_bytes(body)
         with self.case.fixture.queue._db() as db:
             db.execute('UPDATE viewer_tasks SET error=? WHERE uuid=?', (CUSTODY_INTENT, identifier))
+        self.assertEqual(self.case.custody(identifier), {'state': 'pending', 'reason': 'archive_verification_pending'})
         service._attempt_eager_custody(identifier, None)
         self.assertEqual(self.case.fixture.task(identifier)['error'], CUSTODY_INTENT)
+        self.assertEqual(self.case.custody(identifier), {'state': 'refused', 'reason': 'archive_requires_inspection', 'retained': True})
+        self.case.restart()
+        self.assertEqual(self.case.custody(identifier), {'state': 'refused', 'reason': 'archive_requires_inspection', 'retained': True})
+
+    def test_refusal_write_failure_never_reports_verified_even_after_restart(self):
+        identifier = self.case.finished()
+        service = self.case.service
+        path = self.case.directory(identifier) / 'all.zip.receipt'
+        receipt = json.loads(path.read_text())
+        receipt['sha256'] = '0' * 64
+        path.write_text(json.dumps(receipt))
+        with self.case.fixture.queue._db() as db:
+            db.execute('UPDATE viewer_tasks SET error=? WHERE uuid=?', (CUSTODY_INTENT, identifier))
+        with patch.object(service.store, 'save_custody', side_effect=OSError('synthetic failure')):
+            service._attempt_eager_custody(identifier, None)
+        self.assertEqual(self.case.custody(identifier), {'state': 'pending', 'reason': 'archive_requires_inspection'})
+        self.case.restart()
+        self.assertEqual(self.case.custody(identifier), {'state': 'pending', 'reason': 'archive_verification_pending'})
 
     def test_verified_sidecar_cannot_clear_intent_after_receipt_change(self):
         identifier = self.case.finished()
@@ -123,6 +145,7 @@ class CustodySemanticBoundaries(unittest.TestCase):
             self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
         self.assertIsNone(self.case.fixture.task(identifier)['error'])
+        self.assertEqual(self.case.custody(identifier), {'state': 'verified'})
 
     def test_boolean_version_and_generation_are_not_integer_identity(self):
         identity = {'task': 'task', 'generation': 1, 'job': 'job', 'node': 'node', 'engine': 'engine'}
