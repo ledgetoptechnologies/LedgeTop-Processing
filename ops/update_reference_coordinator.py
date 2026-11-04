@@ -163,6 +163,10 @@ def volume_census(root, *, uid=10001, offline=False):
     def sha(value):
         return hashlib.sha256(encode(value)).hexdigest()
     allowed = {'jobs', 'sqlite_sequence', 'coordinator_identity', 'coordinator_authority_lease', 'nodes', 'viewer_tasks', 'viewer_files', 'viewer_incarnations', 'reference_jobs', 'reference_acceptances', 'reference_outbox', 'reference_claims', 'reference_worker_receipts', 'reference_transfer_grants', 'reference_worker_failures', 'reference_terminal_acceptances', 'owned_maintenance_schedules', 'reference_viewer_receipts', 'reference_viewer_transfers', 'viewer_reservations', 'viewer_option_evidence', 'viewer_full_option_evidence', 'reference_released_claims', 'viewer_guarded_dispatch_checkpoint', 'viewer_guarded_dispatch_history'}
+    # Literal schemas are embedded so the isolated serialized helper needs no candidate imports.
+    prepared_ddl = ('CREATE TABLE reference_viewer_activation (\n job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), activation_id TEXT UNIQUE NOT NULL,\n principal_id TEXT NOT NULL, environment TEXT NOT NULL, viewer_attempt_id TEXT NOT NULL,\n binding_json TEXT NOT NULL, binding_sha256 TEXT NOT NULL,\n UNIQUE(principal_id, environment, viewer_attempt_id))', 'CREATE TABLE reference_viewer_submission_owners (\n job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), principal_id TEXT NOT NULL,\n environment TEXT NOT NULL, request_digest TEXT NOT NULL, protocol TEXT NOT NULL)', 'CREATE TABLE reference_viewer_activation_schema (\n singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=1))', 'CREATE TABLE reference_viewer_envelopes_v2 (\n job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), principal_id TEXT NOT NULL,\n environment TEXT NOT NULL, activation_id TEXT UNIQUE NOT NULL, viewer_task_id TEXT NOT NULL,\n viewer_attempt_id TEXT NOT NULL, envelope_json TEXT NOT NULL, envelope_sha256 TEXT NOT NULL,\n UNIQUE(principal_id, environment, viewer_attempt_id))', 'CREATE TABLE reference_viewer_v3_copy_hold (\n job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), envelope_sha256 TEXT NOT NULL,\n payload_json TEXT NOT NULL, payload_sha256 TEXT NOT NULL)', 'CREATE TABLE reference_viewer_v3_policy (\n job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), policy_json TEXT NOT NULL, policy_sha256 TEXT NOT NULL)')
+    prepared_names = {'reference_viewer_activation','reference_viewer_submission_owners','reference_viewer_activation_schema','reference_viewer_envelopes_v2','reference_viewer_v3_copy_hold','reference_viewer_v3_policy'}
+    allowed.update(prepared_names)
     files = []
     journals = []
     journal_files = 0
@@ -237,6 +241,24 @@ def volume_census(root, *, uid=10001, offline=False):
         names = {row[1] for row in objects if row[0] == 'table'}
         if not (not names - allowed and {'jobs', 'coordinator_identity', 'nodes', 'reference_jobs', 'viewer_tasks'} <= names):
             raise AssertionError()
+        prepared = names & prepared_names
+        if prepared and prepared != prepared_names:
+            raise AssertionError('partial prepared schema')
+        if prepared:
+            expected_db = sqlite3.connect(':memory:')
+            try:
+                for statement in prepared_ddl: expected_db.execute(statement)
+                expected_objects = [list(row) for row in expected_db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name')]
+            finally: expected_db.close()
+            normalize = lambda rows: [[*r[:3], re.sub(r'\s+', ' ', r[3]).strip() if r[3] is not None else None] for r in rows]
+            if normalize([r for r in objects if r[2] in prepared_names]) != normalize(expected_objects):
+                raise AssertionError('unreviewed prepared schema')
+            for name in sorted(prepared_names):
+                if name == 'reference_viewer_activation_schema':
+                    if [tuple(row) for row in db.execute('SELECT * FROM reference_viewer_activation_schema LIMIT 2')] != [(1,1)]:
+                        raise AssertionError('invalid prepared marker')
+                elif db.execute('SELECT 1 FROM "'+name+'" LIMIT 1').fetchone():
+                    raise AssertionError('nonempty prepared schema')
         viewer_extra = {'viewer_reservations', 'viewer_option_evidence'}
         if names & viewer_extra and not viewer_extra <= names:
             raise AssertionError('partial Viewer schema')
@@ -337,7 +359,8 @@ def volume_census(root, *, uid=10001, offline=False):
         # nonterminal task, reservation or orphaned task row holds instead.
         retained_viewer = {'viewer_tasks', 'viewer_files', 'viewer_incarnations', 'viewer_option_evidence'}
         for name in names:
-            if (name.startswith(('reference_', 'viewer_')) and tables[name]['count'] != 0 and name not in retained_viewer):
+            if (name.startswith(('reference_', 'viewer_')) and tables[name]['count'] != 0
+                    and name not in retained_viewer and name != 'reference_viewer_activation_schema'):
                 raise AssertionError('nonempty guarded table')
         if 'viewer_tasks' in names:
             if db.execute("SELECT COUNT(*) FROM viewer_tasks WHERE NOT (phase='complete' AND stage IN ('succeeded','failed','cancelled'))").fetchone()[0]:
@@ -480,7 +503,24 @@ def remove_migration(a,b):
         a['tables'][table]=json.loads(canonical(before))
 
 
-def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, allow_viewer_additions=False, allow_migration=False):
+def expected_empty_prepared_census():
+    """Exact review-only prepared schema; no authorization to run old code."""
+    import sqlite3
+    db=sqlite3.connect(':memory:')
+    try:
+        statements=('CREATE TABLE reference_viewer_activation (\n job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), activation_id TEXT UNIQUE NOT NULL,\n principal_id TEXT NOT NULL, environment TEXT NOT NULL, viewer_attempt_id TEXT NOT NULL,\n binding_json TEXT NOT NULL, binding_sha256 TEXT NOT NULL,\n UNIQUE(principal_id, environment, viewer_attempt_id))', 'CREATE TABLE reference_viewer_submission_owners (\n job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), principal_id TEXT NOT NULL,\n environment TEXT NOT NULL, request_digest TEXT NOT NULL, protocol TEXT NOT NULL)', 'CREATE TABLE reference_viewer_activation_schema (\n singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=1))', 'CREATE TABLE reference_viewer_envelopes_v2 (\n job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), principal_id TEXT NOT NULL,\n environment TEXT NOT NULL, activation_id TEXT UNIQUE NOT NULL, viewer_task_id TEXT NOT NULL,\n viewer_attempt_id TEXT NOT NULL, envelope_json TEXT NOT NULL, envelope_sha256 TEXT NOT NULL,\n UNIQUE(principal_id, environment, viewer_attempt_id))', 'CREATE TABLE reference_viewer_v3_copy_hold (\n job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), envelope_sha256 TEXT NOT NULL,\n payload_json TEXT NOT NULL, payload_sha256 TEXT NOT NULL)', 'CREATE TABLE reference_viewer_v3_policy (\n job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id), policy_json TEXT NOT NULL, policy_sha256 TEXT NOT NULL)')
+        for statement in statements:db.execute(statement)
+        db.execute('INSERT INTO reference_viewer_activation_schema VALUES(1,1)')
+        schema=[list(row) for row in db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name')]
+        tables={}
+        for name in (r[1] for r in schema if r[0]=='table'):
+            rows=[list(row) for row in db.execute('SELECT * FROM "'+name+'"')]
+            tables[name]=dict(count=len(rows),sha256=digest(rows),columns=[list(row) for row in db.execute('PRAGMA table_info("'+name+'")')])
+        return normalized_schema(schema),tables
+    finally:db.close()
+
+
+def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, allow_viewer_additions=False, allow_migration=False, allow_prepared_forward=False):
     """Compare complete censuses; allow exact empty additions only explicitly.
 
     Viewer additions are permitted for candidate verification, not the offline
@@ -493,6 +533,16 @@ def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, all
     a,b=json.loads(canonical(observed)),json.loads(canonical(baseline))
     for value in (a,b):
         if value['authorityId']!=AUTHORITY or value['sqliteQuickCheck']!='ok':raise Stopped('census_authority_or_integrity_changed')
+    prepared={'reference_viewer_activation','reference_viewer_submission_owners','reference_viewer_activation_schema','reference_viewer_envelopes_v2','reference_viewer_v3_copy_hold','reference_viewer_v3_policy'}
+    if allow_prepared_forward:
+        if prepared & set(b['tables']) or not prepared <= set(a['tables']):
+            raise Stopped('prepared_forward_only')
+        expected_schema,expected_tables=expected_empty_prepared_census()
+        if (normalized_schema([r for r in a['schema'] if r[2] in prepared]) != expected_schema
+                or {name:a['tables'][name] for name in prepared} != expected_tables):
+            raise Stopped('unreviewed_prepared_schema_or_rows')
+        a['schema']=[row for row in a['schema'] if row[2] not in prepared]
+        for name in prepared:a['tables'].pop(name)
     if allow_migration:remove_migration(a,b)
     extra={'viewer_reservations','viewer_option_evidence'}
     added=extra & set(a['tables']);prior=extra & set(b['tables'])
@@ -1018,6 +1068,8 @@ class ReferenceCoordinatorUpdate:
 
     def rollback(self,state):
         self.validate(state)
+        if any(name.startswith('reference_viewer_activation') or name in ('reference_viewer_submission_owners','reference_viewer_envelopes_v2','reference_viewer_v3_copy_hold','reference_viewer_v3_policy') for name in state.get('drained',{}).get('tables',{})):
+            raise Stopped('prepared_schema_rollback_unqualified')
         if state.get('reopeningStarted') or state.get('pendingPlan'):raise Stopped('reopen_or_schedule_uncertainty_prevents_rollback')
         with self.gate_factory() as gates:
             self.check(state,gates);self.rollback_config(state);item=self.candidate(state)
