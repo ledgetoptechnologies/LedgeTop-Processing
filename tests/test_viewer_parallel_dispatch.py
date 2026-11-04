@@ -77,8 +77,7 @@ class Harness(unittest.TestCase):
 
     def open_queue(self):
         self.queue = Queue(self.root / 'state', node_ids=('cluster', 'main'), treedar_node_ids=('main',),
-                           viewer_enabled=True, per_node_slots=self.parallel,
-                           parallel_viewer_uploads=self.parallel)
+                           viewer_enabled=True, per_node_slots=self.parallel)
         self.service = ViewerService(self.queue, self.config, engines=self.engines, probe=self.probe)
         self.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(item) for item in OPTIONS]}
         self.service._selected_options = lambda _node: [dict(item) for item in OPTIONS]
@@ -136,7 +135,7 @@ class FlagOffTests(Harness):
 
     def test_absent_configuration_keeps_synchronous_transfer_and_lock(self):
         self.assertFalse(self.service._parallel_dispatch)
-        self.assertFalse(self.queue.parallel_viewer_uploads)
+        self.assertFalse(self.service.store.parallel_dispatch)
         senders = []
         original = self.engines['cluster'].upload
         self.engines['cluster'].upload = lambda *args: (senders.append(threading.current_thread()), original(*args))
@@ -199,6 +198,33 @@ class ParallelDispatchTests(Harness):
         self.addCleanup(holder.join, WAIT)
         self.addCleanup(release.set)
         return release
+
+    def test_flag_keeps_inbound_uploads_on_the_store_lock(self):
+        """Inbound parallelism stays off until shared disk is reserved."""
+        self.assertFalse(self.queue.parallel_viewer_uploads)
+        entered, release = threading.Event(), threading.Event()
+        class SlowStream(io.BytesIO):
+            def read(self, size=-1):
+                entered.set()
+                release.wait(WAIT)
+                return super().read(size)
+        identifier = str(uuid.uuid4())
+        self.service.initialize(identifier, 'Synthetic survey', REQUEST_OPTIONS, None, 'production')
+        upload = threading.Thread(target=self.service.upload,
+                                  args=(identifier, 'photo.jpg', SlowStream(b'owned'), 5), daemon=True)
+        upload.start()
+        self.addCleanup(upload.join, WAIT)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(WAIT))
+        reader = threading.Thread(target=self.service.store.task, args=(identifier,), daemon=True)
+        reader.start()
+        reader.join(0.1)
+        self.assertTrue(reader.is_alive())
+        release.set()
+        reader.join(WAIT)
+        upload.join(WAIT)
+        self.assertFalse(reader.is_alive() or upload.is_alive())
+        self.assertEqual([item['name'] for item in self.task(identifier)['files']], ['photo.jpg'])
 
     def test_second_tick_does_not_block_during_upload(self):
         identifier = self.start_blocked()
@@ -265,6 +291,17 @@ class ParallelDispatchTests(Harness):
         self.drained()
         self.assertEqual(self.task(identifier)['job']['status'], 'running')
         self.assertIsNone(self.task(identifier)['error'])
+
+    def test_same_task_request_does_not_change_the_reason_for_a_real_hold(self):
+        self.engines['cluster'].fail = 'upload'
+        identifier = self.start_blocked()
+        fence = self.fenced(identifier)
+        self.release.set()
+        self.phase(identifier, 'held')
+        fence.set()
+        self.drained()
+        task = self.task(identifier)
+        self.assertEqual((task['job']['status'], task['error']), ('held', 'engine_submission_uncertain'))
 
     def test_late_multipart_fence_does_not_hold_job_at_claim(self):
         identifier = self.submit()
@@ -486,7 +523,7 @@ config=SimpleNamespace(prototype_state_dir=str(root/'state'),viewer_max_input_by
  local_node_url='http://synthetic-cluster.invalid:3000',local_node_token='a',main_node_url='http://synthetic-main.invalid:3000',
  main_node_token='b',local_max_photos=2,local_max_input_bytes=10**9,viewer_parallel_dispatch=True)
 queue=Queue(root/'state',node_ids=('cluster','main'),treedar_node_ids=('main',),viewer_enabled=True,
- per_node_slots=True,parallel_viewer_uploads=True)
+ per_node_slots=True)
 fleet=FakeFleet();engines={name:FakeEngine(name,fleet) for name in ('cluster','main')}
 def die(*_):os._exit(73)
 if point=='upload':engines['cluster'].upload=die
@@ -581,7 +618,28 @@ class StartupTests(unittest.TestCase):
                     make_handler(config)
         self.assertFalse(self.state.exists())
 
-    def test_startup_wires_queue_and_service_only_when_enabled(self):
+    def test_flag_with_reference_runtime_refuses_before_state(self):
+        env = {**self.env, 'PROCESSING_VIEWER_PARALLEL_DISPATCH': '1',
+               'PROCESSING_REFERENCE_CONFIG': str(Path(self.temporary.name) / 'absent.json')}
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(ValueError, 'not qualified with the reference runtime'):
+                from_environment()
+        with patch.dict(os.environ, {**env, 'PROCESSING_VIEWER_PARALLEL_DISPATCH': '0'}, clear=True):
+            self.assertIs(from_environment().viewer_parallel_dispatch, False)
+        self.assertFalse(self.state.exists())
+
+    def test_direct_config_with_reference_runtime_refuses_before_lease_or_state(self):
+        lease = Path(self.temporary.name) / 'lease'
+        config = Config(TOKEN, '', '', 800, 20000, prototype_state_dir=str(self.state), per_node_slots=True,
+                        viewer_parallel_dispatch=True, authority_lease_dir=str(lease),
+                        reference_config_path=str(Path(self.temporary.name) / 'absent.json'))
+        with patch('processing.reference_runtime.load_reference_settings',
+                   side_effect=AssertionError('no settings read')):
+            with self.assertRaisesRegex(ValueError, 'not qualified with the reference runtime'):
+                make_handler(config)
+        self.assertFalse(self.state.exists() or lease.exists())
+
+    def test_startup_wires_service_only_when_enabled_and_never_inbound(self):
         for value, expected in ((None, False), ('0', False), ('1', True)):
             env = dict(self.env)
             if value is not None:
@@ -589,8 +647,9 @@ class StartupTests(unittest.TestCase):
             with self.subTest(value=value), patch.dict(os.environ, env, clear=True):
                 handler = make_handler(from_environment())
                 try:
-                    self.assertIs(handler.prototype_queue.parallel_viewer_uploads, expected)
+                    self.assertIs(handler.prototype_queue.parallel_viewer_uploads, False)
                     self.assertIs(handler.viewer_service._parallel_dispatch, expected)
+                    self.assertIs(handler.viewer_service.store.parallel_dispatch, expected)
                 finally:
                     handler.viewer_service.close()
                     handler.prototype_queue.close()

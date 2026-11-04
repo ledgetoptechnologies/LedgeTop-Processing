@@ -22,6 +22,8 @@ def make_handler(config: Config):
     if config.viewer_parallel_dispatch is not False and (
             config.viewer_parallel_dispatch is not True or not config.per_node_slots):
         raise ValueError('parallel Viewer dispatch requires per-node slots')
+    if config.viewer_parallel_dispatch and config.reference_config_path:
+        raise ValueError('parallel Viewer dispatch is not qualified with the reference runtime')
     if config.per_node_slots and not config.node_inventory:
         from .config import require_distinct_node_hosts
         require_distinct_node_hosts(config.local_node_url, config.main_node_url)
@@ -50,7 +52,6 @@ def make_handler(config: Config):
                       reference_enabled=reference_settings is not None,
                       require_idle_existing=config.viewer_production_held,
                       per_node_slots=config.per_node_slots,
-                      parallel_viewer_uploads=config.viewer_parallel_dispatch,
                       node_capabilities={n['id']: n['capabilities'] for n in config.node_inventory} if config.node_inventory else None,
                       node_photo_limits={n['id']: n['maxPhotos'] for n in config.node_inventory} if config.node_inventory else None) if config.prototype_state_dir else None
     except BaseException:

@@ -2,11 +2,11 @@
 
 This prototype can send an already-claimed Viewer task in a dedicated thread,
 allowing the scheduler to poll or dispatch a different node while a transfer
-waits. `PROCESSING_VIEWER_PARALLEL_DISPATCH=1` enables it together with the
-inbound candidate (`parallel-inbound-candidate.md`); absent or `0` keeps the
-synchronous path. Any other value, or `1` without
-`PROCESSING_PER_NODE_SLOTS=1`, refuses startup before state is touched. No
-deployment sets it.
+waits. `PROCESSING_VIEWER_PARALLEL_DISPATCH=1` enables outbound transfers only;
+absent or `0` keeps the synchronous path. Any other value, `1` without
+`PROCESSING_PER_NODE_SLOTS=1`, or `1` with `PROCESSING_REFERENCE_CONFIG` refuses
+startup before any lease or state is touched: this mode is not qualified with
+the reference runtime. No deployment sets it.
 
 The job claim and engine UUID remain durable before transfer starts. In-flight
 submissions cannot be cancelled or operator-resolved through ViewerService:
@@ -27,11 +27,15 @@ reconciliation before maintenance can complete.
 An explicit `afterJobId` maintenance plan for the already-claimed task allows
 that task to finish submitting; node update remains blocked while it runs.
 
-With the flag off, inbound `TaskStore.upload` still holds the store-wide lock
-while reading and syncing a file, so a stalled upload can block the scheduler
-and both nodes. The flag removes that lock under the per-task fence; broker
-`update` writes bypass the fence so a same-task request cannot force a false
-hold. Safe shared-space reservation remains unimplemented.
+The flag does not enable parallel inbound uploads (`parallel-inbound-candidate.md`),
+which stay blocked until shared disk reservation exists. Inbound
+`TaskStore.upload` therefore still holds the store-wide lock while reading and
+syncing a file, with or without the flag: a stalled upload can block the
+scheduler, both nodes and a sender's next phase write. The sender waits rather
+than holds, but this remains a deployment blocker. Broker `update` and `hold`
+writes bypass the per-task fence under the flag, so a same-task request cannot
+force a false hold or stall a claim; other same-task controls get a retryable
+conflict rather than wait for a fenced request.
 
 Tests use fake engines and exact synthetic bytes. This candidate does not fence
 direct engine clients, another coordinator with separate state, or external

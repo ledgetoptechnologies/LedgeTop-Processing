@@ -73,14 +73,15 @@ def sync_directory(path):
 def task_fenced(method):
     @wraps(method)
     def call(self, identifier, *args, **kwargs):
-        # A control request can hold the scheduler's service lock. In the
-        # isolated parallel mode it must not wait for a slow upload while
+        # A control request can hold the scheduler's service lock. In either
+        # isolated parallel mode it must not wait for a fenced request while
         # holding that lock; callers get a retryable conflict instead.
-        if self.queue.parallel_viewer_uploads and method.__name__ in ('update', 'hold'):
+        parallel = self.parallel_dispatch or self.queue.parallel_viewer_uploads
+        if parallel and method.__name__ in ('update', 'hold'):
             # Broker state, never input: one store-locked transaction. A same-
             # task request must not fail the owner's write into a false hold.
             return method(self, identifier, *args, **kwargs)
-        blocking = not self.queue.parallel_viewer_uploads or method.__name__ == 'upload'
+        blocking = not parallel or method.__name__ == 'upload'
         with self._task_fence(identifier, blocking=blocking, upload=method.__name__ == 'upload'):
             return method(self, identifier, *args, **kwargs)
     return call
@@ -100,6 +101,7 @@ class TaskStore:
         if os.name != 'nt' and self.root.stat().st_mode & 0o077:
             raise ValueError('private input directory required')
         self.max_input_bytes = max_input_bytes
+        self.parallel_dispatch = False  # Outbound only; ViewerService sets it.
         self._lock = queue._viewer_store_lock
         # Claim credentials are stored in this shared database. Tighten the
         # exact existing, owned database before creating or updating secret

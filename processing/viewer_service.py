@@ -212,6 +212,7 @@ class ViewerService:
         self._dispatch_threads = {}
         if self._parallel_dispatch and not queue.per_node_slots:
             raise ValueError('parallel dispatch requires per-node slots')
+        self.store.parallel_dispatch = self._parallel_dispatch
 
     def _guard_ready(self, node_id):
         if not self._require_guard:

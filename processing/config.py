@@ -176,6 +176,8 @@ def from_environment() -> Config:
         raise ValueError('PROCESSING_VIEWER_PARALLEL_DISPATCH must be 0 or 1')
     if parallel_dispatch == '1' and per_node_slots != '1':
         raise ValueError('parallel Viewer dispatch requires per-node slots')
+    if parallel_dispatch == '1' and os.environ.get('PROCESSING_REFERENCE_CONFIG'):
+        raise ValueError('parallel Viewer dispatch is not qualified with the reference runtime')
     if inventory and (per_node_slots != '1' or os.environ.get('PROCESSING_REFERENCE_CONFIG')):
         raise ValueError('inventory requires per-node slots and no reference runtime')
     lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
