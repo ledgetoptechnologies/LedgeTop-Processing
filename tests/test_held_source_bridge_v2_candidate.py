@@ -69,6 +69,7 @@ class HeldSourceBridgeTests(unittest.TestCase):
                               ('selectedFrameStream',selected),('gcpEvidenceStream',evidence),('gcpFileStream',generated)):
             bridge[name+'Sha256'], bridge[name+'ByteCount'] = pair(payload)
         g = local['gcp']
+        self.assertEqual(g['evidenceVersion'], 'ltds-viewer-gcp-evidence-chunks-v2')
         outer = {k:v for k,v in context.items() if k not in ('localIssuerId','localKeyId','maxSelectedBytes','maxObjectBytes')}
         outer.update(protocol=PROTOCOL, schemaVersion=2, snapshotId=local['snapshotId'],
             sourcePageHashes=local['sourcePageHashes'], sourcePageBytes=[len(x)-1 for x in source.splitlines(keepends=True)],
