@@ -27,6 +27,14 @@ archive/tiles hashes and `ready_for_review`, rejects repeated invocation against
 the same root and a second root sharing the registry, and removes only its
 verified container. Fixture files and database remain for inspection.
 
+The fake runner records the exact created container ID, name, image, owner
+label, and observed `/pilot` bind source before starting it. It verifies the
+same identity, mount and stopped state before removing that container. These
+checks identify one container at one instant; they do not prevent restart or
+prove that another container or host process cannot write the pilot directory.
+The record is on the writable pilot mount and is not independently tamperproof.
+This check does not authorize WAL recovery or a live run.
+
 `inspect_real_viewer_pilot.py` is an owner-bound inspector for a pilot whose
 writers were independently confirmed stopped and SQLite fully checkpointed. It
 refuses WAL/shared-memory/journal sidecars and opens an immutable database to

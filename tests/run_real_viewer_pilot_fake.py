@@ -2,10 +2,12 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import uuid
+from pilot_container_guard import stopped_pilot
 
 IMAGE = 'sha256:e7add2a490bb17d97b485b8641bd88455fff7839ade0f5eba493c3508124d413'
 CONVERTER = {'Obj2Tiles': '3577688939806dabdf1f4620cc05debe6e178180a99bf0308f4b8483b8a36725',
@@ -38,6 +40,7 @@ def main():
         (a.converter,'/opt/obj2tiles',True),(a.data,'/pilot',False),(a.data/'registry','/pilot-registry',False)):
         cmd+=['--mount',f'type=bind,src={source},dst={target}'+(',readonly' if readonly else '')]
     cmd+=['--env','NODE_PATH=/tmp/deps/node_modules','--env','LD_LIBRARY_PATH=/opt/obj2tiles','--entrypoint','sh',IMAGE,'-c',script]
+    expected=None
     try:
         created=subprocess.run(cmd,capture_output=True,text=True,timeout=30,check=True).stdout.strip()
     except (subprocess.TimeoutExpired,subprocess.CalledProcessError):
@@ -48,7 +51,23 @@ def main():
             or item['Config']['Labels'].get('ltds.fixture.owner')!=owner):raise RuntimeError('container identity changed')
         return item
     try:
-        inspect()
+        item=inspect()
+        mounts=[mount for mount in item['Mounts'] if mount['Destination']=='/pilot']
+        if len(mounts)!=1 or os.path.normcase(os.path.normpath(mounts[0]['Source']))!=os.path.normcase(os.path.normpath(str(a.data))):
+            raise RuntimeError('pilot mount identity cannot be verified')
+        expected={'id':created,'name':name,'image':IMAGE,'owner':owner,'mountSource':mounts[0]['Source']}
+        # Record the exact supervised container before it can write the pilot.
+        # This is a fake fixture only; it does not establish a host-wide fence.
+        fd=os.open(a.data/'container-owner.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        try:
+            raw=json.dumps(expected,sort_keys=True).encode('utf-8')
+            if os.write(fd,raw)!=len(raw):raise RuntimeError('short pilot owner receipt write')
+            os.fsync(fd)
+        finally:os.close(fd)
+        if os.name=='posix':
+            fd=os.open(a.data,os.O_RDONLY|os.O_DIRECTORY)
+            try:os.fsync(fd)
+            finally:os.close(fd)
         result=subprocess.run(['docker','start','-a',created],capture_output=True,text=True,timeout=180)
         print(result.stdout[-4000:]);print(result.stderr[-4000:],file=sys.stderr)
         if result.returncode:raise RuntimeError('fake pilot failed')
@@ -56,7 +75,12 @@ def main():
         item=inspect()
         if item['State']['Running']:
             subprocess.run(['docker','stop','--time','3',created],capture_output=True,timeout=15,check=True)
-        inspect();subprocess.run(['docker','rm',created],capture_output=True,timeout=15,check=True)
+        # If the owner receipt was created, refuse to remove the fixture unless
+        # the same container and bind mount are observed stopped. This does not
+        # establish that another host process cannot write the same directory.
+        if expected is not None:stopped_pilot(inspect(),expected)
+        else:inspect()
+        subprocess.run(['docker','rm',created],capture_output=True,timeout=15,check=True)
 
 
 if __name__=='__main__': main()
