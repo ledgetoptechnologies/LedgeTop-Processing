@@ -1,13 +1,9 @@
-# Parallel scheduler Viewer result retry fixture
+# Paired Viewer real mesh derivative fixture
 
-This isolated synthetic fixture pairs Processing `6912439f8c859bf60a9d3281014f27de0e5a78a7` with Viewer `ad0bf46611de44545825db9147e90b68195902ab`. It uses two fake engines and one job, simulated Viewer storage headroom, and a placeholder ZIP. Per-node slots and parallel Viewer dispatch are enabled, with distinct non-routable fake node addresses.
+This bounded network-isolated fixture uses Processing `6912439f8c859bf60a9d3281014f27de0e5a78a7` and Viewer `ad0bf46611de44545825db9147e90b68195902ab` with fake engines. It builds an invented textured square as matching OBJ and GLB, and uses a placeholder EPT header. The fixture interrupts the engine archive download after seven bytes, verifies that Viewer has not committed a receipt, retries, and checks all six ingested receipt hashes against extracted bytes.
 
-Real Viewer submission, coordinator HTTP and task storage, and Viewer SQLite ingestion are exercised. After simulated engine completion, a fake engine archive stream is interrupted after seven bytes. The fixture verifies the coordinator retains its partial and intent, retries, then verifies that Viewer ingests a receipt whose archive digest matches the retained coordinator archive.
+The actual Viewer derivative worker then invokes Obj2Tiles 1.6.2 with pinned source/patch metadata and libktx copied read-only from an existing staging image, validates the generated tiles through the Viewer's actual audit and registration code, and reaches `ready_for_review`. It verifies the registered tileset digest and reads the same status and model version through a second SQLite connection. This is not a real photogrammetry or point-cloud validity test, does not prove physical power-loss durability, production source equivalence or deployment readiness, and does not publish a model. Storage headroom, processing input photos, and NodeODM execution are simulated.
 
-The fixture creates a uniquely named, labeled network-isolated Docker container, mounts source and npm cache read-only, and removes the container after verifying ownership. It does not prove real-node processing, photogrammetry, actual storage capacity, power-loss behavior, node restart, simultaneous jobs, or deployment readiness. Execute only with trusted exact-source trees and an existing offline npm cache:
+The test uses the local node:24-bookworm image digest from the runner, a read-only copy of Viewer source and npm cache, plus a task-owned converter directory. The converter and its `libktx.so` and `build-info.json` must match the exact recorded SHA-256 digests in the runner; the binary came from the older staging container, not the candidate Viewer image. No existing staging service is modified.
 
-```
-python tests/run_legacy_viewer_pair.py --processing <absolute fixture worktree> --viewer <absolute pinned Viewer worktree> --npm-cache <absolute npm cache>
-```
-
-A local run of this exact fixture passed on 2026-11-04: the seven-byte interruption produced no Viewer archive receipt, retry ingested six verified archive entries, and the attempt reached derivatives. This does not establish completion of derivative processing.
+A bounded local run on 2026-11-04 passed with `ready_for_review`, six checked receipt entries, a registered tileset whose bytes match its digest, and matching state read through a second database connection. It created and removed a uniquely labeled disposable test container.
