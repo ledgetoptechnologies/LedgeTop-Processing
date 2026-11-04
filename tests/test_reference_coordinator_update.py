@@ -810,6 +810,18 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.assertEqual(self.updater.rollback(self.state)['phase'],'rolled_back')
         self.assertEqual([call[0] for call in self.transport.calls],['stop','start'])
 
+    def test_lease_backed_predecessor_rollback_preserves_original_mount(self):
+        lease='/private/authority';binding={'path':lease,'device':1,'inode':2,'lockDevice':1,'lockInode':3}
+        self.updater.lease_dir=lease;self.state['leaseBinding']=binding
+        self.transport.old['Mounts'].append(dict(Type='bind',Source=lease,Destination='/run/ledgetop-authority-lease',RW=True))
+        self.transport.old['Config']['Env'].append('PROCESSING_AUTHORITY_LEASE_DIR=/run/ledgetop-authority-lease')
+        self.transport.loss='stop'
+        with patch.object(module,'lease_binding',return_value=binding):
+            with self.assertRaises(OSError):self.activate()
+            self.assertEqual(self.updater.rollback(self.state)['phase'],'rolled_back')
+        self.assertTrue(self.transport.old['State']['Running'])
+        self.assertEqual([call[0] for call in self.transport.calls],['stop','start'])
+
     def test_lost_old_rename_response_never_repeats_rename_or_creates_candidate(self):
         self.transport.loss='rename'
         with self.assertRaises(OSError):self.activate()

@@ -986,7 +986,7 @@ class ReferenceCoordinatorUpdate:
                 raise Stopped('offline_rollback_refused') from None
             old=self.t.inspected(OLD_ID)
             if old['Image']!=OLD_IMAGE or old['Name'] not in ('/'+NAME,'/'+state['rollbackName']):raise Stopped('exact_old_reference_rollback_only')
-            self.t.facts(old,reference=True)
+            self.facts(old)
             if application_environment(self.t,old,lease=self.lease_dir is not None)!=state['applicationEnvironmentSha256']:raise Stopped('rollback_application_environment_changed')
             if item is not None and item['Name']=='/'+NAME:
                 self.save(state,'rollback_rename_candidate_pending');self.mutation(state,gates,'rename',item['Id'],state['failedName'])
