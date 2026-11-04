@@ -63,6 +63,26 @@ class RehearsalDrainBoundary(unittest.TestCase):
                 finally:
                     queue.close()
 
+    def test_begin_update_does_not_check_physical_gate_reservation(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root)
+            queue = Queue(str(path / 'queue'), node_ids=('cluster', 'main'))
+            try:
+                now = datetime.now(timezone.utc).isoformat()
+                plan = queue.schedule_node('main', {'expectedRevision': 0, 'drainAt': now,
+                    'notBefore': now, 'afterJobId': None, 'targetImage': 'sha256:' + 'a' * 64})
+                with patch('processing.node_gate.canonical_gate_path', return_value=path / 'gate'):
+                    with NodeGate('synthetic-engine') as gate:
+                        origin = 'http://127.0.0.1:18080'
+                        gate.provision('main', origin, queue.authority_id)
+                        gate.reserve('main', origin, queue.authority_id, 1, 'a' * 32)
+                        result = queue.begin_node_update('main', {'expectedRevision': plan['revision'],
+                                                                  'planId': plan['planId']})
+                        self.assertEqual(result['node']['state'], 'updating')
+                        self.assertIsNotNone(gate.snapshot()['reservation'])
+            finally:
+                queue.close()
+
 
 if __name__ == '__main__':
     unittest.main()
