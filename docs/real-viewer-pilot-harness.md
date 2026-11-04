@@ -31,6 +31,14 @@ verified container. Fixture files and database remain for inspection.
 writers were independently confirmed stopped and SQLite fully checkpointed. It
 refuses WAL/shared-memory/journal sidecars and opens an immutable database to
 avoid creating them; it cannot prove writers are stopped or resume/clean work.
+The fake Viewer left WAL/SHM files even after its container exited, so this
+inspector correctly refuses that retained state. A safe WAL snapshot requires a
+qualified launcher that records and verifies the exact container/host process
+identities and exclusive storage ownership, proves all writers have exited, and
+copies the database and WAL together into a separately owned snapshot before
+any recovery/checkpoint of that copy. The current harness has no such writer
+fence or offline-snapshot procedure; do not assume a stopped container proves
+that no other process can write the database.
 `advisory_live_pilot_preflight.py` checks a
 point-in-time sample of the expected local source/converter and cluster
 identity, stage-token binding, queue and free space without copying photos or
