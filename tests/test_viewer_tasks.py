@@ -17,7 +17,8 @@ class ViewerTaskStoreTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        self.queue = Queue(self.root / 'queue', node_ids=('cluster', 'main'), treedar_node_ids=('main',))
+        self.queue = Queue(self.root / 'queue', node_ids=('cluster', 'main'), treedar_node_ids=('main',),
+                           viewer_outbound_parallel=self._testMethodName == 'test_stalled_upload_releases_store_but_serializes_other_uploads')
         self.queue.allowed_profiles.add(VIEWER_PROFILE)
         self.store = TaskStore(self.queue, self.root / 'inputs')
         self.identifier = str(uuid.uuid4())
@@ -44,6 +45,47 @@ class ViewerTaskStoreTests(unittest.TestCase):
 
     def claim(self, node='cluster'):
         return self.queue.claim({'workerId': 'viewer-broker', 'nodeId': node, 'profiles': [VIEWER_PROFILE]})
+
+    def test_stalled_upload_releases_store_but_serializes_other_uploads(self):
+        other = str(uuid.uuid4())
+        self.initialize()
+        self.initialize(other)
+        direct_store = TaskStore(self.queue, self.root / 'inputs')
+        entered, release, second_entered = threading.Event(), threading.Event(), threading.Event()
+        errors = []
+
+        class SlowInput(io.BytesIO):
+            def read(inner, n=-1):
+                entered.set()
+                if not release.wait(5): raise RuntimeError('fixture timed out')
+                return super().read(n)
+
+        class SecondInput(io.BytesIO):
+            def read(inner, n=-1):
+                second_entered.set()
+                return super().read(n)
+
+        def run(identifier, stream):
+            try: (self.store if identifier == self.identifier else direct_store).upload(identifier, 'photo.jpg', stream, 3)
+            except BaseException as error: errors.append(error)
+
+        first = threading.Thread(target=run, args=(self.identifier, SlowInput(b'abc')))
+        second = threading.Thread(target=run, args=(other, SecondInput(b'def')))
+        first.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            second.start()
+            self.store.update(other, progress=1)
+            with self.assertRaises(Conflict): direct_store.commit(self.identifier)
+            self.assertFalse(second_entered.wait(0.2))
+        finally:
+            release.set()
+            first.join(5)
+            if second.ident is not None: second.join(5)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(second_entered.is_set())
 
     def test_initialization_is_durable_idempotent_and_settings_bound(self):
         self.initialize()

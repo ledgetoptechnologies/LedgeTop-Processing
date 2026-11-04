@@ -174,6 +174,11 @@ class ViewerService:
     def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node, guard_probe=None,
                  guarded_engine_factory=None):
         self.queue, self.config = queue, config
+        self._parallel_dispatch = getattr(config, 'viewer_parallel_dispatch', False) is True
+        if self._parallel_dispatch and not queue.per_node_slots:
+            raise ValueError('parallel dispatch requires per-node slots')
+        if self._parallel_dispatch != queue.viewer_outbound_parallel:
+            raise ValueError('Viewer service and Queue outbound modes differ')
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
                                        config.viewer_max_input_bytes)
         self.inventory = getattr(config, 'node_inventory', ())
@@ -208,11 +213,7 @@ class ViewerService:
         self._downloads = {}
         # Prototype only: absent configuration keeps the deployed synchronous
         # path. A node's in-flight transfer remains in its durable queue slot.
-        self._parallel_dispatch = getattr(config, 'viewer_parallel_dispatch', False) is True
         self._dispatch_threads = {}
-        if self._parallel_dispatch and not queue.per_node_slots:
-            raise ValueError('parallel dispatch requires per-node slots')
-        self.store.parallel_dispatch = self._parallel_dispatch
 
     def _guard_ready(self, node_id):
         if not self._require_guard:

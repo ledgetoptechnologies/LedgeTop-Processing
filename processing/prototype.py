@@ -83,7 +83,7 @@ class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
                  treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
                  require_idle_existing=False, per_node_slots=False, node_capabilities=None,
-                 parallel_viewer_uploads=False, node_photo_limits=None):
+                 parallel_viewer_uploads=False, node_photo_limits=None, viewer_outbound_parallel=False):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or ('cluster' not in node_ids and not per_node_slots)):
@@ -93,8 +93,12 @@ class Queue(Maintenance):
         self._database_users = 0
         if type(parallel_viewer_uploads) is not bool:
             raise ValueError('parallel_viewer_uploads must be boolean')
+        if type(viewer_outbound_parallel) is not bool or (viewer_outbound_parallel and parallel_viewer_uploads):
+            raise ValueError('outbound mode requires serialized inbound uploads')
         self.parallel_viewer_uploads = parallel_viewer_uploads
         self._viewer_store_lock = threading.RLock()
+        self._viewer_serial_upload_lock = threading.Lock()
+        self.__viewer_outbound_parallel = viewer_outbound_parallel
         self._viewer_task_locks_guard = threading.Lock()
         self._viewer_task_locks = {}
         self.node_ids = tuple(node_ids)
@@ -187,6 +191,10 @@ class Queue(Maintenance):
                 db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held')")
             db.execute("UPDATE jobs SET status='held', held_reason='coordinator_restart', updated_at=CURRENT_TIMESTAMP WHERE status='running'")
             self._init_maintenance(db)
+
+    @property
+    def viewer_outbound_parallel(self):
+        return self.__viewer_outbound_parallel
 
     def close(self):
         if os.getpid() != self._creator_pid:
