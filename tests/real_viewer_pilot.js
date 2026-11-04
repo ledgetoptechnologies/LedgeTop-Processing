@@ -27,9 +27,8 @@ function safeBasename(name){return typeof name==='string'&&name.length>0&&name==
 async function main(){
   const root=process.env.PILOT_ROOT, endpoint=process.env.PILOT_ENDPOINT;
   const mode=process.env.PILOT_MODE, deadlineSeconds=Number(process.env.PILOT_DEADLINE_SECONDS||'7200');
-  // Requires separate launcher, credential/capacity/recovery and peer review.
-  const LIVE_PILOT_ENABLED=false;
-  if(mode==='live'&&!LIVE_PILOT_ENABLED) throw new Error('live_pilot_not_qualified');
+  // Live use is restricted to the separately reviewed single-pilot launcher.
+  if(mode==='live'&&process.env.PILOT_REVIEWED_LAUNCHER!=='1') throw new Error('live_pilot_not_qualified');
   if(!root||!path.isAbsolute(root)||!fs.statSync(root).isDirectory()||fs.realpathSync(root)!==root||
      !Number.isInteger(deadlineSeconds)||deadlineSeconds<30||deadlineSeconds>21600) throw new Error('invalid_pilot_config');
   const url=new URL(endpoint);
