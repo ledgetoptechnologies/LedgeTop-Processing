@@ -345,6 +345,16 @@ class ReferenceDriverTests(unittest.TestCase):
             with self.assertRaises(DriverHeld):
                 self.driver._source_range_grant(job['jobId'], claim, mutated)
             self.assertIsNone(self.driver._source_grant_cache)
+            # The same check applies on a cache miss, while the copied
+            # snapshot is undergoing the full manifest validation.
+            changed_claim = copy.deepcopy(claim)
+            def change_during_validation():
+                changed_claim['submission']['manifest']['objects'][0]['byteSize'] += 1
+                return replacement.expires - 1
+            self.driver.clock = change_during_validation
+            with self.assertRaises(DriverHeld):
+                self.driver._source_range_grant(job['jobId'], changed_claim, rotated)
+            self.assertIsNone(self.driver._source_grant_cache)
             # A matching cache entry cannot outlive the grant: expiration
             # starts durable renewal rather than returning the cached token.
             self.driver.clock = lambda: replacement.expires
