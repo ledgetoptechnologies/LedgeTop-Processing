@@ -84,7 +84,9 @@ authorize deleting the last copy.
 Removal of a task with a verified custody sidecar requires a checked, complete
 sidecar plus an identity-bound receipt and a fresh archive hash check. Older
 verified sidecars with `checked: false` require inspection; they are not silently
-upgraded. Rehashing can take time for large archives.
+upgraded. Rehashing can take time for large archives; it runs outside the global
+service and database locks. Removal holds the task's download lock and rechecks
+the record, receipt and pinned file identity before committing.
 
 ## What a verified receipt means
 

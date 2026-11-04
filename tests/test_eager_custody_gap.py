@@ -1273,6 +1273,58 @@ class EagerCustody(unittest.TestCase):
         archive.write_bytes(saved_archive)
         self.assertTrue(self.service.remove(identifier)['success'])
 
+    def test_remove_hash_does_not_hold_service_or_database_lock(self):
+        identifier = self.finished()
+        entered, resume, errors = threading.Event(), threading.Event(), []
+        original = self.service._verify_archive
+        def slow(path, receipt):
+            entered.set()
+            if not resume.wait(5):
+                raise RuntimeError('test timed out')
+            return original(path, receipt)
+        def remove():
+            try:
+                self.service.remove(identifier)
+            except Exception as error:
+                errors.append(error)
+        with patch.object(self.service, '_verify_archive', side_effect=slow):
+            thread = threading.Thread(target=remove)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                self.assertTrue(self.service._lock.acquire(timeout=1))
+                self.service._lock.release()
+                with self.fixture.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE')
+            finally:
+                resume.set()
+                thread.join(5)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_remove_refuses_archive_changed_after_hash(self):
+        identifier = self.finished()
+        archive = self.directory(identifier) / 'all.zip'
+        original = self.service.store.remove
+        def change_then_remove(*args, **kwargs):
+            archive.write_bytes(b'changed')
+            return original(*args, **kwargs)
+        with patch.object(self.service.store, 'remove', side_effect=change_then_remove):
+            with self.assertRaises(Conflict):
+                self.service.remove(identifier)
+
+    def test_remove_refuses_sidecar_changed_after_hash(self):
+        identifier = self.finished()
+        task = self.fixture.task(identifier)
+        record = self.service.store.custody(task)
+        original = self.service.store.remove
+        def change_then_remove(*args, **kwargs):
+            self.service.store.save_custody(task, {**record, 'state': 'unavailable', 'reason': 'inspection'})
+            return original(*args, **kwargs)
+        with patch.object(self.service.store, 'remove', side_effect=change_then_remove):
+            with self.assertRaises(Conflict):
+                self.service.remove(identifier)
+
     def test_unavailable_custody_blocks_remove_across_restart(self):
         identifier = self.finished(wait=False)
         task = self.fixture.task(identifier)

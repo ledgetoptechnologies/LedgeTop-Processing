@@ -858,6 +858,7 @@ class ViewerService:
             # Only receipt-backed, fully rehashed archives carry this optional
             # HTTP identity. It is not an acknowledgement or custody proof.
             stream.ledgetop_archive_sha256 = receipt['sha256']
+            stream.ledgetop_verified_stat = fields(after)
             return stream
         except (OSError, ValueError):
             if stream is not None: stream.close()
@@ -1129,11 +1130,42 @@ class ViewerService:
 
     def remove(self, identifier):
         with self._lock:
-            # Deliberately retain engine results and all local bytes. Viewer has
-            # no successful-ingestion ACK; remove is also its upload-reset route.
-            return self.store.remove(identifier, self._validate_removal_custody)
+            lock = self._downloads.setdefault(identifier, threading.Lock())
+        # Never wait for a fetch or rehash under the global service/DB lock.
+        with lock:
+            try:
+                task = self.store.task(identifier)
+            except KeyError:
+                with self._lock:
+                    return self.store.remove(identifier)
+            record = self.store.custody(task)
+            if record is None or record['state'] != 'verified':
+                with self._lock:
+                    return self.store.remove(identifier)
+            path, receipt, stream = self._prepare_removal_custody(task, record)
+            try:
+                verified_stat = stream.ledgetop_verified_stat
+                def recheck(current, current_record):
+                    if (current_record != record or any(current[k] != task[k] for k in
+                            ('uuid', 'generation', 'job_id', 'node_id', 'engine_uuid', 'archive_path', 'directory'))):
+                        raise Conflict('result custody changed during removal')
+                    current_receipt = self._archive_receipt(current, path.with_suffix('.zip.receipt'))
+                    if current_receipt != receipt:
+                        raise Conflict('archive receipt changed during removal')
+                    try:
+                        after, named = os.fstat(stream.fileno()), path.lstat()
+                        fields = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+                        if (verified_stat != fields(after) or fields(after)[:4] != fields(named)[:4]
+                                or (os.name != 'nt' and fields(after)[4] != fields(named)[4])):
+                            raise Conflict('archive changed during removal')
+                    except OSError:
+                        raise Conflict('archive changed during removal') from None
+                with self._lock:
+                    return self.store.remove(identifier, recheck)
+            finally:
+                stream.close()
 
-    def _validate_removal_custody(self, task, record):
+    def _prepare_removal_custody(self, task, record):
         """Revalidate local bytes; this does not acknowledge Viewer ingestion."""
         path = Path(task['directory']) / 'all.zip'
         if task['archive_path'] != str(path):
@@ -1141,7 +1173,7 @@ class ViewerService:
         receipt = self._archive_receipt(task, path.with_suffix('.zip.receipt'))
         if record['archive'] != {'bytes': receipt['bytes'], 'sha256': receipt['sha256']}:
             raise Conflict('archive receipt differs from custody record')
-        self._verify_archive(path, receipt).close()
+        return path, receipt, self._verify_archive(path, receipt)
 
     def operator(self, identifier, action, request):
         """Serialize operator state changes with Viewer engine mutations."""
