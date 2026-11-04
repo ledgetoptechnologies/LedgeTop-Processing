@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives import serialization
 from processing import reference_protocol as p
 from processing.held_source_bridge_v2_candidate import verify, DOMAIN, PROTOCOL
 from processing.held_source_bridge_journal_candidate import initialize, stage, _stage
-from processing.held_source_bridge_binding_candidate import BoundBridgeTrust, inspect as inspect_bound
+from processing.held_source_bridge_binding_candidate import BoundBridgeTrust, inspect as inspect_bound, pin_prepared
 from processing.prepared_envelope_jcs_candidate import PROTOCOL as PREPARED
 from processing.prototype import Queue
 from processing.reference_store import ReferenceStore, PROFILE
@@ -250,6 +250,11 @@ class HeldSourceBridgeTests(unittest.TestCase):
                 bound_args=dict(authenticated_principal='viewer-a',authenticated_environment='staging',trust=trust,
                     statement_bytes=signed(bound_outer),intent_bytes=intent2,local_signature=signature2,source_frames=source2,
                     selected_frames=selected2,evidence_frames=None,file_frames=None,processing_closure=closure2,processing_pages=pages2)
+                with self.assertRaises(ValueError):inspect_bound(store,submission['submissionId'],**bound_args)
+                pin_args=dict(authenticated_principal='viewer-a',authenticated_environment='staging',expected_authority_id=queue.authority_id)
+                with self.assertRaises(ValueError):pin_prepared(store,submission['submissionId'],**{**pin_args,'authenticated_principal':'other'})
+                self.assertTrue(pin_prepared(store,submission['submissionId'],**pin_args))
+                self.assertFalse(pin_prepared(store,submission['submissionId'],**pin_args))
                 def fail_after(at):
                     if at=='source':raise OSError('synthetic crash')
                 with self.assertRaises(ValueError):inspect_bound(store,submission['submissionId'],**bound_args,_fault=fail_after)

@@ -35,6 +35,20 @@ class AtomicSnapshotTests(unittest.TestCase):
   self.assertEqual(self.run_stage(source=b'')['reason'],'snapshot_replay_status_only');self.assertEqual(self.counts(),(1,1,3))
   with self.assertRaises(SnapshotHeld):self.run_stage(source=self.source[:-1])
   self.assertEqual(self.counts(),(1,1,3))
+ def test_v2_pin_blocks_legacy_journal(self):
+  from processing.held_source_bridge_journal_candidate import initialize as initialize_v2
+  from processing.held_source_bridge_binding_candidate import pin_prepared
+  with self.queue._db() as db:initialize_v2(db)
+  pin_prepared(self.store,self.env['submission']['submissionId'],authenticated_principal='viewer-a',authenticated_environment='staging',expected_authority_id=self.queue.authority_id)
+  with self.assertRaises(SnapshotHeld):self.run_stage()
+  self.assertEqual(self.counts(),(0,0,0))
+ def test_legacy_evidence_blocks_v2_pin(self):
+  from processing.held_source_bridge_journal_candidate import initialize as initialize_v2
+  from processing.held_source_bridge_binding_candidate import pin_prepared
+  self.run_stage()
+  with self.queue._db() as db:initialize_v2(db)
+  with self.assertRaises(ValueError):pin_prepared(self.store,self.env['submission']['submissionId'],authenticated_principal='viewer-a',authenticated_environment='staging',expected_authority_id=self.queue.authority_id)
+  self.assertEqual(self.counts(),(1,1,3))
  def test_failure_each_phase_rolls_back_all(self):
   for phase in ('journal','frames','evidence'):
    def fault(at):

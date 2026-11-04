@@ -154,6 +154,11 @@ def inspect(store,submission_id,raw,*,principal,environment,trust,stage_bundle=N
    if found is None:return None
    row=store._row(db,found['job_id']);owner=store._submission_owner(db,row)
    if owner is None or (owner['principal_id'],owner['environment'],owner['protocol'])!=(principal,environment,jcs.PROTOCOL):return None
+   v2names={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('held_source_bridge_v2','held_source_bridge_blobs_v2','held_source_bridge_marker_v2','held_source_protocol_policy_v2')")}
+   if v2names:
+    from .held_source_bridge_journal_candidate import _schema as v2_schema
+    v2_schema(db)
+    if db.execute('SELECT 1 FROM held_source_protocol_policy_v2 WHERE job_id=?',(row['job_id'],)).fetchone():raise ValueError('v2 protocol required')
    envelope=db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?',(row['job_id'],)).fetchone()
    policy=db.execute('SELECT * FROM reference_viewer_v3_policy WHERE job_id=?',(row['job_id'],)).fetchone()
    if envelope is None or policy is None:raise ValueError()

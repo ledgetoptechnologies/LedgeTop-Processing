@@ -14,11 +14,12 @@ JOURNAL = ('CREATE TABLE held_source_bridge_v2 (issuer TEXT NOT NULL, snapshot T
            'PRIMARY KEY(issuer,snapshot), UNIQUE(local_issuer,local_snapshot), UNIQUE(intent_sha))')
 BLOBS = 'CREATE TABLE held_source_bridge_blobs_v2 (issuer TEXT NOT NULL, snapshot TEXT NOT NULL, kind TEXT NOT NULL, wire BLOB NOT NULL, PRIMARY KEY(issuer,snapshot,kind))'
 MARKER = 'CREATE TABLE held_source_bridge_marker_v2 (singleton INTEGER PRIMARY KEY CHECK(singleton=1), version INTEGER NOT NULL CHECK(version=2))'
+POLICY = "CREATE TABLE held_source_protocol_policy_v2 (job_id TEXT PRIMARY KEY, protocol TEXT NOT NULL CHECK(protocol='ltds-viewer-paged-source-snapshot-v2'))"
 
 
 def _schema(db):
     for name, expected in (('held_source_bridge_v2', JOURNAL), ('held_source_bridge_blobs_v2', BLOBS),
-                           ('held_source_bridge_marker_v2', MARKER)):
+                           ('held_source_bridge_marker_v2', MARKER), ('held_source_protocol_policy_v2', POLICY)):
         row = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
         if row is None or row[0] != expected:
             raise ValueError()
@@ -33,11 +34,11 @@ def initialize(db):
     try:
         _durability(db); db.execute('BEGIN IMMEDIATE')
         names = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE name IN "
-                    "('held_source_bridge_v2','held_source_bridge_blobs_v2','held_source_bridge_marker_v2')")}
+                    "('held_source_bridge_v2','held_source_bridge_blobs_v2','held_source_bridge_marker_v2','held_source_protocol_policy_v2')")}
         if not names:
-            for ddl in (JOURNAL, BLOBS, MARKER): db.execute(ddl)
+            for ddl in (JOURNAL, BLOBS, MARKER, POLICY): db.execute(ddl)
             db.execute('INSERT INTO held_source_bridge_marker_v2 VALUES(1,2)')
-        elif len(names) != 3:
+        elif len(names) != 4:
             raise ValueError()
         _schema(db); db.commit()
     except Exception:

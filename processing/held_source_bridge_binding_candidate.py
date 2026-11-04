@@ -6,7 +6,7 @@ from cryptography.hazmat.primitives import serialization
 
 from . import reference_protocol as p
 from . import prepared_envelope_jcs_candidate as jcs
-from .held_source_bridge_journal_candidate import _stage
+from .held_source_bridge_journal_candidate import _stage, _schema
 from .paged_snapshot_journal_candidate import pin_registry
 from .viewer_paged_frame_candidate import _pairs
 
@@ -46,6 +46,46 @@ class BoundBridgeTrust:
         self.max_object_bytes = max_object_bytes
 
 
+def pin_prepared(store, submission_id, *, authenticated_principal, authenticated_environment, expected_authority_id):
+    """Pin a prepared, inactive job by trusted local policy; never a request route.
+
+    This blocks the candidate v1 journal for this job only. It does not provide
+    cross-job, cross-version snapshot uniqueness and is not an activation gate.
+    """
+    from . import paged_snapshot_journal_candidate as legacy
+    try:
+        p._uuid(submission_id, 'submission'); p._slug(authenticated_principal, 'principal')
+        p._environment(authenticated_environment); p._uuid(expected_authority_id, 'authority')
+        with store.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE'); _schema(db)
+            store._check_jcs_capability(db); store._require_viewer_authority(db, expected_authority_id)
+            found = store._scoped_prepared_job_id(db, submission_id, authenticated_principal,
+                                                  authenticated_environment, jcs.PROTOCOL)
+            if found is None: raise ValueError()
+            row = store._row(db, found['job_id']); owner = store._submission_owner(db, row)
+            if (owner is None or (owner['principal_id'], owner['environment'], owner['protocol']) !=
+                    (authenticated_principal, authenticated_environment, jcs.PROTOCOL)):
+                raise ValueError()
+            existing = db.execute('SELECT protocol FROM held_source_protocol_policy_v2 WHERE job_id=?', (row['job_id'],)).fetchone()
+            if existing is not None:
+                if existing[0] != 'ltds-viewer-paged-source-snapshot-v2': raise ValueError()
+                return False
+            if (row['status'] != 'queued' or row['phase'] not in ('queued', 'waiting_capacity')
+                    or db.execute('SELECT 1 FROM reference_viewer_activation WHERE job_id=?', (row['job_id'],)).fetchone()
+                    or db.execute('SELECT 1 FROM reference_claims WHERE job_id=?', (row['job_id'],)).fetchone()):
+                raise ValueError()
+            names = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('paged_snapshot_journal_v1','paged_snapshot_journal_marker_v1')")}
+            if names:
+                legacy._check_schema(db)
+                if db.execute('SELECT 1 FROM paged_snapshot_journal_v1 LIMIT 1').fetchone(): raise ValueError()
+            db.execute('INSERT INTO held_source_protocol_policy_v2 VALUES (?,?)',
+                       (row['job_id'], 'ltds-viewer-paged-source-snapshot-v2'))
+            db.commit()
+            return True
+    except Exception:
+        raise ValueError('protocol_pin_unavailable') from None
+
+
 def inspect(store, submission_id, *, authenticated_principal, authenticated_environment, trust,
             statement_bytes, intent_bytes, local_signature, source_frames, selected_frames,
             evidence_frames, file_frames, processing_closure, processing_pages, _fault=None):
@@ -81,7 +121,7 @@ def inspect(store, submission_id, *, authenticated_principal, authenticated_envi
             raise ValueError()
         with store.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            store._check_jcs_capability(db); store._require_viewer_authority(db, authority)
+            _schema(db); store._check_jcs_capability(db); store._require_viewer_authority(db, authority)
             found = store._scoped_prepared_job_id(db, submission_id, authenticated_principal,
                                                   authenticated_environment, jcs.PROTOCOL)
             if found is None:
@@ -89,6 +129,9 @@ def inspect(store, submission_id, *, authenticated_principal, authenticated_envi
             row = store._row(db, found['job_id']); owner = store._submission_owner(db, row)
             if owner is None or (owner['principal_id'], owner['environment'], owner['protocol']) != (
                     authenticated_principal, authenticated_environment, jcs.PROTOCOL):
+                raise ValueError()
+            pin = db.execute('SELECT protocol FROM held_source_protocol_policy_v2 WHERE job_id=?', (row['job_id'],)).fetchone()
+            if pin is None or pin[0] != 'ltds-viewer-paged-source-snapshot-v2':
                 raise ValueError()
             envelope = db.execute('SELECT * FROM reference_viewer_envelopes_v2 WHERE job_id=?', (row['job_id'],)).fetchone()
             policy = db.execute('SELECT * FROM reference_viewer_v3_policy WHERE job_id=?', (row['job_id'],)).fetchone()
