@@ -60,8 +60,8 @@ class LauncherTests(unittest.TestCase):
         return calls,state,secret
     def test_pinned_inline_entrypoint_reaches_help_without_launch(self):
         bootstrap = '''import hashlib,subprocess
-commit='49a4f3b70870d1d275799a99b70c28991a362fb6'
-expected='9fb0b1299c55a40ffe041c71b04b3c3e5d57ced5935ef6d20eccba749d5c6dc8'
+commit='847807e430823d9fdf219af394fd0699afaa5e58'
+expected='edd618707406c726317cb9413c4ab2bce114cef986e8737fd1f270d24e46359c'
 code=subprocess.check_output(['git','show',commit+':tests/run_real_viewer_pilot.py'])
 if hashlib.sha256(code).hexdigest()!=expected: raise SystemExit('pinned launcher mismatch')
 exec(compile(code,'<verified-pilot-launcher>','exec'),{'__name__':'__main__'})'''
