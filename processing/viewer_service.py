@@ -31,6 +31,8 @@ from .prototype import VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
 from .viewer_limits import MAX_UPLOAD_BYTES
+from .viewer_output_log import (OUTPUT_TAIL_LINES, append_output_tail, consume_output, mark_output,
+                                new_output_log, output_digest, restart_output, skip_oversized_line)
 
 # A silent node holds overflow this long, matching the readiness cache TTL.
 UNANSWERED_NODE_SECONDS = 30
@@ -43,6 +45,10 @@ ENGINE_LOST_SECONDS = 900
 ENGINE_LOST_REASONS = ('node_lost', 'engine_task_missing')
 # A held task's engine is only read, at this interval, to tell the operator.
 HELD_OBSERVATION_SECONDS = 60
+# A running task's console is copied this often; a terminal one is copied once,
+# with this many bounded reads to drain whatever the node still holds.
+OUTPUT_CAPTURE_SECONDS = 5
+OUTPUT_FINAL_READS = 8
 
 
 class EngineUnavailable(OSError):
@@ -51,6 +57,27 @@ class EngineUnavailable(OSError):
 
 class EngineTaskMissing(EngineUnavailable):
     """The engine answered, and the answer is that it has no such task."""
+
+
+class PartialLines(list):
+    """The complete leading lines of an output over the read limit."""
+
+
+def _leading_lines(raw):
+    text = raw.decode('utf-8', 'ignore')  # The cut can split a character.
+    if not text.startswith('['):
+        raise ValueError()
+    lines, index, decoder = PartialLines(), 1, json.JSONDecoder()
+    try:
+        while True:
+            while text[index:index + 1] in (' ', ',', '\n', '\r', '\t'):
+                index += 1
+            value, index = decoder.raw_decode(text, index)
+            if type(value) is not str:
+                raise ValueError()
+            lines.append(value)
+    except json.JSONDecodeError:
+        return lines
 
 
 def _reports_missing(value):
@@ -120,7 +147,10 @@ class NativeEngine:
             query['token'] = self.token
         return route + ('?' + urlencode(query) if query else '')
 
-    def read(self, route, *, missing=False, limit=4 * 1024 ** 2, **query):
+    def read_output(self, route, line):
+        return self.read(route, prefix=True, line=line)
+
+    def read(self, route, *, missing=False, limit=4 * 1024 ** 2, prefix=False, **query):
         try:
             pinned = getattr(self, '_guarded_client', None)
             origin = self._mutation_client().fixed_origin() if pinned is not None else self.origin
@@ -130,6 +160,8 @@ class NativeEngine:
                     raise ValueError()
                 raw = response.read(limit + 1)
                 if len(raw) > limit:
+                    if prefix:
+                        return _leading_lines(raw[:limit])
                     raise ValueError()
                 value = json.loads(raw)
                 if _reports_missing(value):
@@ -240,6 +272,11 @@ class ViewerService:
         self._node_lost_hold = getattr(config, 'viewer_node_lost_hold', False) is True
         self._lost = {}
         self._held_observations = {}
+        # Prototype only, absent keeps the live output proxy: this adds node
+        # reads and task files, and an unavailable response is no longer a list.
+        self._log_retention = getattr(config, 'viewer_log_retention', False) is True
+        self._output_due = {}
+        self._output_failures = {}
         self._downloads = {}
         # Prototype only: absent configuration keeps the deployed synchronous
         # path. A node's in-flight transfer remains in its durable queue slot.
@@ -491,8 +528,36 @@ class ViewerService:
         if self.store.task_environment(identifier) != environment:
             raise KeyError('unknown task')
 
+    def _output_reason(self, task, log):
+        """Why retained lines may be behind the engine, as a fixed code."""
+        if log['snapshot'] == 'complete':
+            return None
+        if log['snapshot'] or task['phase'] == 'complete':
+            return 'output_snapshot_incomplete'
+        if task['phase'] == 'held':
+            seen = self._held_observations.get(task['uuid'])
+            if seen is not None and seen['observation']['state'] == 'task_present':
+                return self._output_failures.get(task['uuid'])
+            return task['error'] if task['error'] in ENGINE_LOST_REASONS else 'task_held'
+        return self._output_failures.get(task['uuid'])
+
+    @staticmethod
+    def _unavailable_output(reason, lines):
+        # NodeODM clients already read an error member as a failed call. An
+        # empty list would say the log is empty and let their cursor move on.
+        return {'availability': 'unavailable', 'reason': reason, 'error': reason, 'lines': lines}
+
     def output(self, identifier, line=0):
         task = self.store.task(identifier)
+        if self._log_retention and task['engine_uuid']:
+            self.store.output_cursor(line)
+            try:
+                log = self.store.output_log(task)
+            except Conflict:
+                return self._unavailable_output('retained_output_invalid', self.store.output(identifier, line))
+            if log is not None:
+                reason = self._output_reason(task, log)
+                return log['lines'][line:] if reason is None else self._unavailable_output(reason, log['lines'][line:])
         if task['engine_uuid'] and task['node_id'] in self.engines and task['phase'] in ('processing', 'complete', 'cancel_pending', 'held'):
             try:
                 result = self._task_engine(task).read('/task/' + task['engine_uuid'] + '/output', line=line)
@@ -501,7 +566,8 @@ class ViewerService:
                 return result
             except EngineUnavailable:
                 # Never return engine error bodies, query tokens or host paths.
-                return self.store.output(identifier, line)
+                retained = self.store.output(identifier, line)
+                return self._unavailable_output('engine_output_unavailable', retained) if self._log_retention else retained
         return self.store.output(identifier, line)
 
     def _archive_identity(self, task):
@@ -979,6 +1045,7 @@ class ViewerService:
             try:
                 info = self._read_status(task)
                 observation = {'state': 'task_present', 'code': info['status']['code']}
+                self._retain_output(task, info['status']['code'])
             except EngineTaskMissing:
                 observation = {'state': 'task_missing'}
             except EngineUnavailable:
@@ -987,6 +1054,77 @@ class ViewerService:
                                                      'observation': observation}
         except Exception:
             logging.getLogger(__name__).exception('held engine observation failed')
+
+    def _advance_output(self, engine, task, log):
+        """Apply one bounded read; true while the engine may hold more."""
+        route = '/task/' + task['engine_uuid'] + '/output'
+        # Rereading the last line shows whether the node still has this output.
+        # A NodeODX cursor past the end answers [], the same as no new lines.
+        start = log['cursor'] - 1 if log['last'] else log['cursor']
+        reader = getattr(engine, 'read_output', None)
+        lines = reader(route, start) if reader else engine.read(route, line=start)
+        if not isinstance(lines, list) or any(not isinstance(x, str) for x in lines):
+            raise EngineUnavailable('engine_output_unavailable')
+        partial = isinstance(lines, PartialLines)
+        if log['last']:
+            if not lines or output_digest(lines[0]) != log['last']:
+                restart_output(log)
+                return True
+            lines = lines[1:]
+        if partial and not lines:
+            skip_oversized_line(log)
+        else:
+            consume_output(log, lines)
+        return partial
+
+    def _capture_output(self, task):
+        identifier = task['uuid']
+        now = time.monotonic()
+        if now < self._output_due.get(identifier, 0):
+            return
+        self._output_due[identifier] = now + OUTPUT_CAPTURE_SECONDS
+        log = self.store.output_log(task) or new_output_log(task['engine_uuid'])
+        if log['snapshot']:
+            return
+        before = (log['cursor'], len(log['lines']))
+        self._advance_output(self._task_engine(task), task, log)
+        if (log['cursor'], len(log['lines'])) != before:
+            self.store.save_output_log(task, log)
+
+    def _snapshot_output(self, task):
+        """Take what the node still has; its task cleanup must not take the log."""
+        log = self.store.output_log(task) or new_output_log(task['engine_uuid'])
+        if log['snapshot']:
+            return
+        try:
+            engine = self._task_engine(task)
+            for _ in range(OUTPUT_FINAL_READS):
+                if not self._advance_output(engine, task, log):
+                    break
+            else:
+                raise EngineUnavailable('engine_output_backlog')
+            if log['omittedFrom'] is not None:
+                start = max(log['omittedFrom'], log['cursor'] - OUTPUT_TAIL_LINES)
+                append_output_tail(log, engine.read('/task/' + task['engine_uuid'] + '/output', line=start))
+            log['snapshot'] = 'complete'
+        except EngineUnavailable:
+            log['snapshot'] = 'incomplete'
+            mark_output(log, 'final output could not be read')
+        self.store.save_output_log(task, log)
+
+    def _retain_output(self, task, code):
+        """A log failure is reported on output; it never changes the job."""
+        if not self._log_retention:
+            return
+        identifier = task['uuid']
+        try:
+            (self._capture_output if code in (10, 20) else self._snapshot_output)(task)
+            self._output_failures.pop(identifier, None)
+        except EngineUnavailable:
+            self._output_failures[identifier] = 'engine_output_unavailable'
+        except Exception:
+            self._output_failures[identifier] = 'output_retention_failed'
+            logging.getLogger(__name__).exception('Viewer output retention failed')
 
     def _poll(self, task):
         identifier = task['uuid']
@@ -1005,6 +1143,7 @@ class ViewerService:
         self._backoff.pop(identifier, None)
         self._lost.pop(identifier, None)
         code = info['status']['code']
+        self._retain_output(task, code)
         if code in (10, 20):
             # Queued10 may mean a delayed accepted commit or an uncommitted
             # upload. Keep ownership and poll; neither case permits a replay.

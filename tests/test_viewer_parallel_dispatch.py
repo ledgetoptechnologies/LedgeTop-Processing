@@ -597,6 +597,18 @@ class StartupTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'PROCESSING_VIEWER_PARALLEL_DISPATCH must be 0 or 1'):
                     from_environment()
 
+    def test_log_retention_is_opt_in_and_strict(self):
+        with patch.dict(os.environ, self.env, clear=True):
+            self.assertIs(from_environment().viewer_log_retention, False)
+        self.assertIs(Config(TOKEN, '', '', 800, 20000).viewer_log_retention, False)
+        with patch.dict(os.environ, {**self.env, 'PROCESSING_VIEWER_LOG_RETENTION': '1'}, clear=True):
+            self.assertIs(from_environment().viewer_log_retention, True)
+        for value in ('', 'true', 'TRUE', 'yes', '2', ' 1', '1 '):
+            with self.subTest(value=value), patch.dict(
+                    os.environ, {**self.env, 'PROCESSING_VIEWER_LOG_RETENTION': value}, clear=True):
+                with self.assertRaisesRegex(ValueError, 'PROCESSING_VIEWER_LOG_RETENTION must be 0 or 1'):
+                    from_environment()
+
     def test_node_lost_hold_is_opt_in_and_strict(self):
         with patch.dict(os.environ, self.env, clear=True):
             self.assertIs(from_environment().viewer_node_lost_hold, False)

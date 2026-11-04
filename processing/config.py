@@ -41,6 +41,7 @@ class Config:
     node_inventory: tuple = field(default=(), repr=False)
     viewer_parallel_dispatch: bool = False
     viewer_node_lost_hold: bool = False
+    viewer_log_retention: bool = False
 
 
 def parse_node_inventory(raw, environment):
@@ -182,6 +183,9 @@ def from_environment() -> Config:
     node_lost_hold = os.environ.get('PROCESSING_VIEWER_NODE_LOST_HOLD', '0')
     if node_lost_hold not in ('0', '1'):
         raise ValueError('PROCESSING_VIEWER_NODE_LOST_HOLD must be 0 or 1')
+    log_retention = os.environ.get('PROCESSING_VIEWER_LOG_RETENTION', '0')
+    if log_retention not in ('0', '1'):
+        raise ValueError('PROCESSING_VIEWER_LOG_RETENTION must be 0 or 1')
     if inventory and (per_node_slots != '1' or os.environ.get('PROCESSING_REFERENCE_CONFIG')):
         raise ValueError('inventory requires per-node slots and no reference runtime')
     lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
@@ -245,4 +249,5 @@ def from_environment() -> Config:
         node_inventory=inventory,
         viewer_parallel_dispatch=parallel_dispatch == '1',
         viewer_node_lost_hold=node_lost_hold == '1',
+        viewer_log_retention=log_retention == '1',
     )

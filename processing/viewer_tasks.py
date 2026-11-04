@@ -22,6 +22,7 @@ from contextlib import contextmanager, nullcontext
 from functools import wraps
 
 from .maintenance import Conflict
+from .viewer_output_log import OUTPUT_LOG_MAX_FILE_BYTES, OUTPUT_LOG_NAME, valid_output_log
 
 
 class OptionEvidenceConflict(Conflict):
@@ -920,10 +921,71 @@ class TaskStore:
             info['ledgetopHeld'] = True
         return info
 
-    def output(self, identifier, line=0):
+    @staticmethod
+    def output_cursor(line):
         if type(line) is not int or not 0 <= line <= 2 ** 53 - 1:
             raise ValueError('nonnegative output cursor required')
+
+    def output(self, identifier, line=0):
+        self.output_cursor(line)
         return self.task(identifier)['output_lines'][line:]
+
+    @staticmethod
+    def output_log(task):
+        """Load a task's retained console, or None before its first capture.
+
+        A file in the task directory, not a table or column: the directory is
+        already inside the update census, whose schema allowlist is strict.
+        """
+        path = Path(task['directory']) / OUTPUT_LOG_NAME
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise Conflict('retained output requires inspection') from None
+        try:
+            with os.fdopen(descriptor, 'rb') as stream:
+                TaskStore._check_output_log_file(os.fstat(stream.fileno()))
+                raw = stream.read(OUTPUT_LOG_MAX_FILE_BYTES + 1)
+            if len(raw) > OUTPUT_LOG_MAX_FILE_BYTES:
+                raise ValueError()
+            log = json.loads(raw)
+        except (OSError, ValueError, RecursionError):
+            raise Conflict('retained output requires inspection') from None
+        if not valid_output_log(log, task['engine_uuid']):
+            raise Conflict('retained output requires inspection')
+        return log
+
+    @staticmethod
+    def _check_output_log_file(info):
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or (os.name != 'nt' and info.st_uid != os.geteuid())):
+            raise ValueError('owned regular output log required')
+
+    @staticmethod
+    def save_output_log(task, log):
+        """Replace the console in one step, never writing through an existing path."""
+        directory = Path(task['directory'])
+        path = directory / OUTPUT_LOG_NAME
+        try:
+            TaskStore._check_output_log_file(path.lstat())
+        except FileNotFoundError:
+            pass
+        except ValueError:
+            raise Conflict('retained output requires inspection') from None
+        temporary = directory / (OUTPUT_LOG_NAME + '.tmp-' + secrets.token_hex(16))
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+        try:
+            with os.fdopen(descriptor, 'wb') as stream:
+                stream.write(canonical(log).encode())
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        sync_directory(directory)
 
     @task_fenced
     def cancel(self, identifier):

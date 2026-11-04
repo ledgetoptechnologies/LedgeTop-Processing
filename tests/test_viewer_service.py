@@ -30,8 +30,10 @@ import zipfile
 from processing.maintenance import Conflict
 from processing.odx_smoke_worker import SmokeError
 from processing.prototype import PROFILE, VIEWER_PROFILE, Queue
+from processing.viewer_output_log import CLIPPED, MARKER, OUTPUT_LINE_CHARS, OUTPUT_LOG_NAME, OUTPUT_TOTAL_BYTES
 from processing.viewer_service import (ENGINE_LOST_SECONDS, ENGINE_MISSING_POLLS, EngineTaskMissing,
-                                       EngineUnavailable, NODE_LOST_POLLS, NativeEngine, ViewerService)
+                                       EngineUnavailable, NODE_LOST_POLLS, NativeEngine, PartialLines,
+                                       ViewerService)
 from tests.reference_activation_fixture import activated_prepared_v3_job
 
 
@@ -138,7 +140,7 @@ class FakeEngine:
         if kind == 'info':
             return {'uuid': identifier, 'status': dict(task['status']), 'progress': task['progress']}
         if kind == 'output':
-            return ['synthetic engine output', '', 'comma,record'][query.get('line', 0):]
+            return task.get('console', ['synthetic engine output', '', 'comma,record'])[query.get('line', 0):]
         raise AssertionError('unexpected engine read')
 
     def finish(self, identifier, code=40):
@@ -2666,6 +2668,7 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
     def polls(self, count):
         for _ in range(count):
             self.service._backoff.clear()
+            self.service._output_due.clear()
             self.service.tick()
 
     def assert_held_intact(self, identifier, before, reason):
@@ -2827,6 +2830,247 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         self.finish(identifier)
         self.polls(1)
         self.assertEqual(self.task(identifier)['job']['status'], 'succeeded')
+
+    def retaining(self, console=None):
+        self.service._log_retention = True
+        identifier = self.submit()
+        self.service.tick()
+        task = self.task(identifier)
+        if console is not None:
+            self.engines[task['node_id']].tasks[task['engine_uuid']]['console'] = console
+        self.polls(1)
+        return identifier, self.engines[task['node_id']].tasks[task['engine_uuid']]
+
+    def retained_file(self, identifier):
+        return Path(self.task(identifier)['directory']) / OUTPUT_LOG_NAME
+
+    def test_output_failure_is_explicit_and_keeps_retained_lines(self):
+        identifier, _ = self.retaining(['one', 'two'])
+        self.assertEqual(self.service.output(identifier, 0), ['one', 'two'])
+        self.engine_for(identifier).output_unavailable = True
+        self.polls(1)
+        self.assertEqual(self.service.output(identifier, 1), {
+            'availability': 'unavailable', 'reason': 'engine_output_unavailable',
+            'error': 'engine_output_unavailable', 'lines': ['two']})
+        self.assertEqual(self.task(identifier)['job']['status'], 'running')
+        self.engine_for(identifier).output_unavailable = False
+        self.polls(1)
+        self.assertEqual(self.service.output(identifier, 0), ['one', 'two'])
+
+    def test_output_failure_before_any_capture_is_not_an_empty_log(self):
+        self.service._log_retention = True
+        identifier = self.submit()
+        self.service.tick()
+        self.engine_for(identifier).output_unavailable = True
+        self.assertEqual(self.service.output(identifier, 0)['availability'], 'unavailable')
+        self.assertEqual(self.service.output(identifier, 0)['lines'], [])
+
+    def test_lost_node_output_names_the_hold(self):
+        self.service._node_lost_hold = True
+        identifier, _ = self.retaining(['one'])
+        self.engine_for(identifier).read_unavailable = True
+        self.polls(NODE_LOST_POLLS)
+        result = self.service.output(identifier, 0)
+        self.assertEqual((result['reason'], result['lines']), ('node_lost', ['one']))
+        self.engine_for(identifier).read_unavailable = False
+        self.polls(1)
+        self.assertEqual(self.service.output(identifier, 0), ['one'])
+        self.assertEqual(self.task(identifier)['job']['status'], 'held')
+
+    def test_node_restart_marks_the_gap_and_keeps_cursors_valid(self):
+        for changed in (['new'], ['new', 'lines', 'are', 'longer']):
+            with self.subTest(changed=changed):
+                identifier, engine_task = self.retaining(['one', 'two', 'three'])
+                engine_task['console'] = list(changed)
+                self.polls(2)
+                lines = self.service.output(identifier, 0)
+                self.assertEqual(lines[:3], ['one', 'two', 'three'])
+                self.assertTrue(lines[3].startswith(MARKER + 'engine output restarted'))
+                self.assertEqual(lines[4:], changed)
+                engine_task['console'].append('next')
+                self.polls(1)
+                self.assertEqual(self.service.output(identifier, len(lines)), ['next'])
+                self.finish(identifier)
+                self.polls(1)
+
+    def test_retained_lines_survive_coordinator_restart_without_duplicates(self):
+        identifier, engine_task = self.retaining(['one', 'two'])
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.service._log_retention = True
+        engine_task['console'].append('three')
+        self.polls(2)
+        self.assertEqual(self.service.output(identifier, 0), ['one', 'two', 'three'])
+
+    def test_terminal_snapshot_outlives_engine_cleanup_and_restart(self):
+        identifier, engine_task = self.retaining(['one'])
+        engine_task['console'] = ['one', 'two', 'last words']
+        self.finish(identifier)
+        self.polls(1)
+        self.assertEqual(self.task(identifier)['job']['status'], 'succeeded')
+        engine = self.engine_for(identifier)
+        del engine.tasks[self.task(identifier)['engine_uuid']]
+        engine.read_unavailable = True
+        reads = len(engine.calls)
+        self.assertEqual(self.service.output(identifier, 1), ['two', 'last words'])
+        self.assertEqual(len(engine.calls), reads)
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.service._log_retention = True
+        self.assertEqual(self.service.output(identifier, 0), ['one', 'two', 'last words'])
+
+    def test_failed_terminal_snapshot_is_explicit_and_never_blocks_completion(self):
+        identifier, _ = self.retaining(['one'])
+        self.engine_for(identifier).output_unavailable = True
+        self.finish(identifier)
+        self.polls(1)
+        self.assertEqual(self.task(identifier)['job']['status'], 'succeeded')
+        result = self.service.output(identifier, 0)
+        self.assertEqual(result['reason'], 'output_snapshot_incomplete')
+        self.assertEqual(result['lines'][0], 'one')
+        self.assertTrue(result['lines'][1].startswith(MARKER))
+
+    def test_retained_log_is_bounded_and_truncation_is_marked(self):
+        with patch('processing.viewer_output_log.OUTPUT_HEAD_LINES', 3), \
+                patch('processing.viewer_service.OUTPUT_TAIL_LINES', 2):
+            identifier, engine_task = self.retaining(['x' * (OUTPUT_LINE_CHARS + 50)] + ['line %d' % i for i in range(20)])
+            lines = self.service.output(identifier, 0)
+            self.assertEqual(len(lines[0]), OUTPUT_LINE_CHARS)
+            self.assertTrue(lines[0].endswith(CLIPPED))
+            self.assertEqual(lines[1:3], ['line 0', 'line 1'])
+            self.assertEqual(lines[3], MARKER + 'output limit reached; later lines are omitted')
+            self.assertEqual(len(lines), 4)
+            engine_task['console'] += ['failure detail', 'final line']
+            self.finish(identifier)
+            self.polls(1)
+            final = self.service.output(identifier, 0)
+            self.assertEqual(final[:4], lines)  # Retained indices never move.
+            self.assertEqual(final[4], MARKER + '18 engine lines omitted; final lines follow')
+            self.assertEqual(final[5:], ['failure detail', 'final line'])
+
+    def test_retained_log_stays_inside_its_total_size(self):
+        identifier, engine_task = self.retaining(['\u00e9' * OUTPUT_LINE_CHARS] * 1000)
+        self.finish(identifier)
+        self.polls(1)
+        self.assertLessEqual(len(json.dumps(self.service.output(identifier, 0))), OUTPUT_TOTAL_BYTES)
+        self.assertLess(self.retained_file(identifier).stat().st_size, OUTPUT_TOTAL_BYTES + 4096)
+
+    def test_backlog_over_the_read_limit_advances_and_never_stalls(self):
+        identifier, engine_task = self.retaining(['one'])
+        engine = self.engine_for(identifier)
+        console = engine_task['console'] = ['one', 'two', 'three', 'four', 'huge', 'five']
+
+        def read_output(route, line):
+            # Two lines fit the synthetic limit and 'huge' never does.
+            lines = console[line:]
+            kept = lines[:lines.index('huge')] if 'huge' in lines else lines
+            return PartialLines(kept[:2]) if len(kept) > 2 or 'huge' in lines else kept
+
+        engine.read_output = read_output
+        try:
+            self.polls(6)
+        finally:
+            del engine.read_output
+        lines = self.service.output(identifier, 0)
+        self.assertEqual(lines, ['one', 'two', 'three', 'four', MARKER + 'engine line over the read limit omitted', 'five'])
+
+    def test_native_output_prefix_keeps_only_complete_lines(self):
+        lines = ['one', 'caf\u00e9', 'a,"b"', 'tail ' * 50]
+        raw = json.dumps(lines, ensure_ascii=False).encode()
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        client = NativeEngine('http://127.0.0.1:' + str(server.server_port))
+        try:
+            partial = client.read('/task/x/output', limit=40, prefix=True, line=0)
+            self.assertIsInstance(partial, PartialLines)
+            self.assertEqual(partial, lines[:3])
+            self.assertNotIsInstance(client.read('/task/x/output', prefix=True, line=0), PartialLines)
+            with self.assertRaises(EngineUnavailable):
+                client.read('/task/x/output', limit=40, line=0)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_invalid_retained_file_is_reported_and_not_overwritten(self):
+        identifier, _ = self.retaining(['one'])
+        self.retained_file(identifier).write_text('{}')
+        self.polls(1)
+        self.assertEqual(self.retained_file(identifier).read_text(), '{}')
+        self.assertEqual(self.task(identifier)['job']['status'], 'running')
+        self.assertEqual(self.service.output(identifier, 0)['reason'], 'retained_output_invalid')
+
+    def test_retained_writes_never_follow_a_preplaced_link(self):
+        identifier, engine_task = self.retaining(['one'])
+        path = self.retained_file(identifier)
+        victim = self.root / 'unrelated-file'
+        victim.write_text('unrelated bytes')
+        old_temporary = path.with_name(OUTPUT_LOG_NAME + '.tmp')
+        for place in (lambda: os.link(victim, old_temporary), lambda: old_temporary.symlink_to(victim)):
+            place()
+            engine_task['console'].append('next')
+            self.polls(1)
+            self.assertEqual(victim.read_text(), 'unrelated bytes')
+            self.assertEqual(self.service.output(identifier, 0), engine_task['console'])
+            self.assertEqual(path.stat().st_nlink, 1)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            old_temporary.unlink()
+        self.assertEqual(sorted(item.name for item in path.parent.iterdir() if item.name.startswith(OUTPUT_LOG_NAME)),
+                         [OUTPUT_LOG_NAME])
+
+    def test_retained_file_identity_is_checked_before_read_and_replace(self):
+        for replace in (lambda path, other: os.link(path, other),
+                        lambda path, other: (other.write_bytes(path.read_bytes()), path.unlink(), path.symlink_to(other))):
+            identifier, engine_task = self.retaining(['one'])
+            path = self.retained_file(identifier)
+            other = self.root / ('other-' + identifier)
+            replace(path, other)
+            before = other.read_bytes()
+            engine_task['console'].append('next')
+            self.polls(1)
+            self.assertEqual(other.read_bytes(), before)
+            self.assertEqual(self.service.output(identifier, 0)['reason'], 'retained_output_invalid')
+            with self.assertRaises(Conflict):
+                self.service.store.save_output_log(self.task(identifier), {})
+            self.assertEqual(self.task(identifier)['job']['status'], 'running')
+            self.finish(identifier)
+            self.polls(1)
+
+    def test_failed_retained_write_leaves_no_temporary_and_keeps_the_log(self):
+        identifier, engine_task = self.retaining(['one'])
+        path = self.retained_file(identifier)
+        engine_task['console'].append('next')
+        with patch('processing.viewer_tasks.os.replace', side_effect=OSError('synthetic')):
+            self.polls(1)
+        self.assertEqual(self.service.output(identifier, 0)['reason'], 'output_retention_failed')
+        self.assertEqual(self.service.output(identifier, 0)['lines'], ['one'])
+        self.assertEqual([item.name for item in path.parent.iterdir() if '.tmp-' in item.name], [])
+        self.polls(1)
+        self.assertEqual(self.service.output(identifier, 0), ['one', 'next'])
+
+    def test_retention_off_keeps_the_live_list_and_writes_nothing(self):
+        identifier = self.submit()
+        self.service.tick()
+        self.polls(3)
+        engine = self.engine_for(identifier)
+        self.assertFalse([call for call in engine.calls if call[0] == 'read' and call[2] == 'output'])
+        self.assertEqual(self.service.output(identifier, 1), ['', 'comma,record'])
+        self.assertFalse(self.retained_file(identifier).exists())
+        engine.output_unavailable = True
+        self.assertEqual(self.service.output(identifier, 0), [])
 
 
 if __name__ == '__main__':
