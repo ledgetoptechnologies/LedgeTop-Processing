@@ -68,28 +68,31 @@ class RealDockerCrashTest(unittest.TestCase):
             code = '''import sys
 from ops.update_reference_coordinator import run_owned_helper
 from tests.test_owned_helper_docker_kill import DockerTransport
-run_owned_helper(DockerTransport(), ('synthetic',), journal_root=sys.argv[1])
+run_owned_helper(DockerTransport(), ('synthetic',), journal_root=sys.argv[1],
+                 journal_binding={'operation':'2'*32,'engineId':'synthetic-docker-engine'})
 '''
             child = subprocess.Popen([sys.executable, '-c', code, root], stdout=subprocess.PIPE, text=True)
             try:
                 self.assertEqual(child.stdout.readline().strip(), 'ready')
                 os.kill(child.pid, signal.SIGKILL); child.wait(timeout=5)
-                with HelperJournal(root) as journal:
+                binding={'operation':'2'*32,'engineId':'synthetic-docker-engine'}
+                with HelperJournal(root,binding) as journal:
                     record = journal.read()
                     self.assertEqual(record['phase'], 'start_pending')
                     transport = DockerTransport()
                     self.assertTrue(transport.inspected(record['containerId'])['State']['Running'])
-                    journal.recover(transport)
+                    journal.recover(transport, authorize=lambda: None)
                     self.assertEqual(journal.read()['phase'], 'resolved')
             finally:
                 if child.poll() is None: child.kill(); child.wait(timeout=5)
                 child.stdout.close()
                 # Cleanup only the exact journal-bound test helper on failure.
                 try:
-                    with HelperJournal(root) as journal:
+                    with HelperJournal(root,{'operation':'2'*32,'engineId':'synthetic-docker-engine'}) as journal:
                         if journal.read()['phase'] in ('created', 'start_pending'):
-                            journal.recover(DockerTransport())
+                            journal.recover(DockerTransport(), authorize=lambda: None)
                 except FileNotFoundError: pass
 
 
 if __name__ == '__main__': unittest.main()
+

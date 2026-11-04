@@ -1,5 +1,5 @@
 """Temporary real SQLite/HTTP, synthetic Docker/SSH boundaries; no host changes."""
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 import copy
 import io
 import http.client
@@ -35,7 +35,7 @@ OPERATOR='synthetic-coordinator-update-operator'
 
 
 class Gates:
-    binding={'cluster':{'generation':1},'main':{'generation':1}}
+    binding={'cluster':{'generation':1,'engineId':'synthetic-cluster'},'main':{'generation':1}}
     def __init__(self):self.live=False;self.dead=False;self.checks=0
     def __call__(self):return self
     def __enter__(self):self.live=True;self.check();return self
@@ -72,7 +72,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.gates=Gates();self.transport=self.make_transport()
         # Container lifecycle is exercised separately by
         # test_update_owned_helper; this fixture supplies synthetic census I/O.
-        self.helper_patch=patch.object(module,'run_owned_helper',side_effect=lambda t,args,timeout=60,journal_root=None:t.docker('run',*args,timeout=timeout))
+        self.helper_patch=patch.object(module,'run_owned_helper',side_effect=lambda t,args,timeout=60,journal_root=None,journal_binding=None:t.docker('run',*args,timeout=timeout))
         self.helper_patch.start();self.addCleanup(self.helper_patch.stop)
         self.operation=self.root/'operation';self.operation.mkdir(mode=0o700)
         self.updater=module.ReferenceCoordinatorUpdate(self.operation,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda state:None)
@@ -92,6 +92,41 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.assertEqual(self.state['phase'],'needs_inspection')
         self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
         self.assertNotIn(NEW_ID,self.transport.containers)
+
+    def prepare_owned_recovery(self):
+        from ops.durable_helper_journal import HelperJournal
+        op='1'*32; cid='b'*64
+        with HelperJournal(self.operation,module.helper_binding(self.state)) as journal:
+            journal.write(op,'create_pending');journal.write(op,'created',cid);journal.write(op,'start_pending',cid)
+        self.transport.helper={'Id':cid,'Name':'/ledgetop-update-helper-'+op,
+            'Config':{'Labels':{'io.ledgetop.update-helper':op}},'State':{'Running':True}}
+
+    def test_recover_helper_takes_operation_lock_and_checks_gates_and_engine(self):
+        self.prepare_owned_recovery();self.updater.recover_helper(copy.deepcopy(self.state))
+        self.assertTrue(self.transport.helper_removed)
+        self.assertFalse(self.transport.operation_locked)
+        self.assertGreaterEqual(self.gates.checks,4)
+        self.assertEqual(self.updater.load(),self.state)
+
+    def test_recover_helper_does_not_remove_for_changed_daemon_or_stale_checkpoint(self):
+        self.prepare_owned_recovery();self.transport.engine_id='different-engine'
+        with self.assertRaisesRegex(module.Stopped,'recovery_docker_engine_changed'):
+            self.updater.recover_helper(copy.deepcopy(self.state))
+        self.assertIsNotNone(self.transport.helper)
+
+    def test_recover_helper_rechecks_gate_after_identity_inspection(self):
+        self.prepare_owned_recovery(); original=self.transport.inspected
+        def lose_gate(identifier,**kwargs):
+            item=original(identifier,**kwargs);self.gates.dead=True;return item
+        with patch.object(self.transport,'inspected',side_effect=lose_gate):
+            with self.assertRaisesRegex(module.Stopped,'synthetic_gate_lost'):
+                self.updater.recover_helper(copy.deepcopy(self.state))
+        self.assertIsNotNone(self.transport.helper)
+        self.assertFalse(getattr(self.transport,'helper_removed',False))
+        changed=copy.deepcopy(self.state);changed['phase']='stale'
+        with self.assertRaisesRegex(module.Stopped,'recovery_checkpoint_changed'):
+            self.updater.recover_helper(changed)
+        self.assertIsNotNone(self.transport.helper)
 
     def test_viewer_extra_tables_exact_empty_upgrade_and_copy(self):
         with self.queue._db() as db:
@@ -184,12 +219,18 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         class Transport:
             save=staticmethod(module.legacy.save);private_file=staticmethod(module.legacy.private_file)
             def __init__(self):
-                self.calls=[];self.loss=None;self.hook=None
+                self.calls=[];self.loss=None;self.hook=None;self.operation_locked=False;self.engine_id='synthetic-cluster'
                 self.application={'PROCESSING_API_TOKEN':TOKEN,'PROCESSING_PROTOTYPE_OPERATOR_TOKEN':OPERATOR,
                     'PROCESSING_REFERENCE_CONFIG':module.legacy.CONFIG_PATH}
                 self.old=self.container(module.OLD_ID,module.OLD_IMAGE,module.NAME,True)
                 self.containers={module.OLD_ID:self.old,
                     '6'*64:self.container('6'*64,'sha256:'+'6'*64,'historical-native-untouched',False)}
+            @contextmanager
+            def operation_lock(self):
+                if self.operation_locked:raise module.Stopped('another_install_operation_owns_lock')
+                self.operation_locked=True
+                try:yield
+                finally:self.operation_locked=False
             def image(self,image):
                 version=module.OLD_SOURCE if image==module.OLD_IMAGE else SOURCE
                 defaults=['PATH=/old/default'] if image==module.OLD_IMAGE else ['PATH=/new/default']
@@ -229,6 +270,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
             def verify_reference(self):return {'tlsVerified':True,'nativeProductionCredentialsRejected':True}
             def docker(self,*args,**kwargs):
                 action=args[0]
+                if action=='info':return self.engine_id
                 if action=='ps':
                     if any(str(value).startswith('volume=') for value in args):return '\n'.join(item['Id'] for item in self.containers.values() if item['State']['Running'])
                     if any(str(value).startswith('label=io.ledgetop.update-helper=') for value in args):return self.helper['Id'] if getattr(self,'helper',None) else ''
@@ -253,6 +295,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                     if not self.helper_is_offline:return json.dumps([{'path':'runtime.json','uid':10001,'mode':0o600,'sha256':'a'*64}])
                     return json.dumps(module.volume_census(owner.volume,uid=os.geteuid(),offline=True))
                 if action=='rm' and getattr(self,'helper',None) and args[-1]==self.helper['Id']:
+                    if owner.gates.live:assert self.operation_locked or getattr(self,'helper_failure',False)
                     self.helper=None;self.helper_removed=True;return ''
                 assert owner.gates.live and not owner.gates.dead
                 self.calls.append(args)

@@ -17,12 +17,17 @@ class JournalError(ValueError):
 
 
 class HelperJournal:
-    def __init__(self, root):
+    def __init__(self, root, binding=None):
         self.root = Path(root).absolute()
         info = self.root.lstat()
         if (self.root.resolve() != self.root or not stat.S_ISDIR(info.st_mode)
                 or info.st_uid != os.geteuid() or info.st_mode & 0o077):
             raise JournalError('private_journal_root_required')
+        if binding is not None and (type(binding) is not dict or set(binding) != {'operation', 'engineId'}
+                or type(binding['operation']) is not str or not re.fullmatch('[a-f0-9]{32}', binding['operation'])
+                or type(binding['engineId']) is not str or not binding['engineId']):
+            raise JournalError('invalid_helper_binding')
+        self.binding = dict(binding) if binding is not None else None
         self.lock = None
 
     def __enter__(self):
@@ -64,7 +69,7 @@ class HelperJournal:
             if (operation != previous['operation'] or phase not in allowed[previous['phase']]
                     or previous['containerId'] is not None and previous['containerId'] != container_id):
                 raise JournalError('invalid_helper_transition')
-        payload = json.dumps({'operation': operation, 'phase': phase, 'containerId': container_id},
+        payload = json.dumps({'operation': operation, 'phase': phase, 'containerId': container_id, 'binding': self.binding},
                              sort_keys=True, separators=(',', ':')).encode()
         # Unique temp names prevent accidental truncation or symlink following.
         import uuid
@@ -89,7 +94,7 @@ class HelperJournal:
                 raise JournalError('invalid_helper_record')
             with os.fdopen(fd, 'rb', closefd=False) as src: record = json.load(src)
         finally: os.close(fd)
-        if type(record) is not dict or set(record) != {'operation', 'phase', 'containerId'}:
+        if type(record) is not dict or set(record) != {'operation', 'phase', 'containerId', 'binding'} or record['binding'] != self.binding:
             raise JournalError('invalid_helper_record')
         op, phase, cid = record['operation'], record['phase'], record['containerId']
         if (type(op) is not str or not re.fullmatch('[a-f0-9]{32}', op)
@@ -99,13 +104,16 @@ class HelperJournal:
             raise JournalError('invalid_helper_record')
         return record
 
-    def recover(self, transport):
+    def recover(self, transport, *, authorize=None):
         """Remove only a positively identified helper; never replay a start."""
         record = self.read()
         if record['phase'] == 'create_pending':
             raise JournalError('create_outcome_requires_inspection')
         if record['phase'] == 'resolved':
             return
+        if not callable(authorize):
+            raise JournalError('live_recovery_authority_required')
+        authorize()
         cid, op = record['containerId'], record['operation']
         label = 'io.ledgetop.update-helper=' + op
         ids = transport.docker('ps', '-a', '--no-trunc', '--filter', 'label=' + label,
@@ -113,11 +121,14 @@ class HelperJournal:
         if ids not in ([], [cid]):
             raise JournalError('helper_identity_ambiguous')
         if ids:
+            authorize()
             item = transport.inspected(cid, timeout=30)
             if (item.get('Id') != cid or item.get('Name') != '/ledgetop-update-helper-' + op
                     or (item.get('Config', {}).get('Labels') or {}).get('io.ledgetop.update-helper') != op):
                 raise JournalError('helper_identity_ambiguous')
+            authorize()
             transport.docker('rm', '-f', cid, timeout=30)
+        authorize()
         if transport.docker('ps', '-a', '--no-trunc', '--filter', 'label=' + label,
                             '--format', '{{.ID}}', timeout=30).splitlines():
             raise JournalError('helper_cleanup_unconfirmed')

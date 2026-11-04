@@ -334,12 +334,22 @@ print(json.dumps(counts))
     return legacy.BACKUP.replace('print(json.dumps(counts))',extra)
 
 
-def run_owned_helper(transport, args, *, timeout=60, journal_root=None):
+def run_owned_helper(transport, args, *, timeout=60, journal_root=None, journal_binding=None):
     from ops.owned_update_helper import run_owned_helper as run
     if journal_root is not None:
         from ops.durable_helper_journal import HelperJournal
     return run(transport, args, timeout=timeout, error_type=Stopped,
-               journal=HelperJournal(journal_root) if journal_root is not None else None)
+               journal=HelperJournal(journal_root, journal_binding) if journal_root is not None else None)
+
+
+def helper_binding(state):
+    try:
+        operation = state['operation']; engine = state['gateBinding']['cluster']['engineId']
+        if not re.fullmatch(r'[a-f0-9]{32}', operation) or type(engine) is not str or not engine:
+            raise ValueError()
+    except (KeyError, TypeError, ValueError):
+        raise Stopped('helper_binding_required') from None
+    return {'operation': operation, 'engineId': engine}
 
 
 def copy_backup(transport,root,state):
@@ -360,7 +370,7 @@ fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     return json.loads(run_owned_helper(transport,('--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
         '--cap-drop','ALL','--security-opt','no-new-privileges',
         '--mount','type=volume,src='+VOLUME+',dst=/source,readonly',
-        '--mount','type=bind,src='+str(destination)+',dst=/backup','--entrypoint','python',state['image'],'-c',backup_script()),timeout=120,journal_root=root))
+        '--mount','type=bind,src='+str(destination)+',dst=/backup','--entrypoint','python',state['image'],'-c',backup_script()),timeout=120,journal_root=root,journal_binding=helper_binding(state)))
 
 
 class ReferenceCoordinatorUpdate:
@@ -380,6 +390,26 @@ class ReferenceCoordinatorUpdate:
     def load(self):
         state=json.loads(self.t.private_file(self.root/'checkpoint.json').read_text())
         self.validate(state);return state
+
+    def recover_helper(self, expected_state):
+        """Explicit helper-only cleanup; never start/replay a coordinator update."""
+        from ops.durable_helper_journal import HelperJournal
+        # Recovery takes the same cross-operation lock as activation. Re-read
+        # after acquiring it so an earlier checkpoint read cannot authorize a
+        # mutation after a different operation has changed the receipt.
+        with self.t.operation_lock():
+            state=self.load()
+            if state != expected_state:raise Stopped('recovery_checkpoint_changed')
+            binding=helper_binding(state)
+            with self.gate_factory() as gates:
+                def authorize():
+                    gates.check()
+                    if self.t.docker('info','--format','{{.ID}}',timeout=30).strip()!=binding['engineId']:
+                        raise Stopped('recovery_docker_engine_changed')
+                    gates.check()
+                with HelperJournal(self.root,binding) as journal:
+                    journal.recover(self.t,authorize=authorize)
+        return state
 
     def validate(self,state):
         if (state.get('schemaVersion')!=2 or state.get('mode')!=MODE or state.get('authorityId')!=AUTHORITY
@@ -403,7 +433,7 @@ class ReferenceCoordinatorUpdate:
             if self.t.docker('ps','--filter','volume='+VOLUME,'--format','{{.ID}}').strip():raise Stopped('offline_volume_has_owner')
             raw=run_owned_helper(self.t,('--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
                 '--cap-drop','ALL','--security-opt','no-new-privileges','--mount','type=volume,src='+VOLUME+',dst=/source,readonly',
-                '--entrypoint','python',state['image'],'-c',code),journal_root=self.root)
+                '--entrypoint','python',state['image'],'-c',code),journal_root=self.root,journal_binding=helper_binding(state))
         else:raw=self.t.docker('exec','--user','10001:10001',container or state['old']['containerId'],'python','-c',code)
         result=json.loads(raw)
         if result['authorityId']!=AUTHORITY or result['tables']['jobs']['count']!=12:raise Stopped('reviewed_idle_history_required')
@@ -413,7 +443,7 @@ class ReferenceCoordinatorUpdate:
         raw=run_owned_helper(self.t,('--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
             '--cap-drop','ALL','--security-opt','no-new-privileges','--mount',
             'type=bind,src='+str(legacy.TLS_MOUNT)+',dst=/run/processing-reference,readonly',
-            '--entrypoint','python',state['image'],'-c',TLS_CENSUS),journal_root=self.root)
+            '--entrypoint','python',state['image'],'-c',TLS_CENSUS),journal_root=self.root,journal_binding=helper_binding(state))
         return json.loads(raw)
 
     def cluster_idle(self,state):
@@ -743,7 +773,7 @@ class GateFactory:
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=('prepare','activate','rollback'))
+    parser.add_argument('action',choices=('prepare','activate','rollback','recover-helper'))
     parser.add_argument('--image',required=True);parser.add_argument('--source-commit',required=True)
     parser.add_argument('--receipt-dir',required=True);parser.add_argument('--verified-main-image',required=True)
     parser.add_argument('--gate-config',required=True,help='private reviewed live dual-host gate bridge configuration')
@@ -753,6 +783,20 @@ def main(argv=None):
         import pwd
         if (os.geteuid()!=1000 or pwd.getpwuid(os.geteuid()).pw_name!='bkoltz'
                 or socket.gethostname().split('.')[0].lower()!='cluster'):raise Stopped('fixed_cluster_account_required')
+        if args.action=='recover-helper':
+            if not ACTIVATION_REVIEWED:raise Stopped('source_review_required_before_activation')
+            root=Path(args.receipt_dir)
+            if not root.is_absolute() or root.resolve()!=root or any(path.is_symlink() for path in (root,*root.parents)):
+                raise Stopped('absolute_private_operation_required')
+            initial=json.loads(legacy.private_file(root/'checkpoint.json').read_text())
+            factory=GateFactory(json.loads(legacy.private_file(args.gate_config).read_text()),operation_id=initial['operation'])
+            updater=ReferenceCoordinatorUpdate(root,gate_factory=factory)
+            updater.validate(initial)
+            if (initial['image'],initial['sourceCommit'],initial['engineImages']['main'])!=(args.image,args.source_commit,args.verified_main_image):
+                raise Stopped('prepared_argument_binding_changed')
+            updater.recover_helper(initial)
+            print('Owned helper reconciliation completed; updater checkpoint unchanged.',file=__import__('sys').stderr)
+            return 0
         with legacy.operation_lock():
             root=Path(args.receipt_dir)
             if not root.is_absolute() or root.resolve()!=root or any(path.is_symlink() for path in (root,*root.parents)):

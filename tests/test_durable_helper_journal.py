@@ -57,7 +57,7 @@ with HelperJournal(sys.argv[1]) as journal:
             os.kill(child.pid, signal.SIGKILL); child.wait(timeout=5)
             fixture = FakeDaemon()
             with HelperJournal(self.root) as journal:
-                journal.recover(fixture)
+                journal.recover(fixture, authorize=lambda: None)
                 self.assertEqual(journal.read()['phase'], 'resolved')
             self.assertEqual(fixture.removals, [CID])
         finally:
@@ -69,7 +69,7 @@ with HelperJournal(sys.argv[1]) as journal:
         with HelperJournal(self.root) as journal:
             journal.write(OP, 'create_pending')
             with self.assertRaisesRegex(JournalError, 'create_outcome_requires_inspection'):
-                journal.recover(fixture)
+                journal.recover(fixture, authorize=lambda: None)
         self.assertEqual(fixture.removals, [])
 
     def test_mismatched_identity_is_not_removed(self):
@@ -78,7 +78,7 @@ with HelperJournal(sys.argv[1]) as journal:
             journal.write(OP, 'create_pending')
             journal.write(OP, 'created', CID)
             with self.assertRaisesRegex(JournalError, 'helper_identity_ambiguous'):
-                journal.recover(fixture)
+                journal.recover(fixture, authorize=lambda: None)
         self.assertEqual(fixture.removals, [])
 
     def test_unresolved_record_cannot_be_overwritten_or_rebound(self):
@@ -90,5 +90,17 @@ with HelperJournal(sys.argv[1]) as journal:
             with self.assertRaisesRegex(JournalError, 'invalid_helper_transition'):
                 journal.write(OP, 'start_pending', 'b' * 64)
 
+    def test_recovery_requires_authority_and_exact_parent_binding(self):
+        binding={'operation':'2'*32,'engineId':'engine-one'}; fixture=FakeDaemon()
+        with HelperJournal(self.root,binding) as journal:
+            journal.write(OP,'create_pending');journal.write(OP,'created',CID)
+            with self.assertRaisesRegex(JournalError,'live_recovery_authority_required'):
+                journal.recover(fixture)
+        with HelperJournal(self.root,{'operation':'3'*32,'engineId':'engine-one'}) as journal:
+            with self.assertRaisesRegex(JournalError,'invalid_helper_record'):
+                journal.recover(fixture,authorize=lambda: None)
+        self.assertEqual(fixture.removals,[])
+
 
 if __name__ == '__main__': unittest.main()
+
