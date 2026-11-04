@@ -7,12 +7,43 @@ import time
 import io
 import zipfile
 import hashlib
+import struct
+import base64
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from processing.app import CoordinatorService, make_handler
 from processing.config import Config
 from tests.test_viewer_service import FakeEngine, FakeFleet, OPTIONS
+
+
+def synthetic_assets():
+    # An invented textured square, with matching OBJ and embedded-texture GLB.
+    png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+cFQAAAABJRU5ErkJggg==')
+    points = [(0,0,0),(1,0,0),(1,1,0),(0,0,0),(1,1,0),(0,1,0)]
+    position = b''.join(struct.pack('<fff',*p) for p in points)
+    normal = b''.join(struct.pack('<fff',0,0,1) for _ in points)
+    uv = b''.join(struct.pack('<ff',p[0],p[1]) for p in points)
+    parts=[];views=[]
+    for value in (position,normal,uv,png):
+        offset=sum(map(len,parts));views.append({'buffer':0,'byteOffset':offset,'byteLength':len(value)})
+        parts.append(value+b'\0'*((-len(value))%4))
+    blob=b''.join(parts)
+    desc={'asset':{'version':'2.0'},'scene':0,'scenes':[{'nodes':[0]}],'nodes':[{'mesh':0}],
+          'meshes':[{'primitives':[{'attributes':{'POSITION':0,'NORMAL':1,'TEXCOORD_0':2},'material':0}]}],
+          'materials':[{'pbrMetallicRoughness':{'baseColorTexture':{'index':0}}}],
+          'textures':[{'source':0}],'images':[{'bufferView':3,'mimeType':'image/png'}],
+          'accessors':[{'bufferView':i,'componentType':5126,'count':6,'type':t} for i,t in enumerate(('VEC3','VEC3','VEC2'))],
+          'bufferViews':views,'buffers':[{'byteLength':len(blob)}]}
+    header=json.dumps(desc,separators=(',',':')).encode();header+=b' '*((-len(header))%4)
+    glb=struct.pack('<III',0x46546c67,2,12+8+len(header)+8+len(blob))+struct.pack('<II',len(header),0x4e4f534a)+header+struct.pack('<II',len(blob),0x004e4942)+blob
+    obj=b'mtllib materials/model.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\nusemtl surface\nf 1/1/1 2/2/1 3/3/1\nf 1/1/1 3/3/1 4/4/1\n'
+    return {'odm_texturing/odm_textured_model_geo.glb':glb,
+            'odm_texturing/odm_textured_model_geo.obj':obj,
+            'odm_texturing/materials/model.mtl':b'newmtl surface\nmap_Kd ../textures/model.png\n',
+            'odm_texturing/textures/model.png':png,
+            'entwine_pointcloud/ept.json':b'{}',
+            '3d_tiles/model/tileset.json':b'{}'}
 
 
 def main():
@@ -30,14 +61,7 @@ def main():
     if sys.argv[2] in ('result', 'result-retry'):
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, 'w') as z:
-            for name, value in {
-                'odm_texturing/odm_textured_model_geo.glb': 'glb',
-                'odm_texturing/odm_textured_model_geo.obj': 'mtllib materials/model.mtl\nv 0 0 0\n',
-                'odm_texturing/materials/model.mtl': 'newmtl surface\nmap_Kd ../textures/model.jpg\n',
-                'odm_texturing/textures/model.jpg': 'texture',
-                'entwine_pointcloud/ept.json': '{}',
-                '3d_tiles/model/tileset.json': '{}',
-            }.items():
+            for name, value in synthetic_assets().items():
                 z.writestr(name, value)
         for engine in handler.viewer_service.engines.values():
             engine.archive = archive.getvalue()

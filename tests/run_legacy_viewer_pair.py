@@ -41,6 +41,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--processing', type=Path, required=True)
     parser.add_argument('--viewer', type=Path, required=True)
+    parser.add_argument('--converter', type=Path, required=True)
     parser.add_argument('--npm-cache', type=Path, required=True, help='existing npm cache, mounted read-only')
     args = parser.parse_args()
     check_source(args.processing, PROCESSING, fixture=True)
@@ -50,12 +51,13 @@ def main():
     owner = uuid.uuid4().hex
     name = 'ltds-legacy-pair-' + owner
     command = ['docker', 'create', '--name', name, '--label', 'ltds.fixture.owner=' + owner,
-               '--network', 'none', '--read-only', '--memory', '512m', '--cpus', '1',
+               '--network', 'none', '--read-only', '--memory', '1024m', '--cpus', '1',
                '--pids-limit', '96', '--tmpfs', '/tmp:rw,nosuid,nodev,size=512m,mode=1777',
                '--user', '10001:10001', '--workdir', '/processing',
                '--mount', f'type=bind,src={args.processing},dst=/processing,readonly',
                '--mount', f'type=bind,src={args.viewer},dst=/viewer,readonly',
                '--mount', f'type=bind,src={args.npm_cache},dst=/npm-cache,readonly',
+               '--mount', f'type=bind,src={args.converter},dst=/opt/obj2tiles,readonly',
                '--env', 'NODE_PATH=/tmp/deps/node_modules', '--entrypoint', 'sh', IMAGE, '-c',
                'mkdir /tmp/deps && cp /viewer/apps/viewer/package.json /viewer/apps/viewer/package-lock.json /tmp/deps/ '
                '&& npm ci --prefix /tmp/deps --omit=dev --offline --ignore-scripts --no-audit --no-fund --cache /npm-cache --logs-max=0 '
@@ -76,7 +78,7 @@ def main():
     try:
         verify()
         try:
-            print(run(['docker', 'start', '-a', identifier], timeout=60))
+            print(run(['docker', 'start', '-a', identifier], timeout=180))
         except subprocess.CalledProcessError as error:
             print(error.stdout, error.stderr, file=sys.stderr)
             raise

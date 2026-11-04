@@ -14,6 +14,7 @@ const {StorageManager}=require(path.join(server,'storageManager'));
 const {ViewerRepository}=require(path.join(server,'repository'));
 const {NodeOdmProvider}=require(path.join(server,'nodeOdmProvider'));
 const {processSubmit,processReconcile,processIngest}=require(path.join(server,'processingWorker'));
+const {processOneDerivative}=require(path.join(server,'derivativeWorker'));
 
 async function main() {
   const dataRoot=process.argv[2], port=Number(process.argv[3]), mode=process.argv[4];
@@ -82,23 +83,28 @@ async function main() {
       const receipt=processing.getAttemptTransferProvenance(attempt.id)?.archive;
       const final=processing.getAttempt(attempt.id);
       assert.ok(receipt && Array.isArray(receipt.archiveFiles) && receipt.archiveFiles.length===6);
-      const expected={
-        'odm_texturing/odm_textured_model_geo.glb':'glb',
-        'odm_texturing/odm_textured_model_geo.obj':'mtllib materials/model.mtl\nv 0 0 0\n',
-        'odm_texturing/materials/model.mtl':'newmtl surface\nmap_Kd ../textures/model.jpg\n',
-        'odm_texturing/textures/model.jpg':'texture',
-        'entwine_pointcloud/ept.json':'{}',
-        '3d_tiles/model/tileset.json':'{}',
-      };
+      const expectedNames=new Set(['odm_texturing/odm_textured_model_geo.glb','odm_texturing/odm_textured_model_geo.obj','odm_texturing/materials/model.mtl','odm_texturing/textures/model.png','entwine_pointcloud/ept.json','3d_tiles/model/tileset.json']);
       for(const file of receipt.archiveFiles){
-        assert.ok(Object.hasOwn(expected,file.relativePath));
-        assert.equal(file.byteSize,Buffer.byteLength(expected[file.relativePath]));
-        assert.equal(file.sha256,crypto.createHash('sha256').update(expected[file.relativePath]).digest('hex'));
+        assert.ok(expectedNames.delete(file.relativePath));
+        const bytes=fs.readFileSync(path.join(dataRoot,'models',task.id,attempt.id,file.relativePath));
+        assert.equal(file.byteSize,bytes.length);
+        assert.equal(file.sha256,crypto.createHash('sha256').update(bytes).digest('hex'));
       }
+      assert.equal(expectedNames.size,0);
       assert.equal(receipt.archiveManifestSha256,crypto.createHash('sha256').update(JSON.stringify(receipt.archiveFiles)).digest('hex'));
       assert.ok(final.resultModelId && final.resultModelVersionId);
       assert.equal(final.status,'derivatives');
-      console.log(JSON.stringify({event:'ingested',uuid:attempt.providerTaskId,receipt,attemptStatus:final.status,modelId:final.resultModelId,versionId:final.resultModelVersionId}));
+      const repo=new ViewerRepository(db);
+      const derivativeConfig={...config,obj2TilesBin:'/opt/obj2tiles/Obj2Tiles',localDerivativesEnabled:false};
+      storage.requireDerivativeSpace=()=>({inodeReserve:0});
+      const priorInfo=console.info; console.info=(...args)=>console.error(...args);
+      try { assert.equal(await processOneDerivative({processing,storage,config:derivativeConfig},'synthetic-derivative'),true); }
+      finally { console.info=priorInfo; }
+      const completed=processing.getAttempt(attempt.id);
+      if(completed.status!=='ready_for_review') console.error('derivative diagnostic',JSON.stringify(processing.listDerivativeJobs(10)));
+      assert.equal(completed.status,'ready_for_review');
+      assert.ok(repo.getModelVersion(completed.resultModelId,completed.resultModelVersionId));
+      console.log(JSON.stringify({event:'ingested',uuid:attempt.providerTaskId,receipt,attemptStatus:completed.status,modelId:completed.resultModelId,versionId:completed.resultModelVersionId}));
       return;
     }
     console.log(JSON.stringify({event:'complete',uuid:attempt.providerTaskId,files,mode,dropped}));
