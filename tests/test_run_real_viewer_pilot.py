@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -57,9 +58,37 @@ class LauncherTests(unittest.TestCase):
         for p in patches:p.start()
         self.addCleanup(lambda:[p.stop() for p in reversed(patches)])
         return calls,state,secret
+    def test_pinned_inline_entrypoint_reaches_help_without_launch(self):
+        bootstrap = '''import hashlib,subprocess
+commit='49a4f3b70870d1d275799a99b70c28991a362fb6'
+expected='9fb0b1299c55a40ffe041c71b04b3c3e5d57ced5935ef6d20eccba749d5c6dc8'
+code=subprocess.check_output(['git','show',commit+':tests/run_real_viewer_pilot.py'])
+if hashlib.sha256(code).hexdigest()!=expected: raise SystemExit('pinned launcher mismatch')
+exec(compile(code,'<verified-pilot-launcher>','exec'),{'__name__':'__main__'})'''
+        result=subprocess.run([sys.executable,'-c',bootstrap,'--help'],cwd=ROOT.parent,
+                              capture_output=True,text=True,timeout=15)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('--processing',result.stdout)
+        self.assertFalse((self.args.registry/'launcher.json').exists())
+
     def test_other_registry_is_rejected(self):
         with self.assertRaisesRegex(RuntimeError,'fixed_registry_required'):
             m.verify_registry_acl(self.args.registry)
+
+    @unittest.skipUnless(os.name=='nt','Windows ACL check only')
+    def test_private_windows_registry_accepts_owner_and_rejects_everyone(self):
+        sid=subprocess.check_output(['pwsh','-NoProfile','-NonInteractive','-Command',
+            '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],text=True,timeout=15).strip()
+        directory=self.args.registry
+        subprocess.run(['icacls.exe',str(directory),'/inheritance:r','/grant:r',
+            f'*{sid}:(OI)(CI)F','*S-1-5-18:(OI)(CI)F','*S-1-5-32-544:(OI)(CI)F'],
+            capture_output=True,text=True,timeout=15,check=True)
+        with patch.object(m,'FIXED_REGISTRY',directory):
+            m.verify_registry_acl(directory)
+            subprocess.run(['icacls.exe',str(directory),'/grant:r','*S-1-1-0:(OI)(CI)F'],
+                capture_output=True,text=True,timeout=15,check=True)
+            with self.assertRaisesRegex(RuntimeError,'registry_acl_unverified'):
+                m.verify_registry_acl(directory)
 
     def test_pinned_git_objects_match_expected_hashes(self):
         pinned=m.load_pinned(ROOT.parent)

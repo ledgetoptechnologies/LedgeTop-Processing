@@ -62,7 +62,7 @@ def verify_registry_acl(registry):
        "(($r.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq "
        "[Security.AccessControl.FileSystemRights]::FullControl)){$mine=$true}}; "
        "if($ok -and $mine){exit 0}else{exit 1}")
-    if subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',script],
+    if subprocess.run(['pwsh','-NoProfile','-NonInteractive','-Command',script],
                       capture_output=True,timeout=15).returncode:raise RuntimeError('registry_acl_unverified')
 
 # Reads the already configured staging credential remotely and returns it only
