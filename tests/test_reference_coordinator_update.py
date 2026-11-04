@@ -743,6 +743,22 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
             self.assertEqual(args[args.index(flag)+1],value)
         self.assertIn('--read-only',args)
 
+    def test_authority_lease_recipe_is_exact_and_binding_is_pinned(self):
+        lease='/private/authority'; binding={'path':lease,'device':1,'inode':2,'lockDevice':1,'lockInode':3}
+        self.updater.lease_dir=lease
+        state=dict(self.state,leaseBinding=binding)
+        with patch.object(module,'lease_binding',return_value=binding):
+            args=self.updater.create_args(state)
+            self.assertIn('PROCESSING_AUTHORITY_LEASE_DIR=/run/ledgetop-authority-lease',args)
+            self.assertIn('type=bind,src='+lease+',dst=/run/ledgetop-authority-lease',args)
+            item=copy.deepcopy(self.transport.inspected(module.NAME))
+            item['Mounts'].append(dict(Type='bind',Source=lease,Destination='/run/ledgetop-authority-lease',RW=True))
+            self.updater.facts(item)
+            item['Mounts'][-1]['RW']=False
+            with self.assertRaisesRegex(module.Stopped,'authority_lease_mount_changed'):self.updater.facts(item)
+        with patch.object(module,'lease_binding',return_value={**binding,'lockInode':4}):
+            with self.assertRaisesRegex(module.Stopped,'lease_binding_changed'):self.updater.create_args(state)
+
     def test_candidate_without_exact_tmpfs_is_refused_before_start_and_held(self):
         real_docker=self.transport.docker
         def create_with_wrong_tmpfs(*args,**kwargs):

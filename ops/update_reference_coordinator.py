@@ -532,12 +532,31 @@ print(json.dumps(dict(path='runtime.json',bytes=len(raw),sha256=hashlib.sha256(r
 """
 
 
-def application_environment(transport, item):
+def lease_binding(directory):
+    """Record the existing private authority lock without creating it."""
+    if type(directory) is not str or not directory.startswith('/') or ',' in directory or '\n' in directory:
+        raise Stopped('absolute_private_lease_directory_required')
+    path=Path(directory)
+    if path.resolve(strict=True)!=path or any(p.is_symlink() for p in (path,*path.parents)):
+        raise Stopped('absolute_private_lease_directory_required')
+    st=path.stat(); lock=(path/(AUTHORITY+'.lease')).lstat()
+    if (not stat.S_ISDIR(st.st_mode) or (st.st_uid,st.st_gid,stat.S_IMODE(st.st_mode))!=(10001,10001,0o711)
+            or not stat.S_ISREG(lock.st_mode) or (lock.st_uid,lock.st_gid,stat.S_IMODE(lock.st_mode),lock.st_nlink)!=(10001,10001,0o600,1)
+            or lock.st_dev!=st.st_dev):raise Stopped('private_authority_lease_required')
+    return dict(path=str(path),device=st.st_dev,inode=st.st_ino,lockDevice=lock.st_dev,lockInode=lock.st_ino)
+
+
+def application_environment(transport, item, *, lease=False):
     env=transport.environment()
-    defaults=dict(value.split('=',1) for value in transport.image(item['Image'])['Config'].get('Env',[]))
-    observed=dict(value.split('=',1) for value in item['Config']['Env'])
+    default_entries=transport.image(item['Image'])['Config'].get('Env',[])
+    entries=item['Config']['Env']
+    defaults=dict(value.split('=',1) for value in default_entries)
+    observed=dict(value.split('=',1) for value in entries)
+    if len(defaults)!=len(default_entries) or len(observed)!=len(entries):raise Stopped('duplicate_application_environment_key')
     application=dict(env,PROCESSING_REFERENCE_CONFIG=legacy.CONFIG_PATH)
-    if observed!=dict(defaults,**application):raise Stopped('reference_application_environment_changed')
+    expected=dict(defaults,**application)
+    if lease:expected['PROCESSING_AUTHORITY_LEASE_DIR']='/run/ledgetop-authority-lease'
+    if observed!=expected:raise Stopped('reference_application_environment_changed')
     return digest(application)
 
 
@@ -594,8 +613,9 @@ fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
 
 
 class ReferenceCoordinatorUpdate:
-    def __init__(self,root,*,gate_factory,transport=legacy,cluster_probe=None):
+    def __init__(self,root,*,gate_factory,transport=legacy,cluster_probe=None,lease_dir=None):
         self.root=Path(root).absolute();self.t=transport;self.gate_factory=gate_factory
+        self.lease_dir=lease_dir
         self.cluster_probe=cluster_probe or self.cluster_idle
         if self.root.resolve()!=self.root or any(path.is_symlink() for path in (self.root,*self.root.parents)):
             raise Stopped('private_update_root_required')
@@ -612,6 +632,9 @@ class ReferenceCoordinatorUpdate:
         self.validate(state);return state
 
     def validate(self,state):
+        if ((self.lease_dir is None and 'leaseBinding' in state) or
+                (self.lease_dir is not None and state.get('leaseBinding')!=lease_binding(self.lease_dir))):
+            raise Stopped('lease_binding_changed')
         if (state.get('schemaVersion')!=2 or state.get('mode')!=MODE or state.get('authorityId')!=AUTHORITY
                 or state.get('old',{}).get('containerId')!=OLD_ID or state['old'].get('image')!=OLD_IMAGE
                 or state.get('gateBinding')!=self.gate_factory.binding):raise Stopped('reference_update_checkpoint_binding_changed')
@@ -700,10 +723,10 @@ class ReferenceCoordinatorUpdate:
         if (item['Id']!=OLD_ID or item['Image']!=OLD_IMAGE or not item['State']['Running']
                 or item['State'].get('Health',{}).get('Status')!='healthy'
                 or item['HostConfig'].get('Tmpfs')):raise Stopped('exact_current_reference_primary_required')
-        facts=self.t.facts(item,reference=True);self.t.sole_owner(OLD_ID)
+        facts=self.facts(item);self.t.sole_owner(OLD_ID)
         if self.t.image(OLD_IMAGE)['Config'].get('Labels',{}).get('org.opencontainers.image.revision')!=OLD_SOURCE:
             raise Stopped('predecessor_source_changed')
-        if state and (facts!=state['old'] or application_environment(self.t,item)!=state['applicationEnvironmentSha256']):
+        if state and (facts!=state['old'] or application_environment(self.t,item,lease=self.lease_dir is not None)!=state['applicationEnvironmentSha256']):
             raise Stopped('prepared_reference_primary_changed')
         return item,facts
 
@@ -714,7 +737,7 @@ class ReferenceCoordinatorUpdate:
         if not re.fullmatch(r'sha256:[0-9a-f]{64}',target) or not re.fullmatch(r'[0-9a-f]{40}',source_commit):raise Stopped('immutable_candidate_required')
         if target==OLD_IMAGE:raise Stopped('new_reference_image_required')
         if (self.root/'checkpoint.json').exists():raise Stopped('new_private_operation_required')
-        old,original=self.original();application=application_environment(self.t,old)
+        old,original=self.original();application=application_environment(self.t,old,lease=self.lease_dir is not None)
         candidate=self.t.image(target)
         if (candidate['Id']!=target or candidate['Config'].get('Labels',{}).get('org.opencontainers.image.revision')!=source_commit
                 or any(candidate['Config'].get(key)!=old['Config'].get(key) for key in ('User','WorkingDir','Cmd','Entrypoint','Healthcheck'))):
@@ -733,6 +756,7 @@ class ReferenceCoordinatorUpdate:
             applicationEnvironmentSha256=application,gateBinding=self.gate_factory.binding,
             engineImages=dict(main=main_image,cluster=cluster['Image']),clusterContainerId=cluster['Id'],
             rollbackName=NAME+'-pre-reference-update-'+operation,failedName=NAME+'-failed-reference-update-'+operation)
+        if self.lease_dir is not None:state['leaseBinding']=lease_binding(self.lease_dir)
         self.validate(state)
         self.cluster_probe(state)
         for name in (state['rollbackName'],state['failedName']):
@@ -762,10 +786,19 @@ class ReferenceCoordinatorUpdate:
         if (not re.fullmatch(r'[a-f0-9]{64}',item['Id']) or item['Image']!=state['image']
                 or item['Config'].get('Labels',{}).get(LABEL)!=state['operation']
                 or item['Name'] not in ('/'+NAME,'/'+state['failedName'])):raise Stopped('foreign_candidate_refused')
-        self.t.facts(item,reference=True)
+        self.facts(item)
         if item['HostConfig'].get('Tmpfs')!=TMPFS:raise Stopped('candidate_tmpfs_changed')
-        if application_environment(self.t,item)!=state['applicationEnvironmentSha256']:raise Stopped('candidate_application_environment_changed')
+        if application_environment(self.t,item,lease=self.lease_dir is not None)!=state['applicationEnvironmentSha256']:raise Stopped('candidate_application_environment_changed')
         self.save(state,newContainerId=item['Id']);return item
+
+    def facts(self,item):
+        if self.lease_dir is None:return self.t.facts(item,reference=True)
+        lease_binding(self.lease_dir)
+        mounts=item.get('Mounts') or []
+        found=[m for m in mounts if m.get('Destination')=='/run/ledgetop-authority-lease']
+        if len(found)!=1 or found[0].get('Type')!='bind' or found[0].get('Source')!=self.lease_dir or found[0].get('RW') is not True:
+            raise Stopped('authority_lease_mount_changed')
+        return self.t.facts(dict(item,Mounts=[m for m in mounts if m is not found[0]]),reference=True)
 
     def plans(self,state,api):
         for identifier,plan in state['plans'].items():
@@ -792,14 +825,19 @@ class ReferenceCoordinatorUpdate:
             if observed['nodeRows'][identifier]!=expected:raise Stopped('unowned_node_row_transition')
 
     def create_args(self,state):
-        return ('create','--name',NAME,'--pull=never','--init','--restart','unless-stopped','--network','bridge',
+        args=('create','--name',NAME,'--pull=never','--init','--restart','unless-stopped','--network','bridge',
             '--read-only','--tmpfs','/tmp:'+TMPFS['/tmp'],'--user','10001:10001','--cap-drop','ALL','--security-opt','no-new-privileges',
             '--pids-limit','64','--cpus','0.5','--memory','256m','--memory-swap','512m','--ipc','private','--shm-size','64m',
             '--log-driver','json-file','--workdir','/app','--env-file',str(legacy.NATIVE_ENV),'-e','PROCESSING_REFERENCE_CONFIG='+legacy.CONFIG_PATH,
             '--mount','type=volume,src='+VOLUME+',dst=/prototype-state',
             '--mount','type=bind,src='+str(legacy.TLS_MOUNT)+',dst=/run/processing-reference,readonly',
             '-p','127.0.0.1:18080:8080','-p','192.168.50.89:3005:8080','-p','192.168.50.89:18443:8443',
-            '--label',LABEL+'='+state['operation'],state['image'])
+            '--label',LABEL+'='+state['operation'])
+        if self.lease_dir is not None:
+            if state.get('leaseBinding')!=lease_binding(self.lease_dir):raise Stopped('lease_binding_changed')
+            args+=('-e','PROCESSING_AUTHORITY_LEASE_DIR=/run/ledgetop-authority-lease',
+                   '--mount','type=bind,src='+self.lease_dir+',dst=/run/ledgetop-authority-lease')
+        return args+(state['image'],)
 
     def backup(self,state,gates):
         self.check(state,gates)
@@ -949,7 +987,7 @@ class ReferenceCoordinatorUpdate:
             old=self.t.inspected(OLD_ID)
             if old['Image']!=OLD_IMAGE or old['Name'] not in ('/'+NAME,'/'+state['rollbackName']):raise Stopped('exact_old_reference_rollback_only')
             self.t.facts(old,reference=True)
-            if application_environment(self.t,old)!=state['applicationEnvironmentSha256']:raise Stopped('rollback_application_environment_changed')
+            if application_environment(self.t,old,lease=self.lease_dir is not None)!=state['applicationEnvironmentSha256']:raise Stopped('rollback_application_environment_changed')
             if item is not None and item['Name']=='/'+NAME:
                 self.save(state,'rollback_rename_candidate_pending');self.mutation(state,gates,'rename',item['Id'],state['failedName'])
             if old['Name']!='/'+NAME:
@@ -1003,6 +1041,7 @@ def main(argv=None):
     parser.add_argument('--image',required=True);parser.add_argument('--source-commit',required=True)
     parser.add_argument('--receipt-dir',required=True);parser.add_argument('--verified-main-image',required=True)
     parser.add_argument('--gate-config',required=True,help='private reviewed live dual-host gate bridge configuration')
+    parser.add_argument('--lease-dir',required=True,help='existing host authority lease directory')
     args=parser.parse_args(argv)
     try:
         if os.name!='posix':raise Stopped('linux_reference_update_required')
@@ -1019,7 +1058,7 @@ def main(argv=None):
                 root.mkdir(mode=0o700)
             state=None if args.action=='prepare' else json.loads(legacy.private_file(root/'checkpoint.json').read_text())
             factory=GateFactory(json.loads(legacy.private_file(args.gate_config).read_text()),operation_id=state['operation'] if state else None)
-            updater=ReferenceCoordinatorUpdate(root,gate_factory=factory)
+            updater=ReferenceCoordinatorUpdate(root,gate_factory=factory,lease_dir=args.lease_dir)
             if args.action=='prepare':state=updater.prepare(args.image,args.source_commit,args.verified_main_image)
             else:
                 if not ACTIVATION_REVIEWED:raise Stopped('source_review_required_before_activation')
