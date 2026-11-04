@@ -97,12 +97,16 @@ class ReferenceStore:
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
                  main_node_id=None, viewer_required_environments=(),
-                 node_inventory=None, node_readiness=None, jcs_runtime_enabled=False):
+                 node_inventory=None, node_readiness=None, jcs_runtime_enabled=False,
+                 admission_family_candidate=False):
         if PROFILE not in queue.allowed_profiles:
             raise ValueError("reference queue profile is disabled")
         for value in (max_queued_jobs, max_metadata_bytes):
             if type(value) is not int or value < 1:
                 raise ValueError("metadata quotas must be positive integers")
+        if type(admission_family_candidate) is not bool:
+            raise ValueError('explicit candidate family flag required')
+        self.admission_family_candidate = admission_family_candidate
         if type(jcs_runtime_enabled) is not bool:
             raise ValueError('explicit JCS runtime flag required')
         self.jcs_runtime_enabled = jcs_runtime_enabled
@@ -150,6 +154,9 @@ class ReferenceStore:
         # Read-only compatibility preflight before chmod or schema writes.
         try:
             with closing(sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)) as preflight:
+                marker = preflight.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_admission_family_candidate'").fetchone()
+                if marker and not admission_family_candidate:
+                    raise Conflict('candidate family state requires candidate runtime')
                 owners = preflight.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_viewer_submission_owners'").fetchone()
                 if owners and not jcs_runtime_enabled and preflight.execute("SELECT 1 FROM reference_viewer_submission_owners WHERE protocol='ltds-viewer-prepared-envelope-jcs-v3' LIMIT 1").fetchone():
                     raise JCSRuntimeUnavailable('JCS durable state requires enabled capable runtime')
@@ -210,6 +217,21 @@ class ReferenceStore:
             self._init_envelope_v2_schema(db)
             self._init_v3_policy_schema(db)
             self._init_v3_copy_hold_schema(db)
+            if self.admission_family_candidate:
+                from .admission_family_candidate import SCHEMA, FamilyHeld, initialize_empty, validate_family
+                if not db.in_transaction:
+                    db.execute('BEGIN IMMEDIATE')
+                marker = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reference_admission_family_candidate'").fetchone()
+                try:
+                    if marker is None:
+                        initialize_empty(db)
+                    elif ' '.join(marker[0].split()) != ' '.join(SCHEMA.split()):
+                        raise FamilyHeld('candidate schema changed')
+                    for item in db.execute('SELECT job_id FROM reference_jobs').fetchall():
+                        validate_family(db, item[0], self.queue.authority_id)
+                except FamilyHeld as exc:
+                    raise Conflict('candidate family evidence unavailable') from exc
+                db.commit()
             self._check_jcs_capability(db)
             if db.execute("SELECT 1 FROM reference_viewer_submission_owners WHERE protocol='ltds-viewer-prepared-envelope-jcs-v3' LIMIT 1").fetchone():
                 if not self.jcs_runtime_enabled:
@@ -355,6 +377,12 @@ class ReferenceStore:
           WHERE r.job_id=? AND j.profile=?""", (job_id, PROFILE)).fetchone()
         if row is None:
             raise Conflict("unknown reference job")
+        if self.admission_family_candidate:
+            from .admission_family_candidate import FamilyHeld, validate_family
+            try:
+                validate_family(db, job_id, self.queue.authority_id)
+            except FamilyHeld as exc:
+                raise Conflict('candidate family evidence unavailable') from exc
         return row
 
     def _public(self, row):
@@ -597,6 +625,15 @@ class ReferenceStore:
             if policy_wire is not None:
                 db.execute('INSERT INTO reference_viewer_v3_policy VALUES(?,?,?)',
                     (job_id,policy_wire,hashlib.sha256(policy_wire.encode('utf-8')).hexdigest()))
+            if self.admission_family_candidate:
+                from .admission_family_candidate import FamilyHeld, _snapshot
+                family = 'legacy-v1' if owner is None else (
+                    'prepared-v3' if envelope_protocol == 'ltds-viewer-prepared-envelope-jcs-v3' and envelope is not None else None)
+                try:
+                    evidence = _snapshot(db, job_id, self.queue.authority_id, family)
+                    db.execute('INSERT INTO reference_admission_family_candidate VALUES(?,?,?,?,?,?,?,?,?)', evidence)
+                except FamilyHeld as exc:
+                    raise Conflict('candidate family evidence unavailable') from exc
             return self._public(self._row(db, job_id)), True
 
     def get(self, job_id, *, private=False):

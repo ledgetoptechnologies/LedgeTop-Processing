@@ -37,7 +37,7 @@ def _snapshot(db, job_id, authority_id, family):
     try:
         p._uuid(job_id, 'job ID'); p._uuid(authority_id, 'authority ID')
         auth = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchall()
-        if auth != [(authority_id,)]:
+        if [tuple(item) for item in auth] != [(authority_id,)]:
             raise ValueError('authority mismatch')
         row = db.execute('SELECT generation,environment,request_digest FROM reference_jobs WHERE job_id=?', (job_id,)).fetchone()
         if row is None: raise ValueError('job missing')
