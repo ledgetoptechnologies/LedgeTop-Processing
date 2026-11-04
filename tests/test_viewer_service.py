@@ -1065,6 +1065,84 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick()
         self.assertEqual(self.service.info(viewer)['status']['code'], 20)
 
+    def mixed_inventory_service(self, name, probe, *, readiness=None):
+        from processing.reference_store import ReferenceStore
+        self.service.close(); self.queue.close()
+        inventory = (dict(id='cluster', physicalHostId='cluster', origin='http://192.0.2.1:3000',
+                          token='', maxPhotos=1, capabilities=('odm',)),
+                     dict(id='main', physicalHostId='main', origin='http://192.0.2.2:3000',
+                          token='', maxPhotos=None, capabilities=('odm',)))
+        self.config.node_inventory = inventory
+        self.config.prototype_state_dir = str(self.root / name)
+        self.queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
+                           treedar_node_ids=(), viewer_enabled=True, reference_enabled=True, per_node_slots=True,
+                           node_capabilities={'cluster': ('odm',), 'main': ('odm',)},
+                           node_photo_limits={'cluster': 1, 'main': None})
+        self.service = ViewerService(self.queue, self.config, engines=self.engines, probe=probe)
+        self.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(item) for item in OPTIONS]}
+        self.service._selected_options = lambda _: [dict(item) for item in OPTIONS]
+        return ReferenceStore(self.queue, node_inventory=inventory, node_readiness=readiness) if readiness else None
+
+    def test_viewer_uses_idle_node_behind_reference_exceeding_its_scratch(self):
+        from processing import reference_protocol as protocol
+        reports = {node: {'ready': True, 'taskQueueCount': 0, 'maxImages': None, 'outputBudgetBytes': 1024,
+                          'availableScratchBytes': 10 ** 9} for node in ('cluster', 'main')}
+        reports['cluster']['availableScratchBytes'] = 5000
+        reference = self.mixed_inventory_service('scratch-proof-state',
+            lambda role, origin, token: {'ready': True, 'maxImages': None, 'taskQueueCount': 0},
+            readiness=lambda node: reports[node])
+        fixture = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())
+        def submit(images, size):
+            raw = json.loads(json.dumps(fixture['submission']))
+            raw['submissionId'] = str(uuid.uuid4())
+            manifest = raw['manifest']
+            manifest['objects'] = [{**manifest['objects'][0], 'id': f'image-{i}', 'name': f'image-{i}.jpg',
+                                    'byteSize': size} for i in range(images)]
+            manifest.update(objectCount=images, totalBytes=images * size)
+            manifest['inputCounts']['images'] = images
+            manifest['sha256'] = protocol.manifest_sha256(manifest)
+            return reference.submit(protocol.validate_submission(raw, environment='production',
+                capability_fingerprint=raw['capabilityFingerprint']))[0]
+        running = submit(2, 3)
+        self.assertIsNotNone(reference.claim(running['jobId'], node_id='main', worker_id='main',
+            worker_instance_id='instance', claim_request_id='main-claim'))
+        waiting = submit(1, 100000)
+        viewer = self.submit()
+        known, reports['cluster'] = reports['cluster'], None
+        self.service.tick()
+        self.assertIsNone(self.task(viewer)['node_id'])  # Scratch unknown: the barrier holds.
+        reports['cluster'] = known
+        self.service.tick()
+        self.assertEqual(self.task(viewer)['node_id'], 'cluster')
+        self.assertEqual(self.queue.get(waiting['jobId'])['status'], 'queued')
+
+    def test_unanswered_node_holds_viewer_overflow_for_a_bounded_time(self):
+        from processing import viewer_service
+        cluster = [{'role': 'cluster', 'configured': True, 'ready': False, 'reason': 'probe_failed'}]
+        self.mixed_inventory_service('unanswered-state', lambda role, origin, token: cluster[0] if role == 'cluster'
+            else {'ready': True, 'maxImages': None, 'taskQueueCount': 0})
+        small = self.submit()
+        self.service.tick()
+        self.assertIsNone(self.task(small)['node_id'])
+        self.assertEqual(self.task(small)['error'], 'no_eligible_node')
+        self.service._unanswered['cluster'] -= viewer_service.UNANSWERED_NODE_SECONDS
+        self.service.tick()
+        self.assertEqual(self.task(small)['node_id'], 'main')
+
+    def test_silent_node_does_not_hold_a_viewer_job_it_cannot_run(self):
+        self.mixed_inventory_service('oversized-state', lambda role, origin, token: {'ready': False}
+            if role == 'cluster' else {'ready': True, 'maxImages': None, 'taskQueueCount': 0})
+        large = self.submit(count=2)
+        self.service.tick()
+        self.assertEqual(self.task(large)['node_id'], 'main')
+
+    def test_answered_not_ready_node_may_overflow_immediately(self):
+        self.mixed_inventory_service('answered-state', lambda role, origin, token: {'ready': role == 'main',
+            'maxImages': None, 'taskQueueCount': 0})
+        small = self.submit()
+        self.service.tick()
+        self.assertEqual(self.task(small)['node_id'], 'main')
+
     def test_partial_catalog_saved_evidence_routes_only_to_compatible_returned_node(self):
         from tests.test_options import Engine
         self.service.close(); self.queue.close()

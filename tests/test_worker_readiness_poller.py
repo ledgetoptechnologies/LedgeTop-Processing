@@ -151,6 +151,26 @@ class WorkerReadinessPollerTests(unittest.TestCase):
             finally:
                 queue.close()
 
+    def test_failed_probe_leaves_node_unknown_until_its_ttl(self):
+        now = [100.0]
+        cache = NodeReadiness(('small',), ttl_seconds=30, clock=lambda: now[0])
+        workers = {'small': dict(origin='https://small.invalid', bearer='synthetic-token-00001', workerId='small-worker')}
+        observation = dict(ready=True, taskQueueCount=0, maxImages=None, availableScratchBytes=100, outputBudgetBytes=0)
+        answers = [Reply(dict(nodeId='small', workerId='small-worker', observation=observation))]
+        def opener(request, timeout):
+            if answers:
+                return answers.pop()
+            raise OSError('synthetic failure')
+        poller = WorkerReadinessPoller(workers, cache, ssl_context=ssl.create_default_context(), opener=opener)
+        poller.poll_once()
+        self.assertTrue(cache.status('small')['ready'])
+        now[0] = 129
+        poller.poll_once()
+        self.assertIsNone(cache.status('small'))
+        now[0] = 130
+        poller.poll_once()
+        self.assertEqual(cache.status('small'), {'ready': False, 'reason': 'readiness_expired'})
+
 
 if __name__ == '__main__':
     unittest.main()

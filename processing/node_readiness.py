@@ -2,6 +2,11 @@
 
 Only a trusted caller that has already authenticated and checked a node may
 publish an observation. This cache is not a node attestation or reservation.
+
+get() is the claim evidence: a current observation or nothing. status() also
+answers routing: a node with no current observation stays unknown for one TTL
+after its last valid probe (or cache start), then is unavailable, so a later
+node never overflows past a routine probe and a silent node cannot wedge it.
 """
 import math
 import threading
@@ -19,6 +24,7 @@ class NodeReadiness:
             raise ValueError('invalid readiness cache configuration')
         self._nodes, self._ttl, self._clock = frozenset(ids), ttl_seconds, clock
         self._observations = {}
+        self._evidence = dict.fromkeys(ids, clock())
         self._epochs = {node: 0 for node in ids}
         self._pending = {}
         self._lock = threading.Lock()
@@ -69,6 +75,7 @@ class NodeReadiness:
             if now < pending[1] or now - pending[1] >= self._ttl:
                 raise ValueError('expired readiness probe')
             self._observations[node_id] = (pending[1], dict(report))
+            self._evidence[node_id] = pending[1]
 
     def _invalidate_ticket(self, node_id, ticket):
         with self._lock:
@@ -94,3 +101,16 @@ class NodeReadiness:
                     or now < record[0] or now - record[0] >= self._ttl):
                 return None
             return dict(record[1])
+
+    def status(self, node_id):
+        """Current report, None while unknown, or a not-ready marker past the TTL."""
+        report = self.get(node_id)
+        if report is not None:
+            return report
+        now = self._clock()
+        with self._lock:
+            evidence = self._evidence[node_id]
+        if (any(type(value) not in (int, float) or not math.isfinite(value) for value in (now, evidence))
+                or now - evidence < self._ttl):
+            return None
+        return {'ready': False, 'reason': 'readiness_expired'}

@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from processing import reference_protocol as p
 from processing.prototype import Queue, PROFILE as LEGACY_PROFILE, VIEWER_PROFILE
+from processing.node_readiness import NodeReadiness
 from processing.maintenance import Conflict
 from processing.reference_failure import FailureReceiver
 from processing.reference_recovery import SCHEMA as RECOVERY_SCHEMA
@@ -1101,6 +1102,269 @@ class ReferenceStoreTests(unittest.TestCase):
         payload["token"] = "secret"
         with self.assertRaises(ValueError):
             self.store.enqueue_outbox("delivery_ack", "ack-2", payload)
+
+
+class InventorySchedulingTests(unittest.TestCase):
+    """Synthetic queues for "earliest job eligible for each available node"."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.queue = Queue(self.directory.name, node_ids=('cluster', 'node-2'), treedar_node_ids=('node-2',),
+                           viewer_enabled=True, reference_enabled=True, per_node_slots=True,
+                           node_capabilities={'cluster': ['odm'], 'node-2': ['odm', 'treedar']},
+                           node_photo_limits={'cluster': 2, 'node-2': None})
+        self.inventory = [dict(id='cluster', maxPhotos=2, capabilities=['odm']),
+                          dict(id='node-2', maxPhotos=None, capabilities=['odm', 'treedar'])]
+        self.reports = {'cluster': self.report(), 'node-2': self.report()}
+        self.store = ReferenceStore(self.queue, node_inventory=self.inventory,
+                                    node_readiness=lambda node: self.reports[node])
+        self.fixture = json.loads((Path(__file__).resolve().parents[1] /
+                                  'contracts/reference-v1.contract.json').read_text())
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE viewer_tasks(uuid TEXT, job_id TEXT, removed INTEGER)')
+            db.execute('CREATE TABLE viewer_files(uuid TEXT, is_photo INTEGER)')
+
+    def tearDown(self):
+        self.queue.close()
+        self.directory.cleanup()
+
+    @staticmethod
+    def report(**changes):
+        return {'ready': True, 'taskQueueCount': 0, 'maxImages': None,
+                'availableScratchBytes': 10 ** 9, 'outputBudgetBytes': 1024, **changes}
+
+    def reference(self, images, *, size=3, environment='staging', store=None):
+        raw = copy.deepcopy(self.fixture['submission'])
+        raw['submissionId'] = str(uuid.uuid4())
+        manifest = raw['manifest']
+        manifest['objects'] = [{**manifest['objects'][0], 'id': f'image-{i}', 'name': f'image-{i}.jpg',
+                                'byteSize': size} for i in range(images)]
+        manifest.update(objectCount=images, totalBytes=images * size)
+        manifest['inputCounts']['images'] = images
+        manifest['sha256'] = p.manifest_sha256(manifest)
+        return (store or self.store).submit(p.validate_submission(raw, environment=environment,
+            capability_fingerprint=raw['capabilityFingerprint']))[0]
+
+    def treedar(self):
+        raw = copy.deepcopy(self.fixture['submission'])
+        raw['submissionId'] = str(uuid.uuid4())
+        manifest = raw['manifest']
+        manifest['objects'][0].update(name='genuine.las', kind='lidar', mediaType='application/octet-stream')
+        manifest['inputCounts'].update(images=0, lidarObjects=1, points=1)
+        manifest['sha256'] = p.manifest_sha256(manifest)
+        raw['pipeline']['odm'].update(requested=False)
+        raw['pipeline']['treedar'].update(requested=True, inputObjectIds=['image-1'],
+                                          provenanceReceiptId='trusted-ingestion-receipt')
+        return self.store.submit(p.validate_submission(raw, environment='staging',
+            capability_fingerprint=raw['capabilityFingerprint'], available_engines=('odm', 'treedar')))[0]
+
+    def viewer(self, photos):
+        job, _ = self.queue.submit({'requestId': 'viewer-' + uuid.uuid4().hex[:12], 'environment': 'staging',
+                                    'profile': VIEWER_PROFILE})
+        with self.queue._db() as db:
+            db.execute('INSERT INTO viewer_tasks VALUES(?,?,0)', (job['id'], job['id']))
+            db.executemany('INSERT INTO viewer_files VALUES(?,1)', [(job['id'],)] * photos)
+        return job
+
+    def claim(self, job, node, store=None):
+        return (store or self.store).claim(job['jobId'], node_id=node, worker_id=node, worker_instance_id='instance',
+                                           claim_request_id='claim-' + uuid.uuid4().hex[:12])
+
+    def claim_viewer(self, job, node):
+        return self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': node, 'profiles': [VIEWER_PROFILE],
+                                 'expectedJobId': job['id']}, allow_viewer_same_priority_skip=True)
+
+    def status(self, job):
+        return self.queue.get(job.get('jobId') or job['id'])['status']
+
+    def occupy_main(self):
+        self.assertIsNotNone(self.claim(self.reference(5), 'node-2'))
+
+    def test_idle_node_runs_viewer_past_job_proven_too_large_for_its_scratch(self):
+        self.reports['cluster'] = self.report(availableScratchBytes=5000)
+        self.occupy_main()
+        blocked, viewer, later = self.reference(1, size=100000), self.viewer(1), self.reference(1)
+        self.assertTrue(self.queue.viewer_skip_is_safe(viewer['id'], 'cluster'))
+        self.assertEqual(self.claim_viewer(viewer, 'cluster')['nodeId'], 'cluster')
+        self.assertEqual((self.status(blocked), self.status(later)), ('queued', 'queued'))
+
+    def test_later_reference_passes_jobs_proven_ineligible_on_idle_node(self):
+        self.reports['cluster'] = self.report(availableScratchBytes=5000)
+        self.occupy_main()
+        blocked, viewer, later = self.reference(1, size=100000), self.viewer(5), self.reference(1)
+        self.assertEqual(self.store.next_for_node('cluster')['jobId'], later['jobId'])
+        self.assertEqual(self.claim(later, 'cluster')['nodeId'], 'cluster')
+        self.assertEqual((self.status(blocked), self.status(viewer)), ('queued', 'queued'))
+
+    def test_uncertain_scratch_evidence_keeps_the_viewer_barrier(self):
+        self.occupy_main()
+        self.reference(1, size=100000)
+        viewer = self.viewer(1)
+        for report in (None, {}, {'ready': False, 'reason': 'readiness_expired'}, self.report(ready=False),
+                       self.report(taskQueueCount=1), self.report(availableScratchBytes=None),
+                       self.report(outputBudgetBytes=-1), self.report(availableScratchBytes=10 ** 9)):
+            with self.subTest(report=report):
+                self.reports['cluster'] = report
+                self.assertFalse(self.queue.viewer_skip_is_safe(viewer['id'], 'cluster'))
+                self.assertIsNone(self.claim_viewer(viewer, 'cluster'))
+        def broken(_):
+            raise OSError('synthetic readiness failure')
+        self.store.node_readiness = broken
+        self.assertFalse(self.queue.viewer_skip_is_safe(viewer['id'], 'cluster'))
+        self.assertEqual(self.status(viewer), 'queued')
+
+    def test_tampered_reference_metadata_proves_nothing(self):
+        self.reports['cluster'] = self.report(availableScratchBytes=5000)
+        self.occupy_main()
+        blocked, viewer = self.reference(1, size=100000), self.viewer(1)
+        self.assertTrue(self.queue.viewer_skip_is_safe(viewer['id'], 'cluster'))
+        with self.queue._db() as db:
+            row = db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?', (blocked['jobId'],)).fetchone()
+            submission = json.loads(row['input_json'])
+            submission['manifest']['totalBytes'] += 1
+            db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?', (json.dumps(submission), blocked['jobId']))
+        self.assertFalse(self.queue.viewer_skip_is_safe(viewer['id'], 'cluster'))
+
+    def test_treedar_job_needing_main_does_not_idle_the_cluster(self):
+        self.occupy_main()
+        lidar, viewer = self.treedar(), self.viewer(1)
+        self.assertTrue(self.queue.viewer_skip_is_safe(viewer['id'], 'cluster'))
+        self.assertEqual(self.claim_viewer(viewer, 'cluster')['nodeId'], 'cluster')
+        self.assertEqual(self.status(lidar), 'queued')
+
+    def test_unconfigured_capability_is_not_proof(self):
+        self.occupy_main()
+        self.treedar()
+        viewer = self.viewer(1)
+        self.queue.node_capabilities = None
+        self.assertFalse(self.queue.viewer_skip_is_safe(viewer['id'], 'cluster'))
+        self.assertIsNone(self.claim_viewer(viewer, 'cluster'))
+
+    def test_reference_passes_viewer_on_node_without_odm(self):
+        self.occupy_main()
+        self.queue.node_capabilities['cluster'] = frozenset({'treedar'})
+        self.inventory[0]['capabilities'] = ['treedar']
+        self.queue.treedar_node_ids = ('cluster', 'node-2')
+        self.viewer(1)
+        lidar = self.treedar()
+        self.assertEqual(self.store.next_for_node('cluster')['jobId'], lidar['jobId'])
+
+    def test_reported_cap_alone_is_not_proof_in_either_direction(self):
+        self.reports.update({'cluster': self.report(ready=False), 'node-2': self.report(maxImages=1)})
+        viewer, later = self.viewer(5), self.reference(1)
+        self.assertIsNone(self.claim(later, 'node-2'))
+        self.assertEqual((self.status(viewer), self.status(later)), ('queued', 'queued'))
+        with self.queue._db() as db:
+            db.execute("UPDATE jobs SET status='failed' WHERE status='queued'")
+        self.reports.update({'cluster': self.report(maxImages=1), 'node-2': self.report()})
+        self.occupy_main()
+        self.reference(2)
+        viewer = self.viewer(1)
+        self.assertFalse(self.queue.viewer_skip_is_safe(viewer['id'], 'cluster'))
+
+    def polled(self, clock):
+        cache = NodeReadiness(('cluster', 'node-2'), ttl_seconds=30, clock=clock)
+        for node in cache.node_ids:
+            cache.publish(node, self.report(), ticket=cache.begin(node))
+        return cache, ReferenceStore(self.queue, node_inventory=self.inventory, node_readiness=cache.status)
+
+    def test_routine_probe_of_idle_cluster_does_not_overflow_to_main(self):
+        cache, store = self.polled(lambda: 100.0)
+        job = self.reference(1, store=store)
+        self.assertIsNone(store.next_for_node('node-2'))
+        ticket = cache.begin('cluster')
+        self.assertIsNone(store.next_for_node('node-2'))
+        self.assertIsNone(self.claim(job, 'node-2', store))
+        self.assertIsNone(self.claim(job, 'cluster', store))  # Claims still need a current observation.
+        self.assertEqual(self.status(job), 'queued')
+        cache.publish('cluster', self.report(), ticket=ticket)
+        self.assertEqual(self.claim(job, 'cluster', store)['nodeId'], 'cluster')
+
+    def test_confirmed_busy_cluster_may_overflow_to_main(self):
+        cache, store = self.polled(lambda: 100.0)
+        running = self.reference(1, store=store)
+        self.assertIsNotNone(self.claim(running, 'cluster', store))
+        occupied = self.reference(1, store=store)
+        self.assertEqual(store.next_for_node('node-2')['jobId'], occupied['jobId'])
+        with self.queue._db() as db:
+            db.execute("UPDATE jobs SET status='failed' WHERE id=?", (running['jobId'],))
+        for observed in (self.report(taskQueueCount=1), self.report(ready=False)):
+            with self.subTest(observed=observed):
+                cache.publish('cluster', observed, ticket=cache.begin('cluster'))
+                self.assertEqual(store.next_for_node('node-2')['jobId'], occupied['jobId'])
+
+    def test_unknown_node_stops_holding_later_nodes_after_its_ttl(self):
+        now = [100.0]
+        cache, store = self.polled(lambda: now[0])
+        job = self.reference(1, store=store)
+        now[0] = 105
+        cache.begin('cluster')  # This probe, and every later one, never answers.
+        now[0] = 128
+        cache.publish('node-2', self.report(), ticket=cache.begin('node-2'))
+        now[0] = 129.9
+        self.assertIsNone(store.next_for_node('node-2'))
+        now[0] = 130
+        cache.begin('cluster')
+        self.assertEqual(store.next_for_node('node-2')['jobId'], job['jobId'])
+        cache.publish('cluster', self.report(), ticket=cache.begin('cluster'))
+        self.assertIsNone(store.next_for_node('node-2'))
+        self.assertEqual(store.next_for_node('cluster')['jobId'], job['jobId'])
+
+    def test_startup_without_observation_is_bounded(self):
+        now = [100.0]
+        cache = NodeReadiness(('cluster', 'node-2'), ttl_seconds=30, clock=lambda: now[0])
+        store = ReferenceStore(self.queue, node_inventory=self.inventory, node_readiness=cache.status)
+        job = self.reference(1, store=store)
+        now[0] = 129
+        cache.publish('node-2', self.report(), ticket=cache.begin('node-2'))
+        self.assertIsNone(store.next_for_node('node-2'))
+        now[0] = 130
+        self.assertEqual(store.next_for_node('node-2')['jobId'], job['jobId'])
+
+    def test_unknown_node_holds_only_jobs_it_might_run(self):
+        self.reports['cluster'] = None
+        large = self.reference(5)
+        self.assertEqual(self.store.next_for_node('node-2')['jobId'], large['jobId'])
+        small = self.reference(1)
+        self.assertEqual(self.claim(large, 'node-2')['nodeId'], 'node-2')
+        with self.queue._db() as db:
+            db.execute("UPDATE jobs SET status='failed' WHERE id=?", (large['jobId'],))
+        # The held small job also holds later order: a long job taking main now
+        # would strand it behind that job if the cluster proves to be down.
+        later = self.reference(5)
+        self.assertIsNone(self.store.next_for_node('node-2'))
+        self.assertEqual((self.status(small), self.status(later)), ('queued', 'queued'))
+        # A job main cannot run gives main nothing to hold for.
+        self.reports['node-2'] = self.report(availableScratchBytes=2000)
+        with self.queue._db() as db:
+            db.execute("UPDATE jobs SET status='failed' WHERE id=?", (small['jobId'],))
+        self.reference(1, size=5000)
+        self.assertEqual(self.store.next_for_node('node-2')['jobId'], later['jobId'])
+
+    def test_unknown_node_does_not_let_staging_pass_production(self):
+        self.reports['cluster'] = None
+        production = self.reference(1, environment='production')
+        staging = self.reference(5)
+        self.assertIsNone(self.store.next_for_node('node-2'))
+        self.assertIsNone(self.claim(staging, 'node-2'))
+        self.assertEqual((self.status(production), self.status(staging)), ('queued', 'queued'))
+
+    def test_racing_mixed_claims_keep_one_job_per_node(self):
+        for _ in range(12):
+            jobs = [self.viewer(1), self.reference(1), self.viewer(5), self.reference(5)]
+            attempts = [(job, node) for job in jobs for node in ('cluster', 'node-2')]
+            barrier = threading.Barrier(len(attempts))
+            def attempt(item):
+                job, node = item
+                barrier.wait(timeout=10)
+                return self.claim_viewer(job, node) if 'id' in job and 'jobId' not in job else self.claim(job, node)
+            with ThreadPoolExecutor(max_workers=len(attempts)) as pool:
+                list(pool.map(attempt, attempts))
+            running = [job['nodeId'] for job in self.queue.list() if job['status'] == 'running']
+            self.assertTrue(running)
+            self.assertEqual(len(running), len(set(running)))
+            with self.queue._db() as db:
+                db.execute("UPDATE jobs SET status='failed' WHERE status IN ('queued','running')")
 
 
 if __name__ == "__main__":

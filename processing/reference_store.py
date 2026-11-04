@@ -126,6 +126,7 @@ class ReferenceStore:
                 if (limit is not None and (type(limit) is not int or limit < 1)
                         or not isinstance(spec.get('capabilities'), (list, tuple))):
                     raise ValueError('invalid reference inventory capability or limit')
+            queue.node_scratch_evidence = self._scratch_evidence
         if not isinstance(viewer_required_environments, (tuple, list, set, frozenset)):
             raise ValueError('invalid Viewer acceptance environments')
         self.viewer_required_environments = frozenset(viewer_required_environments)
@@ -1108,38 +1109,48 @@ class ReferenceStore:
             return None
         return row
 
+    def _observe(self, name):
+        """Return (maxImages, scratch, output), False if observed out, None if unknown."""
+        try:
+            report = self.node_readiness(name)
+        except Exception:
+            return None
+        if not isinstance(report, dict):
+            return None
+        queued = report.get('taskQueueCount')
+        if report.get('ready') is False or (type(queued) is int and queued > 0):
+            return False
+        limit, scratch, output = (report.get(k) for k in ('maxImages', 'availableScratchBytes', 'outputBudgetBytes'))
+        if (report.get('ready') is not True or type(queued) is not int or queued != 0 or 'maxImages' not in report
+                or (limit is not None and (type(limit) is not int or limit < 1))
+                or type(scratch) is not int or scratch < 0 or type(output) is not int or output < 0):
+            return None
+        return limit, scratch, output
+
+    def _scratch_evidence(self, name):
+        observed = self._observe(name)
+        return observed[1:] if observed else None
+
     def _inventory_eligible_head(self, db, node_id):
         """Pick one ordered eligible assignment under the queue write lock.
 
-        Readiness must be a trusted, nonblocking local observation. A missing or
-        malformed observation is ineligible; reservations are checked again in
-        this transaction. This path is not enabled by runtime configuration.
+        Readiness must be a trusted, nonblocking local observation; reservations
+        are checked again in this transaction. A job passes an earlier node only
+        when that node is occupied, observed out, or cannot run it. An unknown
+        earlier node that might run it stops any later node from taking it;
+        status() bounds how long a node stays unknown. This path is not enabled
+        by runtime configuration.
         """
         occupied = {r['node_id'] for r in db.execute(
             "SELECT node_id FROM jobs WHERE status IN ('running','held')")}
         if not occupied.issubset(set(self.queue.node_ids)):
             return None
-        available = []
+        observed = {}
         for spec in self.node_inventory:
             name = spec['id']
-            if (name in occupied or self.queue._node(db, name)['state'] not in ('active', 'scheduled')
-                    or PROFILE not in self.queue.node_profiles(name)):
-                continue
-            try:
-                report = self.node_readiness(name)
-            except Exception:
-                continue
-            if (not isinstance(report, dict) or report.get('ready') is not True
-                    or type(report.get('taskQueueCount')) is not int or report['taskQueueCount'] != 0
-                    or 'maxImages' not in report):
-                continue
-            limit = report['maxImages']
-            if limit is not None and (type(limit) is not int or limit < 1):
-                continue
-            scratch, output = report.get('availableScratchBytes'), report.get('outputBudgetBytes')
-            if (type(scratch) is not int or scratch < 0 or type(output) is not int or output < 0):
-                continue
-            available.append((spec, limit, scratch, output))
+            observed[name] = (False if name in occupied
+                or self.queue._node(db, name)['state'] not in ('active', 'scheduled')
+                or PROFILE not in self.queue.node_profiles(name) else self._observe(name))
         jobs = db.execute("""SELECT id,profile,environment FROM jobs WHERE status='queued'
             ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq""").fetchall()
         if not jobs:
@@ -1154,8 +1165,8 @@ class ReferenceStore:
                 break
             if job['profile'] == VIEWER_PROFILE:
                 # A Viewer job may be bypassed only on a node that provably
-                # cannot accept its photo count. Missing or ambiguous Viewer
-                # metadata is a barrier, not evidence of ineligibility.
+                # cannot run it by configured capability or photo cap. Missing
+                # or ambiguous Viewer metadata is a barrier, not ineligibility.
                 try:
                     viewer = db.execute('SELECT uuid FROM viewer_tasks WHERE job_id=? AND removed=0',
                                         (job['id'],)).fetchall()
@@ -1175,17 +1186,24 @@ class ReferenceStore:
             row = self._row(db, job['id'])
             submission = json.loads(row['input_json'])
             photos = submission['manifest']['inputCounts']['images']
-            for spec, limit, scratch, output in available:
-                if any(not any(cap is not None and count > cap for cap in (spec['maxPhotos'], limit))
-                       for count in foreign_viewer_counts):
+            uncertain = False
+            for spec in self.node_inventory:
+                state, cap = observed[spec['id']], spec['maxPhotos']
+                if state is False:
+                    continue
+                if 'odm' in spec['capabilities'] and any(cap is None or count <= cap for count in foreign_viewer_counts):
                     continue
                 if ((submission['pipeline']['odm']['requested'] and 'odm' not in spec['capabilities']) or
                     (submission['pipeline']['treedar']['requested'] and
-                     ('treedar' not in spec['capabilities'] or spec['id'] not in self.queue.treedar_node_ids))):
+                     ('treedar' not in spec['capabilities'] or spec['id'] not in self.queue.treedar_node_ids))
+                        or (cap is not None and photos > cap)):
                     continue
-                if (submission['manifest']['totalBytes'] + output <= scratch
-                        and all(cap is None or photos <= cap for cap in (spec['maxPhotos'], limit))):
-                    return row if spec['id'] == node_id else None
+                if state is None:
+                    uncertain = True
+                    continue
+                limit, scratch, output = state
+                if submission['manifest']['totalBytes'] + output <= scratch and (limit is None or photos <= limit):
+                    return row if spec['id'] == node_id and not uncertain else None
         return None
 
     def next_for_node(self, node_id):
