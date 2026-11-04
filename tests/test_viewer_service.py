@@ -30,10 +30,12 @@ import zipfile
 from processing.maintenance import Conflict
 from processing.odx_smoke_worker import SmokeError
 from processing.prototype import PROFILE, VIEWER_PROFILE, Queue
-from processing.viewer_output_log import CLIPPED, MARKER, OUTPUT_LINE_CHARS, OUTPUT_LOG_NAME, OUTPUT_TOTAL_BYTES
+from processing.viewer_output_log import (ARCHIVED_OUTPUT_MAX_BYTES, CLIPPED, MARKER, OUTPUT_ANCHOR_BYTES,
+                                          OUTPUT_ANCHOR_LINES, OUTPUT_LINE_CHARS, OUTPUT_LOG_NAME,
+                                          OUTPUT_TOTAL_BYTES, archived_output_lines)
 from processing.viewer_service import (ENGINE_LOST_SECONDS, ENGINE_MISSING_POLLS, EngineTaskMissing,
-                                       EngineUnavailable, NODE_LOST_POLLS, NativeEngine, PartialLines,
-                                       ViewerService)
+                                       EngineUnavailable, NODE_LOST_POLLS, NativeEngine,
+                                       OUTPUT_SNAPSHOT_ATTEMPTS, PartialLines, ViewerService)
 from tests.reference_activation_fixture import activated_prepared_v3_job
 
 
@@ -138,7 +140,8 @@ class FakeEngine:
                 return None
             raise EngineTaskMissing('synthetic_task_not_found')
         if kind == 'info':
-            return {'uuid': identifier, 'status': dict(task['status']), 'progress': task['progress']}
+            return {'uuid': identifier, 'status': dict(task['status']), 'progress': task['progress'],
+                    **{key: task[key] for key in ('processingTime',) if key in task}}
         if kind == 'output':
             return task.get('console', ['synthetic engine output', '', 'comma,record'])[query.get('line', 0):]
         raise AssertionError('unexpected engine read')
@@ -2998,6 +3001,7 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
             partial = client.read('/task/x/output', limit=40, prefix=True, line=0)
             self.assertIsInstance(partial, PartialLines)
             self.assertEqual(partial, lines[:3])
+            self.assertEqual(client.read_output_prefix('/task/x/output', 40), lines[:3])
             self.assertNotIsInstance(client.read('/task/x/output', prefix=True, line=0), PartialLines)
             with self.assertRaises(EngineUnavailable):
                 client.read('/task/x/output', limit=40, line=0)
@@ -3061,6 +3065,286 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         self.polls(1)
         self.assertEqual(self.service.output(identifier, 0), ['one', 'next'])
 
+    def anchor_due(self):
+        self.service._output_anchor_due.clear()
+
+    def restarted_at(self, lines):
+        return [index for index, line in enumerate(lines) if line.startswith(MARKER + 'engine output restarted')]
+
+    def test_repeated_line_at_the_same_index_does_not_hide_a_restart(self):
+        # Codex's reproduction: the reread line matches, 'boot' was never read.
+        identifier, engine_task = self.retaining(['old run', 'same progress'])
+        engine_task['console'] = ['boot', 'same progress', 'new run']
+        self.anchor_due()
+        self.polls(1)
+        lines = self.service.output(identifier, 0)
+        self.assertEqual(lines[:2], ['old run', 'same progress'])
+        self.assertIn('lines may be missing', lines[2])
+        self.assertEqual(lines[3:], ['boot', 'same progress', 'new run'])
+        self.assertEqual(self.service.info(identifier)['ledgetopOutputStream']['generation'], 2)
+        engine_task['console'].append('later')
+        self.polls(1)
+        self.assertEqual(self.service.output(identifier, len(lines)), ['later'])
+
+    def test_restart_between_anchor_reads_is_marked_when_found(self):
+        identifier, engine_task = self.retaining(['old run', 'same progress'])
+        self.anchor_due()
+        self.polls(1)
+        engine_task['console'] = ['boot', 'same progress', 'new run']
+        self.polls(1)  # The anchor is not due: the line digest alone is fooled.
+        self.assertEqual(self.service.output(identifier, 0), ['old run', 'same progress', 'new run'])
+        self.anchor_due()
+        self.polls(1)
+        lines = self.service.output(identifier, 0)
+        self.assertIn('lines from index 2 to here are unproven', lines[3])
+        self.assertEqual(lines[4:], ['boot', 'same progress', 'new run'])
+
+    def test_terminal_snapshot_always_proves_the_anchor(self):
+        identifier, engine_task = self.retaining(['old run', 'same progress'])
+        self.anchor_due()
+        self.polls(1)
+        engine_task['console'] = ['boot', 'same progress', 'new run']
+        self.finish(identifier)
+        self.polls(1)
+        lines = self.service.output(identifier, 0)
+        self.assertEqual(lines[3:], ['boot', 'same progress', 'new run'])
+        self.assertEqual(len(self.restarted_at(lines)), 1)
+
+    def test_status_regression_resets_without_waiting_for_the_anchor(self):
+        for name, first, second in (('time', {'processingTime': 9000}, {'processingTime': 40}),
+                                    ('progress', {'progress': 60}, {'progress': 12}),
+                                    ('queued', {}, {'status': {'code': 10}})):
+            with self.subTest(name=name):
+                identifier, engine_task = self.retaining(['same run'])
+                engine_task.update(first)
+                self.anchor_due()
+                self.polls(1)
+                self.polls(1)
+                self.assertEqual(self.service.output(identifier, 0), ['same run'])
+                engine_task.update(second)
+                self.polls(1)
+                lines = self.service.output(identifier, 0)
+                self.assertEqual(len(self.restarted_at(lines)), 1)
+                self.assertEqual(lines[-1], 'same run')  # A false marker, by choice.
+                self.finish(identifier)
+                self.polls(1)
+
+    def test_good_anchor_adds_nothing_and_keeps_the_generation(self):
+        identifier, engine_task = self.retaining(['one', 'two'])
+        stream = self.service.info(identifier)['ledgetopOutputStream']
+        for line in ('three', 'four'):
+            engine_task['console'].append(line)
+            self.anchor_due()
+            self.polls(1)
+        self.assertEqual(self.service.output(identifier, 0), ['one', 'two', 'three', 'four'])
+        self.assertEqual(self.service.info(identifier)['ledgetopOutputStream'], stream)
+        self.assertEqual(stream['continuity'], 'anchored')
+
+    def test_anchor_read_is_bounded_and_periodic(self):
+        identifier, engine_task = self.retaining(['one'])
+        engine = self.engine_for(identifier)
+        limits = []
+        engine.read_output_prefix = lambda route, limit: limits.append(limit) or engine_task['console']
+        self.polls(5)
+        self.assertEqual(limits, [OUTPUT_ANCHOR_BYTES])
+        self.anchor_due()
+        self.polls(1)
+        self.assertEqual(limits, [OUTPUT_ANCHOR_BYTES] * 2)
+
+    def test_anchor_covers_only_the_leading_lines(self):
+        console = ['line %d' % index for index in range(OUTPUT_ANCHOR_LINES + 3)]
+        identifier, engine_task = self.retaining(list(console))
+        engine_task['console'][OUTPUT_ANCHOR_LINES] = 'changed past the anchor'
+        self.anchor_due()
+        self.polls(1)
+        self.assertEqual(self.service.output(identifier, 0), console)
+        engine_task['console'][OUTPUT_ANCHOR_LINES - 1] = 'changed inside the anchor'
+        self.anchor_due()
+        self.polls(1)
+        self.assertEqual(self.restarted_at(self.service.output(identifier, 0)), [len(console)])
+
+    def test_failed_anchor_read_consumes_nothing_and_reports(self):
+        identifier, engine_task = self.retaining(['one'])
+        engine = self.engine_for(identifier)
+        engine_task['console'] = ['one', 'unproven']
+
+        def fail(route, limit):
+            raise EngineUnavailable('synthetic')
+
+        engine.read_output_prefix = fail
+        self.polls(1)
+        result = self.service.output(identifier, 0)
+        self.assertEqual((result['reason'], result['lines']), ('engine_output_unavailable', ['one']))
+        del engine.read_output_prefix
+        self.polls(1)
+        self.assertEqual(self.service.output(identifier, 0), ['one', 'unproven'])
+
+    def test_output_without_a_provable_anchor_says_so_once(self):
+        identifier, engine_task = self.retaining(['one'])
+        engine = self.engine_for(identifier)
+        engine.node_guarded = True
+        engine_task['console'].append('two')
+        self.polls(3)
+        engine_task['console'].append('three')
+        self.polls(1)
+        lines = self.service.output(identifier, 0)
+        self.assertEqual(lines[0], 'one')
+        self.assertEqual(lines[1], MARKER + 'output continuity cannot be verified; lines may be missing')
+        self.assertEqual(lines[2:], ['two', 'three'])
+        self.assertEqual(self.service.info(identifier)['ledgetopOutputStream']['continuity'], 'unverified')
+        engine.node_guarded = False
+        self.finish(identifier)
+        self.polls(1)
+
+    def test_first_line_too_long_to_anchor_is_marked_not_reset_forever(self):
+        identifier, engine_task = self.retaining(['x' * OUTPUT_ANCHOR_BYTES, 'two'])
+        self.anchor_due()
+        self.polls(3)
+        lines = self.service.output(identifier, 0)
+        self.assertEqual(lines[0], MARKER + 'output continuity cannot be verified; lines may be missing')
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(self.service.info(identifier)['ledgetopOutputStream']['generation'], 1)
+
+    def test_version_one_log_resets_its_cursor_at_the_cutover(self):
+        identifier, engine_task = self.retaining(['one', 'two'])
+        path = self.retained_file(identifier)
+        log = json.loads(path.read_text())
+        path.write_text(json.dumps({key: log[key] for key in ('engine', 'cursor', 'last', 'omitted', 'omittedFrom',
+                                                               'snapshot', 'lines')} | {'version': 1}))
+        self.service._output_streams.clear()
+        first = self.service.info(identifier)['ledgetopOutputStream']
+        self.assertEqual(self.service.info(identifier)['ledgetopOutputStream'], first)
+        self.assertEqual(first['continuity'], 'unverified')
+        self.assertEqual(self.service.output(identifier, 0), ['one', 'two'])
+        self.polls(1)
+        lines = self.service.output(identifier, 0)
+        self.assertEqual(lines[:2], ['one', 'two'])
+        self.assertEqual(self.restarted_at(lines), [2])
+        self.assertEqual(lines[3:], ['one', 'two'])
+        stream = self.service.info(identifier)['ledgetopOutputStream']
+        self.assertEqual((stream['id'], stream['generation'], stream['continuity']), (first['id'], 2, 'anchored'))
+
+    def test_stream_survives_restart_and_is_absent_until_retained(self):
+        self.service._log_retention = True
+        identifier = self.submit()
+        self.assertNotIn('ledgetopOutputStream', self.service.info(identifier))
+        self.service.tick()
+        self.engine_for(identifier).tasks[self.task(identifier)['engine_uuid']]['console'] = ['one']
+        self.polls(1)
+        stream = self.service.info(identifier)['ledgetopOutputStream']
+        self.assertRegex(stream['id'], r'\A[0-9a-f]{32}\Z')
+        self.assertEqual(set(stream), {'id', 'generation', 'continuity'})
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.service._log_retention = True
+        self.assertEqual(self.service.info(identifier)['ledgetopOutputStream'], stream)
+
+    def expire_snapshot_retry(self, identifier):
+        self.service._output_retries[identifier] = 0
+
+    def test_terminal_snapshot_retries_and_completes(self):
+        identifier, engine_task = self.retaining(['one'])
+        engine = self.engine_for(identifier)
+        engine.output_unavailable = True
+        engine_task['console'] = ['one', 'last words']
+        self.finish(identifier)
+        self.polls(1)
+        self.assertEqual(self.service.output(identifier, 0)['reason'], 'output_snapshot_incomplete')
+        reads = len(engine.calls)
+        self.polls(3)
+        self.assertEqual(len(engine.calls), reads)  # The retry waits its turn.
+        engine.output_unavailable = False
+        self.expire_snapshot_retry(identifier)
+        self.polls(1)
+        lines = self.service.output(identifier, 0)
+        self.assertEqual((lines[0], lines[-1]), ('one', 'last words'))
+        self.assertEqual(self.service._output_retries, {})
+
+    def test_terminal_snapshot_retries_are_bounded_then_marked(self):
+        identifier, _ = self.retaining(['one'])
+        engine = self.engine_for(identifier)
+        engine.output_unavailable = True
+        self.finish(identifier)
+        self.polls(1)
+        for _ in range(OUTPUT_SNAPSHOT_ATTEMPTS - 1):
+            self.expire_snapshot_retry(identifier)
+            self.polls(1)
+        result = self.service.output(identifier, 0)
+        self.assertEqual(result['reason'], 'output_snapshot_incomplete')
+        self.assertIn('lines may be missing', result['lines'][-1])
+        self.assertEqual(self.service._output_retries, {})
+        reads = len(engine.calls)
+        self.polls(3)
+        self.assertEqual(len(engine.calls), reads)
+
+    def test_terminal_snapshot_retry_survives_a_coordinator_restart(self):
+        identifier, engine_task = self.retaining(['one'])
+        engine = self.engine_for(identifier)
+        engine.output_unavailable = True
+        engine_task['console'] = ['one', 'last words']
+        self.finish(identifier)
+        self.polls(1)
+        self.service.close()
+        self.queue.close()
+        engine.output_unavailable = False
+        self.make_queue_service()
+        self.service._log_retention = True
+        self.polls(1)
+        self.assertEqual(self.service.output(identifier, 0)[-1], 'last words')
+
+    def console_archive(self, text):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, 'w') as archive:
+            archive.writestr('synthetic-result.txt', b'owned synthetic transfer fixture')
+            archive.writestr('task_output.txt', text)
+        return stream.getvalue()
+
+    def test_verified_archive_completes_an_incomplete_snapshot(self):
+        for console in (['one', 'two', 'three'], ['boot', 'two', 'three']):
+            with self.subTest(console=console):
+                identifier, engine_task = self.retaining(['one', 'two'])
+                engine = self.engine_for(identifier)
+                engine.archive = self.console_archive('\n'.join(console))
+                engine.output_unavailable = True
+                self.finish(identifier)
+                self.polls(1)
+                self.assertEqual(self.service.output(identifier, 0)['reason'], 'output_snapshot_incomplete')
+                stream, length = self.service.download(identifier)
+                with stream:
+                    self.assertEqual(stream.read(), engine.archive)
+                lines = self.service.output(identifier, 0)
+                self.assertIsInstance(lines, list)
+                self.assertEqual(lines[-1], 'three')
+                self.assertEqual(lines[0:2], ['one', 'two'])
+                self.assertEqual(len(self.restarted_at(lines)), 1 if console[0] == 'boot' else 0)
+                self.assertEqual(self.service._output_retries, {})
+                engine.output_unavailable = False
+
+    def test_archive_without_a_safe_console_leaves_the_snapshot_incomplete(self):
+        identifier, _ = self.retaining(['one'])
+        engine = self.engine_for(identifier)
+        engine.output_unavailable = True
+        self.finish(identifier)
+        self.polls(1)
+        stream, _ = self.service.download(identifier)
+        with stream:
+            self.assertEqual(stream.read(), engine.archive)
+        self.assertEqual(self.service.output(identifier, 0)['reason'], 'output_snapshot_incomplete')
+
+    def test_archived_console_read_is_bounded(self):
+        with patch('processing.viewer_output_log.ARCHIVED_OUTPUT_MAX_BYTES', 8):
+            self.assertIsNone(archived_output_lines(io.BytesIO(self.console_archive('x' * 64))))
+            self.assertEqual(archived_output_lines(io.BytesIO(self.console_archive('a\nb\n'))), ['a', 'b'])
+        forged = bytearray(self.console_archive('y' * 2048))
+        size = (2048).to_bytes(4, 'little')
+        for index in range(len(forged) - 3):
+            if forged[index:index + 4] == size:
+                forged[index:index + 4] = (3).to_bytes(4, 'little')
+        self.assertIsNone(archived_output_lines(io.BytesIO(bytes(forged))))
+        self.assertIsNone(archived_output_lines(io.BytesIO(b'not a zip')))
+        self.assertGreater(ARCHIVED_OUTPUT_MAX_BYTES, OUTPUT_TOTAL_BYTES)
+
     def test_retention_off_keeps_the_live_list_and_writes_nothing(self):
         identifier = self.submit()
         self.service.tick()
@@ -3069,6 +3353,7 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         self.assertFalse([call for call in engine.calls if call[0] == 'read' and call[2] == 'output'])
         self.assertEqual(self.service.output(identifier, 1), ['', 'comma,record'])
         self.assertFalse(self.retained_file(identifier).exists())
+        self.assertNotIn('ledgetopOutputStream', self.service.info(identifier))
         engine.output_unavailable = True
         self.assertEqual(self.service.output(identifier, 0), [])
 

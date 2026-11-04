@@ -31,8 +31,9 @@ from .prototype import VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
 from .viewer_limits import MAX_UPLOAD_BYTES
-from .viewer_output_log import (OUTPUT_TAIL_LINES, append_output_tail, consume_output, mark_output,
-                                new_output_log, output_digest, restart_output, skip_oversized_line)
+from .viewer_output_log import (OUTPUT_ANCHOR_BYTES, OUTPUT_TAIL_LINES, append_output_tail, archived_output_lines,
+                                consume_output, mark_output, mark_unverifiable, matches_anchor, new_output_log,
+                                output_digest, restart_output, skip_oversized_line)
 
 # A silent node holds overflow this long, matching the readiness cache TTL.
 UNANSWERED_NODE_SECONDS = 30
@@ -49,6 +50,13 @@ HELD_OBSERVATION_SECONDS = 60
 # with this many bounded reads to drain whatever the node still holds.
 OUTPUT_CAPTURE_SECONDS = 5
 OUTPUT_FINAL_READS = 8
+# NodeODM output has no read limit, so the node renders it all to answer this
+# prefix read. Restart signals and a coordinator restart do not wait for it.
+OUTPUT_ANCHOR_SECONDS = 30
+# A terminal read that fails is retried this often, each wait four times longer.
+OUTPUT_SNAPSHOT_ATTEMPTS = 5
+OUTPUT_SNAPSHOT_RETRY_SECONDS = 60
+OUTPUT_RETRY_SCAN_JOBS = 64
 
 
 class EngineUnavailable(OSError):
@@ -61,6 +69,21 @@ class EngineTaskMissing(EngineUnavailable):
 
 class PartialLines(list):
     """The complete leading lines of an output over the read limit."""
+
+
+class _ArchivedOutput:
+    """A verified archive's console, read through the same continuity checks."""
+    def __init__(self, lines):
+        self.lines = lines
+
+    def read_output_prefix(self, route, limit):
+        return self.lines
+
+    def read_output(self, route, line):
+        return self.lines[line:]
+
+    def read(self, route, *, line=0):
+        return self.lines[line:]
 
 
 def _leading_lines(raw):
@@ -149,6 +172,9 @@ class NativeEngine:
 
     def read_output(self, route, line):
         return self.read(route, prefix=True, line=line)
+
+    def read_output_prefix(self, route, limit):
+        return self.read(route, prefix=True, limit=limit, line=0)
 
     def read(self, route, *, missing=False, limit=4 * 1024 ** 2, prefix=False, **query):
         try:
@@ -277,6 +303,11 @@ class ViewerService:
         self._log_retention = getattr(config, 'viewer_log_retention', False) is True
         self._output_due = {}
         self._output_failures = {}
+        self._output_seen = {}
+        self._output_anchor_due = {}
+        self._output_retries = {}
+        self._output_streams = {}
+        self._output_scanned = False
         self._downloads = {}
         # Prototype only: absent configuration keeps the deployed synchronous
         # path. A node's in-flight transfer remains in its durable queue slot.
@@ -506,6 +537,9 @@ class ViewerService:
         if task['node_id']:
             # The ID is configured locally, not an endpoint or credential.
             info['ledgetopNodeId'] = task['node_id']
+        stream = self._output_stream(task)
+        if stream is not None:
+            info['ledgetopOutputStream'] = stream
         if info.get('ledgetopHeld') and task['error'] in ENGINE_LOST_REASONS:
             # Fixed codes only. The hold stands whatever a later read observed.
             info['ledgetopHoldReason'] = task['error']
@@ -527,6 +561,39 @@ class ViewerService:
         self.store.authorize_reservation(identifier,environment,capability)
         if self.store.task_environment(identifier) != environment:
             raise KeyError('unknown task')
+
+    def _output_stream(self, task):
+        """Name the retained list a client's output cursor belongs to.
+
+        Additive and only under log retention, once a retained log exists:
+        {"id": 32 hex, "generation": int >= 1, "continuity": "anchored"|"unverified"}.
+        ``line`` indexes this stream's list, which only grows, so a generation
+        change never moves a cursor. A cursor saved under another id, or under
+        no id (the live proxy counted engine lines), restarts at line 0.
+        """
+        if not self._log_retention or not task['engine_uuid']:
+            return None
+        stream = self._output_streams.get(task['uuid'])
+        if stream is None:
+            try:
+                log = self.store.output_log(task)
+            except Conflict:
+                return None
+            if log is None:
+                return None
+            stream = self._remember_stream(task, log)
+        return dict(stream)
+
+    def _remember_stream(self, task, log):
+        unverified = log['unverifiable'] or (log['cursor'] and not log['anchorLines'])
+        stream = {'id': log['stream'], 'generation': log['generation'],
+                  'continuity': 'unverified' if unverified else 'anchored'}
+        self._output_streams[task['uuid']] = stream
+        return stream
+
+    def _save_output(self, task, log):
+        self.store.save_output_log(task, log)
+        self._remember_stream(task, log)
 
     def _output_reason(self, task, log):
         """Why retained lines may be behind the engine, as a fixed code."""
@@ -754,6 +821,16 @@ class ViewerService:
             except FileNotFoundError: pass
 
     def download(self, identifier):
+        stream, length = self._download(identifier)
+        if self._log_retention and getattr(stream, 'ledgetop_archive_sha256', None):
+            try:
+                self._output_from_archive(self.store.task(identifier), stream)
+            except Exception:
+                logging.getLogger(__name__).error('Viewer archive console could not be read')
+            stream.seek(0)
+        return stream, length
+
+    def _download(self, identifier):
         task = self.store.task(identifier)
         self._require_downloadable(task)
         with self._lock:
@@ -1045,7 +1122,7 @@ class ViewerService:
             try:
                 info = self._read_status(task)
                 observation = {'state': 'task_present', 'code': info['status']['code']}
-                self._retain_output(task, info['status']['code'])
+                self._retain_output(task, info)
             except EngineTaskMissing:
                 observation = {'state': 'task_missing'}
             except EngineUnavailable:
@@ -1077,7 +1154,56 @@ class ViewerService:
             consume_output(log, lines)
         return partial
 
-    def _capture_output(self, task):
+    def _output_regressed(self, task, info):
+        """Whether status went backward since the last capture.
+
+        Only a sign, and held in memory: a coordinator restart re-proves the
+        anchor anyway. A false sign costs one marker and one reread.
+        """
+        if info is None:
+            return False
+        code = info['status']['code']
+        current = {'code': code, 'progress': info.get('progress'), 'time': info.get('processingTime')}
+        seen = self._output_seen.get(task['uuid'])
+        self._output_seen[task['uuid']] = current
+        if seen is None:
+            return False
+        number = lambda value: type(value) in (int, float)
+        return ((seen['code'] == 20 and code == 10)
+                or (number(seen['time']) and number(current['time']) and current['time'] < seen['time'])
+                or (code in (10, 20) and number(seen['progress']) and number(current['progress'])
+                    and current['progress'] < seen['progress']))
+
+    def _prove_output(self, engine, task, log, info, *, due=False):
+        """Reset to a new generation unless this output is shown to be the same."""
+        identifier = task['uuid']
+        regressed = self._output_regressed(task, info)
+        if not log['cursor']:
+            return
+        if regressed or not (log['anchorLines'] or log['unverifiable']):
+            restart_output(log)
+            return
+        now = time.monotonic()
+        if log['unverifiable'] or (not due and now < self._output_anchor_due.get(identifier, 0)):
+            return
+        route = '/task/' + task['engine_uuid'] + '/output'
+        reader = getattr(engine, 'read_output_prefix', None)
+        if reader is None and getattr(engine, 'node_guarded', False) is True:
+            # A guarded read cannot be cut short, and its reply limit fails on a
+            # long output. It still gets the line digest and status signs.
+            mark_unverifiable(log)
+            return
+        # A failed read raises before any line is consumed, so nothing is claimed.
+        lines = reader(route, OUTPUT_ANCHOR_BYTES) if reader else engine.read(route, line=0)
+        if not isinstance(lines, list) or any(not isinstance(x, str) for x in lines):
+            raise EngineUnavailable('engine_output_unavailable')
+        self._output_anchor_due[identifier] = now + OUTPUT_ANCHOR_SECONDS
+        if matches_anchor(log, lines):
+            log['verified'] = len(log['lines'])
+        else:
+            restart_output(log)
+
+    def _capture_output(self, task, info):
         identifier = task['uuid']
         now = time.monotonic()
         if now < self._output_due.get(identifier, 0):
@@ -1086,39 +1212,110 @@ class ViewerService:
         log = self.store.output_log(task) or new_output_log(task['engine_uuid'])
         if log['snapshot']:
             return
-        before = (log['cursor'], len(log['lines']))
-        self._advance_output(self._task_engine(task), task, log)
-        if (log['cursor'], len(log['lines'])) != before:
-            self.store.save_output_log(task, log)
-
-    def _snapshot_output(self, task):
-        """Take what the node still has; its task cleanup must not take the log."""
-        log = self.store.output_log(task) or new_output_log(task['engine_uuid'])
-        if log['snapshot']:
-            return
+        state = lambda: (log['cursor'], len(log['lines']), log['generation'], log['unverifiable'], log['verified'])
+        before = state()
         try:
             engine = self._task_engine(task)
-            for _ in range(OUTPUT_FINAL_READS):
-                if not self._advance_output(engine, task, log):
-                    break
-            else:
-                raise EngineUnavailable('engine_output_backlog')
-            if log['omittedFrom'] is not None:
-                start = max(log['omittedFrom'], log['cursor'] - OUTPUT_TAIL_LINES)
-                append_output_tail(log, engine.read('/task/' + task['engine_uuid'] + '/output', line=start))
-            log['snapshot'] = 'complete'
+            self._prove_output(engine, task, log, info)
+            self._advance_output(engine, task, log)
+        finally:
+            # A reset found before a failed read must survive that failure.
+            if state() != before:
+                self._save_output(task, log)
+
+    def _drain_output(self, engine, task, log, info):
+        self._prove_output(engine, task, log, info, due=True)
+        for _ in range(OUTPUT_FINAL_READS):
+            if not self._advance_output(engine, task, log):
+                break
+        else:
+            raise EngineUnavailable('engine_output_backlog')
+        if log['omittedFrom'] is not None:
+            start = max(log['omittedFrom'], log['cursor'] - OUTPUT_TAIL_LINES)
+            append_output_tail(log, engine.read('/task/' + task['engine_uuid'] + '/output', line=start))
+        log['snapshot'] = 'complete'
+
+    def _snapshot_output(self, task, info):
+        """Take what the node still has; its task cleanup must not take the log."""
+        identifier = task['uuid']
+        log = self.store.output_log(task) or new_output_log(task['engine_uuid'])
+        if (log['snapshot'] == 'complete' or log['snapshotAttempts'] >= OUTPUT_SNAPSHOT_ATTEMPTS
+                or time.monotonic() < self._output_retries.get(identifier, 0)):
+            return
+        try:
+            self._drain_output(self._task_engine(task), task, log, info)
+            self._output_retries.pop(identifier, None)
         except EngineUnavailable:
             log['snapshot'] = 'incomplete'
-            mark_output(log, 'final output could not be read')
-        self.store.save_output_log(task, log)
+            log['snapshotAttempts'] += 1
+            attempts = log['snapshotAttempts']
+            if attempts == 1:
+                mark_output(log, 'final output could not be read; retrying')
+            if attempts >= OUTPUT_SNAPSHOT_ATTEMPTS:
+                mark_output(log, 'final output remains incomplete; lines may be missing')
+                self._output_retries.pop(identifier, None)
+            else:
+                self._output_retries[identifier] = (time.monotonic()
+                                                    + OUTPUT_SNAPSHOT_RETRY_SECONDS * 4 ** (attempts - 1))
+        self._save_output(task, log)
 
-    def _retain_output(self, task, code):
-        """A log failure is reported on output; it never changes the job."""
+    def _output_from_archive(self, task, stream):
+        """Finish an incomplete log from the console a verified archive preserved."""
+        log = self.store.output_log(task)  # Replaced whole, so safe to read here.
+        if log is None or log['snapshot'] == 'complete':
+            return
+        lines = archived_output_lines(stream)
+        if lines is None:
+            return
+        with self._lock:
+            log = self.store.output_log(task)
+            if log is None or log['snapshot'] == 'complete':
+                return
+            mark_output(log, 'final output read from the result archive')
+            self._drain_output(_ArchivedOutput(lines), task, log, None)
+            self._save_output(task, log)
+            self._output_retries.pop(task['uuid'], None)
+
+    def _retry_output_snapshots(self, jobs):
+        """Bounded retries of terminal reads, found again after a restart."""
+        if not self._log_retention:
+            return
+        if not self._output_scanned:
+            self._output_scanned = True
+            ended = [job for job in jobs if job['profile'] == VIEWER_PROFILE and job['status'] in ('succeeded', 'failed')]
+            for job in ended[-OUTPUT_RETRY_SCAN_JOBS:]:
+                try:
+                    task = self.store.task_for_job(job['id'])
+                    log = self.store.output_log(task) if task['engine_uuid'] else None
+                except Exception:
+                    continue  # Reported on output; a scan never stops the scheduler.
+                if log and log['snapshot'] != 'complete' and log['snapshotAttempts'] < OUTPUT_SNAPSHOT_ATTEMPTS:
+                    self._output_retries.setdefault(task['uuid'], 0)
+        now = time.monotonic()
+        for identifier, due in list(self._output_retries.items()):
+            if now < due:
+                continue
+            try:
+                task = self.store.task(identifier)
+            except Exception:
+                self._output_retries.pop(identifier, None)  # Removed since.
+                continue
+            if task['job'] and task['job']['status'] in ('succeeded', 'failed'):
+                self._retain_output(task, None)
+                if self._output_retries.get(identifier) == due:
+                    self._output_retries.pop(identifier, None)  # Nothing left to read.
+
+    def _retain_output(self, task, info):
+        """A log failure is reported on output; it never changes the job.
+
+        No info is a retry of a task the coordinator already knows ended.
+        """
         if not self._log_retention:
             return
         identifier = task['uuid']
+        code = info['status']['code'] if info else None
         try:
-            (self._capture_output if code in (10, 20) else self._snapshot_output)(task)
+            (self._capture_output if code in (10, 20) else self._snapshot_output)(task, info)
             self._output_failures.pop(identifier, None)
         except EngineUnavailable:
             self._output_failures[identifier] = 'engine_output_unavailable'
@@ -1143,7 +1340,7 @@ class ViewerService:
         self._backoff.pop(identifier, None)
         self._lost.pop(identifier, None)
         code = info['status']['code']
-        self._retain_output(task, code)
+        self._retain_output(task, info)
         if code in (10, 20):
             # Queued10 may mean a delayed accepted commit or an uncommitted
             # upload. Keep ownership and poll; neither case permits a replay.
@@ -1240,6 +1437,7 @@ class ViewerService:
                                 self.store.hold_reconciliation_error(job['id'])
                         except Exception as hold_error:
                             reconciliation_errors.append(hold_error)
+            self._retry_output_snapshots(jobs)
             if reconciliation_errors:
                 raise Conflict('Viewer reconciliation requires inspection') from reconciliation_errors[0]
             jobs = self.queue.list()

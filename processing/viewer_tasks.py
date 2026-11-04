@@ -22,7 +22,7 @@ from contextlib import contextmanager, nullcontext
 from functools import wraps
 
 from .maintenance import Conflict
-from .viewer_output_log import OUTPUT_LOG_MAX_FILE_BYTES, OUTPUT_LOG_NAME, valid_output_log
+from .viewer_output_log import OUTPUT_LOG_MAX_FILE_BYTES, OUTPUT_LOG_NAME, upgrade_output_log, valid_output_log
 
 
 class OptionEvidenceConflict(Conflict):
@@ -953,6 +953,7 @@ class TaskStore:
             log = json.loads(raw)
         except (OSError, ValueError, RecursionError):
             raise Conflict('retained output requires inspection') from None
+        log = upgrade_output_log(log, task['engine_uuid'])
         if not valid_output_log(log, task['engine_uuid']):
             raise Conflict('retained output requires inspection')
         return log
