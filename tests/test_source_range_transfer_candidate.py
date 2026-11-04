@@ -9,7 +9,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from contextlib import closing
 from unittest.mock import patch
 
@@ -86,6 +86,10 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
             self.make_client().download_object(grant=grant, object_id='not-in-grant',
                                                destination=self.root / 'unknown.bin')
         self.assertEqual(self.calls, [])
+        self.assertEqual(set(asdict(grant)), {
+            'identity', 'expires', 'objects', 'chunk_bytes', 'request_budget',
+            'byte_budget', 'attempt_budget', 'token'})
+        self.assertEqual(asdict(grant)['objects'][0]['id'], self.obj.id)
         for restored in (copy.deepcopy(grant), pickle.loads(pickle.dumps(grant))):
             self.assertEqual(restored, grant)
             self.assertEqual(restored.object_for(self.obj.id), self.obj)

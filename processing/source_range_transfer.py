@@ -189,11 +189,12 @@ class ValidatedSourceGrant:
     byte_budget: int
     attempt_budget: int
     token: str = field(repr=False)
-    _object_index: object = field(init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self):
         # A grant is immutable and reused across many object downloads. Build
-        # its lookup once; never silently collapse duplicate object IDs.
+        # its lookup once; never silently collapse duplicate object IDs. This
+        # derived attribute is intentionally not a dataclass field so existing
+        # dataclasses.asdict callers retain their original wire/value shape.
         if type(self.objects) is not tuple or any(type(obj) is not SourceObject for obj in self.objects):
             raise TransferError('invalid source object closure')
         index = {obj.id: obj for obj in self.objects}
