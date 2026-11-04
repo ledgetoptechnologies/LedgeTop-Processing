@@ -1066,6 +1066,18 @@ class ReferenceCoordinatorUpdate:
         self.save(state,'rolled_back',databaseRestored=False,referenceTLSRetained=True)
         return state
 
+    def retain_running_only(self,state,gates,item):
+        """Observe an exact running candidate; never start or stop it."""
+        self.check(state,gates)
+        current=self.candidate(state)
+        if (current is None or current['Id']!=item['Id'] or current['Name']!='/'+NAME
+                or current.get('State',{}).get('Running') is not True):
+            raise Stopped('prepared_candidate_running_unverified')
+        self.t.sole_owner(current['Id'])
+        _env,api,_operator=self.t.local_clients()
+        self.t.health(api,container_id=current['Id']);self.t.sole_owner(current['Id'])
+        self.save(state,'needs_inspection',downgradeRefused=True,replacementRetained=True)
+
     def rollback(self,state):
         self.validate(state)
         if state.get('reopeningStarted') or state.get('pendingPlan'):raise Stopped('reopen_or_schedule_uncertainty_prevents_rollback')
@@ -1084,7 +1096,7 @@ class ReferenceCoordinatorUpdate:
                         raise Stopped('prepared_candidate_state_uncertain')
                     if item['State']['Running'] is False:
                         raise Stopped('prepared_candidate_restart_unqualified')
-                    self.retain(state,gates,item)
+                    self.retain_running_only(state,gates,item)
                 raise Stopped('prepared_schema_rollback_unqualified')
             self.check(state,gates);self.rollback_config(state);item=self.candidate(state)
             old=self.t.inspected(OLD_ID)
