@@ -70,6 +70,10 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         origin='http://127.0.0.1:'+str(self.server.server_port)
         self.api,self.operator=Client(origin,TOKEN),Client(origin,OPERATOR)
         self.gates=Gates();self.transport=self.make_transport()
+        # Container lifecycle is exercised separately by
+        # test_update_owned_helper; this fixture supplies synthetic census I/O.
+        helper=patch.object(module,'run_owned_helper',side_effect=lambda t,args,timeout=60:t.docker('run',*args,timeout=timeout))
+        helper.start();self.addCleanup(helper.stop)
         self.operation=self.root/'operation';self.operation.mkdir(mode=0o700)
         self.updater=module.ReferenceCoordinatorUpdate(self.operation,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda state:None)
         self.backup_patch=patch.object(module,'copy_backup',side_effect=self.backup)
@@ -215,6 +219,7 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                 action=args[0]
                 if action=='ps':
                     if any(str(value).startswith('volume=') for value in args):return '\n'.join(item['Id'] for item in self.containers.values() if item['State']['Running'])
+                    if any(str(value).startswith('label=io.ledgetop.update-helper=') for value in args):return ''
                     if any(str(value).startswith('label=') for value in args):return '\n'.join(item['Id'] for item in self.containers.values() if item['Config']['Labels'].get(module.LABEL)==owner.state['operation'])
                     return ''
                 if action in ('run','exec'):

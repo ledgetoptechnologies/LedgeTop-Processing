@@ -334,6 +334,62 @@ print(json.dumps(counts))
     return legacy.BACKUP.replace('print(json.dumps(counts))',extra)
 
 
+def run_owned_helper(transport, args, *, timeout=60):
+    """Run an updater helper and reconcile its daemon-side lifetime.
+
+    A timeout of the Docker CLI does not stop the container. Never remove a
+    container without checking both its operation-unique name and label.
+    """
+    operation = uuid.uuid4().hex
+    name = 'ledgetop-update-helper-' + operation
+    label = 'io.ledgetop.update-helper=' + operation
+    def listed():
+        raw = transport.docker('ps', '-a', '--no-trunc', '--filter', 'label=' + label,
+                               '--format', '{{.ID}}', timeout=30)
+        ids = raw.splitlines()
+        if len(ids) > 1 or any(not re.fullmatch(r'[a-f0-9]{64}', value) for value in ids):
+            raise Stopped('helper_identity_ambiguous')
+        return ids
+    if listed():
+        raise Stopped('helper_identity_already_exists')
+    try:
+        # Split create from start: if the create client times out, a late
+        # daemon-side create may leave a stopped container, but cannot start a
+        # late untracked helper after our cleanup check.
+        created = transport.docker('create', '--name', name, '--label', label, *args, timeout=30).strip()
+        if not re.fullmatch(r'[a-f0-9]{64}', created) or listed() != [created]:
+            raise Stopped('helper_create_unconfirmed')
+        item = transport.inspected(created, timeout=30)
+        if (item.get('Id') != created or item.get('Name') != '/' + name
+                or (item.get('Config', {}).get('Labels') or {}).get('io.ledgetop.update-helper') != operation
+                or item.get('State', {}).get('Running') is not False):
+            raise Stopped('helper_identity_ambiguous')
+        return transport.docker('start', '--attach', created, timeout=timeout)
+    finally:
+        ids = listed()
+        if ids:
+            try:
+                item = transport.inspected(ids[0], timeout=30)
+            except Exception:
+                # --rm may finish between listing and inspecting. Only treat
+                # that race as resolved if a fresh daemon listing is empty.
+                if listed():
+                    raise Stopped('helper_identity_unconfirmed') from None
+                item = None
+            if item is not None and (item.get('Id') != ids[0] or item.get('Name') != '/' + name
+                    or (item.get('Config', {}).get('Labels') or {}).get('io.ledgetop.update-helper') != operation):
+                raise Stopped('helper_identity_ambiguous')
+            if item is not None:
+                try:
+                    transport.docker('rm', '-f', ids[0], timeout=30)
+                except Exception:
+                    # The --rm helper can finish between inspect and removal.
+                    if listed():
+                        raise Stopped('helper_cleanup_unconfirmed') from None
+                if listed():
+                    raise Stopped('helper_cleanup_unconfirmed')
+
+
 def copy_backup(transport,root,state):
     destination=root/'original-state-backup'
     if destination.exists() or destination.is_symlink():raise Stopped('new_backup_destination_required')
@@ -349,10 +405,10 @@ fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
     info=destination.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=10001 or info.st_gid!=10001 or stat.S_IMODE(info.st_mode)!=0o700):
         raise Stopped('private_numeric_uid_backup_required')
-    return json.loads(transport.docker('run','--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
+    return json.loads(run_owned_helper(transport,('--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
         '--cap-drop','ALL','--security-opt','no-new-privileges',
         '--mount','type=volume,src='+VOLUME+',dst=/source,readonly',
-        '--mount','type=bind,src='+str(destination)+',dst=/backup','--entrypoint','python',state['image'],'-c',backup_script(),timeout=120))
+        '--mount','type=bind,src='+str(destination)+',dst=/backup','--entrypoint','python',state['image'],'-c',backup_script()),timeout=120))
 
 
 class ReferenceCoordinatorUpdate:
@@ -393,9 +449,9 @@ class ReferenceCoordinatorUpdate:
         code=inspect.getsource(volume_census)+'\nimport json\nprint(json.dumps(volume_census('+repr('/source' if offline else '/prototype-state')+',offline='+repr(offline)+')))'
         if offline:
             if self.t.docker('ps','--filter','volume='+VOLUME,'--format','{{.ID}}').strip():raise Stopped('offline_volume_has_owner')
-            raw=self.t.docker('run','--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
+            raw=run_owned_helper(self.t,('--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
                 '--cap-drop','ALL','--security-opt','no-new-privileges','--mount','type=volume,src='+VOLUME+',dst=/source,readonly',
-                '--entrypoint','python',state['image'],'-c',code)
+                '--entrypoint','python',state['image'],'-c',code))
         else:raw=self.t.docker('exec','--user','10001:10001',container or state['old']['containerId'],'python','-c',code)
         result=json.loads(raw)
         if result['authorityId']!=AUTHORITY or result['tables']['jobs']['count']!=12:raise Stopped('reviewed_idle_history_required')
