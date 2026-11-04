@@ -7,6 +7,8 @@ and CRS/EPSG string settings require a later typed option-value contract.
 """
 from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
+import hmac
 import os
 from pathlib import Path
 import re
@@ -47,6 +49,8 @@ class ReferenceSettings:
     viewer_acceptance_targets: dict | None = None
     staged_ack_bearers: dict | None = None
     inbound_client_ca: str | None = None
+    inbound_ca_sha256: str | None = None
+    outbound_ca_sha256: str | None = None
 
 
 def _file(path, *, private):
@@ -150,13 +154,16 @@ def load_reference_settings(path, config):
         for field in ("certificate", "privateKey", "clientCA"):
             _file(listener[field], private=field == "privateKey")
         inbound_client_ca = None
+        inbound_ca_sha256 = outbound_ca_sha256 = None
         if version == 6:
             inbound_path, _ = _file(value['inboundClientCA'], private=False)
-            _, inbound_anchors = _read_ca_bundle(str(inbound_path))
-            _, outbound_anchors = _read_ca_bundle(listener['clientCA'])
+            inbound_pem, inbound_anchors = _read_ca_bundle(str(inbound_path))
+            outbound_pem, outbound_anchors = _read_ca_bundle(listener['clientCA'])
             if inbound_anchors & outbound_anchors:
                 raise RuntimeConfigurationError('inbound and outbound trust anchors overlap')
             inbound_client_ca = str(inbound_path)
+            inbound_ca_sha256 = hashlib.sha256(inbound_pem.encode('ascii')).hexdigest()
+            outbound_ca_sha256 = hashlib.sha256(outbound_pem.encode('ascii')).hexdigest()
         inventory = getattr(config, 'node_inventory', ())
         if (not config.prototype_state_dir or
                 (inventory and (not config.per_node_slots or
@@ -277,7 +284,8 @@ def load_reference_settings(path, config):
                 raise RuntimeConfigurationError("distinct Viewer service keys and receipt pins are required")
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
                                  {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery,
-                                 viewer_keys, viewer_targets or None, staged, inbound_client_ca)
+                                 viewer_keys, viewer_targets or None, staged, inbound_client_ca,
+                                 inbound_ca_sha256, outbound_ca_sha256)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -384,6 +392,10 @@ class ReferenceRuntime:
             if settings.inbound_client_ca is not None:
                 inbound_pem, inbound_anchors = _read_ca_bundle(settings.inbound_client_ca)
                 outbound_pem, outbound_anchors = _read_ca_bundle(settings.listener['clientCA'])
+                for actual, pinned in ((inbound_pem, settings.inbound_ca_sha256), (outbound_pem, settings.outbound_ca_sha256)):
+                    if (type(pinned) is not str or re.fullmatch(r'[a-f0-9]{64}',pinned) is None
+                            or not hmac.compare_digest(hashlib.sha256(actual.encode('ascii')).hexdigest(),pinned)):
+                        raise RuntimeConfigurationError('CA bundle differs from validated settings')
                 if inbound_anchors & outbound_anchors:
                     raise RuntimeConfigurationError('inbound and outbound trust anchors overlap')
                 worker_context = ssl.create_default_context()

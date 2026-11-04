@@ -1,5 +1,7 @@
 import base64
+import hashlib
 import http.client
+import json
 import os
 import shutil
 import ssl
@@ -34,7 +36,9 @@ class InboundMTLSTests(unittest.TestCase):
         self.token='viewer-token-'+'x'*32
 
     def runtime(self, inbound=None):
-        settings=ReferenceSettings(self.listener,{self.token:'staging'},self.workers,dict(maxConcurrent=1,maxObjectBytes=1000),inbound_client_ca=inbound)
+        pins={} if inbound is None else dict(inbound_ca_sha256=hashlib.sha256(Path(inbound).read_bytes()).hexdigest(),
+            outbound_ca_sha256=hashlib.sha256(Path(self.listener['clientCA']).read_bytes()).hexdigest())
+        settings=ReferenceSettings(self.listener,{self.token:'staging'},self.workers,dict(maxConcurrent=1,maxObjectBytes=1000),inbound_client_ca=inbound,**pins)
         runtime=ReferenceRuntime(self.queue,self.config,settings,discover=lambda:{'ready':False})
         runtime.start();self.addCleanup(runtime.close)
         return runtime
@@ -56,6 +60,23 @@ class InboundMTLSTests(unittest.TestCase):
         for cert in (None,'other'):
             with self.subTest(cert=cert),self.assertRaises((ssl.SSLError,ConnectionError,OSError)):
                 self.request(runtime,cert)
+
+    def test_swapped_disjoint_inbound_ca_after_settings_is_refused(self):
+        from dataclasses import replace
+        from processing.reference_runtime import RuntimeConfigurationError, load_reference_settings
+        inbound=self.root/'client.pem'
+        configfile=self.root/'reference.json'
+        configfile.write_text(json.dumps(dict(schemaVersion=6,listener={**self.listener,'port':19443},
+            viewerBearers={'staging':self.token},workers=self.workers,
+            streamBudget=dict(maxConcurrent=1,maxObjectBytes=1000),inboundClientCA=str(inbound))))
+        if os.name!='nt':configfile.chmod(0o600)
+        settings=load_reference_settings(str(configfile),self.config)
+        settings=replace(settings,listener=dict(settings.listener,port=0))
+        # The replacement is also disjoint from the outbound CA; the saved
+        # config-load fingerprint must still prevent silently changing trust.
+        inbound.write_bytes((self.root/'other.pem').read_bytes())
+        with self.assertRaises(RuntimeConfigurationError):
+            ReferenceRuntime(self.queue,self.config,settings,discover=lambda:{'ready':False})
 
     def test_default_preserves_tls_without_client_certificate(self):
         runtime=self.runtime()
