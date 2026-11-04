@@ -573,7 +573,7 @@ class EagerCustody(unittest.TestCase):
         self.service.tick()
         self.join()
         self.assert_no_half_archive(identifier)
-        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': RESULT_CHANGED})
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': RESULT_CHANGED})
         self.assert_job_succeeded(identifier)
         self.settle()
         self.assertEqual(engine.download_calls, 1)  # Latched, and Viewer is unaffected.
@@ -588,7 +588,7 @@ class EagerCustody(unittest.TestCase):
             self.service.tick()
         engine.tasks[task['engine_uuid']]['status']['code'] = 20  # A stale tasks.json reran it.
         self.settle()
-        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': RESULT_CHANGED})
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': RESULT_CHANGED})
         self.assertEqual(engine.download_calls, 0)
 
     def test_insufficient_disk_defers_then_recovers(self):
@@ -654,7 +654,8 @@ class EagerCustody(unittest.TestCase):
         self.assertEqual(set(status['lastFree']), {'bytes', 'observedAt'})
         self.assertEqual({key: status[key] for key in status if key != 'lastFree'},
                          {'reserveBytes': 1, 'maxBytes': 1024 ** 3, 'fileLimitBytes': CENSUS_RETAINED_FILE_BYTES,
-                          'pendingTasks': 1, 'resumeScanned': False})
+                          'pendingTasks': 1, 'resumeScanned': False, 'next': None, 'tasks': status['tasks']})
+        self.assertEqual(len(status['tasks']), 1)
 
     def test_status_route_exists_only_with_the_flag(self):
         startup = startup_fixture.StartupTests('test_invalid_values_refuse')
@@ -760,7 +761,7 @@ class EagerCustody(unittest.TestCase):
         engine.download = oversized
         self.service.tick()
         self.join()
-        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': 'archive_exceeds_census_limit'})
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': 'archive_exceeds_census_limit'})
         self.assert_no_half_archive(identifier)
         self.assert_job_succeeded(identifier)
 
@@ -796,7 +797,7 @@ class EagerCustody(unittest.TestCase):
             self.service.tick()
         with self.service.download(identifier)[0]:
             pass
-        self.assertEqual(self.custody(identifier), {'state': 'pending'})
+        self.assertEqual(self.custody(identifier), {'state': 'pending', 'retained': True})
         self.service.tick()
         self.join()
         self.assertEqual(self.custody(identifier), {'state': 'verified'})
@@ -862,19 +863,21 @@ class EagerCustody(unittest.TestCase):
         self.assert_job_succeeded(identifier)
         self.assertEqual(self.custody(identifier), {'state': 'verified'})
 
-    def test_engine_answering_missing_ends_after_bounded_attempts(self):
+    def test_engine_answering_missing_keeps_retrying_and_can_return(self):
         identifier = self.finished(wait=False)
         task = self.fixture.task(identifier)
         engine = self.engine(identifier)
         with patch.object(self.service, '_advance_eager_custody', lambda: None):
             self.service.tick()
-        del engine.tasks[task['engine_uuid']]
-        for attempt in range(ENGINE_MISSING_POLLS):
-            self.assertEqual(self.custody(identifier)['state'], 'pending')
+        kept = engine.tasks.pop(task['engine_uuid'])
+        for attempt in range(ENGINE_MISSING_POLLS + 3):
             self.settle()
-        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': 'engine_task_missing'})
-        self.assertNotIn(identifier, self.service._eager_due)
+            self.assertEqual(self.custody(identifier), {'state': 'pending', 'reason': 'engine_task_missing'})
+        self.assertIn(identifier, self.service._eager_due)
         self.assert_job_succeeded(identifier)
+        engine.tasks[task['engine_uuid']] = kept  # An engine back from an outage.
+        self.settle()
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
 
     def test_unreachable_node_retries_until_it_answers(self):
         identifier = self.finished(wait=False)
@@ -1015,14 +1018,14 @@ class EagerCustody(unittest.TestCase):
         task = self.fixture.task(identifier)
         return self.engine(identifier).tasks[task['engine_uuid']]
 
-    def assert_unavailable_and_lazy(self, identifier, reason):
-        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': reason})
+    def assert_refused_and_lazy(self, identifier, reason):
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': reason})
         self.assertEqual(self.record(identifier)['archive'], None)
-        self.assertEqual(self.service.store.pending_custody(), [])
+        self.assertIn(identifier, self.service.store.pending_custody())
         self.assert_job_succeeded(identifier)
         with self.service.download(identifier)[0] as stream:
             self.assertEqual(stream.read(), self.engine(identifier).archive)
-        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': reason})
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': reason, 'retained': True})
 
     def test_a_code_40_missing_any_evidence_binds_nothing(self):
         for field in ('dateCreated', 'imagesCount', 'options', 'processingTime'):
@@ -1034,7 +1037,7 @@ class EagerCustody(unittest.TestCase):
                 self.join()
                 self.assertEqual(self.engine(identifier).download_calls, 0)
                 self.assert_no_half_archive(identifier)
-                self.assert_unavailable_and_lazy(identifier, IDENTITY_UNAVAILABLE)
+                self.assert_refused_and_lazy(identifier, IDENTITY_UNAVAILABLE)
                 self.engine(identifier).download_calls = 0
 
     def test_a_code_40_disagreeing_with_the_submission_binds_nothing(self):
@@ -1045,7 +1048,7 @@ class EagerCustody(unittest.TestCase):
                 self.service.tick()
                 self.join()
                 self.assertEqual(self.engine(identifier).download_calls, 0)
-                self.assert_unavailable_and_lazy(identifier, IDENTITY_MISMATCH)
+                self.assert_refused_and_lazy(identifier, IDENTITY_MISMATCH)
                 self.engine(identifier).download_calls = 0
 
     def test_evidence_vanishing_during_the_transfer_publishes_nothing(self):
@@ -1061,7 +1064,7 @@ class EagerCustody(unittest.TestCase):
         self.service.tick()
         self.join()
         self.assert_no_half_archive(identifier)
-        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': IDENTITY_UNAVAILABLE})
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': IDENTITY_UNAVAILABLE})
         self.assertFalse(self.record(identifier)['checked'])
 
     def test_a_verified_record_holds_a_complete_checked_binding(self):
@@ -1079,7 +1082,7 @@ class EagerCustody(unittest.TestCase):
         self.engine_task(identifier)['processingTime'] = 9000
         self.service.tick()
         self.join()
-        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': RESULT_CHANGED})
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': RESULT_CHANGED, 'retained': True})
         self.assertEqual((self.directory(identifier) / 'all.zip').read_bytes(), self.engine(identifier).archive)
 
     def test_viewer_bytes_with_unreadable_members_are_not_verified(self):
@@ -1092,7 +1095,7 @@ class EagerCustody(unittest.TestCase):
                 pass
             self.service.tick()
             self.join()
-        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': 'archive_members_unreadable'})
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': 'archive_members_unreadable', 'retained': True})
         self.assertEqual((self.directory(identifier) / 'all.zip').read_bytes(), engine.archive)
 
     def test_adoption_without_a_binding_needs_every_field_the_engine_reports(self):
@@ -1161,8 +1164,8 @@ class EagerCustody(unittest.TestCase):
         self.settle()
         self.assertEqual(self.engine(identifier).download_calls, 1)
         # Those bytes came before any record of the run, so nothing vouches for them.
-        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': 'result_bound_too_late'})
-        self.assertEqual(self.service.store.pending_custody(), [])
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': 'result_bound_too_late', 'retained': True})
+        self.assertEqual(self.service.store.pending_custody(), [identifier])
 
     @unittest.skipIf(os.name == 'nt', 'needs SIGKILL')
     def test_a_kill_right_after_the_commit_cannot_lose_the_intent(self):
@@ -1183,7 +1186,7 @@ class EagerCustody(unittest.TestCase):
         path = self.directory(identifier) / CUSTODY_NAME
         path.write_text('{"state":"verified"}')
         self.settle()
-        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': 'custody_record_invalid'})
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': 'custody_record_invalid'})
         self.assertEqual(path.read_text(), '{"state":"verified"}')
         self.assertEqual(self.engine(identifier).download_calls, 0)
 
@@ -1194,18 +1197,369 @@ class EagerCustody(unittest.TestCase):
         partial = self.directory(identifier) / 'all.zip.partial'
         partial.write_bytes(b'no intent was recorded for this')
         self.settle()
-        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': 'archive_requires_inspection'})
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': 'archive_requires_inspection'})
         self.assertTrue(partial.exists())
 
-    def test_task_removed_before_its_fetch_is_dropped(self):
+    def entry(self, identifier):
+        return next((item for item in self.listing() if item['taskId'] == identifier), None)
+
+    def listing(self, **page):
+        status = self.service.eager_custody_status(**page)
+        items = status['tasks']
+        while status['next'] is not None:
+            status = self.service.eager_custody_status(**{**page, 'after': status['next']})
+            items = items + status['tasks']
+        return items
+
+    def act(self, identifier, action, note='synthetic note'):
+        return self.service.custody_action(self.job(identifier), action, {'note': note})
+
+    def job(self, identifier):
+        return self.service.store.custody_task(identifier)['job_id']
+
+    def attempt(self, identifier):
+        """One attempt for this task alone, whatever else is due."""
+        self.service._take_eager_custody(identifier, None)
+
+    def owed(self, *, read_unavailable=False):
+        """A finished job whose fetch has not started."""
         identifier = self.finished(wait=False)
-        engine = self.engine(identifier)
         with patch.object(self.service, '_advance_eager_custody', lambda: None):
             self.service.tick()
+        self.engine(identifier).read_unavailable = read_unavailable
+        return identifier
+
+    def test_remove_while_owed_keeps_custody_and_completes_it(self):
+        identifier = self.owed()
+        engine, directory = self.engine(identifier), self.directory(identifier)
+        self.assertEqual(self.service.remove(identifier), {'success': True, 'uuid': identifier})
+        with self.assertRaises(KeyError):
+            self.service.info(identifier)  # Viewer's view of it is exactly as before.
+        self.assertEqual({key: self.entry(identifier)[key] for key in ('state', 'removed')}, {'state': 'pending', 'removed': True})
+        self.settle()
+        self.assertEqual(json.loads((directory / CUSTODY_NAME).read_text())['state'], 'verified')
+        self.assertEqual((directory / 'all.zip').read_bytes(), engine.archive)
+        self.assertEqual(self.service.store.pending_custody(), [])
+
+    def test_remove_during_a_fetch_lets_it_finish(self):
+        identifier = self.finished(wait=False)
+        directory = self.directory(identifier)
+        blocked = Blocked(self.engine(identifier))
+        self.addCleanup(blocked.undo)
+        self.service.tick()
+        self.assertTrue(blocked.reading.wait(10))
+        self.service.remove(identifier)
+        blocked.undo()
+        self.join()
+        self.assertEqual(json.loads((directory / CUSTODY_NAME).read_text())['state'], 'verified')
+        self.assertEqual(self.service.store.custody_task(identifier)['archive_path'], str(directory / 'all.zip'))
+
+    def test_removed_custody_survives_a_restart_and_an_outage(self):
+        identifier = self.owed(read_unavailable=True)
+        engine, directory = self.engine(identifier), self.directory(identifier)
         self.service.remove(identifier)
         self.settle()
+        self.restart()
+        self.assertEqual(self.service.store.pending_custody(), [identifier])
+        self.assertEqual(self.entry(identifier)['reason'], 'archive_fetch_failed')
+        engine.read_unavailable = False
+        self.settle()
+        self.service.tick()
+        self.join()
+        self.assertEqual((directory / 'all.zip').read_bytes(), engine.archive)
+
+    def test_a_uuid_that_owes_custody_is_not_reset(self):
+        identifier = self.owed()
+        task = self.fixture.task(identifier)
+        self.service.remove(identifier)
+        with self.assertRaisesRegex(Conflict, 'still owes result custody'):
+            self.service.store.initialize(identifier, task['name'], task['options'], task['outputs'], task['environment'])
+        self.assertEqual(self.service.store.pending_custody(), [identifier])
+
+    def test_abandon_records_who_when_why_and_repeats_harmlessly(self):
+        identifier = self.owed(read_unavailable=True)
+        engine = self.engine(identifier)
+        self.settle()
+        began = int(time.time())
+        first = self.act(identifier, 'abandon', 'client confirmed a rerun')
+        self.assertEqual((first['state'], first['reason']), ('abandoned', 'operator_abandoned'))
+        recorded = self.record(identifier)['abandoned']
+        self.assertEqual({key: recorded[key] for key in ('action', 'by', 'note')},
+                         {'action': 'abandon', 'by': 'operator_credential', 'note': 'client confirmed a rerun'})
+        self.assertEqual(recorded['from'], {'state': 'pending', 'reason': 'archive_fetch_failed'})
+        self.assertGreaterEqual(recorded['at'], began)
+        self.assertEqual(self.act(identifier, 'abandon', 'a different reason'), first)
+        self.assertEqual(self.record(identifier)['abandoned'], recorded)
+        self.assertEqual(len(self.record(identifier)['operator']), 1)
         self.assertNotIn(identifier, self.service._eager_due)
+        engine.read_unavailable = False
+        self.restart()
+        self.service.tick()
+        self.join()
         self.assertEqual(engine.download_calls, 0)
+        self.assertEqual(self.custody(identifier), {'state': 'abandoned', 'reason': 'operator_abandoned'})
+        self.assertEqual(self.entry(identifier)['abandoned'], recorded)  # Still listed, and nothing was deleted.
+        self.assert_job_succeeded(identifier)
+        with self.service.download(identifier)[0] as stream:  # Abandoning custody is not refusing Viewer.
+            self.assertEqual(stream.read(), engine.archive)
+        self.assertEqual(self.custody(identifier)['retained'], True)
+
+    def test_a_mistaken_abandonment_can_be_retried(self):
+        identifier = self.owed()
+        self.act(identifier, 'abandon')
+        self.act(identifier, 'retry', 'that was the wrong job')
+        self.service.tick()
+        self.join()
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
+        self.assertEqual([item['action'] for item in self.record(identifier)['operator']], ['abandon', 'retry'])
+        self.assertIsNone(self.record(identifier)['abandoned'])
+
+    def test_a_verified_result_has_nothing_to_abandon_or_retry(self):
+        identifier = self.finished()
+        for action in ('abandon', 'retry'):
+            with self.assertRaisesRegex(Conflict, 'no result custody is owed'):
+                self.service.custody_action(self.fixture.task(identifier)['job_id'], action, {'note': 'synthetic note'})
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
+
+    def test_operator_actions_need_a_bounded_note_only(self):
+        identifier = self.owed()
+        for request in ({}, {'note': ''}, {'note': 'x' * 257}, {'note': 7}, {'note': 'a\nb'}, {'note': 'caf\u00e9'},
+                        {'note': 'x', 'by': 'someone'}, 'note'):
+            with self.subTest(request), self.assertRaises(ValueError):
+                self.service.custody_action(self.job(identifier), 'abandon', request)
+        self.assertNotEqual(self.custody(identifier)['state'], 'abandoned')
+
+    def test_an_operator_action_never_waits_on_a_transfer(self):
+        identifier = self.finished(wait=False)
+        blocked = Blocked(self.engine(identifier))
+        self.addCleanup(blocked.undo)
+        self.service.tick()
+        self.assertTrue(blocked.reading.wait(10))
+        with self.assertRaisesRegex(Conflict, 'transfer in progress'):
+            self.act(identifier, 'abandon')
+        blocked.undo()
+        self.join()
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
+
+    def test_operator_actions_stop_at_a_closed_gate(self):
+        gate = self.gate()
+        identifier = self.owed()
+        self.close_gate(gate)
+        with self.assertRaises(AdmissionClosed):
+            self.act(identifier, 'abandon')
+        self.assertEqual(self.custody(identifier), {'state': 'pending'})
+
+    def test_custody_routes_need_the_operator_credential_and_the_flag(self):
+        startup = startup_fixture.StartupTests('test_invalid_values_refuse')
+        startup.setUp()
+        self.addCleanup(startup.doCleanups)
+        startup.state.mkdir()
+        startup.env['PROCESSING_PROTOTYPE_OPERATOR_TOKEN'] = 'o' * 32
+
+        def post(sizes, token, path='/v1/prototype/jobs/%s/custody/abandon' % uuid.uuid4()):
+            with patch.dict(os.environ, {**startup.env, **sizes}, clear=True):
+                handler = make_handler(from_environment())
+            server = start_server(handler)
+            try:
+                request = Request('http://127.0.0.1:%d%s' % (server.server_port, path), data=b'{"note":"synthetic"}',
+                                  headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+                try:
+                    with urlopen(request, timeout=5) as response:
+                        return response.status
+                except HTTPError as error:
+                    return error.code
+            finally:
+                server.shutdown()
+                server.server_close()
+                handler.viewer_service.close()
+                handler.prototype_queue.close()
+
+        on = {'PROCESSING_VIEWER_EAGER_RESULT_CUSTODY': '1', 'PROCESSING_VIEWER_EAGER_CUSTODY_RESERVE_BYTES': '7',
+              'PROCESSING_VIEWER_EAGER_CUSTODY_MAX_BYTES': '9'}
+        self.assertEqual(post({}, startup.env['PROCESSING_API_TOKEN']), 404)
+        self.assertEqual(post(on, startup.env['PROCESSING_API_TOKEN']), 401)
+        self.assertEqual(post(on, 'o' * 32), 409)  # Authorized, and no such custody is owed.
+
+    def test_no_failure_or_length_of_time_abandons_anything(self):
+        identifier = self.owed(read_unavailable=True)
+        for _ in range(30):
+            self.settle()
+        self.assertEqual(self.record(identifier)['abandoned'], None)
+        self.assertEqual(self.custody(identifier)['state'], 'pending')
+
+    def test_a_long_disconnection_keeps_retrying_at_a_capped_rate_then_succeeds(self):
+        identifier = self.owed(read_unavailable=True)
+        engine = self.engine(identifier)
+        delays = []
+        for attempt in range(40):
+            self.settle()
+            delays.append(self.service._eager_due[identifier] - time.monotonic())
+            if attempt == 20:
+                self.restart()  # An outage may outlive the coordinator too; the rate survives.
+                self.assertEqual(self.custody(identifier), {'state': 'pending', 'reason': 'archive_fetch_failed'})
+                self.service._eager_scanned = False
+                self.service.tick()
+                self.join()
+                delays.append(self.service._eager_due[identifier] - time.monotonic())
+        self.assertLess(delays[0], delays[3])
+        self.assertLessEqual(max(delays), service_module.RESULT_FETCH_RETRY_MAX_SECONDS)
+        self.assertGreater(min(delays[-10:]), service_module.RESULT_FETCH_RETRY_MAX_SECONDS - 60)
+        self.assertGreaterEqual(self.record(identifier)['attempts'], 40)
+        engine.read_unavailable = False
+        self.settle()
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
+        self.assertEqual((self.directory(identifier) / 'all.zip').read_bytes(), engine.archive)
+
+    def test_hard_refusal_waits_for_an_operator_then_retry_retains_the_result(self):
+        identifier = self.owed()
+        engine = self.engine(identifier)
+        engine_task = self.engine_task(identifier)
+        engine_task['processingTime'] = 9000
+        self.settle()
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': RESULT_CHANGED})
+        self.assertNotIn(identifier, self.service._eager_due)
+        self.restart()
+        self.service.tick()
+        self.join()
+        self.assertEqual(engine.download_calls, 0)  # Latched across a restart, and listed.
+        self.assertEqual(self.entry(identifier)['reason'], RESULT_CHANGED)
+        self.act(identifier, 'retry', 'checked the engine: same run')
+        self.assertEqual(self.custody(identifier), {'state': 'pending'})
+        self.service.tick()
+        self.join()
+        self.assertEqual(self.record(identifier)['result']['processingTime'], 9000)
+        self.assertEqual((self.directory(identifier) / 'all.zip').read_bytes(), engine.archive)
+        self.assertEqual(self.service.store.pending_custody(), [] if self.record(identifier)['state'] == 'verified' else [identifier])
+
+    def test_retry_holds_bytes_that_remain_refused(self):
+        identifier = self.finished(wait=False)
+        self.engine_task(identifier)['identity']['imagesCount'] = 2
+        self.service.tick()
+        self.join()
+        self.assert_refused_without_bytes(identifier, IDENTITY_MISMATCH)
+        self.act(identifier, 'retry', 'keep them while we look')
+        self.service.tick()
+        self.join()
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': IDENTITY_MISMATCH, 'retained': True})
+        record = self.record(identifier)
+        self.assertEqual(record['archive']['bytes'], len(self.engine(identifier).archive))
+        self.assertEqual(self.service.store.pending_custody(), [identifier])
+
+    def assert_refused_without_bytes(self, identifier, reason):
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': reason})
+        self.assert_no_half_archive(identifier)
+
+    def test_retry_of_a_census_refusal_still_never_holds_the_file(self):
+        identifier = self.finished(wait=False)
+        engine = self.engine(identifier)
+        original = engine.download
+        self.fixture.config.viewer_max_archive_bytes = 10 * CENSUS_RETAINED_FILE_BYTES
+
+        def oversized(task_id):
+            response = original(task_id)
+            response.headers['Content-Length'] = str(CENSUS_RETAINED_FILE_BYTES + 1)
+            return response
+
+        engine.download = oversized
+        self.service.tick()
+        self.join()
+        self.act(identifier, 'retry')
+        self.service.tick()
+        self.join()
+        self.assert_refused_without_bytes(identifier, 'archive_exceeds_census_limit')
+
+    def test_retry_when_the_engine_is_gone_keeps_trying(self):
+        identifier = self.finished(wait=False)
+        self.engine_task(identifier)['processingTime'] = 9000
+        original = self.engine(identifier).download
+
+        def download(task_id):
+            self.engine_task(identifier)['processingTime'] = 9001
+            return original(task_id)
+
+        self.engine(identifier).download = download
+        self.service.tick()
+        self.join()
+        self.assertEqual(self.custody(identifier), {'state': 'refused', 'reason': RESULT_CHANGED})
+        task = self.fixture.task(identifier)
+        del self.engine(identifier).tasks[task['engine_uuid']]
+        self.act(identifier, 'retry')
+        self.service.tick()
+        self.join()
+        self.assertEqual(self.custody(identifier), {'state': 'pending', 'reason': 'engine_task_missing'})
+        self.assertTrue(self.record(identifier)['rebind'])  # Still the operator's retry when it returns.
+
+    def test_the_list_shows_everything_unverified_across_pages(self):
+        done = self.finished()
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
+            fleet = [self.finished() for _ in range(7)]
+        self.assertEqual([item['taskId'] for item in self.listing(limit=2)], fleet)
+        self.assertNotIn(done, self.service.store.pending_custody())
+        first = self.service.eager_custody_status(limit=3)
+        self.assertEqual([item['taskId'] for item in first['tasks']], fleet[:3])
+        second = self.service.eager_custody_status(after=first['next'], limit=3)
+        self.assertEqual([item['taskId'] for item in second['tasks']], fleet[3:6])
+        third = self.service.eager_custody_status(after=second['next'], limit=3)
+        self.assertEqual(([item['taskId'] for item in third['tasks']], third['next']), (fleet[6:], None))
+        self.assertEqual(first['pendingTasks'], 7)
+        for page in ({'limit': 0}, {'limit': service_module.CUSTODY_PAGE_MAX + 1}, {'after': -1}, {'limit': True}):
+            with self.subTest(page), self.assertRaises(ValueError):
+                self.service.eager_custody_status(**page)
+
+    def test_an_invalid_record_is_listed_not_hidden(self):
+        bad, good = self.owed(), self.owed()
+        (self.directory(bad) / CUSTODY_NAME).write_text('{"state":"verified"}')
+        items = {item['taskId']: item for item in self.listing()}
+        self.assertEqual((items[bad]['state'], items[bad]['reason']), ('refused', 'custody_record_invalid'))
+        self.assertEqual(items[good]['state'], 'pending')
+
+    def test_a_restart_preserves_every_state(self):
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
+            deferred, retrying, refused, abandoned, verified = (self.finished() for _ in range(5))
+        with patch('processing.viewer_service.shutil.disk_usage', lambda path: SimpleNamespace(free=0)):
+            self.attempt(deferred)
+        self.engine(retrying).read_unavailable = True
+        self.attempt(retrying)
+        self.engine(retrying).read_unavailable = False
+        self.engine_task(refused)['processingTime'] = 9000
+        self.attempt(refused)
+        self.act(abandoned, 'abandon')
+        self.attempt(verified)
+        states = {identifier: self.custody(identifier) for identifier in (deferred, retrying, refused, abandoned, verified)}
+        self.assertEqual([item['state'] for item in states.values()], ['deferred', 'pending', 'refused', 'abandoned', 'verified'])
+        listed = {item['taskId']: item for item in self.listing()}
+        self.restart()
+        self.assertEqual({identifier: self.custody(identifier) for identifier in states}, states)
+        self.assertEqual({item['taskId']: item for item in self.listing()}, listed)
+
+    def test_the_list_route_pages_and_refuses_a_bad_page(self):
+        startup = startup_fixture.StartupTests('test_invalid_values_refuse')
+        startup.setUp()
+        self.addCleanup(startup.doCleanups)
+        startup.state.mkdir()
+        on = {'PROCESSING_VIEWER_EAGER_RESULT_CUSTODY': '1', 'PROCESSING_VIEWER_EAGER_CUSTODY_RESERVE_BYTES': '7',
+              'PROCESSING_VIEWER_EAGER_CUSTODY_MAX_BYTES': '9'}
+        with patch.dict(os.environ, {**startup.env, **on}, clear=True):
+            handler = make_handler(from_environment())
+        server = start_server(handler)
+
+        def read(query):
+            request = Request('http://127.0.0.1:%d/v1/prototype/result-custody%s' % (server.server_port, query),
+                              headers={'Authorization': 'Bearer ' + startup.env['PROCESSING_API_TOKEN']})
+            try:
+                with urlopen(request, timeout=5) as response:
+                    return response.status
+            except HTTPError as error:
+                return error.code
+
+        try:
+            self.assertEqual([read(item) for item in ('?limit=2', '?after=5&limit=500', '?limit=0', '?limit=x', '?other=1', '?limit=1&limit=2')],
+                             [200, 200, 400, 400, 400, 400])
+        finally:
+            server.shutdown()
+            server.server_close()
+            handler.viewer_service.close()
+            handler.prototype_queue.close()
 
     def test_kept_archive_survives_resolve(self):
         identifier = self.finished()
@@ -1379,7 +1733,8 @@ class EagerCustody(unittest.TestCase):
                 self.assertFalse(done.wait(0.1), kind)
                 release.set()
                 writer.join(5)
-                del registry['synthetic']
+                with self.service._lock:
+                    del registry['synthetic']
                 waiter.join(5)
                 self.assertTrue(done.is_set(), kind)
 
@@ -1401,7 +1756,8 @@ class EagerCustody(unittest.TestCase):
         self.assertFalse(done.wait(0.3), 'a grace released a sender that can mutate an engine')
         release.set()
         writer.join(5)
-        del self.service._dispatch_threads['synthetic']
+        with self.service._lock:
+            del self.service._dispatch_threads['synthetic']
         waiter.join(5)
         self.assertTrue(done.is_set())
 

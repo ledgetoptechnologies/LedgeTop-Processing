@@ -4,6 +4,7 @@ import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import signal
 import sys
 import threading
@@ -13,6 +14,7 @@ from .policy import plan
 from .provider import probe_node
 from .prototype import Queue, Conflict
 from .options import catalog
+from urllib.parse import parse_qs, urlsplit
 
 MAX_BODY = 8192
 
@@ -197,9 +199,12 @@ def make_handler(config: Config):
                     self._reply(404, {"error": "prototype_disabled"})
                 elif self.path == "/v1/prototype/authority":
                     self._reply(200, {"authorityId": queue.authority_id})
-                elif (self.path == "/v1/prototype/result-custody" and self.viewer_service is not None
+                elif (urlsplit(self.path).path == "/v1/prototype/result-custody" and self.viewer_service is not None
                         and getattr(config, 'viewer_eager_result_custody', False) is True):
-                    self._reply(200, {"resultCustody": self.viewer_service.eager_custody_status()})
+                    try:
+                        self._reply(200, {"resultCustody": self.viewer_service.eager_custody_status(**_custody_page(self.path))})
+                    except ValueError:
+                        self._reply(400, {"error": "invalid_request"})
                 elif self.path == "/v1/prototype/jobs":
                     self._reply(200, {"jobs": queue.list(), "mode": "bounded_photo_test" if config.photo_smoke_enabled else "synthetic_prototype"})
                 elif self.path == "/v1/prototype/nodes":
@@ -267,9 +272,11 @@ def make_handler(config: Config):
             if self.path not in ("/v1/plan", "/v2/plan") and not prototype:
                 self._reply(404, {"error": "not_found"})
                 return
+            custody = (re.fullmatch(r'/v1/prototype/jobs/([^/]+)/custody/(abandon|retry)', self.path)
+                       if service is not None and getattr(config, 'viewer_eager_result_custody', False) is True else None)
             operator = prototype and (self.path == '/v1/prototype/admission-drain' or self.path.endswith(("/hold", "/resolve"))
                                       or (getattr(config, 'viewer_lost_result_adopt', False) and self.path.endswith("/adopt"))
-                                      or self.path.startswith("/v1/prototype/nodes/"))
+                                      or self.path.startswith("/v1/prototype/nodes/") or custody is not None)
             if not self._authorized(operator=operator):
                 return
             if self.path == '/v1/plan' and config.node_inventory:
@@ -331,6 +338,12 @@ def make_handler(config: Config):
                         else:
                             result = methods[action](identifier, request)
                             self._reply(200,result if action=='begin' else {'receipt':result} if action=='schedule-owned' else {'node':result})
+                    elif custody is not None:
+                        from .admission_drain import AdmissionClosed
+                        try:
+                            self._reply(200, {'resultCustody': service.custody_action(custody[1], custody[2], request)})
+                        except AdmissionClosed:
+                            self._reply(503, {'error': 'admission_draining'})
                     elif operator and self.path.startswith("/v1/prototype/jobs/"):
                         identifier, _, action = self.path[len("/v1/prototype/jobs/"):].rpartition("/")
                         transition = service.operator if service else queue.operator
@@ -379,6 +392,14 @@ def make_handler(config: Config):
                               **decision, "nodes": [local, main]})
 
     return Handler
+
+
+def _custody_page(path):
+    query = parse_qs(urlsplit(path).query, keep_blank_values=True)
+    if not set(query) <= {'after', 'limit'} or any(len(items) != 1 or not re.fullmatch('[0-9]{1,18}', items[0])
+                                                   for items in query.values()):
+        raise ValueError('invalid result custody page')
+    return {key: int(items[0]) for key, items in query.items()}
 
 
 # An engine read times out at 60: a fetch nothing could wake has ended by then.

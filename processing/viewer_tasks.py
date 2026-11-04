@@ -496,6 +496,8 @@ class TaskStore:
                         name, options_text, outputs_text, environment):
                     raise Conflict('task UUID belongs to different settings')
                 return {'uuid': identifier}
+            if row is not None and row['error'] == CUSTODY_INTENT:
+                raise Conflict('task UUID still owes result custody')  # A reset replaces this row.
             if row is None and db.execute('SELECT COUNT(*) FROM viewer_tasks').fetchone()[0] >= 1000:
                 raise Conflict('task history limit reached')
             generation = row['generation'] + 1 if row is not None else 1
@@ -745,12 +747,32 @@ class TaskStore:
                 db.execute('UPDATE viewer_tasks SET error=? WHERE uuid=?',(CUSTODY_INTENT,row['uuid']))
 
     def pending_custody(self):
-        """Every task still owed a custody decision, oldest first and without a limit."""
+        """Every task not yet verified, oldest first and without a limit.
+
+        A removed task is here too: Viewer's remove hides a task from Viewer, and
+        Viewer has no ingestion acknowledgement, so it decides nothing about bytes.
+        """
         with self._lock, self.queue._db() as db:
-            return [row[0] for row in db.execute("SELECT uuid FROM viewer_tasks WHERE removed=0 AND error=? AND phase='complete' AND stage='succeeded' ORDER BY rowid",(CUSTODY_INTENT,))]
+            return [row[0] for row in db.execute("SELECT uuid FROM viewer_tasks WHERE error=? AND phase='complete' AND stage='succeeded' ORDER BY rowid",(CUSTODY_INTENT,))]
+
+    def custody_page(self, after, limit):
+        """That list as (position, uuid) from just past ``after``, oldest first."""
+        with self._lock, self.queue._db() as db:
+            return [tuple(row) for row in db.execute("SELECT rowid,uuid FROM viewer_tasks WHERE error=? AND phase='complete' AND stage='succeeded' AND rowid>? ORDER BY rowid LIMIT ?",(CUSTODY_INTENT,after,limit))]
+
+    def custody_task(self, identifier):
+        """A task for its custody only, which outlives Viewer's remove."""
+        with self._lock, self.queue._db() as db:
+            return self._task(db, self._row(db, identifier, removed=True))
+
+    def custody_task_for_job(self, job_id):
+        with self._lock, self.queue._db() as db:
+            rows=db.execute("SELECT * FROM viewer_tasks WHERE job_id=? AND error=? AND phase='complete' AND stage='succeeded' LIMIT 2",(job_id,CUSTODY_INTENT)).fetchall()
+            if len(rows)!=1:raise Conflict('no result custody is owed')
+            return self._task(db,rows[0])
 
     def settle_custody(self, task):
-        """The sidecar now holds the decision. Repeating this changes nothing."""
+        """The result is verified, so nothing is owed. Repeating this changes nothing."""
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             db.execute('UPDATE viewer_tasks SET error=NULL WHERE uuid=? AND generation=? AND error=?',
@@ -876,7 +898,9 @@ class TaskStore:
                 raise ValueError('task output too large')
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = self._row(db, identifier)
+            row = self._row(db, identifier, removed=set(fields) == {'archive_path'})
+            if row['removed'] and row['error'] != CUSTODY_INTENT:
+                raise KeyError('unknown task')  # Only custody writes past Viewer's remove.
             if row['node_guarded'] and fields.get('node_guarded', True) is not True:
                 raise Conflict('guard marker cannot be cleared')
             if row['engine_uuid'] and fields.get('engine_uuid', row['engine_uuid']) != row['engine_uuid']:
@@ -895,7 +919,7 @@ class TaskStore:
             assignments = ','.join(field + '=?' for field in fields)
             db.execute('UPDATE viewer_tasks SET ' + assignments + ',updated_at=CURRENT_TIMESTAMP WHERE uuid=?',
                        (*fields.values(), identifier))
-        return self.task(identifier)
+        return self.custody_task(identifier) if row['removed'] else self.task(identifier)
 
     def info(self, identifier):
         try:

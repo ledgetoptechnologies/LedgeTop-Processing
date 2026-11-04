@@ -36,9 +36,9 @@ from .prototype import VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
 from .viewer_limits import MAX_UPLOAD_BYTES
-from .viewer_result_adoption import (CUSTODY_INTENT, CUSTODY_NAME, IDENTITY_UNAVAILABLE, RESULT_CHANGED, bound_evidence,
-                                     custody_refusal, engine_evidence, evidence_complete, identity_refusal, new_adoption,
-                                     new_custody)
+from .viewer_result_adoption import (CUSTODY_ACTIONS_KEPT, CUSTODY_INTENT, CUSTODY_NAME, CUSTODY_SETTLED, IDENTITY_UNAVAILABLE,
+                                     RESULT_CHANGED, bound_evidence, custody_refusal, engine_evidence, identity_refusal,
+                                     new_adoption, new_custody)
 from .viewer_output_log import (OUTPUT_ANCHOR_BYTES, OUTPUT_TAIL_LINES, append_output_tail, archived_output_lines,
                                 consume_output, mark_output, mark_unverifiable, matches_anchor, new_output_log,
                                 output_digest, restart_output, skip_oversized_line)
@@ -75,6 +75,7 @@ RESULT_FETCH_RETRY_MAX_SECONDS = 3600
 # tasks that finished before it.
 EAGER_FETCH_CONCURRENCY = 1
 EAGER_DEFERRED_RETRY_SECONDS = 300
+CUSTODY_PAGE_DEFAULT, CUSTODY_PAGE_MAX = 100, 500
 # ops/update_reference_coordinator.py refuses any larger file under viewer-tasks/.
 # Viewer can still fetch a larger result itself; custody must not add one unasked.
 CENSUS_RETAINED_FILE_BYTES = 20 * 1024 ** 3
@@ -143,6 +144,10 @@ def _check_archive_members(path, stop=None):
         raise EngineUnavailable('archive_transfer_incomplete') from None
 
 
+def _eager_retry_seconds(failures):
+    return min(RESULT_FETCH_RETRY_MAX_SECONDS, RESULT_FETCH_RETRY_SECONDS * 2 ** min(failures, 6))
+
+
 def _reports_missing(value):
     # NodeODX reports an unknown task as a JSON error, often with a 200 status.
     return (isinstance(value, dict) and isinstance(value.get('error'), str)
@@ -182,7 +187,7 @@ class _CustodyDeferred(Exception):
 
 
 class _CustodyRefused(Exception):
-    """An eager fetch must not be tried again; args[0] is a fixed code."""
+    """An eager fetch waits for an operator; args[0] is a fixed code."""
 
 
 class _PinnedLoopbackClient(Client):
@@ -402,7 +407,6 @@ class ViewerService:
         self._eager_threads = {}
         self._eager_due = {}
         self._eager_failures = {}
-        self._eager_missing = {}
         self._eager_notes = {}
         self._eager_scanned = False
         # Prototype only: absent configuration keeps the deployed synchronous
@@ -1436,8 +1440,8 @@ class ViewerService:
             if self.store.custody(task) is None:
                 record, reason = new_custody(self._adoption_identity(task), info), custody_refusal(task, info)
                 if reason is not None:
-                    record = {**record, 'state': 'unavailable', 'reason': reason}
-                    logging.getLogger(__name__).error('Viewer result custody unavailable: %s', reason)
+                    record = {**record, 'state': 'refused', 'reason': reason}
+                    logging.getLogger(__name__).error('Viewer result custody refused: %s', reason)
                 self.store.save_custody(task, record)
         except Exception:
             logging.getLogger(__name__).error('Viewer result custody could not be recorded')
@@ -1449,16 +1453,18 @@ class ViewerService:
         try:
             record = self.store.custody(task)
         except Conflict:
-            return {'state': 'unavailable', 'reason': 'custody_record_invalid'}
+            return {'state': 'refused', 'reason': 'custody_record_invalid'}
         if task['uuid'] in self._eager_threads:
             return {'state': 'fetching'}
         if record is None:
             # Survives a restart, as the intent does: it was never written, not lost.
             return {'state': 'pending', 'reason': 'custody_record_unwritten'} if task['error'] == CUSTODY_INTENT else None
         custody = {'state': record['state']}
-        reason = record['reason'] or (self._eager_notes.get(task['uuid']) if record['state'] == 'pending' else None)
+        reason = (record['state'] == 'pending' and self._eager_notes.get(task['uuid'])) or record['reason']
         if reason is not None:
             custody['reason'] = reason
+        if task['archive_path'] and record['state'] != 'verified':
+            custody['retained'] = True  # Viewer's own download, or bytes an operator kept.
         return custody
 
     def _advance_eager_custody(self):
@@ -1483,9 +1489,13 @@ class ViewerService:
 
     def _start_eager_fetch(self, identifier, now):
         try:
-            task = self.store.task(identifier)
+            task = self.store.custody_task(identifier)
+            record = self.store.custody(task)
         except (Conflict, KeyError):
-            self._forget_eager(identifier)  # Removed since.
+            self._forget_eager(identifier)  # Info and the list report an invalid record.
+            return
+        if record is not None and record['state'] in CUSTODY_SETTLED and record['state'] != 'verified':
+            self._forget_eager(identifier)
             return
         note = None
         if task['environment'] == 'production' and getattr(self.config, 'viewer_production_held', False) is True:
@@ -1506,7 +1516,7 @@ class ViewerService:
             raise
 
     def _forget_eager(self, identifier):
-        for schedule in (self._eager_due, self._eager_failures, self._eager_missing, self._eager_notes):
+        for schedule in (self._eager_due, self._eager_failures, self._eager_notes):
             schedule.pop(identifier, None)
 
     def _fetch_eager_result(self, identifier):
@@ -1519,53 +1529,55 @@ class ViewerService:
         try:
             gate = getattr(self.queue, 'admission_drain', None)
             with gate.background() if gate is not None else nullcontext() as closing:
-                delay = self._take_eager_custody(identifier, closing)
-            if delay is None:
-                self._forget_eager(identifier)
-            else:
-                self._eager_due[identifier] = time.monotonic() + delay
+                self._take_eager_custody(identifier, closing)
         except AdmissionClosed:
             self._eager_notes[identifier] = 'admission_closed'
             self._eager_due[identifier] = time.monotonic() + RESULT_FETCH_RETRY_SECONDS
         except Exception:
             # No traceback: a chained engine error may name a credentialed route.
+            # The record could not be read or written either, so memory holds this.
             failures = self._eager_failures.get(identifier, 0) + 1
             self._eager_failures[identifier] = failures
             self._eager_notes[identifier] = 'archive_fetch_failed'
-            self._eager_due[identifier] = time.monotonic() + min(
-                RESULT_FETCH_RETRY_MAX_SECONDS, RESULT_FETCH_RETRY_SECONDS * 2 ** min(failures, 6))
+            self._eager_due[identifier] = time.monotonic() + _eager_retry_seconds(failures)
             logging.getLogger(__name__).error('Viewer result custody fetch failed; it will be retried')
         finally:
             with self._lock:
                 self._eager_threads.pop(identifier, None)
 
-    def _record_eager_result(self, task):
-        """Recording failed at completion, so this read is the code 40.
+    def _record_eager_result(self, task, record):
+        """Bind to a read: none was recorded at completion, or an operator asked.
 
-        It can bind only bytes fetched after it. Any already here have no first read.
+        Unasked, it can bind only bytes fetched after it, as any already here have
+        no first read. An operator's retry instead takes the run the engine reports
+        now, and a refusal that remains no longer stops the bytes being held.
         """
         info = self._read_status(task)
         if info['status']['code'] != 40:
             raise _CustodyRefused(RESULT_CHANGED)
         receipt = Path(task['directory']) / 'all.zip.receipt'
         reason = custody_refusal(task, info)
-        if reason is None and (task['archive_path'] or receipt.exists() or receipt.is_symlink()):
-            reason = 'result_bound_too_late'
-        if reason is not None:
+        if record is not None:
+            current = engine_evidence(info)
+            if current != record['result']:
+                record = {**record, 'result': current, 'checked': False}
+            record = {**record, 'rebind': False, 'overridden': reason}
+        elif reason is None and (task['archive_path'] or receipt.exists() or receipt.is_symlink()):
+            raise _CustodyRefused('result_bound_too_late')
+        elif reason is not None:
             raise _CustodyRefused(reason)
-        record = new_custody(self._adoption_identity(task), info)
+        record = record or new_custody(self._adoption_identity(task), info)
         self.store.save_custody(task, record)
         return record
 
     def _eager_result(self, task, record):
         info = self._read_status(task)
-        evidence = engine_evidence(info)
         if info['status']['code'] != 40:
             raise _CustodyRefused(RESULT_CHANGED)
-        if not evidence_complete(evidence):
-            raise _CustodyRefused(IDENTITY_UNAVAILABLE)
-        reason = RESULT_CHANGED if evidence != record['result'] else custody_refusal(task, info)
-        if reason is not None:
+        reason = custody_refusal(task, info)
+        if engine_evidence(info) != record['result'] and (reason != IDENTITY_UNAVAILABLE or record['overridden']):
+            reason = RESULT_CHANGED
+        if reason is not None and reason != record['overridden']:
             raise _CustodyRefused(reason)
 
     def _eager_custody_bytes(self):
@@ -1586,11 +1598,68 @@ class ViewerService:
         self._eager_free_seen = {'bytes': free, 'observedAt': int(time.time())}
         return free
 
-    def eager_custody_status(self):
-        """The policy in force, its last reading and what is still owed; no paths."""
+    def eager_custody_status(self, after=0, limit=CUSTODY_PAGE_DEFAULT):
+        """The policy, its last reading and one page of everything not verified; no paths.
+
+        ``next`` is null only on the last page, so no limit here can hide work.
+        """
+        if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= CUSTODY_PAGE_MAX:
+            raise ValueError('invalid result custody page')
+        page = self.store.custody_page(after, limit + 1)
         return {'reserveBytes': self._eager_reserve, 'maxBytes': self._eager_max_bytes,
                 'fileLimitBytes': CENSUS_RETAINED_FILE_BYTES, 'lastFree': self._eager_free_seen,
-                'pendingTasks': len(self.store.pending_custody()), 'resumeScanned': self._eager_scanned}
+                'pendingTasks': len(self.store.pending_custody()), 'resumeScanned': self._eager_scanned,
+                'tasks': [self._eager_entry(identifier) for _, identifier in page[:limit]],
+                'next': page[limit - 1][0] if len(page) > limit else None}
+
+    def _eager_entry(self, identifier):
+        """One task's custody for an operator, including a task Viewer removed."""
+        entry = {'taskId': identifier}
+        try:
+            task = self.store.custody_task(identifier)
+            entry.update(jobId=task['job_id'], removed=bool(task['removed']), **(self._eager_status(task) or {'state': 'pending'}))
+            record = self.store.custody(task)
+        except (Conflict, KeyError):
+            return {'state': 'refused', 'reason': 'custody_record_invalid', **entry}
+        if record is not None:
+            entry.update(attempts=record['attempts'], abandoned=record['abandoned'], operatorActions=record['operator'])
+        return entry
+
+    def custody_action(self, job_id, action, request):
+        """Operator only: stop owing a result, or evaluate it again now.
+
+        Abandoning deletes nothing and repeating it changes nothing. A retry may
+        follow any state but a verified one, including a mistaken abandonment.
+        """
+        note = request.get('note') if type(request) is dict and set(request) == {'note'} else None
+        if type(note) is not str or not 1 <= len(note) <= 256 or not note.isascii() or not note.isprintable():
+            raise ValueError('operator custody note required')
+        task = self.store.custody_task_for_job(job_id)
+        identifier = task['uuid']
+        with self._lock:
+            lock = self._downloads.setdefault(identifier, threading.Lock())
+        if not lock.acquire(blocking=False):  # Possibly for minutes, so this never waits.
+            raise Conflict('result transfer in progress; try again')
+        try:
+            gate = getattr(self.queue, 'admission_drain', None)
+            with gate.admit() if gate is not None else nullcontext():
+                record = self.store.custody(task) or new_custody(self._adoption_identity(task), {})
+                if record['state'] == 'verified':
+                    raise Conflict('result custody is verified')
+                if action != 'abandon' or record['state'] != 'abandoned':
+                    entry = {'action': action, 'by': 'operator_credential', 'at': int(time.time()), 'note': note,
+                             'from': {'state': record['state'], 'reason': record['reason']}}
+                    actions = (record['operator'] + [entry])[-CUSTODY_ACTIONS_KEPT:]
+                    self.store.save_custody(task, {**record, 'operator': actions, **(
+                        {'state': 'abandoned', 'reason': 'operator_abandoned', 'abandoned': entry} if action == 'abandon'
+                        else {'state': 'pending', 'reason': None, 'abandoned': None, 'rebind': True})})
+                    self._forget_eager(identifier)
+                    if action == 'retry':
+                        self._eager_due[identifier] = 0
+                    logging.getLogger(__name__).warning('Viewer result custody operator action: %s', action)
+        finally:
+            lock.release()
+        return self._eager_entry(identifier)
 
     def _eager_stop(self, closing):
         def stop():
@@ -1676,62 +1745,91 @@ class ViewerService:
                 except EngineUnavailable:
                     raise _CustodyRefused('archive_members_unreadable') from None
             receipt = self._archive_receipt(task, receipt_path)
-            self.store.save_custody(task, {**record, 'state': 'verified', 'reason': None,
+            state = 'refused' if record['overridden'] else 'verified'
+            self.store.save_custody(task, {**record, 'state': state, 'reason': record['overridden'],
                 'archive': {'bytes': receipt['bytes'], 'sha256': receipt['sha256']}})
             if self._log_retention:
                 try:
                     self._output_from_archive(task, stream)
                 except Exception:
                     logging.getLogger(__name__).error('Viewer archive console could not be read')
+        return state
 
     def _take_eager_custody(self, identifier, closing):
-        """Seconds until the next attempt, or None if none is needed."""
+        """One attempt, scheduling the next under the task's lock: a retry an operator
+        asks for takes that lock, so this cannot forget it."""
         with self._lock:
             lock = self._downloads.setdefault(identifier, threading.Lock())
         with lock:
-            try:
-                task = self.store.task(identifier)
-                if not task['job'] or task['job']['status'] != 'succeeded' or task['phase'] != 'complete':
-                    return None
-                record = self.store.custody(task)
-            except (Conflict, KeyError):
-                return None  # Removed since, or info reports the record as invalid.
-            if record is not None and record['state'] in ('verified', 'unavailable'):
-                self.store.settle_custody(task)
-                return None
-            try:
-                record = record or self._record_eager_result(task)
-                self._transfer_eager_result(task, record, closing)
-                self.store.settle_custody(task)
-                return None
-            except _CustodyPaused:
-                self._eager_notes[identifier] = 'admission_closed'
-                return RESULT_FETCH_RETRY_SECONDS
-            except _CustodyDeferred as deferred:
-                self.store.save_custody(task, {**record, 'state': 'deferred', 'reason': deferred.args[0]})
-                logging.getLogger(__name__).warning('Viewer result custody deferred: %s', deferred.args[0])
-                return EAGER_DEFERRED_RETRY_SECONDS
-            except _CustodyRefused as refused:
-                self._close_eager(task, record, refused.args[0])
-                return None
-            except EngineTaskMissing:
-                missing = self._eager_missing.get(identifier, 0) + 1
-                self._eager_missing[identifier] = missing
-                if missing >= ENGINE_MISSING_POLLS:
-                    self._close_eager(task, record, 'engine_task_missing')
-                    return None
-                raise
-            except Conflict:
-                # Files a person must read. Nothing here will settle them.
-                self._close_eager(task, record, 'archive_requires_inspection')
-                return None
+            delay = self._attempt_eager_custody(identifier, closing)
+            if delay is None:
+                self._forget_eager(identifier)
+            else:
+                self._eager_due[identifier] = time.monotonic() + delay
 
-    def _close_eager(self, task, record, reason):
-        """No further attempts. Viewer's own download stays exactly as it was."""
-        record = record or new_custody(self._adoption_identity(task), {})
-        self.store.save_custody(task, {**record, 'state': 'unavailable', 'reason': reason})
-        self.store.settle_custody(task)
-        logging.getLogger(__name__).error('Viewer result custody unavailable: %s', reason)
+    def _attempt_eager_custody(self, identifier, closing):
+        """Seconds until the next attempt, or None if none is needed."""
+        try:
+            task = self.store.custody_task(identifier)
+            if not task['job'] or task['job']['status'] != 'succeeded' or task['phase'] != 'complete':
+                return None
+            record = self.store.custody(task)
+        except (Conflict, KeyError):
+            return None  # Info and the list report the record as invalid.
+        if record is not None and record['state'] in CUSTODY_SETTLED:
+            if record['state'] == 'verified':
+                self.store.settle_custody(task)
+            return None
+        try:
+            if record is None or record['rebind']:
+                record = self._record_eager_result(task, record)
+            if self._transfer_eager_result(task, record, closing) == 'verified':
+                self.store.settle_custody(task)
+            return None
+        except _CustodyPaused:
+            self._eager_notes[identifier] = 'admission_closed'
+            return RESULT_FETCH_RETRY_SECONDS
+        except _CustodyDeferred as deferred:
+            self.store.save_custody(task, {**record, 'state': 'deferred', 'reason': deferred.args[0]})
+            logging.getLogger(__name__).warning('Viewer result custody deferred: %s', deferred.args[0])
+            return EAGER_DEFERRED_RETRY_SECONDS
+        except _CustodyRefused as refused:
+            self._refuse_eager(task, record, refused.args[0])
+            return None
+        except EngineTaskMissing:
+            # An engine back from an outage may answer before its tasks load,
+            # and only an operator may decide this result is gone for good.
+            return self._retry_eager(task, record, 'engine_task_missing')
+        except Conflict:
+            # Files a person must read. Nothing here will settle them.
+            self._refuse_eager(task, record, 'archive_requires_inspection')
+            return None
+        except Exception:
+            return self._retry_eager(task, record, 'archive_fetch_failed')
+
+    def _retry_eager(self, task, record, reason):
+        """Seconds until a transient failure is tried again, without any end.
+
+        A node may be gone for days. Only the rate is capped, and only an operator
+        gives up. The transfer may have moved the record on from the caller's copy.
+        """
+        identifier = task['uuid']
+        if self._stop.is_set():
+            return RESULT_FETCH_RETRY_SECONDS  # Interrupted, not failed.
+        record = self.store.custody(task) or record
+        failures = max(self._eager_failures.get(identifier, 0), record['attempts'] if record else 0) + 1
+        self._eager_failures[identifier] = failures
+        self._eager_notes[identifier] = reason
+        if record is not None:
+            self.store.save_custody(task, {**record, 'state': 'pending', 'reason': reason, 'attempts': failures})
+        logging.getLogger(__name__).error('Viewer result custody fetch failed; it will be retried')
+        return _eager_retry_seconds(failures)
+
+    def _refuse_eager(self, task, record, reason):
+        """Stop until an operator acts. Viewer's own download stays as it was."""
+        record = self.store.custody(task) or record or new_custody(self._adoption_identity(task), {})
+        self.store.save_custody(task, {**record, 'state': 'refused', 'reason': reason, 'rebind': False})
+        logging.getLogger(__name__).error('Viewer result custody refused: %s', reason)
 
     def _adoptable_result(self, job_id):
         task = self.store.task_for_job(job_id)

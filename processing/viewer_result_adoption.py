@@ -25,10 +25,14 @@ RESULT_CHANGED = 'engine_result_changed'
 _BOUND_FIELDS = ('dateCreated', 'imagesCount', 'options')
 CUSTODY_NAME = '.ledgetop-custody.json'
 CUSTODY_VERSION = 1
-CUSTODY_STATES = ('pending', 'verified', 'deferred', 'unavailable')
+CUSTODY_STATES = ('pending', 'deferred', 'verified', 'refused', 'abandoned')
+# Nothing automatic leaves these. An operator retry leaves the last two.
+CUSTODY_SETTLED = ('verified', 'refused', 'abandoned')
+CUSTODY_ACTIONS_KEPT = 8
 # The durable intent to take custody, not a failure: a finished task's otherwise
 # unread ``viewer_tasks.error``, set in the transaction that makes the job succeed.
 # No table or file is added, a sidecar failure cannot lose it, and a query lists it.
+# Only ``verified`` clears it, so that query is also the list of what is not.
 CUSTODY_INTENT = 'eager_custody_pending'
 
 
@@ -54,17 +58,26 @@ def new_custody(identity, info):
     40, and a transfer publishes only while the engine still reports exactly that.
     ``checked`` is set after that second read, so a crash before ``verified`` can
     tell bytes that passed it from bytes Viewer's own download left behind.
+    ``attempts`` counts transient failures, and survives so a restart keeps the rate.
+    ``rebind`` is an operator retry not yet evaluated, ``overridden`` the refusal it
+    could not clear: those bytes are held, and stay ``refused``. ``abandoned`` and
+    ``operator`` say who did what, when and why.
     """
     return {'version': CUSTODY_VERSION, 'identity': identity, 'state': 'pending', 'reason': None,
-            'result': engine_evidence(info), 'archive': None, 'checked': False}
+            'result': engine_evidence(info), 'archive': None, 'checked': False, 'attempts': 0,
+            'rebind': False, 'overridden': None, 'abandoned': None, 'operator': []}
 
 
 def valid_custody(record, identity):
-    return (type(record) is dict and set(record) == {'version', 'identity', 'state', 'reason', 'result', 'archive', 'checked'}
+    return (type(record) is dict and set(record) == set(new_custody(identity, {}))
             and record['version'] == CUSTODY_VERSION and record['identity'] == identity
-            and type(record['checked']) is bool
+            and type(record['checked']) is bool and type(record['rebind']) is bool
+            and type(record['attempts']) is int and record['attempts'] >= 0
             and record['state'] in CUSTODY_STATES
             and (record['reason'] is None or type(record['reason']) is str)
+            and (record['overridden'] is None or type(record['overridden']) is str)
+            and (record['abandoned'] is None or type(record['abandoned']) is dict)
+            and type(record['operator']) is list and len(record['operator']) <= CUSTODY_ACTIONS_KEPT
             and type(record['result']) is dict
             and (record['archive'] is None or type(record['archive']) is dict))
 
