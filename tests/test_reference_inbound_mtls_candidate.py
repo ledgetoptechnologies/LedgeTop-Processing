@@ -20,7 +20,7 @@ from processing.reference_runtime import ReferenceRuntime, ReferenceSettings
 class InboundMTLSTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
-        for name,extension in (('server','subjectAltName=IP:127.0.0.1'),('client','extendedKeyUsage=clientAuth'),('other','extendedKeyUsage=clientAuth')):
+        for name,extension in (('server','subjectAltName=IP:127.0.0.1'),('client','extendedKeyUsage=clientAuth'),('other','extendedKeyUsage=clientAuth'),('next','extendedKeyUsage=clientAuth')):
             subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
                 '-subj','/CN='+name,'-addext',extension,'-keyout',str(self.root/(name+'.key')),
                 '-out',str(self.root/(name+'.pem'))],check=True,capture_output=True,timeout=15)
@@ -40,10 +40,10 @@ class InboundMTLSTests(unittest.TestCase):
         return ((fingerprint('client'),self.token),(fingerprint('other'),self.workers['cluster']['bearer']),
                 ('a'*64,self.workers['main']['bearer']))
 
-    def runtime(self, inbound=None):
+    def runtime(self, inbound=None, bindings=None):
         pins={} if inbound is None else dict(inbound_ca_sha256=hashlib.sha256(Path(inbound).read_bytes()).hexdigest(),
             outbound_ca_sha256=hashlib.sha256(Path(self.listener['clientCA']).read_bytes()).hexdigest(),
-            inbound_client_bindings=self.bindings())
+            inbound_client_bindings=bindings if bindings is not None else self.bindings())
         settings=ReferenceSettings(self.listener,{self.token:'staging'},self.workers,dict(maxConcurrent=1,maxObjectBytes=1000),inbound_client_ca=inbound,**pins)
         runtime=ReferenceRuntime(self.queue,self.config,settings,discover=lambda:{'ready':False})
         runtime.start();self.addCleanup(runtime.close)
@@ -81,6 +81,35 @@ class InboundMTLSTests(unittest.TestCase):
         worker=self.workers['cluster']['bearer']
         self.assertEqual(self.request(runtime,'other',worker,path='/ltds/worker/v1/authority'),200)
         self.assertEqual(self.request(runtime,'client',worker,path='/ltds/worker/v1/authority'),401)
+
+    def test_bounded_rotation_and_revocation_after_restart(self):
+        bundle=self.root/'rotation.pem'
+        bundle.write_text(''.join((self.root/(name+'.pem')).read_text() for name in ('client','next','other')))
+        fingerprint=lambda name:hashlib.sha256(ssl.PEM_cert_to_DER_cert((self.root/(name+'.pem')).read_text())).hexdigest()
+        base=self.bindings(); rotated=(*base,(fingerprint('next'),self.token))
+        runtime=self.runtime(str(bundle),rotated)
+        self.assertNotEqual(self.request(runtime,'client'),401)
+        self.assertNotEqual(self.request(runtime,'next'),401)
+        self.assertEqual(self.request(runtime,'other'),401)
+        # A duplicate Authorization wire header is rejected before dispatch.
+        context=ssl.create_default_context(cafile=str(self.root/'server.pem'))
+        context.load_cert_chain(str(self.root/'next.pem'),str(self.root/'next.key'))
+        conn=http.client.HTTPSConnection('127.0.0.1',runtime._server.server_port,context=context,timeout=3)
+        try:
+            conn.putrequest('GET','/ltds/v1/capabilities')
+            conn.putheader('Authorization','Bearer '+self.token)
+            conn.putheader('Authorization','Bearer '+self.token)
+            conn.endheaders();response=conn.getresponse();body=response.read()
+            self.assertEqual(response.status,400);self.assertNotIn(self.token.encode(),body)
+        finally:conn.close()
+        runtime.close()
+        # New runtime with old fingerprint removed enforces the new mapping;
+        # changing a config does not affect an already-running listener.
+        newonly=tuple(pair for pair in rotated if pair[0]!=fingerprint('client'))
+        restarted=self.runtime(str(bundle),newonly)
+        self.assertEqual(self.request(restarted,'client'),401)
+        self.assertNotEqual(self.request(restarted,'next'),401)
+        self.assertEqual(self.request(restarted,'other'),401)
 
     def test_swapped_disjoint_inbound_ca_after_settings_is_refused(self):
         from dataclasses import replace
@@ -147,6 +176,15 @@ class InboundConfigurationTests(unittest.TestCase):
         # Missing, duplicate and unknown mappings all fail closed.
         for bad in (basebindings[:-1],basebindings+[basebindings[0]],
                     [*basebindings[:-1],dict(basebindings[-1],bearer='unknown-token-'+'x'*32)]):
+            fixture.value['inboundClientBindings']=bad;fixture.write_config()
+            with self.assertRaises(RuntimeConfigurationError):fixture.settings()
+        # A bounded second certificate for one bearer is allowed, but a third
+        # or any reuse of a certificate across identities must fail.
+        second=dict(certificateSha256='d'*64,bearer=basebindings[0]['bearer'])
+        fixture.value['inboundClientBindings']=[*basebindings,second];fixture.write_config()
+        self.assertEqual(len(fixture.settings().inbound_client_bindings),len(basebindings)+1)
+        for bad in ([*basebindings,second,dict(certificateSha256='e'*64,bearer=basebindings[0]['bearer'])],
+                    [*basebindings,dict(certificateSha256=basebindings[0]['certificateSha256'],bearer=basebindings[1]['bearer'])]):
             fixture.value['inboundClientBindings']=bad;fixture.write_config()
             with self.assertRaises(RuntimeConfigurationError):fixture.settings()
         fixture.value['inboundClientBindings']=basebindings

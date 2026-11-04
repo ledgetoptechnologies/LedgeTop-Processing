@@ -54,7 +54,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                 or re.fullmatch(r'[a-f0-9]{64}',item[0]) is None
                 or type(item[1]) is not str or not 32 <= len(item[1]) <= 4096 for item in bindings)
                 or len({item[0] for item in bindings}) != len(bindings)
-                or len({item[1] for item in bindings}) != len(bindings)):
+                or any(sum(token == item[1] for item in bindings)>2 for token in {item[1] for item in bindings})):
             raise ValueError('invalid client certificate bindings')
         bindings = tuple((item[0],item[1]) for item in bindings)
     family = socket.AF_INET6 if ":" in host else socket.AF_INET

@@ -129,9 +129,10 @@ def _validated_client_bindings(entries, viewers, workers, staged):
                 or not token.isascii() or any(ord(c)<33 or ord(c)>126 for c in token)):
             raise RuntimeConfigurationError('invalid inbound client binding')
         pairs.append((fingerprint,token))
-    if (len({v[0] for v in pairs})!=len(pairs) or len({v[1] for v in pairs})!=len(pairs)
-            or {v[1] for v in pairs}!=set(expected)):
-        raise RuntimeConfigurationError('inbound client bindings must uniquely cover credentials')
+    if (len({v[0] for v in pairs})!=len(pairs)
+            or {v[1] for v in pairs}!=set(expected)
+            or any(sum(token == item[1] for item in pairs)>2 for token in expected)):
+        raise RuntimeConfigurationError('inbound client bindings must cover credentials with at most two certificates')
     return tuple(pairs)
 
 
