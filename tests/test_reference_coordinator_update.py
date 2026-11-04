@@ -1206,6 +1206,21 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.assertEqual(self.transport.calls[before:],[])
         self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
 
+    def test_prepared_candidate_stops_between_observations_never_restarts(self):
+        self.fail_after_start();before=len(self.transport.calls)
+        original=self.updater.candidate;calls=[]
+        def observed(state):
+            calls.append(True)
+            if len(calls)==2:self.transport.containers[NEW_ID]['State']['Running']=False
+            return original(state)
+        with patch.object(self.updater,'candidate',side_effect=observed):
+            with self.assertRaisesRegex(module.Stopped,'prepared_candidate_running_unverified'):
+                self.updater.rollback(self.state)
+        self.assertEqual(len(calls),2)
+        self.assertEqual(self.transport.calls[before:],[])
+        self.assertFalse(self.transport.containers[NEW_ID]['State']['Running'])
+        self.assertFalse(self.transport.containers[module.OLD_ID]['State']['Running'])
+
     def test_online_new_owned_receipt_refuses_before_any_candidate_stop(self):
         self.fail_after_start()
         with self.queue._db() as db:db.execute("INSERT INTO owned_maintenance_schedules VALUES('new','main','a','b','{}','{}')")
