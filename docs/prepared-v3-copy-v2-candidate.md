@@ -5,11 +5,16 @@ integration and migration readiness are hard false, and migration always
 refuses. Tests patch gates and create a fixture-only table in owned temporary
 SQLite; those patches are not evidence the gates can safely open.
 
-The new write path checks legacy identities and counts legacy plus v2 data,
-but legacy writers know neither the fixture namespace nor its byte usage. A
-test deliberately demonstrates that an existing legacy namespace check misses
-a fixture receipt ID. A second test demonstrates legacy quota accounting misses
-fixture bytes. The presence of these tests is not an authorization to enable.
+The experiment extends shared held-copy scans and reference-store quota checks
+to count structurally checked v2 fixture rows, and it fails closed in import
+confirmation writers that do not participate in the shared quota. It does not
+prove every possible writer has been inventoried, authenticate the scanned
+records, or protect against binaries that predate these checks. The tests do
+not authorize enabling the fixture.
+
+The fixture census rejects a same-named non-table object, altered table SQL,
+unexpected indexes or triggers, and missing or changed uniqueness indexes.
+This narrow schema check is not a census of all writers or a migration fence.
 
 Before any shared writer can run, a separate design must provide a complete
 inventory of every receipt writer and namespace, durable cross-namespace ID

@@ -1,10 +1,13 @@
 """Synthetic coordinator DB only; tests patch hard gates, never a live route."""
 import copy
+import hashlib
 import json
 import os
 import subprocess
+import sqlite3
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 import uuid
 from unittest.mock import patch
@@ -13,12 +16,34 @@ from processing.reference_store import ReferenceStore, PROFILE, JCSRuntimeUnavai
 from processing.reference_prepared_api_candidate import PreparedSubmissionAPI
 from processing.prepared_v3_copy_v2_candidate import PreparedCopyV2Candidate, SCHEMA, migrate, _fixture_quota
 from processing.maintenance import Conflict
+from processing.fixture_v2_copy_census_candidate import _checked_schema
 from processing.prepared_envelope_jcs_candidate import PROTOCOL
 from processing import reference_protocol as p
 from tests.test_viewer_service_identity_candidate import AUTH, pem
+from tests.test_viewer_copy_v2_candidate import ViewerCopyV2CandidateTests
 
 
 class CandidateCoordinatorTests(unittest.TestCase):
+    def test_schema_census_rejects_view_mutations_indexes_and_triggers(self):
+        for variant in ('view','uppercase_view','uppercase_table','missing_unique','extra_index','trigger'):
+            with self.subTest(variant=variant),sqlite3.connect(':memory:') as db:
+                if variant=='view':db.execute('CREATE VIEW fixture_v3_copy_v2 AS SELECT 1 AS job_id')
+                elif variant=='uppercase_view':db.execute('CREATE VIEW FIXTURE_V3_COPY_V2 AS SELECT 1 AS job_id')
+                elif variant=='uppercase_table':db.execute(SCHEMA.replace('fixture_v3_copy_v2','FIXTURE_V3_COPY_V2'))
+                elif variant=='missing_unique':db.execute(SCHEMA.replace('receipt_id TEXT UNIQUE','receipt_id TEXT'))
+                else:
+                    db.execute(SCHEMA)
+                    if variant=='extra_index':db.execute('CREATE INDEX fixture_extra ON fixture_v3_copy_v2(digest)')
+                    else:db.execute("CREATE TRIGGER fixture_extra BEFORE INSERT ON fixture_v3_copy_v2 BEGIN SELECT RAISE(ABORT,'held'); END")
+                with self.assertRaises(ValueError):_checked_schema(db)
+        with sqlite3.connect(':memory:') as db:
+            self.assertFalse(_checked_schema(db));db.execute(SCHEMA);self.assertTrue(_checked_schema(db))
+
+    def old_copy(self):
+        fixture=ViewerCopyV2CandidateTests('test_valid_full_closure_and_public_api_disabled');fixture.setUp()
+        raw=p.canonical_json({'acceptance':fixture.a,'viewerReceipt':fixture.r})
+        return (fixture.r['jobId'],raw,hashlib.sha256(raw).hexdigest(),fixture.r['receiptId'],
+                fixture.r['storageReceiptId'],fixture.a['receiptId'],fixture.a['storageReceiptId'])
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.queue=Queue(self.temp.name);self.queue.allowed_profiles.add(PROFILE);self.addCleanup(self.queue.close)
@@ -52,31 +77,66 @@ class CandidateCoordinatorTests(unittest.TestCase):
         with self.queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM fixture_v3_copy_v2').fetchone()[0],0)
 
     def test_prior_copy_rows_count_against_quota_inside_transaction(self):
+        prior=self.old_copy()
         with self.queue._db() as db:
             db.execute(SCHEMA)
-            db.execute('INSERT INTO fixture_v3_copy_v2 VALUES(?,?,?,?,?,?,?)',('old',b'x'*1024,'a'*64,'r1','r2','r3','r4'))
-        self.store.max_metadata_bytes=900
+            db.execute('INSERT INTO fixture_v3_copy_v2 VALUES(?,?,?,?,?,?,?)',prior)
+        self.store.max_metadata_bytes=len(prior[1])
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            # Existing legacy accounting is unaware of the fixture table.
-            self.store._quota(db,3)
+            with self.assertRaises(Conflict):self.store._quota(db,3)
             with self.assertRaises(Conflict):
                 _fixture_quota(self.store,db,body=b'new',job_id='new',digest='b'*64,ids=['a','b','c','d'])
             self.assertEqual(db.execute('SELECT COUNT(*) FROM fixture_v3_copy_v2').fetchone()[0],1)
-        self.store.max_metadata_bytes=10000
+        self.store.max_metadata_bytes=100000
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             _fixture_quota(self.store,db,body=b'new',job_id='new',digest='b'*64,ids=['a','b','c','d'])
 
-    def test_legacy_namespace_check_does_not_see_fixture_receipt_ids(self):
-        # Demonstrates the hard gate is essential, not a safety guarantee.
+    def test_legacy_namespace_check_sees_fixture_receipt_ids(self):
+        prior=self.old_copy()
         with self.queue._db() as db:
             db.execute(SCHEMA)
-            db.execute('INSERT INTO fixture_v3_copy_v2 VALUES(?,?,?,?,?,?,?)',('old',b'x','a'*64,'r1','r2','r3','r4'))
+            db.execute('INSERT INTO fixture_v3_copy_v2 VALUES(?,?,?,?,?,?,?)',prior)
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            self.store._check_copy_identity_namespaces(db,{'r1'})
-            self.assertEqual(db.execute('SELECT receipt_id FROM fixture_v3_copy_v2').fetchone()[0],'r1')
+            with self.assertRaises(Conflict):self.store._check_copy_identity_namespaces(db,{prior[3]})
+            self.assertEqual(db.execute('SELECT receipt_id FROM fixture_v3_copy_v2').fetchone()[0],prior[3])
+
+    def test_competing_writer_observes_namespace_after_commit_in_either_order(self):
+        prior=self.old_copy()
+        with self.queue._db() as db:
+            db.execute(SCHEMA)
+            db.execute('CREATE TABLE viewer_import_confirmations_candidate_v1 (confirmation_id TEXT NOT NULL UNIQUE)')
+        for first in ('v2','legacy'):
+            with self.subTest(first=first):
+                with self.queue._db() as db:
+                    db.execute('DELETE FROM fixture_v3_copy_v2');db.execute('DELETE FROM viewer_import_confirmations_candidate_v1')
+                entered=threading.Event();release=threading.Event();seen=[];errors=[]
+                def writer():
+                    try:
+                        with self.queue._db() as db:
+                            db.execute('BEGIN IMMEDIATE')
+                            if first=='v2':db.execute('INSERT INTO fixture_v3_copy_v2 VALUES(?,?,?,?,?,?,?)',prior)
+                            else:db.execute('INSERT INTO viewer_import_confirmations_candidate_v1 VALUES(?)',(prior[3],))
+                            entered.set()
+                            if not release.wait(5):raise RuntimeError('fixture timeout')
+                    except BaseException as error:errors.append(error)
+                def contender():
+                    try:
+                        with self.queue._db() as db:
+                            db.execute('BEGIN IMMEDIATE')
+                            try:self.store._check_copy_identity_namespaces(db,{prior[3]})
+                            except Conflict:seen.append('conflict')
+                            else:seen.append('accepted')
+                    except BaseException as error:errors.append(error)
+                a=threading.Thread(target=writer);b=threading.Thread(target=contender);a.start()
+                try:
+                    self.assertTrue(entered.wait(3));b.start();b.join(.1);self.assertTrue(b.is_alive())
+                finally:
+                    release.set();a.join(5)
+                    if b.ident is not None:b.join(5)
+                self.assertFalse(a.is_alive() or b.is_alive());self.assertEqual(errors,[]);self.assertEqual(seen,['conflict'])
 
     def test_synthetic_gates_actual_viewer_signer_and_coordinator_transaction(self):
         source=os.environ.get('VIEWER_SOURCE')

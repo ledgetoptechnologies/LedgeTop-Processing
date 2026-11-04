@@ -40,7 +40,10 @@ def bounded_json(text):
 
 def held_copy_ids(db, *, exclude_job=None):
     with bounded_sqlite(db):
-        return _held_copy_ids_bounded(db,exclude_job=exclude_job)
+        from .fixture_v2_copy_census_candidate import census
+        try: extra,_=census(db,exclude_job=exclude_job)
+        except (TypeError,KeyError):raise ValueError('fixture v2 census invalid') from None
+        return _held_copy_ids_bounded(db,exclude_job=exclude_job) | extra
 
 
 def _held_copy_ids_bounded(db, *, exclude_job=None):

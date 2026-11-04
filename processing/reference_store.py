@@ -396,6 +396,9 @@ class ReferenceStore:
         return result
 
     def _quota(self, db, extra_bytes=0):
+        from .fixture_v2_copy_census_candidate import census
+        try: _,fixture_bytes=census(db)
+        except (ValueError,TypeError,KeyError,sqlite3.Error):raise Conflict('fixture v2 accounting unavailable') from None
         used = db.execute("""SELECT COALESCE(SUM(length(CAST(input_json AS BLOB))+
           COALESCE(length(CAST(transfer_json AS BLOB)),0)+COALESCE(length(CAST(result_json AS BLOB)),0)),0)
           FROM reference_jobs""").fetchone()[0]
@@ -425,7 +428,7 @@ class ReferenceStore:
             used += db.execute('''SELECT COALESCE(SUM(length(request_id)+length(job_id)+length(epoch_id)+length(request_sha256)
                 +length(CAST(request_json AS BLOB))+length(CAST(receipt_json AS BLOB))),0)
                 FROM reference_recovery_receipts''').fetchone()[0]
-        if used + extra_bytes > self.max_metadata_bytes:
+        if used + fixture_bytes + extra_bytes > self.max_metadata_bytes:
             raise Conflict("reference metadata quota reached")
 
     def submit(self, validated):

@@ -131,6 +131,19 @@ class ImportConfirmationStoreTests(unittest.TestCase):
             return db.execute('SELECT confirmation_id,binding_sha256,confirmation_sha256,canonical_bytes '
                               'FROM viewer_import_confirmations_candidate_v1').fetchall()
 
+    def test_uppercase_v2_table_and_view_fail_closed(self):
+        for kind in ('TABLE','VIEW'):
+            with self.subTest(kind=kind):
+                with closing(sqlite3.connect(self.path)) as db, db:
+                    if kind=='TABLE':db.execute('CREATE TABLE FIXTURE_V3_COPY_V2 (id TEXT)')
+                    else:db.execute('CREATE VIEW FIXTURE_V3_COPY_V2 AS SELECT 1 AS id')
+                try:
+                    with self.assertRaisesRegex(ImportConfirmationStoreHeld,'v2_shared_quota_unavailable'):
+                        self.store.record(self.scope,self.fixture.confirmation)
+                    self.assertEqual(self.stored_rows(),[])
+                finally:
+                    with closing(sqlite3.connect(self.path)) as db, db:db.execute('DROP '+kind+' FIXTURE_V3_COPY_V2')
+
     def test_exact_first_write_identical_replay_and_restart(self):
         proof = self.fixture.confirmation
         first = self.store.record(self.scope, proof)

@@ -14,12 +14,9 @@ from .reference_store import JCSRuntimeUnavailable
 from .viewer_result_manifest import derive_viewer_result_manifest
 from .viewer_copy_v2_candidate import _verify_v2_for_fixtures
 from .viewer_service_identity_candidate import _registry_for_fixtures, _resolve_for_fixtures
+from .fixture_v2_copy_census_candidate import SCHEMA
 
 _PATH=re.compile(r'/ltds/prepared/v3/submissions/([0-9a-f-]{36})/accepted-copies-v2')
-SCHEMA="""CREATE TABLE fixture_v3_copy_v2 (job_id TEXT PRIMARY KEY, raw BLOB NOT NULL,
- digest TEXT NOT NULL, receipt_id TEXT UNIQUE NOT NULL, storage_id TEXT UNIQUE NOT NULL,
- outer_id TEXT UNIQUE NOT NULL, outer_storage_id TEXT UNIQUE NOT NULL)"""
-
 def _fixture_quota(store, db, *, body, job_id, digest, ids):
     """Account all fixture rows and the new row in the already-held transaction."""
     if not db.in_transaction:raise ValueError('transaction required')
@@ -32,7 +29,8 @@ def _fixture_quota(store, db, *, body, job_id, digest, ids):
           OR typeof(outer_storage_id)!='text' THEN 1 ELSE 0 END),0) FROM fixture_v3_copy_v2''').fetchone()
     if bad or count>=10000:raise Conflict('fixture copy accounting unavailable')
     extra=used+len(body)+sum(len(x.encode('utf-8')) for x in (job_id,digest,*ids))+128
-    store._quota(db,extra)
+    # Shared quota now includes previous v2 rows; only add this proposed row.
+    store._quota(db,extra-used)
 
 def migration_ready():
     return False

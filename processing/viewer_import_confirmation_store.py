@@ -407,6 +407,10 @@ class ImportConfirmationStore:
         with self._connect() as db:
             try:
                 db.execute('BEGIN IMMEDIATE')
+                # This writer has no shared quota accounting. Refuse while the
+                # unmounted v2 fixture schema exists, rather than bypass it.
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name=? COLLATE NOCASE",('fixture_v3_copy_v2',)).fetchone():
+                    raise ImportConfirmationStoreHeld('v2_shared_quota_unavailable')
                 self._check_schema(db)
                 context, binding_sha = self._trusted(db, scope)
                 # Other version's verification-only proof IDs share this

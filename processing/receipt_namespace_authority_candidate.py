@@ -116,6 +116,11 @@ class ReceiptNamespaceGate:
                 for row in rows(table,safe_id('confirmation_id'),True):add(row[0],table)
             # Validate all retained proof checksums and provenance before using IDs.
             held_copy_ids(db)
+            from .fixture_v2_copy_census_candidate import census as fixture_census
+            fixture_ids,fixture_bytes=fixture_census(db)
+            if fixture_bytes>MAX_BYTES-total:raise ReceiptNamespaceHeld('receipt_census_limit')
+            total+=fixture_bytes
+            for value in fixture_ids:add(value,'v2-fixture-held')
             for row in rows('reference_viewer_v3_copy_hold','payload_json',True):
                 raw=row[0]
                 proof=json.loads(raw)
