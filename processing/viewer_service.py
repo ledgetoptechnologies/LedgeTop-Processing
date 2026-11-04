@@ -2179,11 +2179,11 @@ class ViewerService:
             fetches = list(self._adopt_threads.values()) + list(self._eager_threads.values())
         for thread in transfers + fetches:
             thread.join(timeout=10)
-        if any(thread.is_alive() for thread in transfers):
-            raise RuntimeError('active Viewer transfer did not stop; retain queue ownership')
+        if any(thread.is_alive() for thread in transfers + fetches):
+            raise RuntimeError('active Viewer transfer or custody fetch did not stop; retain queue ownership')
 
     def wait_for_transfers(self):
-        """Keep coordinator authority until every task-owned sender exits.
+        """Keep coordinator authority until every task-owned writer exits.
 
         No lock is held while waiting: senders need it for their final cleanup.
         A caller may terminate the process, but must not release queue authority
@@ -2191,7 +2191,9 @@ class ViewerService:
         """
         while True:
             with self._lock:
-                transfers = [thread for _, thread in self._dispatch_threads.values()]
+                transfers = ([thread for _, thread in self._dispatch_threads.values()]
+                             + list(self._adopt_threads.values())
+                             + list(self._eager_threads.values()))
             if not transfers:
                 return
             for thread in transfers:

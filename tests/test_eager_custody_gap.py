@@ -539,6 +539,36 @@ class EagerCustody(unittest.TestCase):
         self.assertEqual(engine.download_calls, 1)
         self.assertEqual(self.custody(identifier), {'state': 'verified'})
 
+    def test_shutdown_retains_authority_while_eager_fetch_is_blocked(self):
+        identifier = self.finished(wait=False)
+        blocked = Blocked(self.engine(identifier))
+        self.addCleanup(blocked.undo)
+        self.service.tick()
+        self.assertTrue(blocked.reading.wait(5))
+        fetch = self.service._eager_threads[identifier]
+        original_join = threading.Thread.join
+
+        def shorten_join(thread, timeout=None):
+            if thread is fetch and timeout is not None:
+                return original_join(thread, min(timeout, 0.05))
+            return original_join(thread, timeout)
+
+        with patch.object(threading.Thread, 'join', new=shorten_join):
+            with self.assertRaisesRegex(RuntimeError, 'retain queue ownership'):
+                self.service.close()
+        done = threading.Event()
+        waiter = threading.Thread(target=lambda: (self.service.wait_for_transfers(), done.set()))
+        waiter.start()
+        try:
+            self.assertFalse(done.wait(0.2), 'shutdown wait ignored active eager fetch')
+            blocked.undo()
+            waiter.join(5)
+            self.assertTrue(done.is_set(), 'shutdown wait did not finish after fetch exited')
+        finally:
+            blocked.undo()
+            waiter.join(5)
+        self.assertFalse(fetch.is_alive())
+
     def test_viewer_download_before_the_fetch_is_recorded_without_a_second_transfer(self):
         identifier = self.finished(wait=False)
         engine = self.engine(identifier)

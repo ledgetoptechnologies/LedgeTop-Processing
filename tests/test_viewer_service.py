@@ -3849,12 +3849,16 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
             self.assertEqual(coordinator.health()['state'], 'ready')
             with patch.object(threading.Thread, 'join', new=bounded_fetch_join):
                 stop.set()
+                coordinator_thread.join(0.3)
+                self.assertTrue(coordinator_thread.is_alive(), 'shutdown released custody writer early')
+                self.assertTrue(fetch.is_alive(), 'blocked result fetch unexpectedly exited')
+                self.assertFalse(queue_closed_while_fetching.is_set(),
+                                 'coordinator released queue authority under a live custody writer')
+                release_fetch.set()
                 coordinator_thread.join(3)
             self.assertFalse(coordinator_thread.is_alive(), 'coordinator shutdown did not finish')
-            self.assertEqual(result, [0])
-            self.assertFalse(queue_closed_while_fetching.is_set(),
-                             'coordinator released queue authority under a live custody writer')
-            self.assertTrue(fetch.is_alive(), 'blocked result fetch unexpectedly exited before queue close')
+            self.assertEqual(result, [2])  # The bounded close reported a drain failure.
+            self.assertFalse(queue_closed_while_fetching.is_set())
         finally:
             release_fetch.set()
             original_join(fetch, 3)
