@@ -36,8 +36,8 @@ from .prototype import VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
 from .viewer_limits import EAGER_CUSTODY_MAX_BYTES, EAGER_CUSTODY_RESERVE_BYTES, MAX_UPLOAD_BYTES
-from .viewer_result_adoption import (CUSTODY_NAME, RESULT_CHANGED, bound_evidence, engine_evidence, identity_refusal,
-                                     new_adoption, new_custody)
+from .viewer_result_adoption import (CUSTODY_INTENT, CUSTODY_NAME, RESULT_CHANGED, bound_evidence, engine_evidence,
+                                     identity_refusal, new_adoption, new_custody)
 from .viewer_output_log import (OUTPUT_ANCHOR_BYTES, OUTPUT_TAIL_LINES, append_output_tail, archived_output_lines,
                                 consume_output, mark_output, mark_unverifiable, matches_anchor, new_output_log,
                                 output_digest, restart_output, skip_oversized_line)
@@ -70,10 +70,9 @@ RESULT_FETCH_RETRY_SECONDS = 60
 RESULT_FETCH_RETRY_MAX_SECONDS = 3600
 # Eager custody of normal successes: one transfer at a time beside the jobs still
 # running; waits for disk or an open gate do not count as failures. Only tasks
-# with a custody record resume, from this many latest successes, so the flag
-# never backfills tasks that finished before it.
+# whose success committed a custody intent resume, so the flag never backfills
+# tasks that finished before it.
 EAGER_FETCH_CONCURRENCY = 1
-EAGER_RESUME_SCAN_JOBS = 256
 EAGER_DEFERRED_RETRY_SECONDS = 300
 # ops/update_reference_coordinator.py refuses any larger file under viewer-tasks/.
 # Viewer can still fetch a larger result itself; custody must not add one unasked.
@@ -1411,9 +1410,10 @@ class ViewerService:
                     self._output_from_archive(task, stream)
 
     def _bind_eager_result(self, task, info):
-        """Record the code 40 before the job commits, so a crash cannot lose it.
+        """Record the code 40 before the job commits, as the run a fetch must match.
 
-        A failure here never touches the job; the fetch records it from a read.
+        A failure here never touches the job, and the job's commit still carries
+        the intent, so the fetch records this from a read and info says it must.
         """
         if not self._eager_custody:
             return
@@ -1434,29 +1434,25 @@ class ViewerService:
         if task['uuid'] in self._eager_threads:
             return {'state': 'fetching'}
         if record is None:
-            return None
+            # Survives a restart, as the intent does: it was never written, not lost.
+            return {'state': 'pending', 'reason': 'custody_record_unwritten'} if task['error'] == CUSTODY_INTENT else None
         custody = {'state': record['state']}
         reason = record['reason'] or (self._eager_notes.get(task['uuid']) if record['state'] == 'pending' else None)
         if reason is not None:
             custody['reason'] = reason
         return custody
 
-    def _advance_eager_custody(self, jobs):
+    def _advance_eager_custody(self):
         """Start due fetches. Never raises: custody is not a scheduler concern."""
         if not self._eager_custody:
             return
         try:
             if not self._eager_scanned:
+                # Every intent, whatever its sidecar says: the fetch reads that.
+                # Scanned only once this succeeds, so a failed read repeats.
+                for identifier in self.store.pending_custody():
+                    self._eager_due.setdefault(identifier, 0)
                 self._eager_scanned = True
-                ended = [job for job in jobs if job['profile'] == VIEWER_PROFILE and job['status'] == 'succeeded']
-                for job in ended[-EAGER_RESUME_SCAN_JOBS:]:
-                    try:
-                        task = self.store.task_for_job(job['id'])
-                        record = self.store.custody(task) if task['engine_uuid'] else None
-                    except Exception:
-                        continue  # Reported on info; a scan never stops the scheduler.
-                    if record is not None and record['state'] in ('pending', 'deferred'):
-                        self._eager_due.setdefault(task['uuid'], 0)
             now = time.monotonic()
             for identifier, due in list(self._eager_due.items()):
                 if len(self._eager_threads) >= EAGER_FETCH_CONCURRENCY:
@@ -1634,10 +1630,12 @@ class ViewerService:
             except (Conflict, KeyError):
                 return None  # Removed since, or info reports the record as invalid.
             if record is not None and record['state'] in ('verified', 'unavailable'):
+                self.store.settle_custody(task)
                 return None
             try:
                 record = record or self._record_eager_result(task)
                 self._transfer_eager_result(task, record, closing)
+                self.store.settle_custody(task)
                 return None
             except _CustodyPaused:
                 self._eager_notes[identifier] = 'admission_closed'
@@ -1665,6 +1663,7 @@ class ViewerService:
         """No further attempts. Viewer's own download stays exactly as it was."""
         record = record or new_custody(self._adoption_identity(task), {})
         self.store.save_custody(task, {**record, 'state': 'unavailable', 'reason': reason})
+        self.store.settle_custody(task)
         logging.getLogger(__name__).error('Viewer result custody unavailable: %s', reason)
 
     def _adoptable_result(self, job_id):
@@ -1963,7 +1962,7 @@ class ViewerService:
                   'environment': task['environment'], 'cancelled': code == 50}
         if code == 40:
             self._bind_eager_result(task, info)
-        self.store.complete_engine_task(task, status, result)
+        self.store.complete_engine_task(task, status, result, custody_intent=code == 40 and self._eager_custody)
         if code == 40 and self._eager_custody:
             self._eager_due.setdefault(identifier, 0)
 
@@ -2034,7 +2033,7 @@ class ViewerService:
                         except Exception as hold_error:
                             reconciliation_errors.append(hold_error)
             self._retry_output_snapshots(jobs)
-            self._advance_eager_custody(jobs)
+            self._advance_eager_custody()
             if reconciliation_errors:
                 raise Conflict('Viewer reconciliation requires inspection') from reconciliation_errors[0]
             jobs = self.queue.list()

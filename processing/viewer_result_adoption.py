@@ -24,6 +24,10 @@ _BOUND_FIELDS = ('dateCreated', 'imagesCount', 'options')
 CUSTODY_NAME = '.ledgetop-custody.json'
 CUSTODY_VERSION = 1
 CUSTODY_STATES = ('pending', 'verified', 'deferred', 'unavailable')
+# The durable intent to take custody, not a failure: a finished task's otherwise
+# unread ``viewer_tasks.error``, set in the transaction that makes the job succeed.
+# No table or file is added, a sidecar failure cannot lose it, and a query lists it.
+CUSTODY_INTENT = 'eager_custody_pending'
 
 
 def new_adoption(identity):

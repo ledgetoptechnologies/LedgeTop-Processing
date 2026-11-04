@@ -28,11 +28,10 @@ from processing.config import Config, from_environment
 from processing.maintenance import Conflict
 from processing.prototype import Queue
 from processing.viewer_limits import EAGER_CUSTODY_MAX_BYTES, EAGER_CUSTODY_RESERVE_BYTES
-from processing.viewer_result_adoption import CUSTODY_NAME, RESULT_CHANGED
+from processing.viewer_result_adoption import CUSTODY_INTENT, CUSTODY_NAME, RESULT_CHANGED
 from processing import viewer_service as service_module
 from processing.viewer_service import (CENSUS_RETAINED_FILE_BYTES, EAGER_DEFERRED_RETRY_SECONDS, EAGER_FETCH_CONCURRENCY,
-                                       EAGER_RESUME_SCAN_JOBS, ENGINE_MISSING_POLLS, EngineUnavailable, NODE_LOST_POLLS,
-                                       NativeEngine)
+                                       ENGINE_MISSING_POLLS, EngineUnavailable, NODE_LOST_POLLS, NativeEngine)
 from processing.viewer_tasks import TaskStore
 from tests import test_viewer_parallel_dispatch as startup_fixture, test_viewer_service as viewer_fixture
 
@@ -91,6 +90,8 @@ class NormalCompletionCustody(unittest.TestCase):
         task = fixture.task(identifier)
         self.assertFalse(fixture.service._eager_threads or fixture.service._eager_due)
         self.assertNotIn('ledgetopResultCustody', fixture.service.info(identifier))
+        self.assertIsNone(task['error'])
+        self.assertEqual(fixture.service.store.pending_custody(), [])
         self.assertTrue(all(path.name.startswith('input-') for path in Path(task['directory']).iterdir()))
         with fixture.service.download(identifier)[0]:
             pass
@@ -245,6 +246,32 @@ print(json.dumps({'code': code, 'alive': fetch.is_alive(), 'state': service.heal
 sys.stdin.read()
 """
 
+# A real SIGKILL straight after the commit of a job whose sidecar could not be written.
+KILLED_AFTER_COMMIT = """
+import json, os, signal
+from unittest.mock import patch
+from processing.viewer_tasks import TaskStore
+from tests.test_eager_custody_gap import EagerCustody
+
+case = EagerCustody('test_outage_after_completion_keeps_the_result')
+case.setUp()
+identifier = case.fixture.submit()
+case.service.tick()
+case.fixture.finish(identifier)
+task = case.fixture.task(identifier)
+print(json.dumps({'root': str(case.fixture.root), 'identifier': identifier, 'engine': task['engine_uuid'],
+                  'node': task['node_id']}), flush=True)
+commit = TaskStore.complete_engine_task
+
+def commit_then_die(*args, **kwargs):
+    commit(*args, **kwargs)
+    os.kill(os.getpid(), signal.SIGKILL)
+
+with patch.object(TaskStore, 'save_custody', side_effect=OSError('synthetic full disk')), \\
+        patch.object(TaskStore, 'complete_engine_task', commit_then_die):
+    case.service.tick()
+"""
+
 
 class EagerCustody(unittest.TestCase):
     def setUp(self):
@@ -306,8 +333,8 @@ class EagerCustody(unittest.TestCase):
 
     def assert_job_succeeded(self, identifier):
         task = self.fixture.task(identifier)
-        self.assertEqual((task['job']['status'], task['stage'], task['phase'], task['error']),
-                         ('succeeded', 'succeeded', 'complete', None))
+        self.assertEqual((task['job']['status'], task['stage'], task['phase']), ('succeeded', 'succeeded', 'complete'))
+        self.assertIn(task['error'], (None, CUSTODY_INTENT))  # The intent is no failure, and info never shows it.
         self.assertEqual(self.service.info(identifier)['status'], {'code': 40})
 
     def assert_no_half_archive(self, identifier):
@@ -450,6 +477,8 @@ class EagerCustody(unittest.TestCase):
         (directory / 'all.zip.partial').write_bytes(b'a stale interrupted transfer')
         record = self.record(identifier)
         TaskStore.save_custody(self.fixture.task(identifier), {**record, 'state': 'pending', 'archive': None})
+        with self.fixture.queue._db() as db:  # As a crash before the verified record leaves it.
+            db.execute('UPDATE viewer_tasks SET error=? WHERE uuid=?', (CUSTODY_INTENT, identifier))
         self.restart()
         self.service.tick()
         self.join()
@@ -508,7 +537,7 @@ class EagerCustody(unittest.TestCase):
         identifier = self.finished(wait=False)
         task = self.fixture.task(identifier)
         engine = self.engine(identifier)
-        with patch.object(self.service, '_advance_eager_custody', lambda jobs: None):
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
             self.service.tick()
         engine.tasks[task['engine_uuid']]['status']['code'] = 20  # A stale tasks.json reran it.
         self.settle()
@@ -563,7 +592,7 @@ class EagerCustody(unittest.TestCase):
     def test_stale_partial_counts_as_room_it_will_free(self):
         identifier = self.finished(wait=False)
         engine = self.engine(identifier)
-        with patch.object(self.service, '_advance_eager_custody', lambda jobs: None):
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
             self.service.tick()
         self.service._eager_due.clear()
         directory = self.directory(identifier)
@@ -643,7 +672,7 @@ class EagerCustody(unittest.TestCase):
     def test_viewer_download_before_the_fetch_is_recorded_without_a_second_transfer(self):
         identifier = self.finished(wait=False)
         engine = self.engine(identifier)
-        with patch.object(self.service, '_advance_eager_custody', lambda jobs: None):
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
             self.service.tick()
         with self.service.download(identifier)[0]:
             pass
@@ -717,7 +746,7 @@ class EagerCustody(unittest.TestCase):
         identifier = self.finished(wait=False)
         task = self.fixture.task(identifier)
         engine = self.engine(identifier)
-        with patch.object(self.service, '_advance_eager_custody', lambda jobs: None):
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
             self.service.tick()
         del engine.tasks[task['engine_uuid']]
         for attempt in range(ENGINE_MISSING_POLLS):
@@ -730,7 +759,7 @@ class EagerCustody(unittest.TestCase):
     def test_unreachable_node_retries_until_it_answers(self):
         identifier = self.finished(wait=False)
         engine = self.engine(identifier)
-        with patch.object(self.service, '_advance_eager_custody', lambda jobs: None):
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
             self.service.tick()
         engine.read_unavailable = True
         for _ in range(ENGINE_MISSING_POLLS + 1):
@@ -819,7 +848,7 @@ class EagerCustody(unittest.TestCase):
     def test_guarded_mode_and_production_hold_wait_without_failures(self):
         identifier = self.finished(wait=False)
         engine = self.engine(identifier)
-        with patch.object(self.service, '_advance_eager_custody', lambda jobs: None):
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
             self.service.tick()
         self.service._require_guard = True
         self.service._guarded_engine_factory = object
@@ -839,7 +868,7 @@ class EagerCustody(unittest.TestCase):
     def test_guarded_reads_use_the_task_client_as_the_held_fetch_does(self):
         identifier = self.finished(wait=False)
         engine = self.engine(identifier)
-        with patch.object(self.service, '_advance_eager_custody', lambda jobs: None):
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
             self.service.tick()
         used = []
         original = self.service._task_engine
@@ -862,21 +891,72 @@ class EagerCustody(unittest.TestCase):
         self.assertNotIn('ledgetopResultCustody', self.service.info(identifier))
         self.assertFalse((self.directory(identifier) / CUSTODY_NAME).exists())
 
-    def test_restart_scan_is_bounded_to_the_latest_successes(self):
-        with patch.object(self.service, '_advance_eager_custody', lambda jobs: None):
-            first = self.finished()
-            second = self.finished()
-        self.assertGreater(EAGER_RESUME_SCAN_JOBS, 1)
+    def test_every_one_of_a_thousand_finished_tasks_resumes_after_a_restart(self):
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
+            finished = [self.finished() for _ in range(1000)]
+        self.assertEqual(self.service.store.pending_custody(), finished)
         self.restart()
-        with patch.object(service_module, 'EAGER_RESUME_SCAN_JOBS', 1):
+        self.service.tick()
+        self.join()
+        self.assertEqual(len(self.service._eager_due) + 1, 1000)  # All found at once; one has already ended.
+        while self.service._eager_due:
             self.service.tick()
             self.join()
-        self.assertEqual(self.custody(second), {'state': 'verified'})
-        self.assertEqual(self.custody(first), {'state': 'pending'})
+        self.assertEqual(self.service.store.pending_custody(), [])
+        self.assertEqual({self.record(identifier)['state'] for identifier in finished}, {'verified'})
+        self.assertEqual(sum(engine.download_calls for engine in self.fixture.engines.values()), 1000)
+        self.restart()  # Settled work stays settled.
+        self.service.tick()
+        self.assertFalse(self.service._eager_due)
+
+    def test_a_failed_resume_scan_repeats_rather_than_skipping_work(self):
+        identifier = self.finished(wait=False)
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
+            self.service.tick()
+        self.restart()
+        with patch.object(TaskStore, 'pending_custody', side_effect=OSError('synthetic read failure')):
+            self.service.tick()
+        self.assertFalse(self.service._eager_due)
+        self.service.tick()
+        self.join()
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
+
+    def test_an_unwritten_record_stays_visible_across_a_restart_and_is_retried(self):
+        identifier = self.fixture.submit()
+        self.service.tick()
+        self.fixture.finish(identifier)
+        unwritable = patch.object(TaskStore, 'save_custody', side_effect=OSError('synthetic full disk'))
+        unwritten = {'state': 'pending', 'reason': 'custody_record_unwritten'}
+        with unwritable:
+            self.service.tick()
+            self.join()
+            self.assert_job_succeeded(identifier)
+            self.assertEqual(self.custody(identifier), unwritten)
+            self.assertEqual(self.service.store.pending_custody(), [identifier])
+            self.restart()
+            self.assertEqual(self.custody(identifier), unwritten)
+            self.settle()
+            self.assertEqual(self.custody(identifier), unwritten)
+        with self.service.download(identifier)[0]:  # Viewer's lazy path never waited for any of this.
+            pass
+        self.settle()
+        self.assertEqual(self.engine(identifier).download_calls, 1)
+
+    @unittest.skipIf(os.name == 'nt', 'needs SIGKILL')
+    def test_a_kill_right_after_the_commit_cannot_lose_the_intent(self):
+        report = self.child(KILLED_AFTER_COMMIT)
+        self.assertEqual(report['code'], -9)
+        self.adopt_child_state(report)
+        identifier = report['identifier']
+        self.assertFalse((self.directory(identifier) / CUSTODY_NAME).exists())
+        self.assertEqual(self.custody(identifier), {'state': 'pending', 'reason': 'custody_record_unwritten'})
+        self.service.tick()
+        self.join()
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
 
     def test_invalid_record_is_reported_and_left_for_inspection(self):
         identifier = self.finished(wait=False)
-        with patch.object(self.service, '_advance_eager_custody', lambda jobs: None):
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
             self.service.tick()
         path = self.directory(identifier) / CUSTODY_NAME
         path.write_text('{"state":"verified"}')
@@ -887,7 +967,7 @@ class EagerCustody(unittest.TestCase):
 
     def test_unsafe_partial_stops_at_inspection_and_is_kept(self):
         identifier = self.finished(wait=False)
-        with patch.object(self.service, '_advance_eager_custody', lambda jobs: None):
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
             self.service.tick()
         partial = self.directory(identifier) / 'all.zip.partial'
         partial.write_bytes(b'no intent was recorded for this')
@@ -898,7 +978,7 @@ class EagerCustody(unittest.TestCase):
     def test_task_removed_before_its_fetch_is_dropped(self):
         identifier = self.finished(wait=False)
         engine = self.engine(identifier)
-        with patch.object(self.service, '_advance_eager_custody', lambda jobs: None):
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
             self.service.tick()
         self.service.remove(identifier)
         self.settle()
@@ -1026,35 +1106,47 @@ class EagerCustody(unittest.TestCase):
         fetch.join(10)
         self.assertFalse(self.service.custody_writers_alive())
 
-    @unittest.skipIf(os.name == 'nt', 'proves a POSIX flock released by process death')
-    def test_a_wedged_writer_keeps_authority_until_the_process_is_killed(self):
-        fixture = self.fixture
-        home = fixture.root / 'child'
+    def child(self, source):
+        """Run a real process on its own state; its report ends at its first line."""
+        home = self.fixture.root / 'child'
         home.mkdir()
-        child = subprocess.Popen([sys.executable, '-c', WEDGED_WRITER], cwd=ROOT, stdin=subprocess.PIPE,
-                                 stdout=subprocess.PIPE, text=True, env={**os.environ, 'TMPDIR': str(home)})
-        self.addCleanup(child.stdout.close)
-        self.addCleanup(child.stdin.close)
-        self.addCleanup(child.wait)
-        self.addCleanup(child.kill)
-        watchdog = threading.Timer(60, child.kill)
+        process = subprocess.Popen([sys.executable, '-c', source], cwd=ROOT, stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, text=True, env={**os.environ, 'TMPDIR': str(home)})
+        self.addCleanup(process.stdout.close)
+        self.addCleanup(process.stdin.close)
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        watchdog = threading.Timer(60, process.kill)
         self.addCleanup(watchdog.cancel)
         watchdog.start()
-        report = json.loads(child.stdout.readline())
-        self.assertEqual((report['code'], report['alive'], report['state'], report['reason']),
-                         (2, True, 'failed', 'result_fetch_drain_failed'))
-        root = Path(report['root'])
-        arguments = dict(node_ids=('cluster', 'main'), treedar_node_ids=('main',), viewer_enabled=True)
-        with self.assertRaisesRegex(RuntimeError, 'already owned'):
-            Queue(root / 'state', **arguments)
-        child.kill()
-        self.assertEqual(child.wait(10), -9)
+        report = json.loads(process.stdout.readline())
+        report['process'] = process
+        if source is KILLED_AFTER_COMMIT:
+            report['code'] = process.wait(10)
+        return report
+
+    def adopt_child_state(self, report):
+        """Stand on a dead process's state, with an engine that kept its task."""
+        fixture, root = self.fixture, Path(report['root'])
         self.service.close()
         fixture.queue.close()
         fixture.root, fixture.config.prototype_state_dir = root, str(root / 'state')
         fixture.engines[report['node']].tasks[report['engine']] = {
             'uuid': report['engine'], 'status': {'code': 40}, 'progress': 100, 'files': {}, 'cancel_requested': False}
         fixture.make_queue_service()
+
+    @unittest.skipIf(os.name == 'nt', 'proves a POSIX flock released by process death')
+    def test_a_wedged_writer_keeps_authority_until_the_process_is_killed(self):
+        report = self.child(WEDGED_WRITER)
+        child = report['process']
+        self.assertEqual((report['code'], report['alive'], report['state'], report['reason']),
+                         (2, True, 'failed', 'result_fetch_drain_failed'))
+        arguments = dict(node_ids=('cluster', 'main'), treedar_node_ids=('main',), viewer_enabled=True)
+        with self.assertRaisesRegex(RuntimeError, 'already owned'):
+            Queue(Path(report['root']) / 'state', **arguments)
+        child.kill()
+        self.assertEqual(child.wait(10), -9)
+        self.adopt_child_state(report)
         identifier = report['identifier']
         names = {path.name for path in self.directory(identifier).iterdir()}
         self.assertFalse(names & {'all.zip', 'all.zip.receipt'}, names)  # The partial is what a kill leaves.

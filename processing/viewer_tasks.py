@@ -23,7 +23,8 @@ from functools import wraps
 
 from .maintenance import Conflict
 from .viewer_output_log import OUTPUT_LOG_MAX_FILE_BYTES, OUTPUT_LOG_NAME, upgrade_output_log, valid_output_log
-from .viewer_result_adoption import ADOPTION_MAX_FILE_BYTES, ADOPTION_NAME, CUSTODY_NAME, valid_adoption, valid_custody
+from .viewer_result_adoption import (ADOPTION_MAX_FILE_BYTES, ADOPTION_NAME, CUSTODY_INTENT, CUSTODY_NAME, valid_adoption,
+                                     valid_custody)
 
 
 class OptionEvidenceConflict(Conflict):
@@ -719,7 +720,7 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             return {row[0] for row in db.execute("SELECT t.job_id FROM viewer_tasks t JOIN jobs j ON j.id=t.job_id WHERE t.removed=0 AND (t.phase IN ('processing','commit_pending','cancel_pending') OR (t.node_guarded=1 AND t.phase IN ('init_pending','upload_pending'))) AND j.status IN ('succeeded','failed')")}
 
-    def complete_engine_task(self, task, status, result):
+    def complete_engine_task(self, task, status, result, custody_intent=False):
         """Commit the queue terminal state and matching Viewer task together."""
         if status not in ('succeeded','failed'):
             raise ValueError('invalid engine completion')
@@ -740,6 +741,20 @@ class TaskStore:
                 {'claimToken':row['claim_token'],'status':status,'result':result})
             db.execute("UPDATE viewer_tasks SET stage=?,phase='complete',progress=?,updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
                 (status,100 if status=='succeeded' else row['progress'],row['uuid']))
+            if custody_intent:
+                db.execute('UPDATE viewer_tasks SET error=? WHERE uuid=?',(CUSTODY_INTENT,row['uuid']))
+
+    def pending_custody(self):
+        """Every task still owed a custody decision, oldest first and without a limit."""
+        with self._lock, self.queue._db() as db:
+            return [row[0] for row in db.execute("SELECT uuid FROM viewer_tasks WHERE removed=0 AND error=? AND phase='complete' AND stage='succeeded' ORDER BY rowid",(CUSTODY_INTENT,))]
+
+    def settle_custody(self, task):
+        """The sidecar now holds the decision. Repeating this changes nothing."""
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('UPDATE viewer_tasks SET error=NULL WHERE uuid=? AND generation=? AND error=?',
+                       (task['uuid'],task['generation'],CUSTODY_INTENT))
 
     def adopt_held_task(self, task, result, reasons):
         """Finish a lost hold as the success its verified result proved, in one step."""
