@@ -3780,6 +3780,89 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         self.assert_no_custody_files(identifier)
         self.assertEqual(self.custody(identifier)['state'], 'fetching')
 
+    def test_app_shutdown_keeps_queue_authority_until_result_custody_writer_exits(self):
+        from processing.app import CoordinatorService
+
+        identifier, engine, engine_task = self.adoptable()
+        self.report_finished(identifier, engine_task)
+        fetch_entered, release_fetch = threading.Event(), threading.Event()
+        original_download = engine.download
+
+        def blocked_download(engine_task_id):
+            fetch_entered.set()
+            if not release_fetch.wait(5):
+                raise AssertionError('test did not release blocked result fetch')
+            return original_download(engine_task_id)
+
+        engine.download = blocked_download
+        task = self.task(identifier)
+        self.service._review_held_result(task, self.service._read_status(task))
+        self.assertTrue(fetch_entered.wait(2), 'result fetch did not reach the blocked engine response')
+        fetch = self.service._adopt_threads[identifier]
+
+        class Server:
+            def __init__(self):
+                self.serving = threading.Event()
+                self.stopped = threading.Event()
+                self.daemon_threads = True
+                self.block_on_close = False
+
+            def serve_forever(self, **_kwargs):
+                self.serving.set()
+                self.stopped.wait(5)
+
+            def shutdown(self):
+                self.stopped.set()
+
+            def server_close(self):
+                pass
+
+        server = Server()
+        handler = SimpleNamespace(viewer_service=self.service, reference_listener=None,
+                                  prototype_queue=self.queue, lifecycle_service=None)
+        coordinator = CoordinatorService(server, handler)
+        stop = threading.Event()
+        result = []
+        coordinator_thread = threading.Thread(target=lambda: result.append(coordinator.run(stop)),
+                                              name='synthetic-coordinator-shutdown')
+        queue_closed_while_fetching = threading.Event()
+        original_queue_close = self.queue.close
+
+        def record_queue_close():
+            if fetch.is_alive():
+                queue_closed_while_fetching.set()
+            original_queue_close()
+
+        self.queue.close = record_queue_close
+        original_join = threading.Thread.join
+
+        def bounded_fetch_join(thread, timeout=None):
+            if thread is fetch and timeout is not None:
+                return original_join(thread, min(timeout, 0.05))
+            return original_join(thread, timeout)
+
+        coordinator_thread.start()
+        try:
+            deadline = time.monotonic() + 2
+            while coordinator.health()['state'] != 'ready' and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(coordinator.health()['state'], 'ready')
+            with patch.object(threading.Thread, 'join', new=bounded_fetch_join):
+                stop.set()
+                coordinator_thread.join(3)
+            self.assertFalse(coordinator_thread.is_alive(), 'coordinator shutdown did not finish')
+            self.assertEqual(result, [0])
+            self.assertFalse(queue_closed_while_fetching.is_set(),
+                             'coordinator released queue authority under a live custody writer')
+            self.assertTrue(fetch.is_alive(), 'blocked result fetch unexpectedly exited before queue close')
+        finally:
+            release_fetch.set()
+            original_join(fetch, 3)
+            stop.set()
+            coordinator_thread.join(3)
+            self.queue.close = original_queue_close
+        self.assertFalse(fetch.is_alive(), 'result fetch leaked after the test released its engine response')
+
     def test_custody_completes_an_incomplete_snapshot(self):
         self.service._log_retention = True
         identifier, engine, engine_task = self.adoptable()
