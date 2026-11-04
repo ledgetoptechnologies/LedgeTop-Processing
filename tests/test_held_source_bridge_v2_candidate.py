@@ -11,6 +11,8 @@ import sqlite3
 import tempfile
 import unittest
 import uuid
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
@@ -84,6 +86,8 @@ class HeldSourceBridgeTests(unittest.TestCase):
             path = Path(tmp)/'bridge.sqlite'
             db = sqlite3.connect(path)
             initialize(db)
+            with self.assertRaises(ValueError):stage(db,arguments=args,max_journal_bytes=1)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM held_source_bridge_v2').fetchone()[0],0)
             for point in ('statement','proof','intent','signature','source','selected','evidence','file'):
                 def fault(at):
                     if at == point: raise OSError('synthetic crash')
@@ -95,7 +99,7 @@ class HeldSourceBridgeTests(unittest.TestCase):
             db.close()
             db = sqlite3.connect(path)
             try:
-                self.assertEqual(stage(db,arguments={**args,'now_ms':1893456600000}),
+                self.assertEqual(stage(db,arguments={**args,'now_ms':1893456600000},max_journal_bytes=1,max_snapshots=1),
                                  {'state':'held_bridge_journaled','created':False})
                 with self.assertRaises(ValueError):stage(db,arguments={**args,'file_frames':generated[:-1]})
                 changed = copy.deepcopy(outer); changed['expiresAt'] = '2030-01-01T00:11:00.000Z'
@@ -130,7 +134,7 @@ class HeldSourceBridgeTests(unittest.TestCase):
         input_value = [dict(relativePath=src['relativePath'],byteSize=src['byteSize'],sha256=src['sha256'])]
         input_sha = hashlib.sha256(json.dumps(input_value,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
         local2 = copy.deepcopy(local)
-        local2.update(sourceCount=1,datasetFileCount=1,sourcePageHashes=[hashlib.sha256(SOURCE_DOMAIN+source_raw).hexdigest()],
+        local2.update(snapshotId=random_uuid(),sourceCount=1,datasetFileCount=1,sourcePageHashes=[hashlib.sha256(SOURCE_DOMAIN+source_raw).hexdigest()],
             sourceFrameBytes=len(source2),selectedCount=1,selectedPageHashes=[hashlib.sha256(SELECTED_DOMAIN+selected_raw).hexdigest()],
             selectedFrameBytes=len(selected2),inputManifestSha256=input_sha,gcp=None)
         local_private = Ed25519PrivateKey.generate(); intent2=p.canonical_json(local2)
@@ -141,7 +145,7 @@ class HeldSourceBridgeTests(unittest.TestCase):
                              ('selectedFrameStream',selected2),('gcpEvidenceStream',None),('gcpFileStream',None)):
             bridge2[name+'Sha256'],bridge2[name+'ByteCount']=pair(payload)
         outer2=copy.deepcopy(outer)
-        outer2.update(processingClosureSha256=context2['processingClosureSha256'],sourcePageHashes=local2['sourcePageHashes'],
+        outer2.update(snapshotId=local2['snapshotId'],processingClosureSha256=context2['processingClosureSha256'],sourcePageHashes=local2['sourcePageHashes'],
             sourcePageBytes=[len(source_raw)],sourceCount=1,selectedPageHashes=local2['selectedPageHashes'],
             selectedPageBytes=[len(selected_raw)],selectedCount=1,inputManifestSha256=input_sha,viewerHeldSource=bridge2)
         for key in ('gcpEvidenceVersion','gcpEvidencePageHashes','gcpEvidencePageBytes','gcpEvidencePageCount',
@@ -155,6 +159,24 @@ class HeldSourceBridgeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             verify(**{**photo_args,'outer_key':local_private.public_key(),
                       'statement_bytes':signed(outer2,local_private)})
+        # Two valid distinct snapshots cannot race past the journal count cap.
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'concurrent.sqlite'
+            setup=sqlite3.connect(path);initialize(setup);setup.close()
+            barrier=threading.Barrier(2)
+            def write(value):
+                connection=sqlite3.connect(path,timeout=10)
+                try:
+                    barrier.wait(timeout=5)
+                    try:return stage(connection,arguments=value,max_snapshots=1)['created']
+                    except ValueError:return False
+                finally:connection.close()
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures=[pool.submit(write,value) for value in (args,photo_args)]
+                self.assertEqual(sum(f.result(timeout=15) for f in futures),1)
+            db=sqlite3.connect(path)
+            try:self.assertEqual(db.execute('SELECT COUNT(*) FROM held_source_bridge_v2').fetchone()[0],1)
+            finally:db.close()
 
 
 if __name__ == '__main__': unittest.main()

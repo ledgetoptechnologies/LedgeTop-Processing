@@ -41,13 +41,15 @@ def initialize(db):
         db.rollback(); raise ValueError('held_bridge_journal_unavailable') from None
 
 
-def stage(db, *, arguments, _fault=None):
+def stage(db, *, arguments, max_journal_bytes=128*1024*1024, max_snapshots=128, _fault=None):
     """Verify and atomically retain exact evidence; repeat only exact replays.
 
     `arguments` is supplied by a trusted caller, not a request decoder. This
     candidate does not bind to a coordinator job or confer any authorization.
     """
-    if db.in_transaction or type(arguments) is not dict:
+    if (db.in_transaction or type(arguments) is not dict or type(max_journal_bytes) is not int
+            or not 1 <= max_journal_bytes <= 1024*1024*1024 or type(max_snapshots) is not int
+            or not 1 <= max_snapshots <= 10000):
         raise ValueError('held_bridge_stage_unavailable')
     try:
         # Detach mutable structures so a caller cannot alter a verified proof
@@ -92,6 +94,14 @@ def stage(db, *, arguments, _fault=None):
             db.commit()
             return {'state':'held_bridge_journaled', 'created':False}
         verify(**args)
+        # Bound this journal's logical bytes under the same write lock as the
+        # insert. This is not a filesystem free-space or global storage quota.
+        count, statements_bytes = db.execute(
+            'SELECT COUNT(*),COALESCE(SUM(length(statement)),0) FROM held_source_bridge_v2').fetchone()
+        blob_bytes = db.execute('SELECT COALESCE(SUM(length(wire)),0) FROM held_source_bridge_blobs_v2').fetchone()[0]
+        if (count >= max_snapshots or statements_bytes + blob_bytes + len(args['statement_bytes'])
+                + sum(len(wire) for wire in payloads.values()) > max_journal_bytes):
+            raise ValueError()
         db.execute('INSERT INTO held_source_bridge_v2 VALUES(?,?,?,?)',
                    (issuer, snapshot, args['statement_bytes'], proof_hash))
         if _fault: _fault('statement')
