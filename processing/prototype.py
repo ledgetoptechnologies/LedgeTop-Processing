@@ -493,6 +493,25 @@ class Queue(Maintenance):
                    (payload["status"], result, identifier))
         return self.public(db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone())
 
+    def _adopt_in_transaction(self, db, identifier, claim_token, reason, result):
+        """Release one lost hold to its proven result. Completion still cannot."""
+        if not db.in_transaction:
+            raise ValueError('adoption requires a transaction')
+        row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
+        if not row:
+            raise Conflict("unknown job")
+        supplied_hash = hashlib.sha256(claim_token.encode()).hexdigest()
+        if not row["claim_hash"] or not hmac.compare_digest(supplied_hash, row["claim_hash"]):
+            raise Conflict("invalid claim")
+        try:
+            note = json.loads(row["result"]).get("note")
+        except (TypeError, ValueError, AttributeError):
+            note = None
+        if row["status"] != "held" or row["held_reason"] != "operator" or note != reason:
+            raise Conflict("operator transition not allowed")
+        db.execute("UPDATE jobs SET status='succeeded',result=?,held_reason=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                   (json.dumps(result, sort_keys=True, allow_nan=False, separators=(",", ":")), identifier))
+
     def operator(self, identifier, action, payload):
         """A separate human/operator credential is required by the HTTP layer.
 

@@ -621,6 +621,22 @@ class StartupTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'PROCESSING_VIEWER_NODE_LOST_HOLD must be 0 or 1'):
                     from_environment()
 
+    def test_lost_result_adoption_is_opt_in_strict_and_needs_the_hold(self):
+        with patch.dict(os.environ, self.env, clear=True):
+            self.assertIs(from_environment().viewer_lost_result_adopt, False)
+        self.assertIs(Config(TOKEN, '', '', 800, 20000).viewer_lost_result_adopt, False)
+        both = {**self.env, 'PROCESSING_VIEWER_NODE_LOST_HOLD': '1', 'PROCESSING_VIEWER_LOST_RESULT_ADOPT': '1'}
+        with patch.dict(os.environ, both, clear=True):
+            self.assertIs(from_environment().viewer_lost_result_adopt, True)
+        with patch.dict(os.environ, {**self.env, 'PROCESSING_VIEWER_LOST_RESULT_ADOPT': '1'}, clear=True):
+            with self.assertRaisesRegex(ValueError, 'requires PROCESSING_VIEWER_NODE_LOST_HOLD'):
+                from_environment()
+        for value in ('', 'true', 'TRUE', 'yes', '2', ' 1', '1 '):
+            with self.subTest(value=value), patch.dict(
+                    os.environ, {**both, 'PROCESSING_VIEWER_LOST_RESULT_ADOPT': value}, clear=True):
+                with self.assertRaisesRegex(ValueError, 'PROCESSING_VIEWER_LOST_RESULT_ADOPT must be 0 or 1'):
+                    from_environment()
+
     def test_flag_without_per_node_slots_refuses_before_state(self):
         for slots in ('0', None):
             env = {**self.env, 'PROCESSING_VIEWER_PARALLEL_DISPATCH': '1'}

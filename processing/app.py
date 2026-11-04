@@ -265,6 +265,7 @@ def make_handler(config: Config):
                 self._reply(404, {"error": "not_found"})
                 return
             operator = prototype and (self.path == '/v1/prototype/admission-drain' or self.path.endswith(("/hold", "/resolve"))
+                                      or (getattr(config, 'viewer_lost_result_adopt', False) and self.path.endswith("/adopt"))
                                       or self.path.startswith("/v1/prototype/nodes/"))
             if not self._authorized(operator=operator):
                 return

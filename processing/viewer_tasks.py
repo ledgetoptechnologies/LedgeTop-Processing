@@ -23,6 +23,7 @@ from functools import wraps
 
 from .maintenance import Conflict
 from .viewer_output_log import OUTPUT_LOG_MAX_FILE_BYTES, OUTPUT_LOG_NAME, upgrade_output_log, valid_output_log
+from .viewer_result_adoption import ADOPTION_MAX_FILE_BYTES, ADOPTION_NAME, valid_adoption
 
 
 class OptionEvidenceConflict(Conflict):
@@ -740,6 +741,23 @@ class TaskStore:
             db.execute("UPDATE viewer_tasks SET stage=?,phase='complete',progress=?,updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
                 (status,100 if status=='succeeded' else row['progress'],row['uuid']))
 
+    def adopt_held_task(self, task, result, reasons):
+        """Finish a lost hold as the success its verified result proved, in one step."""
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, task['uuid'])
+            identity = ('job_id', 'engine_uuid', 'node_id', 'claim_token', 'environment')
+            if (any(type(row[k]) is not str or not row[k] or row[k] != task[k] for k in identity)
+                    or row['phase'] != 'held' or row['error'] not in reasons or not row['archive_path']):
+                raise Conflict('adoption identity changed')
+            job = db.execute('SELECT node_id,environment,profile FROM jobs WHERE id=?', (row['job_id'],)).fetchone()
+            if (job is None or job['node_id'] != row['node_id'] or job['environment'] != row['environment']
+                    or job['profile'] != VIEWER_PROFILE):
+                raise Conflict('engine job binding changed')
+            self.queue._adopt_in_transaction(db, row['job_id'], row['claim_token'], row['error'], result)
+            db.execute("UPDATE viewer_tasks SET stage='succeeded',phase='complete',progress=100,error=NULL,updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
+                       (row['uuid'],))
+
     @staticmethod
     def _hold_in_transaction(db, job, identifier, note):
         """Write both halves of a hold, so no reader sees a held job with a live task."""
@@ -937,26 +955,48 @@ class TaskStore:
         A file in the task directory, not a table or column: the directory is
         already inside the update census, whose schema allowlist is strict.
         """
-        path = Path(task['directory']) / OUTPUT_LOG_NAME
+        log = TaskStore._read_task_file(task, OUTPUT_LOG_NAME, OUTPUT_LOG_MAX_FILE_BYTES, 'retained output')
+        if log is None:
+            return None
+        log = upgrade_output_log(log, task['engine_uuid'])
+        if not valid_output_log(log, task['engine_uuid']):
+            raise Conflict('retained output requires inspection')
+        return log
+
+    @staticmethod
+    def adoption(task):
+        """Load a task's adoption evidence, or None before anything was recorded."""
+        record = TaskStore._read_task_file(task, ADOPTION_NAME, ADOPTION_MAX_FILE_BYTES, 'result adoption')
+        if record is None:
+            return None
+        identity = {'task': task['uuid'], 'generation': task['generation'], 'job': task['job_id'],
+                    'node': task['node_id'], 'engine': task['engine_uuid']}
+        if not valid_adoption(record, identity):
+            raise Conflict('result adoption requires inspection')
+        return record
+
+    @staticmethod
+    def save_adoption(task, record):
+        TaskStore._replace_task_file(task, ADOPTION_NAME, record, 'result adoption')
+
+    @staticmethod
+    def _read_task_file(task, name, limit, label):
+        path = Path(task['directory']) / name
         try:
             descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0))
         except FileNotFoundError:
             return None
         except OSError:
-            raise Conflict('retained output requires inspection') from None
+            raise Conflict(label + ' requires inspection') from None
         try:
             with os.fdopen(descriptor, 'rb') as stream:
                 TaskStore._check_output_log_file(os.fstat(stream.fileno()))
-                raw = stream.read(OUTPUT_LOG_MAX_FILE_BYTES + 1)
-            if len(raw) > OUTPUT_LOG_MAX_FILE_BYTES:
+                raw = stream.read(limit + 1)
+            if len(raw) > limit:
                 raise ValueError()
-            log = json.loads(raw)
+            return json.loads(raw)
         except (OSError, ValueError, RecursionError):
-            raise Conflict('retained output requires inspection') from None
-        log = upgrade_output_log(log, task['engine_uuid'])
-        if not valid_output_log(log, task['engine_uuid']):
-            raise Conflict('retained output requires inspection')
-        return log
+            raise Conflict(label + ' requires inspection') from None
 
     @staticmethod
     def _check_output_log_file(info):
@@ -966,20 +1006,24 @@ class TaskStore:
 
     @staticmethod
     def save_output_log(task, log):
-        """Replace the console in one step, never writing through an existing path."""
+        TaskStore._replace_task_file(task, OUTPUT_LOG_NAME, log, 'retained output')
+
+    @staticmethod
+    def _replace_task_file(task, name, value, label):
+        """Replace a task file in one step, never writing through an existing path."""
         directory = Path(task['directory'])
-        path = directory / OUTPUT_LOG_NAME
+        path = directory / name
         try:
             TaskStore._check_output_log_file(path.lstat())
         except FileNotFoundError:
             pass
         except ValueError:
-            raise Conflict('retained output requires inspection') from None
-        temporary = directory / (OUTPUT_LOG_NAME + '.tmp-' + secrets.token_hex(16))
+            raise Conflict(label + ' requires inspection') from None
+        temporary = directory / (name + '.tmp-' + secrets.token_hex(16))
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0), 0o600)
         try:
             with os.fdopen(descriptor, 'wb') as stream:
-                stream.write(canonical(log).encode())
+                stream.write(canonical(value).encode())
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)

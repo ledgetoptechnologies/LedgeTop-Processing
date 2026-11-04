@@ -40,6 +40,24 @@ class PrototypeHTTPTests(unittest.TestCase):
         with urlopen(request, timeout=5) as response:
             return response.status, json.load(response)
 
+    def adopt(self, token):
+        with self.assertRaises(HTTPError) as caught:
+            self.request("/v1/prototype/jobs/synthetic/adopt", {"note": "n", "workerStopped": True}, token)
+        return caught.exception.code
+
+    def test_adopt_route_exists_only_with_its_flag_and_only_for_the_operator(self):
+        self.assertEqual(self.adopt(OPERATOR_TOKEN), 401)
+        self.assertEqual(self.adopt(TOKEN), 404)
+        self.handler.prototype_queue.close()
+        self.server.shutdown()
+        self.server.server_close()
+        self.handler = make_handler(Config(TOKEN, "", "", 800, 20000, prototype_state_dir=self.directory.name,
+                                           prototype_operator_token=OPERATOR_TOKEN, viewer_lost_result_adopt=True))
+        self.server = start_server(self.handler)
+        self.origin = f"http://127.0.0.1:{self.server.server_port}"
+        self.assertEqual(self.adopt(TOKEN), 401)
+        self.assertNotIn(self.adopt(OPERATOR_TOKEN), (401, 403, 404))
+
     def test_real_http_submit_claim_complete_and_readback(self):
         status, response = self.request("/v1/prototype/jobs", submission("demo"))
         self.assertEqual(status, 201)

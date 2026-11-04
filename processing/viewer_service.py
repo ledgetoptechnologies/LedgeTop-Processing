@@ -5,6 +5,7 @@ HTTP; uncertain mutations hold the applicable slot instead of replaying a job.
 Completed engine tasks and downloaded archives remain until operator cleanup.
 """
 
+from contextlib import nullcontext
 import http.client
 import hashlib
 import json
@@ -21,6 +22,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, build_opener, ProxyHandler
 import uuid
 import zipfile
+import zlib
 from urllib.parse import urlsplit
 
 from .maintenance import Conflict
@@ -31,6 +33,8 @@ from .prototype import VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
 from .viewer_limits import MAX_UPLOAD_BYTES
+from .viewer_result_adoption import (RESULT_CHANGED, bound_evidence, engine_evidence, identity_refusal,
+                                     new_adoption)
 from .viewer_output_log import (OUTPUT_ANCHOR_BYTES, OUTPUT_TAIL_LINES, append_output_tail, archived_output_lines,
                                 consume_output, mark_output, mark_unverifiable, matches_anchor, new_output_log,
                                 output_digest, restart_output, skip_oversized_line)
@@ -57,6 +61,10 @@ OUTPUT_ANCHOR_SECONDS = 30
 OUTPUT_SNAPSHOT_ATTEMPTS = 5
 OUTPUT_SNAPSHOT_RETRY_SECONDS = 60
 OUTPUT_RETRY_SCAN_JOBS = 64
+# A failed fetch of a held result waits this long, doubling. NodeODX may clean
+# the task up after 48 hours, so the wait stays short of that.
+RESULT_FETCH_RETRY_SECONDS = 60
+RESULT_FETCH_RETRY_MAX_SECONDS = 3600
 
 
 class EngineUnavailable(OSError):
@@ -101,6 +109,16 @@ def _leading_lines(raw):
             lines.append(value)
     except json.JSONDecodeError:
         return lines
+
+
+def _check_archive_members(path):
+    """Read every member: an adopted result has no other source to compare with."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            if archive.testzip() is not None:
+                raise ValueError()
+    except (zipfile.BadZipFile, OSError, ValueError, EOFError, RuntimeError, NotImplementedError, zlib.error):
+        raise EngineUnavailable('archive_transfer_incomplete') from None
 
 
 def _reports_missing(value):
@@ -308,6 +326,13 @@ class ViewerService:
         self._output_retries = {}
         self._output_streams = {}
         self._output_scanned = False
+        # Prototype only, absent leaves a lost hold to end only as failed. Fetch
+        # threads and their schedule are observations; the file is the record.
+        self._adopt_lost_result = self._node_lost_hold and getattr(config, 'viewer_lost_result_adopt', False) is True
+        self._adopt_threads = {}
+        self._adopt_failures = {}
+        self._adopt_due = {}
+        self._adopt_bound = set()
         self._downloads = {}
         # Prototype only: absent configuration keeps the deployed synchronous
         # path. A node's in-flight transfer remains in its durable queue slot.
@@ -546,6 +571,9 @@ class ViewerService:
             seen = self._held_observations.get(identifier)
             if seen is not None:
                 info['ledgetopEngineObservation'] = seen['observation']
+            custody = self._result_custody(task)
+            if custody is not None:
+                info['ledgetopResultCustody'] = custody
         elif identifier in self._lost:
             # Below the hold threshold: the last status is no longer current.
             info['ledgetopEngineStatus'] = 'unknown'
@@ -840,112 +868,125 @@ class ViewerService:
             # State may have changed while waiting on the per-task lock. Check
             # again before touching either local archives or the engine.
             self._require_downloadable(task)
-            path = Path(task['archive_path']) if task['archive_path'] else Path(task['directory']) / 'all.zip'
-            if not task['archive_path']:
-                partial = path.with_suffix('.zip.partial')
-                receipt_path = path.with_suffix('.zip.receipt')
-                intent_path = path.with_suffix('.zip.intent')
-                if receipt_path.exists() or receipt_path.is_symlink():
-                    receipt = self._archive_receipt(task, receipt_path)
-                    final_exists = path.exists() or path.is_symlink()
-                    partial_exists = partial.exists() or partial.is_symlink()
-                    stream = None
-                    try:
-                        if final_exists:
-                            stream = self._verify_archive(path, receipt)
-                            if partial_exists and (partial.is_symlink() or not os.path.samefile(path, partial)):
-                                raise Conflict('competing archive requires inspection')
-                        elif partial_exists:
-                            stream = self._verify_archive(partial, receipt)
-                            os.link(partial, path)
-                        else:
-                            raise Conflict('archive receipt has no file')
-                        current = path.lstat(); opened = os.fstat(stream.fileno())
-                        if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
-                            raise Conflict('archive identity changed during publication')
-                        if partial_exists:
-                            if os.name == 'nt':
-                                # Windows can refuse unlink while a hard-linked
-                                # file is open; revalidate the same inode.
-                                identity = (opened.st_dev, opened.st_ino)
-                                stream.close(); stream = None
-                                partial.unlink()
-                                stream = self._verify_archive(path, receipt)
-                                reopened = os.fstat(stream.fileno())
-                                if (reopened.st_dev, reopened.st_ino) != identity:
-                                    raise Conflict('archive identity changed during publication')
-                            else:
-                                partial.unlink()
-                        sync_directory(path.parent)
-                        self.store.update(identifier, archive_path=str(path))
-                        return stream, receipt['bytes']
-                    except BaseException:
-                        if stream is not None: stream.close()
-                        raise
-                if path.exists() or path.is_symlink():
-                    raise Conflict('archive without receipt requires inspection')
-                if intent_path.exists() or intent_path.is_symlink():
-                    intent = self._read_archive_metadata(intent_path); expected = self._archive_identity(task)
-                    if (type(intent) is not dict or set(intent) != set(expected)
-                            or any(type(intent[k]) is not type(v) or intent[k] != v for k, v in expected.items())):
-                        raise Conflict('archive intent requires inspection')
-                    self._recover_metadata_link(intent_path)
-                else:
-                    if partial.exists() or partial.is_symlink():
-                        raise Conflict('partial archive without intent requires inspection')
-                    self._publish_archive_metadata(intent_path,self._archive_identity(task))
-                if partial.exists() or partial.is_symlink():
-                    info = partial.lstat()
-                    if (partial.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-                            or (os.name != 'nt' and info.st_uid != os.geteuid())):
-                        raise Conflict('previous archive path requires inspection')
-                    # A GET is safe to repeat; the engine's original is retained.
-                    # Only this exact incomplete local transfer is replaced.
-                    partial.unlink()
-                total = 0
-                digest = hashlib.sha256()
-                with self._task_engine(task).download(task['engine_uuid']) as response:
-                    if getattr(response, 'status', 200) != 200:
-                        raise EngineUnavailable('archive_unavailable')
-                    media_type = response.headers.get('Content-Type', '').split(';')[0].lower()
-                    if media_type and media_type not in ('application/zip', 'application/octet-stream',
-                                                          'application/x-zip-compressed'):
-                        raise EngineUnavailable('archive_not_ready')
-                    declared = response.headers.get('Content-Length')
-                    if declared is not None and (not declared.isdigit() or int(declared) > self.config.viewer_max_archive_bytes):
-                        raise Conflict('archive exceeds configured disk allowance')
-                    with partial.open('xb') as output:
-                        os.chmod(partial, 0o600)
-                        while chunk := response.read(1024 ** 2):
-                            total += len(chunk)
-                            if total > self.config.viewer_max_archive_bytes:
-                                raise Conflict('archive exceeds configured disk allowance')
-                            digest.update(chunk)
-                            output.write(chunk)
-                        if declared is not None and total != int(declared):
-                            raise EngineUnavailable('archive_transfer_incomplete')
-                        output.flush()
-                        os.fsync(output.fileno())
-                if total < 4 or not zipfile.is_zipfile(partial):
-                    raise EngineUnavailable('archive_transfer_incomplete')
-                receipt = {**self._archive_identity(task), 'bytes': total, 'sha256': digest.hexdigest()}
-                self._publish_archive_metadata(receipt_path,receipt)
-                os.link(partial, path)
-                partial.unlink()
-                sync_directory(path.parent)
-                self.store.update(identifier, archive_path=str(path))
-                return self._verify_archive(path, receipt), receipt['bytes']
+            return self._archive_stream(task)
 
+    def _archive_stream(self, task, before_publish=None):
+        """Open the verified archive, copying it from the engine if needed.
+
+        The caller holds the task's download lock. ``before_publish`` may refuse
+        complete bytes before a receipt makes them the task's result.
+        """
+        identifier = task['uuid']
+        path = Path(task['archive_path']) if task['archive_path'] else Path(task['directory']) / 'all.zip'
+        if not task['archive_path']:
+            partial = path.with_suffix('.zip.partial')
             receipt_path = path.with_suffix('.zip.receipt')
+            intent_path = path.with_suffix('.zip.intent')
             if receipt_path.exists() or receipt_path.is_symlink():
                 receipt = self._archive_receipt(task, receipt_path)
-                try: path.lstat()
-                except FileNotFoundError:
-                    return self._restore_recorded_archive(task,path,receipt)
-                return self._verify_archive(path, receipt), receipt['bytes']
-            if path.is_symlink() or not path.is_file():
-                raise Conflict('retained archive unavailable')
-            return path.open('rb'), path.stat().st_size
+                final_exists = path.exists() or path.is_symlink()
+                partial_exists = partial.exists() or partial.is_symlink()
+                stream = None
+                try:
+                    if final_exists:
+                        stream = self._verify_archive(path, receipt)
+                        if partial_exists and (partial.is_symlink() or not os.path.samefile(path, partial)):
+                            raise Conflict('competing archive requires inspection')
+                    elif partial_exists:
+                        stream = self._verify_archive(partial, receipt)
+                        os.link(partial, path)
+                    else:
+                        raise Conflict('archive receipt has no file')
+                    current = path.lstat(); opened = os.fstat(stream.fileno())
+                    if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                        raise Conflict('archive identity changed during publication')
+                    if partial_exists:
+                        if os.name == 'nt':
+                            # Windows can refuse unlink while a hard-linked
+                            # file is open; revalidate the same inode.
+                            identity = (opened.st_dev, opened.st_ino)
+                            stream.close(); stream = None
+                            partial.unlink()
+                            stream = self._verify_archive(path, receipt)
+                            reopened = os.fstat(stream.fileno())
+                            if (reopened.st_dev, reopened.st_ino) != identity:
+                                raise Conflict('archive identity changed during publication')
+                        else:
+                            partial.unlink()
+                    sync_directory(path.parent)
+                    self.store.update(identifier, archive_path=str(path))
+                    return stream, receipt['bytes']
+                except BaseException:
+                    if stream is not None: stream.close()
+                    raise
+            if path.exists() or path.is_symlink():
+                raise Conflict('archive without receipt requires inspection')
+            if intent_path.exists() or intent_path.is_symlink():
+                intent = self._read_archive_metadata(intent_path); expected = self._archive_identity(task)
+                if (type(intent) is not dict or set(intent) != set(expected)
+                        or any(type(intent[k]) is not type(v) or intent[k] != v for k, v in expected.items())):
+                    raise Conflict('archive intent requires inspection')
+                self._recover_metadata_link(intent_path)
+            else:
+                if partial.exists() or partial.is_symlink():
+                    raise Conflict('partial archive without intent requires inspection')
+                self._publish_archive_metadata(intent_path,self._archive_identity(task))
+            if partial.exists() or partial.is_symlink():
+                info = partial.lstat()
+                if (partial.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or (os.name != 'nt' and info.st_uid != os.geteuid())):
+                    raise Conflict('previous archive path requires inspection')
+                # A GET is safe to repeat; the engine's original is retained.
+                # Only this exact incomplete local transfer is replaced.
+                partial.unlink()
+            total = 0
+            digest = hashlib.sha256()
+            with self._task_engine(task).download(task['engine_uuid']) as response:
+                if getattr(response, 'status', 200) != 200:
+                    raise EngineUnavailable('archive_unavailable')
+                media_type = response.headers.get('Content-Type', '').split(';')[0].lower()
+                if media_type and media_type not in ('application/zip', 'application/octet-stream',
+                                                      'application/x-zip-compressed'):
+                    raise EngineUnavailable('archive_not_ready')
+                declared = response.headers.get('Content-Length')
+                if declared is not None and (not declared.isdigit() or int(declared) > self.config.viewer_max_archive_bytes):
+                    raise Conflict('archive exceeds configured disk allowance')
+                with partial.open('xb') as output:
+                    os.chmod(partial, 0o600)
+                    while chunk := response.read(1024 ** 2):
+                        total += len(chunk)
+                        if total > self.config.viewer_max_archive_bytes:
+                            raise Conflict('archive exceeds configured disk allowance')
+                        if before_publish is not None and self._stop.is_set():
+                            raise EngineUnavailable('archive_transfer_interrupted')
+                        digest.update(chunk)
+                        output.write(chunk)
+                    if declared is not None and total != int(declared):
+                        raise EngineUnavailable('archive_transfer_incomplete')
+                    output.flush()
+                    os.fsync(output.fileno())
+            if total < 4 or not zipfile.is_zipfile(partial):
+                raise EngineUnavailable('archive_transfer_incomplete')
+            if before_publish is not None:
+                before_publish(partial)
+            receipt = {**self._archive_identity(task), 'bytes': total, 'sha256': digest.hexdigest()}
+            self._publish_archive_metadata(receipt_path,receipt)
+            os.link(partial, path)
+            partial.unlink()
+            sync_directory(path.parent)
+            self.store.update(identifier, archive_path=str(path))
+            return self._verify_archive(path, receipt), receipt['bytes']
+
+        receipt_path = path.with_suffix('.zip.receipt')
+        if receipt_path.exists() or receipt_path.is_symlink():
+            receipt = self._archive_receipt(task, receipt_path)
+            try: path.lstat()
+            except FileNotFoundError:
+                return self._restore_recorded_archive(task,path,receipt)
+            return self._verify_archive(path, receipt), receipt['bytes']
+        if path.is_symlink() or not path.is_file():
+            raise Conflict('retained archive unavailable')
+        return path.open('rb'), path.stat().st_size
 
     @staticmethod
     def _require_downloadable(task):
@@ -990,6 +1031,8 @@ class ViewerService:
 
     def operator(self, identifier, action, request):
         """Serialize operator state changes with Viewer engine mutations."""
+        if action == 'adopt' and self._adopt_lost_result:
+            return self._adopt_held_result(identifier, request)
         with self._lock:
             if any(job_id == identifier for job_id, _ in self._dispatch_threads.values()):
                 raise Conflict('submission in progress; inspect before operator action')
@@ -1123,6 +1166,7 @@ class ViewerService:
                 info = self._read_status(task)
                 observation = {'state': 'task_present', 'code': info['status']['code']}
                 self._retain_output(task, info)
+                self._review_held_result(task, info)
             except EngineTaskMissing:
                 observation = {'state': 'task_missing'}
             except EngineUnavailable:
@@ -1131,6 +1175,203 @@ class ViewerService:
                                                      'observation': observation}
         except Exception:
             logging.getLogger(__name__).exception('held engine observation failed')
+
+    @staticmethod
+    def _held_lost(task):
+        job = task['job']
+        return (job is not None and job['status'] == 'held' and job['heldReason'] == 'operator'
+                and task['phase'] == 'held' and task['error'] in ENGINE_LOST_REASONS
+                and isinstance(job['result'], dict) and job['result'].get('note') == task['error'])
+
+    def _adoption_identity(self, task):
+        return {key: value for key, value in self._archive_identity(task).items() if key != 'version'}
+
+    def _bind_engine_identity(self, task, info):
+        """Record who the engine says this is, while it is known to be the claim."""
+        if not self._adopt_lost_result or task['uuid'] in self._adopt_bound:
+            return
+        try:
+            if self.store.adoption(task) is None:
+                self.store.save_adoption(task, {**new_adoption(self._adoption_identity(task)),
+                                                'bound': bound_evidence(info)})
+            self._adopt_bound.add(task['uuid'])
+        except Exception:
+            # The later check is then only as strong as the task's own files.
+            logging.getLogger(__name__).error('Viewer engine identity could not be recorded')
+
+    def _review_held_result(self, task, info):
+        """Fetch a provable code 40; latch anything else after one. No job change."""
+        if not self._adopt_lost_result or not self._held_lost(task):
+            return
+        try:
+            record = self.store.adoption(task) or new_adoption(self._adoption_identity(task))
+            if record['state'] == 'refused':
+                return
+            if info['status']['code'] != 40:
+                # A stale tasks.json reruns a finished task: this is not the 40.
+                if record['state'] != 'bound':
+                    self._refuse_held_result(task, record, RESULT_CHANGED)
+                return
+            reason = identity_refusal(task, record, info)
+            if reason is not None:
+                self._refuse_held_result(task, record, reason)
+            elif record['state'] == 'verified':
+                if engine_evidence(info) != record['result']:
+                    self._refuse_held_result(task, record, RESULT_CHANGED)
+            else:
+                if record['state'] == 'bound':
+                    self.store.save_adoption(task, {**record, 'state': 'observed'})
+                self._start_result_fetch(task)
+        except Exception:
+            logging.getLogger(__name__).error('Viewer held result review failed; inspection required')
+
+    def _refuse_held_result(self, task, record, reason):
+        self.store.save_adoption(task, {**record, 'state': 'refused', 'reason': reason})
+
+    def _result_custody(self, task):
+        """Fixed codes for the operator; the hold stands whatever this says."""
+        if not self._adopt_lost_result:
+            return None
+        try:
+            record = self.store.adoption(task)
+        except Conflict:
+            return {'state': 'unavailable'}
+        if record is None or record['state'] == 'bound':
+            return None
+        custody = {'state': 'fetching' if record['state'] == 'observed' else record['state']}
+        if record['state'] == 'refused':
+            custody['reason'] = record['reason']
+        elif record['state'] == 'observed' and task['uuid'] in self._adopt_failures:
+            custody['reason'] = 'archive_fetch_failed'
+        return custody
+
+    def _start_result_fetch(self, task):
+        identifier = task['uuid']
+        if (identifier in self._adopt_threads or time.monotonic() < self._adopt_due.get(identifier, 0)
+                or not self._guard_ready(task['node_id'])
+                or (task['environment'] == 'production' and getattr(self.config, 'viewer_production_held', False) is True)):
+            return
+        thread = threading.Thread(target=self._fetch_held_result, args=(identifier,),
+                                  name='viewer-result-fetch', daemon=True)
+        self._adopt_threads[identifier] = thread
+        try:
+            thread.start()
+        except BaseException:
+            self._adopt_threads.pop(identifier, None)
+            raise
+
+    def _fetch_held_result(self, identifier):
+        """Thread entry, as a transfer of this size cannot sit in a scheduler turn.
+
+        The admission gate is held as for a Viewer download, so a drain waits for
+        these writes. Any failure leaves the state ``observed`` and retries.
+        """
+        try:
+            gate = getattr(self.queue, 'admission_drain', None)
+            with gate.admit() if gate is not None else nullcontext():
+                self._take_result_custody(identifier)
+            self._adopt_failures.pop(identifier, None)
+            self._adopt_due.pop(identifier, None)
+        except Exception:
+            # No traceback: a chained engine error may name a credentialed route.
+            failures = self._adopt_failures.get(identifier, 0) + 1
+            self._adopt_failures[identifier] = failures
+            self._adopt_due[identifier] = time.monotonic() + min(
+                RESULT_FETCH_RETRY_MAX_SECONDS, RESULT_FETCH_RETRY_SECONDS * 2 ** min(failures, 6))
+            logging.getLogger(__name__).error('Viewer held result fetch failed; it will be retried')
+        finally:
+            with self._lock:
+                self._adopt_threads.pop(identifier, None)
+
+    def _current_result(self, task, record):
+        info = self._read_status(task)
+        if info['status']['code'] != 40 or identity_refusal(task, record, info) is not None:
+            raise EngineUnavailable(RESULT_CHANGED)
+        return engine_evidence(info)
+
+    def _take_result_custody(self, identifier):
+        with self._lock:
+            lock = self._downloads.setdefault(identifier, threading.Lock())
+        with lock:
+            task = self.store.task(identifier)
+            record = self.store.adoption(task)
+            if not self._held_lost(task) or record is None or record['state'] != 'observed':
+                return
+            evidence = self._current_result(task, record)
+
+            def before_publish(partial):
+                # The same finished run on both sides of the transfer.
+                _check_archive_members(partial)
+                if self._current_result(task, record) != evidence:
+                    raise EngineUnavailable(RESULT_CHANGED)
+
+            stream, _ = self._archive_stream(task, before_publish)
+            with stream:
+                receipt = self._archive_receipt(task, Path(task['directory']) / 'all.zip.receipt')
+                with self._lock:
+                    record = self.store.adoption(task)
+                    if record is None or record['state'] != 'observed':
+                        return  # Refused during the transfer. The bytes stay.
+                    self.store.save_adoption(task, {**record, 'state': 'verified', 'result': evidence,
+                        'archive': {'bytes': receipt['bytes'], 'sha256': receipt['sha256']}})
+                if self._log_retention:
+                    self._output_from_archive(task, stream)
+
+    def _adoptable_result(self, job_id):
+        task = self.store.task_for_job(job_id)
+        record = self.store.adoption(task)
+        if not self._held_lost(task):
+            raise Conflict('operator transition not allowed')
+        if record is None or record['state'] != 'verified':
+            raise Conflict('verified result custody required')
+        return task, record
+
+    def _adopt_held_result(self, job_id, request):
+        """Operator: end a lost hold as the success already in custody.
+
+        This is the attestation resolve asks for, and it needs a verified copy,
+        a rehash and a current read. A missing task is what cleanup leaves after
+        custody; any other answer than the same finished run refuses. The job
+        then reads as any succeeded one, so Viewer's download serves this copy
+        and nothing here or after it removes the engine task.
+        """
+        self.queue.fields(request, ('note', 'workerStopped'))
+        if not isinstance(request['note'], str) or not 1 <= len(request['note']) <= 256:
+            raise ValueError('operator inspection note required')
+        if request['workerStopped'] is not True:
+            raise ValueError('verify the worker is stopped before resolution')
+        # Refuse now, not after waiting out a transfer on the task's lock.
+        identifier = self._adoptable_result(job_id)[0]['uuid']
+        with self._lock:
+            lock = self._downloads.setdefault(identifier, threading.Lock())
+        with lock:
+            task, record = self._adoptable_result(job_id)
+            path = Path(task['directory']) / 'all.zip'
+            receipt = self._archive_receipt(task, path.with_suffix('.zip.receipt'))
+            if {'bytes': receipt['bytes'], 'sha256': receipt['sha256']} != record['archive']:
+                raise Conflict('archive receipt differs from custody record')
+            # Rehash outside the service lock: an archive can take minutes.
+            self._verify_archive(path, receipt).close()
+            with self._lock:
+                task, record = self._adoptable_result(job_id)
+                try:
+                    info = self._read_status(task)
+                except EngineTaskMissing:
+                    info = None
+                except EngineUnavailable:
+                    raise Conflict('adoption requires a current engine read') from None
+                if info is not None:
+                    reason = identity_refusal(task, record, info)
+                    if reason is None and (info['status']['code'] != 40 or engine_evidence(info) != record['result']):
+                        reason = RESULT_CHANGED
+                    if reason is not None:
+                        self._refuse_held_result(task, record, reason)
+                        raise Conflict('engine result changed; adoption refused')
+                self.store.save_adoption(task, {**record, 'adoption': {'note': request['note']}})
+                self.store.adopt_held_task(task, {'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
+                                                  'environment': task['environment'], 'cancelled': False},
+                                           ENGINE_LOST_REASONS)
+                return self.queue.get(job_id)
 
     def _advance_output(self, engine, task, log):
         """Apply one bounded read; true while the engine may hold more."""
@@ -1340,6 +1581,7 @@ class ViewerService:
         self._backoff.pop(identifier, None)
         self._lost.pop(identifier, None)
         code = info['status']['code']
+        self._bind_engine_identity(task, info)
         self._retain_output(task, info)
         if code in (10, 20):
             # Queued10 may mean a delayed accepted commit or an uncommitted
@@ -1619,7 +1861,8 @@ class ViewerService:
                 raise RuntimeError('Viewer scheduler did not stop; retain queue ownership')
         with self._lock:
             transfers = [thread for _, thread in self._dispatch_threads.values()]
-        for thread in transfers:
+            fetches = list(self._adopt_threads.values())
+        for thread in transfers + fetches:
             thread.join(timeout=10)
         if any(thread.is_alive() for thread in transfers):
             raise RuntimeError('active Viewer transfer did not stop; retain queue ownership')
