@@ -11,7 +11,7 @@ from types import MappingProxyType
 
 from . import reference_protocol as protocol
 from .maintenance import Conflict
-from .reference_store import ClaimReleased
+from .reference_store import ClaimReleased, JCSRuntimeUnavailable
 from .reference_api import Response
 from .reference_transfer import validate_grant
 
@@ -70,15 +70,19 @@ class ReferenceWorkerAPI:
         return Response(status, {"error": code})
 
     def _owned_job(self, job_id, identity, claim_token):
-        job = self.store.get(job_id, private=True)
         with self.store.queue._db() as db:
+            db.execute('BEGIN')
+            self.store._check_jcs_capability(db)
+            row = self.store._row(db, job_id)
+            if self.store._activation(db, row) is None:
+                raise Conflict('Viewer activation required')
             claim = db.execute("SELECT * FROM reference_claims WHERE job_id=?", (job_id,)).fetchone()
-        if (not claim or (claim["node_id"], claim["worker_id"], claim["instance_id"]) !=
-                (identity["node_id"], identity["worker_id"], identity["worker_instance_id"])
-                or type(claim_token) is not str or not claim_token.isascii()
-                or not hmac.compare_digest(claim["token"], claim_token)):
-            raise Conflict("worker grant ownership mismatch")
-        return job
+            if (not claim or (claim["node_id"], claim["worker_id"], claim["instance_id"]) !=
+                    (identity["node_id"], identity["worker_id"], identity["worker_instance_id"])
+                    or type(claim_token) is not str or not claim_token.isascii()
+                    or not hmac.compare_digest(claim["token"], claim_token)):
+                raise Conflict("worker grant ownership mismatch")
+            return self.store._owned_private_record(db,row)
 
     def _grant(self, job_id, identity, claim_token):
         job = self._owned_job(job_id, identity, claim_token)
@@ -88,7 +92,11 @@ class ReferenceWorkerAPI:
         if grant is None:
             raise Conflict("transfer grant not ready")
         try:
-            validate_grant(grant, job=job)
+            if (job.get('transferRequest') or {}).get('protocol') == 'source-range-v2':
+                from .source_range_transfer import validate_source_grant
+                validate_source_grant(grant, job=job)
+            else:
+                validate_grant(grant, job=job)
         except ValueError:
             raise Conflict("persisted transfer grant is unavailable") from None
         return grant
@@ -208,6 +216,8 @@ class ReferenceWorkerAPI:
         except ClaimReleased:
             # Distinct so a driver can stop replaying this exact fenced request.
             return self._error(409, "claim_released")
+        except JCSRuntimeUnavailable:
+            return self._error(503, 'prepared_runtime_unavailable')
         except Conflict:
             return self._error(409, "worker_conflict")
         except (ValueError, TypeError):

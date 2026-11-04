@@ -9,9 +9,10 @@ from unittest.mock import patch
 from processing.prototype import Queue
 from processing.reference_delivery import DeliveryReceiver, BINDING
 from processing.reference_protocol import digest, release_attestation, validate_submission
-from processing.reference_store import ReferenceStore
+from processing.reference_store import ReferenceStore, JCSRuntimeUnavailable
 from processing.reference_worker_api import ReferenceWorkerAPI, PREFIX
 from processing.reference_failure import FailureOutbox, make_failure
+from tests.reference_activation_fixture import activate_reference_job, prepare_reference_job
 
 
 WORKER = "synthetic-worker-token-0001"
@@ -21,14 +22,19 @@ VIEWER = "synthetic-viewer-token-0003"
 
 class ReferenceWorkerAPITests(unittest.TestCase):
     def setUp(self):
+        # Only exercises post-activation mechanics with a synthetic future grant.
+        self.ready_patch = patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)
+        self.ready_patch.start()
+        self.addCleanup(self.ready_patch.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.queue = Queue(self.directory.name, reference_enabled=True)
         self.store = ReferenceStore(self.queue)
         self.fixture = json.loads((Path(__file__).resolve().parents[1] /
                                   "contracts/reference-v1.contract.json").read_text())
         raw = self.fixture["submission"]
-        self.job = self.store.submit(validate_submission(raw, environment="staging",
+        self.job = prepare_reference_job(self.store, validate_submission(raw, environment="staging",
             capability_fingerprint=raw["capabilityFingerprint"]))[0]
+        activate_reference_job(self.store, self.job)
         self.identities = {
             WORKER: dict(node_id="cluster", worker_id="worker", worker_instance_id="instance-1"),
             OTHER: dict(node_id="cluster", worker_id="other-worker", worker_instance_id="instance-2")}
@@ -71,6 +77,11 @@ class ReferenceWorkerAPITests(unittest.TestCase):
         self.queue = Queue(self.directory.name, reference_enabled=True)
         self.store = ReferenceStore(self.queue)
         self.api = ReferenceWorkerAPI(self.store, DeliveryReceiver(self.store), bearer_workers=self.identities)
+
+    def test_runtime_unavailable_is_503(self):
+        with patch.object(self.store, 'next_for_node', side_effect=JCSRuntimeUnavailable('held')):
+            result = self.request('GET', '/next')
+        self.assertEqual((result.status,result.body),(503,{'error':'prepared_runtime_unavailable'}))
 
     def test_private_auth_transport_and_fixed_identity_claim_replay(self):
         self.assertEqual(self.request('GET','/authority').body, {'authorityId':self.queue.authority_id})
@@ -253,8 +264,9 @@ class ReferenceWorkerAPITests(unittest.TestCase):
                 try:
                     store = ReferenceStore(queue)
                     raw = self.pipeline_submission(kind)
-                    job = store.submit(validate_submission(raw, environment='staging',
+                    job = prepare_reference_job(store, validate_submission(raw, environment='staging',
                         capability_fingerprint=raw['capabilityFingerprint'], available_engines=('odm', 'treedar')))[0]
+                    activate_reference_job(store, job)
                     api = ReferenceWorkerAPI(store, DeliveryReceiver(store), bearer_workers={
                         WORKER: dict(node_id='cluster', worker_id='worker', worker_instance_id='cluster-1'),
                         OTHER: dict(node_id='main', worker_id='worker', worker_instance_id='main-1')})
@@ -271,8 +283,9 @@ class ReferenceWorkerAPITests(unittest.TestCase):
                     # earlier staging main-only job, without claiming either.
                     if kind != 'odm':
                         small = self.pipeline_submission('odm')
-                        production = store.submit(validate_submission(small, environment='production',
+                        production = prepare_reference_job(store, validate_submission(small, environment='production',
                             capability_fingerprint=small['capabilityFingerprint']))[0]
+                        activate_reference_job(store, production)
                         self.assertEqual(advice(WORKER).body['job'], production)
                         self.assertEqual(advice(OTHER).body, {'job':None, 'execution':None})
                         self.assertEqual(store.get(job['jobId'])['status'], 'queued')

@@ -17,7 +17,9 @@ class CleanupPlatformTests(unittest.TestCase):
             root = Path('/unused-synthetic-root')
             def begin_cleanup(self, *args, **kwargs):
                 raise AssertionError('unsupported platform touched ledger')
-        with patch('processing.scratch_cleanup.sys.platform', 'win32'):
+        # Exercise platform refusal independently of the production import hold.
+        with patch('processing.scratch_cleanup.sys.platform', 'win32'), \
+                patch.object(ScratchCleanupExecutor, '_require_import_confirmation', return_value=None):
             with self.assertRaises(CleanupUnsupported):
                 ScratchCleanupExecutor(UnusedLedger()).execute('r1', 'o1', generation=1,
                     sha256='a'*64, byte_size=3, relative_path='jobs/r1/o1.bin')
@@ -26,6 +28,11 @@ class CleanupPlatformTests(unittest.TestCase):
 @unittest.skipUnless(sys.platform.startswith('linux'), 'executor requires Linux descriptor and fsync semantics')
 class ScratchCleanupTests(unittest.TestCase):
     def setUp(self):
+        # Remaining tests exercise descriptor/journal mechanics past the hold.
+        # This is a synthetic bypass, not a production configuration.
+        self.import_gate_patch = patch.object(ScratchCleanupExecutor, '_require_import_confirmation', return_value=None)
+        self.import_gate_patch.start()
+        self.addCleanup(self.import_gate_patch.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
@@ -58,6 +65,39 @@ class ScratchCleanupTests(unittest.TestCase):
         return ScratchLedger(self.root / 'private' / 'ledger.sqlite', self.root,
             capacity_probe=lambda _: 10000, clock=lambda: self.now,
             safety_floor_bytes=0, cleanup_grace_seconds=0)
+
+    def test_accepted_copy_cannot_delete_even_with_existing_cleanup_intent(self):
+        self.import_gate_patch.stop()
+        path = self.root / 'jobs/r1/o1.bin'
+        with self.assertRaisesRegex(CleanupRefused, 'viewer_import_confirmation_unavailable'):
+            self.execute()
+        self.assertTrue(path.exists())
+        intent = self.ledger.begin_cleanup('r1', 'o1', generation=1, sha256=self.sha)
+        with self.assertRaisesRegex(CleanupRefused, 'viewer_import_confirmation_unavailable'):
+            self.execute(intent_token=intent['intent_token'])
+        self.assertTrue(path.exists())
+
+    def test_existing_quarantined_result_is_retained_by_import_hold(self):
+        original = self.executor._persist
+        def crash_after_quarantine(*args):
+            original(*args)
+            if args[-1] == 'quarantined':
+                raise RuntimeError('synthetic interruption')
+        with patch.object(self.executor, '_persist', crash_after_quarantine):
+            with self.assertRaisesRegex(RuntimeError, 'synthetic interruption'):
+                self.execute()
+        intent = self.ledger.cleanup_intent('r1', 'o1')
+        token = intent['intent_token']
+        quarantined = self.root / '.cleanup-journal' / (token + '.object')
+        journal = self.root / '.cleanup-journal' / 'journal.sqlite'
+        before_journal = journal.read_bytes()
+        self.assertEqual(quarantined.read_bytes(), b'abc')
+        self.import_gate_patch.stop()
+        with self.assertRaisesRegex(CleanupRefused, 'viewer_import_confirmation_unavailable'):
+            self.execute(intent_token=token)
+        self.assertEqual(quarantined.read_bytes(), b'abc')
+        self.assertFalse(self.first.exists())
+        self.assertEqual(journal.read_bytes(), before_journal)
 
     def execute(self, **updates):
         values = dict(generation=1, sha256=self.sha, byte_size=3, relative_path='jobs/r1/o1.bin')

@@ -10,6 +10,7 @@ import re
 from types import MappingProxyType
 
 from .maintenance import Conflict
+from .reference_store import JCSRuntimeUnavailable
 from . import reference_protocol as protocol
 
 
@@ -89,10 +90,12 @@ class ReferenceAPI:
 
     def _job(self, job_id, environment, *, private=False):
         try:
-            job = self.store.get(job_id, private=private)
+            job = self.store.get_legacy_job(job_id, environment, private=private)
+        except JCSRuntimeUnavailable:
+            raise
         except Conflict:
             return None
-        if job["environment"] != environment:
+        if job is None:
             return None
         return job
 
@@ -144,20 +147,10 @@ class ReferenceAPI:
                     options_fingerprint=self.options_fingerprint,
                     allowed_odm_options=self.allowed_odm_options,
                     available_engines=("odm", "treedar") if self.treedar_available else ("odm",))
-                # The public adapter has no integrated combined parent pipeline.
-                # Its current TreeDar execution route supports exactly one LAS/LAZ
-                # input on main; reject shapes that would otherwise be stranded.
-                pipeline, objects = validated['pipeline'], validated['manifest']['objects']
-                if pipeline['treedar']['requested'] and (pipeline['odm']['requested'] or
-                        len(objects) != 1 or objects[0]['kind'] != 'lidar' or
-                        pipeline['treedar']['inputObjectIds'] != [objects[0]['id']]):
-                    # Reconcile an identical previously admitted request without
-                    # creating new work; changed identity remains a conflict.
-                    replay = self.store.find_submission_replay(validated['submissionId'],
-                        request_digest=validated['requestDigest'], environment=environment)
-                    return Response(200, replay) if replay is not None else self._error(409, 'treedar_execution_shape_unsupported')
-                job, created = self.store.submit(validated)
-                return Response(201 if created else 200, job)
+                # This credential identifies only an environment, not a Viewer
+                # principal. Such a job could never be safely activated and
+                # would permanently occupy the priority queue head.
+                return self._error(503, "viewer_prepared_submission_required")
             match = re.fullmatch(re.escape(protocol.PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(/results|/acceptance|/transfer-grants|/terminal-outcome|/terminal-acceptance)?", path)
             if not match:
                 return self._error(404, "not_found")
@@ -196,6 +189,8 @@ class ReferenceAPI:
             return self._error(405, "method_not_allowed")
         except (protocol.ProtocolError, ValueError, TypeError):
             return self._error(400, "invalid_request")
+        except JCSRuntimeUnavailable:
+            return self._error(503, 'prepared_runtime_unavailable')
         except Conflict:
             return self._error(409, "reference_conflict")
         except Exception:

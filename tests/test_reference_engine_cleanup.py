@@ -26,6 +26,11 @@ class EngineCacheCleanupFixture(ResultsFixture):
         self.action_patch = patch.object(self.native, 'action', side_effect=self.action)
         self.read_patch.start()
         self.action_patch.start()
+        # Existing tests exercise the removal journal beyond the new gate.
+        # They use a synthetic bypass; production has no such configuration.
+        self.import_gate_patch = patch.object(EngineCacheCleanup, '_require_import_confirmation', return_value=None)
+        self.import_gate_patch.start()
+        self.addCleanup(self.import_gate_patch.stop)
         self.addCleanup(self.read_patch.stop)
         self.addCleanup(self.action_patch.stop)
         self.cleanup = EngineCacheCleanup(self.worker, path=self.root / 'engine-cleanup.sqlite',
@@ -87,6 +92,18 @@ class EngineCacheCleanupFixture(ResultsFixture):
 
 
 class EngineCacheCleanupTests(EngineCacheCleanupFixture, unittest.TestCase):
+    def test_accepted_copy_alone_never_authorizes_engine_removal(self):
+        self.import_gate_patch.stop()
+        proof = self.admitted()
+        result = self.cleanup.remove(self.job['jobId'], viewer_receipts=proof)
+        self.assertEqual(result['state'], 'held')
+        self.assertEqual(result['reason'], 'viewer_import_confirmation_unavailable')
+        self.assertEqual(self.remove_calls, [])
+        # A retry with persisted accepted-copy proof must remain held too.
+        retry = self.cleanup.remove(self.job['jobId'])
+        self.assertEqual(retry['reason'], 'viewer_import_confirmation_unavailable')
+        self.assertEqual(self.remove_calls, [])
+
     def test_invalid_signature_or_unpinned_cleanup_never_removes_engine_cache(self):
         self.metadata_ack()
         valid = self.viewer_acceptance()

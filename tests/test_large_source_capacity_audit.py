@@ -1,0 +1,43 @@
+"""Synthetic sizing only: does not admit work or read image bytes."""
+import copy
+import json
+import unittest
+from pathlib import Path
+from processing import reference_protocol as p
+from processing import prepared_envelope_jcs_candidate as jcs
+from processing.source_range_transfer import build_source_transfer_request
+
+class LargeSourceCapacityAudit(unittest.TestCase):
+ @classmethod
+ def setUpClass(cls):
+  fixture=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())
+  cls.submission=copy.deepcopy(fixture['submission'])
+  manifest=cls.submission['manifest']
+  manifest['id']='dataset-synthetic'
+  manifest['objects']=[dict(id=f'img-{i:05}',name=f'DJI_{i:05}.JPG',byteSize=9089354,sha256='a'*64,kind='image',mediaType='image/jpeg') for i in range(16832)]
+  manifest['objectCount']=len(manifest['objects']);manifest['inputCounts']['images']=len(manifest['objects'])
+  manifest['totalBytes']=sum(o['byteSize'] for o in manifest['objects']);manifest['sha256']=p.manifest_sha256(manifest)
+ def test_real_v1_and_jcs_gates_hold_large_metadata(self):
+  wire=p.canonical_json(self.submission)
+  self.assertLess(len(wire),p.MAX_BODY_BYTES)
+  with self.assertRaisesRegex(ValueError,'invalid object count'):
+   p.validate_submission(self.submission,environment='staging',capability_fingerprint=self.submission['capabilityFingerprint'])
+  with self.assertRaisesRegex(ValueError,'JSON node limit'):jcs._parse(wire)
+ def test_full_inventory_shape_is_measured_without_claiming_validation(self):
+  records=[dict(objectId=f'img-{i:05}',viewerFileId=f'file-{i:05}',relativePath=f'clients/synthetic-site/surveys/2026-11-03/mapping/flight-{i%50:02}/raw/primary-camera/DJI_{i:05}.JPG',role='image',disposition='include',byteSize=9089354,sha256='a'*64,gcpSubstitution=None,custody='viewer-source') for i in range(16832)]
+  records.append(dict(objectId='gcp-generated',viewerFileId='gcp-file',relativePath='clients/synthetic-site/surveys/2026-11-03/control/generated/gcp-list.txt',role='gcp',disposition='substitute',byteSize=4096,sha256='b'*64,custody='viewer-derived',gcpSubstitution=dict(originalFileId='control-original',generatedFileId='gcp-file',sourceCrs='EPSG:4326',targetCrs='EPSG:32616',markerIds=[f'control-{i:03}' for i in range(24)])))
+  page_bytes=[len(p.canonical_json({'index':i//512,'objects':records[i:i+512]})) for i in range(0,len(records),512)]
+  self.assertEqual(len(page_bytes),33)
+  self.assertLess(max(page_bytes),256*1024);self.assertLess(sum(page_bytes),8*1024*1024)
+  self.assertEqual(len({row['objectId'] for row in records}),16833)
+ def test_builder_estimates_ranges_and_retry_budgets_but_does_not_admit(self):
+  m=self.submission['manifest']
+  job={'submission':self.submission,'manifestSha256':m['sha256'],'environment':'staging','generation':1}
+  args=dict(reservation_id='reservation-1',expires_at='2030-01-01T00:00:00.000Z',nonce='nonce-1',clock=lambda:0)
+  one=build_source_transfer_request(job,**args);retry=build_source_transfer_request(job,**args)
+  self.assertEqual(one,retry)
+  self.assertEqual(len(one['objectIds']),16832);self.assertEqual(one['requestBudget'],33664)
+  self.assertEqual(one['attemptBudget'],100992);self.assertEqual(one['byteBudget'],3*m['totalBytes'])
+  self.assertEqual(m['totalBytes'],152992006528)
+
+if __name__=='__main__':unittest.main()

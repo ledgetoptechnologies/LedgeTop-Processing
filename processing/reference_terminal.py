@@ -93,6 +93,7 @@ class TerminalService:
 
     def _check_ids(self, db, checked):
         ids = {checked["receiptId"], checked["storageReceiptId"]}
+        if ids & self.store._held_copy_ids(db): raise Conflict("receipt identity held by v3 proof")
         for row in db.execute("SELECT receipt_id,receipt_json FROM reference_acceptances"):
             old = json.loads(row["receipt_json"])
             if ids & {row["receipt_id"], old["receiptId"], old["storageReceiptId"]}:
@@ -110,6 +111,9 @@ class TerminalService:
             receipt_digest = protocol.digest(checked)
             old = db.execute("SELECT * FROM reference_terminal_acceptances WHERE job_id=? AND generation=?",
                              (job_id, failure["generation"])).fetchone()
+            if self.store._receipt_namespace_gate is not None:
+                try:self.store._receipt_namespace_gate.check_in_transaction(db,proposed=() if old else (checked['receiptId'],checked['storageReceiptId']))
+                except ValueError:raise Conflict('shared receipt namespace unavailable') from None
             if old:
                 if (old["receipt_id"], old["storage_receipt_id"], old["digest"], old["receipt_json"]) != (
                         checked["receiptId"], checked["storageReceiptId"], receipt_digest, encoded):

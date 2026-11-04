@@ -7,6 +7,7 @@ import tempfile
 import threading
 import unittest
 import uuid
+from unittest.mock import patch
 
 from processing import reference_protocol as p
 from processing.prototype import Queue, PROFILE as LEGACY_PROFILE, VIEWER_PROFILE
@@ -15,10 +16,16 @@ from processing.reference_failure import FailureReceiver
 from processing.reference_recovery import SCHEMA as RECOVERY_SCHEMA
 from processing.reference_store import ClaimReleased, MAX_CLAIM_RELEASES_PER_JOB, ReferenceStore, PROFILE
 from processing.reference_terminal import TerminalService
+from tests.reference_activation_fixture import activate_reference_job, prepare_reference_job
+from processing.source_range_transfer import CHUNK_BYTES, source_version_for_manifest
 
 
 class ReferenceStoreTests(unittest.TestCase):
     def setUp(self):
+        # Only exercises post-activation mechanics with a synthetic future grant.
+        self.ready_patch = patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)
+        self.ready_patch.start()
+        self.addCleanup(self.ready_patch.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.queue = Queue(self.directory.name, node_ids=("cluster", "node-2"))
         self.queue.allowed_profiles.add(PROFILE)
@@ -51,7 +58,8 @@ class ReferenceStoreTests(unittest.TestCase):
         return self.store.reserve(job["jobId"], transfer, node_id="cluster")
 
     def result_ready(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         self.reserve(job)
         self.store.update_phase(job["jobId"], "fetching")
         self.store.update_phase(job["jobId"], "processing")
@@ -120,7 +128,8 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertTrue(self.store.acceptance_receipts(job['jobId'])['fullyAccepted'])
 
     def test_retry_transfer_budget_has_explicit_three_copy_ceiling(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
                          worker_instance_id='instance', claim_request_id='claim-budget')
         transfer = copy.deepcopy(self.fixture['transferRequest'])
@@ -132,7 +141,8 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(self.store.reserve(job['jobId'], transfer, node_id='cluster')['phase'], 'awaiting_transfer')
 
     def test_wire_expiry_requires_viewer_compatible_utc_milliseconds(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
             worker_instance_id='instance', claim_request_id='claim-expiry')
         for value in ('2030-01-01T00:00:00.123456Z', '2030-01-01T00:00:00Z', '2030-01-01T00:00:00.000+00:00'):
@@ -140,6 +150,116 @@ class ReferenceStoreTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.store.reserve(job['jobId'], transfer, node_id='cluster')
         self.assertEqual(self.store.reserve(job['jobId'], self.fixture['transferRequest'], node_id='cluster')['phase'], 'awaiting_transfer')
+
+    def test_source_range_v2_reservation_is_bound_and_durable_in_the_shared_queue(self):
+        submission = copy.deepcopy(self.fixture['submission'])
+        submission['submissionId'] = str(uuid.uuid4())
+        submission['manifest']['id'] = 'dataset-fixture-store'
+        submission['manifest']['sha256'] = p.manifest_sha256(submission['manifest'])
+        submission = p.validate_submission(submission, environment='staging',
+            capability_fingerprint=submission['capabilityFingerprint'])
+        job, _ = prepare_reference_job(self.store, submission)
+        activate_reference_job(self.store, job)
+        claim = self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+            worker_instance_id='instance-v2', claim_request_id='claim-v2-' + job['jobId'])
+        manifest = claim['submission']['manifest']
+        chunks = sum((item['byteSize'] + CHUNK_BYTES - 1) // CHUNK_BYTES for item in manifest['objects'])
+        transfer = {
+            'protocol': 'source-range-v2', 'reservationId': 'reservation-v2',
+            'generation': claim['generation'], 'expiresAt': '2030-01-01T00:00:00.000Z',
+            'manifestSha256': manifest['sha256'], 'sourceVersion': source_version_for_manifest(manifest),
+            'objectIds': [item['id'] for item in manifest['objects']], 'chunkBytes': CHUNK_BYTES,
+            'requestBudget': chunks, 'byteBudget': manifest['totalBytes'],
+            'nonce': 'nonce-v2', 'attemptBudget': chunks * 3,
+        }
+        reserved = self.store.reserve(job['jobId'], transfer, node_id='cluster')
+        self.assertEqual(reserved['phase'], 'awaiting_transfer')
+        self.assertEqual(reserved['transferRequest'], transfer)
+        self.assertEqual(self.store.reserve(job['jobId'], transfer, node_id='cluster'), reserved)
+
+        grant = {**transfer, 'expiresAt': '2029-01-01T00:00:00.000Z',
+            'jobId': job['jobId'], 'environment': 'staging', 'token': 'A' * 43}
+        receipt = self.store.receive_transfer_grant(job['jobId'], grant)
+        self.assertTrue(receipt['accepted'])
+        public = self.store.get(job['jobId'])
+        self.assertNotIn('token', json.dumps(public))
+        self.assertEqual(self.store.private_transfer_grant(job['jobId']), grant)
+
+    def test_expired_source_range_exact_replay_preserves_reservation_and_restart_hold(self):
+        raw = copy.deepcopy(self.fixture['submission'])
+        raw['submissionId'] = str(uuid.uuid4())
+        raw['manifest']['id'] = 'dataset-replay-fixture'
+        raw['manifest']['sha256'] = p.manifest_sha256(raw['manifest'])
+        submission = p.validate_submission(raw, environment='staging', capability_fingerprint=raw['capabilityFingerprint'])
+        job, _ = prepare_reference_job(self.store, submission)
+        activate_reference_job(self.store, job)
+        claim = self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+            worker_instance_id='instance-v2', claim_request_id='replay-' + job['jobId'])
+        manifest = claim['submission']['manifest']
+        chunks = sum((item['byteSize'] + CHUNK_BYTES - 1) // CHUNK_BYTES for item in manifest['objects'])
+        request = {'protocol': 'source-range-v2', 'reservationId': 'replay-reservation',
+            'generation': claim['generation'], 'expiresAt': '2030-01-01T00:00:00.000Z',
+            'manifestSha256': manifest['sha256'], 'sourceVersion': source_version_for_manifest(manifest),
+            'objectIds': [item['id'] for item in manifest['objects']], 'chunkBytes': CHUNK_BYTES,
+            'requestBudget': chunks, 'byteBudget': manifest['totalBytes'],
+            'nonce': 'replay-nonce', 'attemptBudget': chunks * 3}
+        with patch('processing.reference_store.time.time', return_value=1893455999):
+            accepted = self.store.reserve(job['jobId'], request, node_id='cluster')
+        # Reconstruct the store after losing its response; exact persisted bytes only.
+        reopened = ReferenceStore(self.queue)
+        with patch('processing.reference_store.time.time', return_value=1893456001):
+            self.assertEqual(reopened.reserve(job['jobId'], request, node_id='cluster'), accepted)
+            for key, value in (('nonce', 'different-nonce'), ('byteBudget', request['byteBudget'] + 1),
+                               ('expiresAt', '2031-01-01T00:00:00.000Z')):
+                changed = dict(request, **{key: value})
+                with self.subTest(key=key), self.assertRaises(Conflict):
+                    reopened.reserve(job['jobId'], changed, node_id='cluster')
+            with self.assertRaises(Conflict):
+                reopened.reserve(job['jobId'], request, node_id='node-2')
+            with self.queue._db() as db:
+                persisted = json.loads(db.execute('SELECT transfer_json FROM reference_jobs WHERE job_id=?',
+                    (job['jobId'],)).fetchone()[0])
+            self.assertEqual(persisted, request)
+            self.assertIsNone(reopened.private_transfer_grant(job['jobId']))
+        # A full coordinator restart intentionally holds in-flight work; do not
+        # acknowledge it as running or reset ownership merely to permit replay.
+        self.queue.close()
+        self.queue = Queue(self.directory.name, node_ids=('cluster', 'node-2'))
+        self.queue.allowed_profiles.add(PROFILE)
+        self.store = ReferenceStore(self.queue)
+        with patch('processing.reference_store.time.time', return_value=1893456001):
+            with self.assertRaises(Conflict):
+                self.store.reserve(job['jobId'], request, node_id='cluster')
+        self.assertEqual(self.store.get(job['jobId'])['status'], 'held')
+
+    def test_source_range_v2_reservation_rejects_source_identity_and_unbounded_budgets(self):
+        submission = copy.deepcopy(self.fixture['submission'])
+        submission['submissionId'] = str(uuid.uuid4())
+        submission['manifest']['id'] = 'dataset-fixture-store'
+        submission['manifest']['sha256'] = p.manifest_sha256(submission['manifest'])
+        submission = p.validate_submission(submission, environment='staging',
+            capability_fingerprint=submission['capabilityFingerprint'])
+        job, _ = prepare_reference_job(self.store, submission)
+        activate_reference_job(self.store, job)
+        claim = self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+            worker_instance_id='instance-v2', claim_request_id='claim-v2-' + job['jobId'])
+        manifest = claim['submission']['manifest']
+        chunks = sum((item['byteSize'] + CHUNK_BYTES - 1) // CHUNK_BYTES for item in manifest['objects'])
+        base = {'protocol': 'source-range-v2', 'reservationId': 'reservation-v2',
+            'generation': claim['generation'], 'expiresAt': '2030-01-01T00:00:00.000Z',
+            'manifestSha256': manifest['sha256'], 'sourceVersion': source_version_for_manifest(manifest),
+            'objectIds': [item['id'] for item in manifest['objects']], 'chunkBytes': CHUNK_BYTES,
+            'requestBudget': chunks, 'byteBudget': manifest['totalBytes'],
+            'nonce': 'nonce-v2', 'attemptBudget': chunks * 3}
+        for mutation in (
+            {'sourceVersion': 'dataset:wrong:' + manifest['sha256']},
+            {'objectIds': ['unbound-object']},
+            {'requestBudget': chunks + 1},
+            {'attemptBudget': chunks * 4},
+            {'expiresAt': '2020-01-01T00:00:00.000Z'},
+        ):
+            with self.subTest(mutation=mutation), self.assertRaises(Conflict):
+                self.store.reserve(job['jobId'], {**base, **mutation}, node_id='cluster')
 
     def test_disabled_profile_fails_closed(self):
         self.queue.allowed_profiles.remove(PROFILE)
@@ -194,7 +314,8 @@ class ReferenceStoreTests(unittest.TestCase):
         checked = p.validate_submission(raw, environment="staging",
             capability_fingerprint=raw["capabilityFingerprint"])
         self.assertEqual(checked["manifest"]["totalBytes"], 50_000_000_000)
-        job, created = self.store.submit(checked)
+        job, created = prepare_reference_job(self.store, checked)
+        activate_reference_job(self.store, job)
         self.assertTrue(created)
         self.assertEqual(self.store._required_node(checked), "node-2")
         self.assertIsNone(self.store.next_for_node("cluster"))
@@ -221,12 +342,35 @@ class ReferenceStoreTests(unittest.TestCase):
                          ['cluster', 'node-2'])
 
     def test_candidate_inventory_routes_the_three_photo_batch_example(self):
+        # Held-only: exercise actual principal/authority authentication, v3
+        # prepared persistence and activation. Synthetic queue completion does
+        # not prove an engine stopped or that Viewer accepted a result.
+        from processing.reference_prepared_api_candidate import PreparedSubmissionAPI
+        from processing.prepared_envelope_jcs_candidate import PROTOCOL
         self.queue.per_node_slots = True
         inventory = [dict(id='cluster', maxPhotos=1000, capabilities=['odm']),
                      dict(id='node-2', maxPhotos=None, capabilities=['odm'])]
         report = {'ready': True, 'taskQueueCount': 0, 'maxImages': None,
                   'availableScratchBytes': 1000000000, 'outputBudgetBytes': 1024}
-        store = ReferenceStore(self.queue, node_inventory=inventory, node_readiness=lambda _: report)
+        store = ReferenceStore(self.queue, node_inventory=inventory,
+                               node_readiness=lambda _: report, jcs_runtime_enabled=True)
+        capabilities = self.fixture['capabilities']
+        legacy = dict(capabilityFingerprint=capabilities['capabilityFingerprint'],
+            optionsFingerprint=capabilities['engines']['odm']['optionsFingerprint'],
+            allowedOdmOptions=['resolution'], availableEngines=['odm'])
+        policy = dict(capabilityFingerprint=legacy['capabilityFingerprint'],
+            optionsFingerprint=legacy['optionsFingerprint'], availableEngines=['odm'],
+            optionDefinitions={'resolution': {'type': 'float', 'domain': {'min': -100, 'max': 100}}})
+        tokens = {'production':'synthetic-v3-production-token-001', 'staging':'synthetic-v3-staging-token-001'}
+        api = PreparedSubmissionAPI(store, credentials=[dict(token=token, principalId='viewer-a', environment=env)
+            for env, token in tokens.items()], legacy_bearer_tokens=[],
+            policies={env:legacy for env in tokens}, jcs_policies={env:policy for env in tokens},
+            expected_authority_id=self.queue.authority_id)
+
+        def post(path, value, environment, token=None):
+            return api.handle('POST', path, {'Authorization':'Bearer '+(token or tokens[environment]),
+                'X-LTDS-Expected-Coordinator-Authority':self.queue.authority_id},
+                json.dumps(value).encode(), protected_transport=True)
 
         def submit(count, environment='production'):
             raw = copy.deepcopy(self.fixture['submission'])
@@ -235,42 +379,61 @@ class ReferenceStoreTests(unittest.TestCase):
             manifest['objects'] = [{**manifest['objects'][0], 'id': f'image-{i}',
                                     'name': f'image-{i}.jpg'} for i in range(count)]
             manifest.update(objectCount=count, totalBytes=count * 3,
-                            inputCounts={'images': count, 'lidarObjects': 0, 'points': 0})
+                            inputCounts={'images':count, 'lidarObjects':0, 'points':0})
             manifest['sha256'] = p.manifest_sha256(manifest)
-            return store.submit(p.validate_submission(raw, environment=environment,
-                capability_fingerprint=raw['capabilityFingerprint']))[0]
+            envelope = dict(schemaVersion=3, protocol=PROTOCOL, submission=raw,
+                viewerTaskId=str(uuid.uuid4()), viewerAttemptId=str(uuid.uuid4()), activationId=str(uuid.uuid4()))
+            response = post('/ltds/prepared/v3/submissions', envelope, environment)
+            self.assertEqual(response.status, 201, response.body)
+            job=response.body
+            found=store.find_viewer_envelope_v2(raw['submissionId'], authenticated_principal='viewer-a',
+                authenticated_environment=environment, expected_protocol=PROTOCOL)
+            activation=dict(activationId=envelope['activationId'], viewerTaskId=envelope['viewerTaskId'],
+                viewerAttemptId=envelope['viewerAttemptId'], envelopeSha256=found['envelopeSha256'])
+            path='/ltds/prepared/v3/submissions/'+raw['submissionId']+'/activation'
+            # Without both test-only source/worker readiness overrides, v3
+            # activation is rejected and jobs cannot be claimed.
+            with patch.object(ReferenceStore, '_v3_source_contract_ready', return_value=False):
+                self.assertEqual(post(path,activation,environment).status,503)
+            self.assertIsNone(store.claim(job['jobId'], node_id='cluster', worker_id='cluster',
+                worker_instance_id='instance', claim_request_id='unactivated-'+job['jobId']))
+            self.assertEqual(post(path,activation,environment,token='invalid-auth-token-000000').status,401)
+            with patch.object(ReferenceStore, '_v3_source_contract_ready', return_value=True):
+                self.assertEqual(post(path,activation,environment).status,200)
+            return job,envelope
 
         def claim(job, node):
             return store.claim(job['jobId'], node_id=node, worker_id=node,
-                worker_instance_id='instance', claim_request_id='claim-' + job['jobId'])
+                worker_instance_id='instance', claim_request_id='claim-'+job['jobId'])
 
-        small, medium, large = (submit(count) for count in (100, 500, 5000))
-        self.assertEqual(store.next_for_node('cluster')['jobId'], small['jobId'])
-        first_claim = claim(small, 'cluster')
-        self.assertEqual(store.next_for_node('node-2')['jobId'], medium['jobId'])
-        second_claim = claim(medium, 'node-2')
-        self.assertEqual(self.queue.get(large['jobId'])['status'], 'queued')
-        # Synthetic queue completion models a free slot; it does not exercise
-        # the real engine or the durable result-acceptance pipeline.
-        self.queue.complete(small['jobId'], {'claimToken': first_claim['claimToken'],
-            'status': 'succeeded', 'result': {}})
+        (small,senv),(medium,menv),(large,_) = (submit(count) for count in (100,500,5000))
+        self.assertEqual(store.next_for_node('cluster')['jobId'],small['jobId'])
+        first_claim=claim(small,'cluster')
+        self.assertEqual(first_claim['sourceViewerAttemptId'],senv['viewerAttemptId'])
+        self.assertEqual(store.next_for_node('node-2')['jobId'],medium['jobId'])
+        second_claim=claim(medium,'node-2')
+        self.assertEqual(second_claim['sourceViewerAttemptId'],menv['viewerAttemptId'])
+        self.assertEqual(self.queue.get(large['jobId'])['status'],'queued')
+        self.queue.complete(small['jobId'],{'claimToken':first_claim['claimToken'],'status':'succeeded','result':{}})
         self.assertIsNone(store.next_for_node('cluster'))
-        self.assertEqual(self.queue.get(large['jobId'])['status'], 'queued')
-        # A later compatible production job may use the free small node;
-        # the older large job still cannot run there. Staging stays queued.
-        staging = submit(20, environment='staging')
-        later_small = submit(50)
-        self.assertEqual(store.next_for_node('cluster')['jobId'], later_small['jobId'])
-        self.assertIsNone(claim(staging, 'cluster'))
-        third_claim = claim(later_small, 'cluster')
-        self.assertIsNotNone(third_claim)
-        self.assertEqual(self.queue.get(large['jobId'])['status'], 'queued')
-        self.assertEqual(self.queue.get(staging['jobId'])['status'], 'queued')
-        self.queue.complete(medium['jobId'], {'claimToken': second_claim['claimToken'],
-            'status': 'succeeded', 'result': {}})
-        self.assertEqual(store.next_for_node('node-2')['jobId'], large['jobId'])
-        self.assertIsNotNone(claim(large, 'node-2'))
-        self.assertEqual(self.queue.get(staging['jobId'])['status'], 'queued')
+        staging,_=submit(20,'staging')
+        later_small,_=submit(50)
+        self.assertEqual(store.next_for_node('cluster')['jobId'],later_small['jobId'])
+        self.assertIsNone(claim(staging,'cluster'))
+        self.assertIsNotNone(claim(later_small,'cluster'))
+        self.assertEqual(self.queue.get(large['jobId'])['status'],'queued')
+        self.assertEqual(self.queue.get(staging['jobId'])['status'],'queued')
+        self.queue.complete(medium['jobId'],{'claimToken':second_claim['claimToken'],'status':'succeeded','result':{}})
+        self.assertEqual(store.next_for_node('node-2')['jobId'],large['jobId'])
+        self.assertIsNotNone(claim(large,'node-2'))
+        self.assertEqual(self.queue.get(staging['jobId'])['status'],'queued')
+
+    def test_unowned_legacy_reference_job_remains_held(self):
+        job,_=self.store.submit(self.submission)
+        self.assertIsNone(self.store.next_for_node('cluster'))
+        self.assertIsNone(self.store.claim(job['jobId'],node_id='cluster',worker_id='worker',
+            worker_instance_id='instance',claim_request_id='unowned-legacy-claim'))
+        self.assertEqual(self.queue.get(job['jobId'])['status'],'queued')
 
     def test_candidate_inventory_racing_claims_do_not_share_a_slot(self):
         self.queue.per_node_slots = True
@@ -753,7 +916,8 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(store.list(), [])
 
     def test_reservation_identity_transition_and_public_redaction(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         with self.assertRaises(Conflict):
             self.store.update_phase(job["jobId"], "processing")
         with self.assertRaises(Conflict):
@@ -769,7 +933,8 @@ class ReferenceStoreTests(unittest.TestCase):
             self.store.get("unknown")
 
     def test_global_engine_lock_includes_legacy_treedar(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         self.reserve(job)
         legacy, _ = self.queue.submit({"requestId": "legacy", "environment": "staging", "profile": LEGACY_PROFILE})
         claim = self.store.get(job["jobId"], private=True)
@@ -782,7 +947,8 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(self.queue.get(legacy["id"])["status"], "queued")
 
     def test_restart_preserves_identity_and_holds_uncertain_engine(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         self.reserve(job)
         self.queue.claim({"workerId": "worker", "profiles": [PROFILE]})
         self.queue.close()
@@ -790,7 +956,7 @@ class ReferenceStoreTests(unittest.TestCase):
         self.queue.allowed_profiles.add(PROFILE)
         self.store = ReferenceStore(self.queue)
         self.assertEqual(self.store.get(job["jobId"])["phase"], "held")
-        self.assertFalse(self.store.submit(self.submission)[1])
+        self.assertFalse(prepare_reference_job(self.store, self.submission)[1])
         self.assertIsNone(self.queue.claim({"workerId": "worker", "profiles": [PROFILE]}))
 
     def test_acceptance_subsets_and_changed_receipt(self):
@@ -813,7 +979,8 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(accepted["job"]["status"], "running")
 
     def test_claim_replay_atomicity_binding_and_restart(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         kwargs = dict(node_id="cluster", worker_id="worker", worker_instance_id="instance-1", claim_request_id="claim-1")
         with ThreadPoolExecutor(max_workers=8) as pool:
             claims = list(pool.map(lambda _: self.store.claim(job["jobId"], **kwargs), range(8)))
@@ -834,7 +1001,8 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(self.store.claim(job["jobId"], **kwargs)["status"], "succeeded")
 
     def test_claim_transaction_rolls_back_queue_when_envelope_insert_fails(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         with self.queue._db() as db:
             db.execute("CREATE TRIGGER reject_claim BEFORE INSERT ON reference_claims BEGIN SELECT RAISE(ABORT,'test crash'); END")
         with self.assertRaises(Exception):
@@ -844,14 +1012,16 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.get(job["jobId"], private=True)["claimToken"])
 
     def test_unclaimed_execution_and_reservation_rejected(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         with self.assertRaises(Conflict):
             self.store.reserve(job["jobId"], self.fixture["transferRequest"], node_id="cluster")
         with self.assertRaises(Conflict):
             self.store.update_phase(job["jobId"], "fetching")
 
     def test_claim_respects_shared_priority_and_node_maintenance(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         self.queue.submit({"requestId": "priority", "environment": "production", "profile": LEGACY_PROFILE})
         kwargs = dict(node_id="cluster", worker_id="worker", worker_instance_id="instance", claim_request_id="claim-1")
         self.assertIsNone(self.store.claim(job["jobId"], **kwargs))
@@ -864,7 +1034,8 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(self.store.claim(job["jobId"], **kwargs)["jobId"], job["jobId"])
 
     def test_surviving_worker_terminal_result_recovers_without_engine_replay(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         self.reserve(job)
         self.store.update_phase(job["jobId"], "fetching")
         self.store.update_phase(job["jobId"], "processing")
@@ -914,7 +1085,8 @@ class ReferenceStoreTests(unittest.TestCase):
             self.store.set_result_manifest(job["jobId"], result)
 
     def test_outbox_durable_idempotency_backoff_and_no_secrets(self):
-        job, _ = self.store.submit(self.submission)
+        job, _ = prepare_reference_job(self.store, self.submission)
+        activate_reference_job(self.store, job)
         payload = {"jobId": job["jobId"], "generation": 1, "environment": "staging", "receiptId": "receipt-1"}
         self.assertTrue(self.store.enqueue_outbox("delivery_ack", "ack-1", payload))
         self.assertFalse(self.store.enqueue_outbox("delivery_ack", "ack-1", payload))

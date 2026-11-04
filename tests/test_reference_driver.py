@@ -1,5 +1,6 @@
 """Real durable components and NativeEngine with transport mocked at its edge."""
 import copy
+from datetime import datetime, timezone
 import hashlib
 import io
 import http.client
@@ -20,6 +21,7 @@ import zipfile
 
 from processing.node_gate import NodeGate
 from processing.prototype import Queue
+from processing.maintenance import Conflict
 from processing.reference_control import ReferenceControlAPI
 from processing.reference_driver import ReferenceDriver, DriverHeld, DriverWait, READINESS_TASK_CAP
 from processing.reference_engine_worker import ReferenceEngineWorker
@@ -27,6 +29,7 @@ from processing.reference_failure import FailureOutbox
 from processing.reference_protocol import manifest_sha256, validate_submission
 from processing.reference_store import ReferenceStore
 from processing.reference_transfer import BrokerClient, TransferResponseUnavailable
+from processing.source_range_transfer import source_version_for_manifest
 from processing.scratch_policy import ScratchLedger, PolicyConflict
 from processing.viewer_service import NativeEngine
 from processing.worker_outbox import WorkerOutbox
@@ -39,6 +42,7 @@ from tests.test_reference_results import ResultsFixture
 from processing.reference_engine_cleanup import EngineCacheCleanup
 from ops.native_node_fixture import NativeNodeFixture
 from tests.viewer_receipt_signer import SyntheticViewerSigner
+from tests.reference_activation_fixture import prepare_reference_job, activate_reference_job
 
 TOKEN = 'synthetic-operational-worker-token'
 VIEWER = 'synthetic-operational-viewer-token'
@@ -92,6 +96,11 @@ class ReferenceDriverTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.patches = []
+        # Synthetic post-activation mechanics only: future bound-grant implementation is absent.
+        for target, method in ((ReferenceStore, '_activation_bound_grant_ready'), (ReferenceDriver, '_require_activation_bound_grant')):
+            mocked = patch.object(target, method, return_value=True if target is ReferenceStore else None)
+            mocked.start()
+            self.patches.append(mocked)
         self.gate_patch = patch('processing.node_gate.canonical_gate_path', return_value=self.root / 'gate')
         self.gate_patch.start()
         self.queue = Queue(self.root / 'queue', reference_enabled=True)
@@ -135,8 +144,9 @@ class ReferenceDriverTests(unittest.TestCase):
         self.temp.cleanup()
 
     def make_driver(self, **kwargs):
+        state_path = kwargs.pop('state_path', self.root / 'driver.sqlite')
         driver = ReferenceDriver(self.worker, self.ledger, self.outbox, self.broker,
-            'https://coordinator.invalid:9443', TOKEN, state_path=self.root / 'driver.sqlite', ssl_context=self.context,
+            'https://coordinator.invalid:9443', TOKEN, state_path=state_path, ssl_context=self.context,
             output_budget=1024 * 1024, transfer_ttl=240, safety_floor=1024, failure_outbox=self.failures,
             worker_instance_id='instance', **kwargs)
         driver._request = self.request
@@ -179,6 +189,7 @@ class ReferenceDriverTests(unittest.TestCase):
     def submit(self, *, environment='staging', contents=(b'arbitrary-photo-data',)):
         raw = copy.deepcopy(self.fixture['submission'])
         raw['submissionId'] = str(uuid.uuid4())
+        raw['manifest']['id'] = 'dataset-' + raw['submissionId']
         objects = []
         for index, content in enumerate(contents):
             object_id = 'image-' + raw['submissionId'] + '-' + str(index)
@@ -189,7 +200,9 @@ class ReferenceDriverTests(unittest.TestCase):
             inputCounts=dict(images=len(objects), lidarObjects=0, points=0))
         raw['manifest']['sha256'] = manifest_sha256(raw['manifest'])
         normalized = validate_submission(raw, environment=environment, capability_fingerprint=raw['capabilityFingerprint'])
-        return self.store.submit(normalized)[0]
+        job, _ = prepare_reference_job(self.store, normalized)
+        activate_reference_job(self.store, job)
+        return job
 
     def test_no_transfer_or_engine_start_without_scratch_reservation(self):
         job = self.submit()
@@ -249,8 +262,11 @@ class ReferenceDriverTests(unittest.TestCase):
         for job in self.store.list(private=True):
             if job['phase'] == 'awaiting_transfer' and self.store.private_transfer_grant(job['jobId']) is None:
                 request = job['transferRequest']
-                self.store.receive_transfer_grant(job['jobId'], dict(request, jobId=job['jobId'], environment=job['environment'],
-                    objectIds=[obj['id'] for obj in job['submission']['manifest']['objects']], token='synthetic-transfer-token'))
+                grant = dict(request, jobId=job['jobId'], environment=job['environment'],
+                    objectIds=[obj['id'] for obj in job['submission']['manifest']['objects']], token='synthetic-transfer-token')
+                if request.get('protocol') == 'source-range-v2':
+                    grant['expiresAt'] = datetime.fromtimestamp(time.time() + 30, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+                self.store.receive_transfer_grant(job['jobId'], grant)
 
     def advance(self, job, target, maximum=80):
         for _ in range(maximum):
@@ -317,18 +333,151 @@ class ReferenceDriverTests(unittest.TestCase):
             self.assertIsNone(self.store.private_transfer_grant(job['jobId']))
             response = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/transfer-grants',
                 {'Authorization': 'Bearer ' + VIEWER}, json.dumps(grant).encode(), protected_transport=True)
-            self.assertEqual(response.status, 200)
-            self.assertTrue(response.body['accepted'])
-            replay = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/transfer-grants',
-                {'Authorization': 'Bearer ' + VIEWER}, json.dumps(grant).encode(), protected_transport=True)
-            self.assertEqual(replay.status, 200)
-            self.assertEqual(replay.body, response.body)
+            # The legacy environment bearer cannot control principal-owned jobs.
+            # Exercise grant persistence directly only as synthetic future-boundary behavior.
+            self.assertEqual(response.status, 404)
+            self.assertIsNone(self.store.private_transfer_grant(job['jobId']))
+            accepted = self.store.receive_transfer_grant(job['jobId'], grant)
+            self.assertTrue(accepted['accepted'])
+            self.assertEqual(self.store.receive_transfer_grant(job['jobId'], grant), accepted)
             changed = dict(grant, token='different-synthetic-transfer-token')
-            conflict = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/transfer-grants',
-                {'Authorization': 'Bearer ' + VIEWER}, json.dumps(changed).encode(), protected_transport=True)
-            self.assertEqual(conflict.status, 409)
+            with self.assertRaises(Conflict):
+                self.store.receive_transfer_grant(job['jobId'], changed)
             self.advance(job, 'awaiting_acceptance')
             self.assertEqual(download.call_count, 1)
+
+    def test_source_range_v2_uses_configured_broker_tls_context(self):
+        with patch('processing.source_range_transfer.SourceRangeClient') as range_client:
+            self.make_driver(source_range_v2_enabled=True,
+                             state_path=self.root / 'driver-source-range-tls.sqlite')
+        self.assertIs(range_client.call_args.kwargs['ssl_context'], self.context)
+        self.assertTrue(self.context.check_hostname)
+        self.assertEqual(self.context.verify_mode, ssl.CERT_REQUIRED)
+
+    def test_source_range_v2_rejects_broker_context_if_verification_disabled(self):
+        self.broker.ssl_context = ssl._create_unverified_context()
+        with self.assertRaisesRegex(ValueError, 'TLS verification'):
+            self.make_driver(source_range_v2_enabled=True,
+                             state_path=self.root / 'driver-source-range-bad-tls.sqlite')
+
+    def test_source_range_v2_reservation_persists_and_fetches_through_range_client(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-v2.sqlite')
+        job = self.submit(contents=(b'v2-queued-photo',))
+        downloads = []
+        def synthetic_download(*, grant, object_id, destination, grant_provider=None):
+            downloads.append((grant.identity.source_version, object_id))
+            Path(destination).write_bytes(self.contents[object_id])
+            return Path(destination)
+        with patch.object(self.driver.source_range_client, 'download_object', side_effect=synthetic_download):
+            self.advance(job, 'awaiting_acceptance')
+        persisted = self.store.get(job['jobId'], private=True)
+        transfer = persisted['transferRequest']
+        self.assertEqual(transfer['protocol'], 'source-range-v2')
+        self.assertEqual(transfer['sourceVersion'], source_version_for_manifest(persisted['submission']['manifest']))
+        self.assertEqual(transfer['objectIds'], [obj['id'] for obj in persisted['submission']['manifest']['objects']])
+        self.assertEqual(downloads, [(transfer['sourceVersion'], transfer['objectIds'][0])])
+
+    def test_expired_source_grant_is_durably_renewed_and_ack_replays_without_new_grant(self):
+        from processing.source_range_transfer import SourceRenewalUnavailable
+        state_path = self.root / 'driver-source-range-renewal.sqlite'
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=state_path)
+        job = self.submit(contents=(b'renewal-test-photo',))
+        self.advance(job, 'fetching')
+        with self.driver._db() as db:
+            row = db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+        data = json.loads(row[0])
+        claim = data['claim']
+        previous = data['grant']
+        previous['expiresAt'] = '1970-01-01T00:00:00.000Z'
+        data['grant'] = previous
+        self.driver._save(job['jobId'], 'fetching', data)
+        successor = dict(previous, expiresAt=claim['transferRequest']['expiresAt'], token='renewed-synthetic-token')
+        renewals, acknowledgements = [], []
+
+        def renew_lost(request):
+            renewals.append(request)
+            raise SourceRenewalUnavailable('synthetic renewal response loss')
+
+        def renew_success(request):
+            renewals.append(request)
+            return 200, {'protocol': 'source-range-v2-renewal', 'renewalId': request['renewalId'],
+                'sequence': request['sequence'], 'previousGrantSha256': request['previousGrantSha256'],
+                'grant': successor}
+
+        def acknowledge_lost(request):
+            acknowledgements.append(request)
+            raise SourceRenewalUnavailable('synthetic ack response loss')
+
+        def acknowledge_success(request):
+            acknowledgements.append(request)
+            return 200, {'protocol': 'source-range-v2-renewal-ack', 'renewalId': request['renewalId'],
+                'sequence': request['sequence'], 'grantSha256': request['grantSha256']}
+
+        def download(*, grant, object_id, destination, grant_provider=None):
+            self.assertEqual(grant.token, 'renewed-synthetic-token')
+            self.assertTrue(callable(grant_provider))
+            Path(destination).write_bytes(self.contents[object_id])
+            return Path(destination)
+
+        with patch.object(self.driver.source_range_client, 'renew_grant', side_effect=renew_lost):
+            first = self.driver.step()
+            self.assertEqual(first['state'], 'retry_wait')
+            with self.driver._db() as db:
+                row = db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+            pending = json.loads(row[0])
+            self.assertEqual(pending['sourceRenewal']['phase'], 'request_pending')
+            request_intent = pending['sourceRenewal']['request']
+
+        # Reconstruct the driver to model process loss after the renewal POST.
+        self.driver = self.make_driver(source_range_v2_enabled=True, state_path=state_path)
+        with patch.object(self.driver.source_range_client, 'renew_grant', side_effect=renew_success), \
+             patch.object(self.driver.source_range_client, 'acknowledge_grant_renewal', side_effect=acknowledge_lost):
+            second = self.driver.step()
+            self.assertEqual(second['state'], 'retry_wait')
+            with self.driver._db() as db:
+                row = db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+            pending = json.loads(row[0])
+            self.assertEqual(pending['sourceRenewal']['phase'], 'ack_pending')
+            self.assertEqual(pending['sourceRenewal']['successorGrant'], successor)
+            self.assertEqual(pending['grant'], previous)
+
+        # Reconstruct again to verify the durable ack intent, not a new renewal, is replayed.
+        self.driver = self.make_driver(source_range_v2_enabled=True, state_path=state_path)
+        with patch.object(self.driver.source_range_client, 'acknowledge_grant_renewal', side_effect=acknowledge_success), \
+             patch.object(self.driver.source_range_client, 'download_object', side_effect=download):
+            third = self.driver.step()
+            self.assertEqual(third['state'], 'fetching')
+        self.assertEqual(len(renewals), 2)
+        self.assertEqual(renewals[0], request_intent)
+        self.assertEqual(renewals[1], request_intent)
+        self.assertEqual(len(acknowledgements), 2)
+        self.assertEqual(acknowledgements[0], acknowledgements[1])
+        with self.driver._db() as db:
+            data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+        self.assertEqual(data['grant'], successor)
+        self.assertEqual(data['sourceRenewalSequence'], 1)
+        self.assertNotIn('sourceRenewal', data)
+
+    def test_mid_transfer_renewal_wait_and_rejection_keep_driver_state(self):
+        from processing.source_range_transfer import validate_source_grant
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-mid-transfer.sqlite')
+        job = self.submit(contents=(b'mid-range-renewal-photo',))
+        self.advance(job, 'fetching')
+        with self.driver._db() as db:
+            row = db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+        data = json.loads(row[0])
+        grant = validate_source_grant(data['grant'], job=data['claim'])
+        cases = ((DriverWait('synthetic renewal outage'), 'retry_wait', 'source_renewal_endpoint_unavailable'),
+                 (DriverHeld('synthetic renewal conflict'), 'held', 'source_renewal_response_invalid'))
+        for renewal_error, expected_state, expected_reason in cases:
+            with patch.object(self.driver, '_source_range_grant', side_effect=[grant, renewal_error]), \
+                 patch.object(self.driver.source_range_client, 'download_object',
+                    side_effect=lambda **kwargs: kwargs['grant_provider']()):
+                result = self.driver.step()
+            self.assertEqual((result['state'], result.get('reason')), (expected_state, expected_reason))
 
     def test_authority_version_and_active_native_tasks_prevent_claim(self):
         job = self.submit()
@@ -1029,7 +1178,7 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertFalse((jobs / 'synthetic-reservation').exists())
 
     @unittest.skipUnless(sys.platform.startswith('linux'), 'exact-object cleanup requires Linux')
-    def test_opted_in_background_cleanup_removes_only_accepted_result_after_receipt(self):
+    def test_background_cleanup_retains_result_until_viewer_import_confirmation(self):
         job = self.submit()
         self.advance(job, 'awaiting_acceptance')
         private = self.store.get(job['jobId'], private=True)
@@ -1045,7 +1194,7 @@ class ReferenceDriverTests(unittest.TestCase):
             trusted_viewer_receipt_keys=signer.trusted_keys)
         self.driver.cleanup_executor = ScratchCleanupExecutor(self.ledger)
         self.driver.step()
-        self.assertEqual(len(list(self.scratch.glob('jobs/*/all.zip'))), 0)
+        self.assertEqual(len(list(self.scratch.glob('jobs/*/all.zip'))), 1)
         self.assertEqual(len(list(self.scratch.glob('jobs/*/*.input'))), 1)
         self.assertFalse(any(kind in ('remove','cancel') for kind, _ in self.transport.calls))
 
@@ -1319,19 +1468,20 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
         payload = dict(acceptance=acceptance, viewerReceipt=self.viewer_signer.receipt(acceptance, result))
         response = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/acceptance',
             {'Authorization': 'Bearer ' + VIEWER}, json.dumps(payload).encode(), protected_transport=True)
-        if response.status != 200:
-            raise AssertionError('synthetic Viewer acceptance was rejected')
-        return response.body
+        # There is no principal-authenticated acceptance route yet. The legacy
+        # environment bearer must be denied; store call simulates future wiring.
+        self.assertEqual(response.status, 404)
+        return self.store.accept(job['jobId'], acceptance, viewer_receipt=payload['viewerReceipt'],
+            trusted_viewer_receipt_keys=self.viewer_signer.trusted_keys)
 
     def accept_legacy_receipt(self, job, *, full):
         response = self.api.handle('POST', '/ltds/v1/jobs/' + job['jobId'] + '/acceptance',
             {'Authorization': 'Bearer ' + VIEWER}, json.dumps(self.acceptance(job, full=full)).encode(),
             protected_transport=True)
-        if response.status != 200:
-            raise AssertionError('synthetic legacy Viewer acceptance was rejected')
-        return response.body
+        self.assertEqual(response.status, 404)
+        return self.store.accept(job['jobId'], self.acceptance(job, full=full))
 
-    def test_actual_native_http_cache_removed_once_only_after_full_viewer_ack_with_inputs_retained(self):
+    def test_actual_native_http_cache_is_retained_after_full_viewer_copy_ack(self):
         job = self.submit(contents=(b'abc',))
         self.advance(job, 'awaiting_acceptance')
         for _ in range(2):
@@ -1343,11 +1493,11 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
         self.assertEqual(self.node_fixture.counts().get('remove', 0), 0)
         self.accept_viewer_copy(job, full=True)
         self.driver.step()
-        self.assertEqual(self.node_fixture.counts().get('remove', 0), 1)
-        self.assertIsNone(self.native.read('/task/' + job['jobId'] + '/info', missing=True))
+        self.assertEqual(self.node_fixture.counts().get('remove', 0), 0)
+        self.assertEqual(self.native.read('/task/' + job['jobId'] + '/info')['status']['code'], 40)
         for _ in range(2):
             self.driver.step()
-        self.assertEqual(self.node_fixture.counts().get('remove', 0), 1)
+        self.assertEqual(self.node_fixture.counts().get('remove', 0), 0)
         inputs = list(self.scratch.glob('jobs/*/*.input'))
         self.assertEqual(len(inputs), 1)
         self.assertEqual(inputs[0].read_bytes(), b'abc')

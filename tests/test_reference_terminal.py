@@ -12,19 +12,27 @@ from processing.reference_protocol import validate_submission, ProtocolError, ca
 from processing.reference_failure import FailureReceiver, FailureOutbox, make_failure
 from processing.reference_terminal import TerminalService
 from processing.maintenance import Conflict
+from tests.reference_activation_fixture import prepare_reference_job, activate_reference_job
 
 
 class ReferenceTerminalTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.queue = Queue(self.root / 'coordinator', reference_enabled=True)
+        self.addCleanup(lambda: self.queue.close())
+        # Synthetic post-activation terminal tests; no real bound-grant contract exists.
+        ready = patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=True)
+        ready.start()
+        self.addCleanup(ready.stop)
         self.store = ReferenceStore(self.queue)
         self.fixture = json.loads((Path(__file__).resolve().parents[1] /
             'contracts/reference-v1.contract.json').read_text())
         raw = self.fixture['submission']
-        self.job = self.store.submit(validate_submission(raw, environment='staging',
-            capability_fingerprint=raw['capabilityFingerprint']))[0]
+        self.job, _ = prepare_reference_job(self.store, validate_submission(raw, environment='staging',
+            capability_fingerprint=raw['capabilityFingerprint']))
+        activate_reference_job(self.store, self.job)
         self.identity = dict(node_id='cluster', worker_id='worker',
             worker_instance_id='instance', claim_request_id='claim-1')
         claim = self.store.claim(self.job['jobId'], **self.identity)
@@ -41,10 +49,6 @@ class ReferenceTerminalTests(unittest.TestCase):
         outbox.persist(self.failure, engine_terminal=True)
         delivery = outbox.claim_next()
         self.envelope = {key: delivery[key] for key in ('outboxId', 'payloadSha256', 'payload')}
-
-    def tearDown(self):
-        self.queue.close()
-        self.temp.cleanup()
 
     def confirm(self):
         self.receiver.receive(self.envelope, **self.identity)
@@ -66,6 +70,13 @@ class ReferenceTerminalTests(unittest.TestCase):
         self.store = ReferenceStore(self.queue)
         self.receiver = FailureReceiver(self.store)
         self.terminal = TerminalService(self.store)
+
+    def test_unavailable_bound_grant_still_blocks_runtime_claims(self):
+        # The surrounding fixture simulates future grant readiness for terminal
+        # tests; the actual store must continue to refuse claims without it.
+        identity = {k: v for k, v in self.identity.items() if k != 'claim_token'}
+        with patch.object(ReferenceStore, '_activation_bound_grant_ready', return_value=False):
+            self.assertIsNone(self.store.claim(self.job['jobId'], **identity))
 
     def test_exact_failure_outcome_and_durable_receipt_replay(self):
         self.confirm()
@@ -196,8 +207,9 @@ class ReferenceTerminalTests(unittest.TestCase):
         self.accept()
         raw = copy.deepcopy(self.fixture['submission'])
         raw['submissionId'] = str(uuid.uuid4())
-        other = self.store.submit(validate_submission(raw, environment='staging',
-            capability_fingerprint=raw['capabilityFingerprint']))[0]
+        other, _ = prepare_reference_job(self.store, validate_submission(raw, environment='staging',
+            capability_fingerprint=raw['capabilityFingerprint']))
+        activate_reference_job(self.store, other)
         other_identity = {**self.identity, 'claim_request_id': 'claim-2'}
         del other_identity['claim_token']
         claim = self.store.claim(other['jobId'], **other_identity)

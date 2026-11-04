@@ -144,6 +144,9 @@ class BrokerClient:
         if type(enable_ranges) is not bool:
             raise ValueError('explicit range setting required')
         self.origin = origin.rstrip("/")
+        # The range client must use the same verified broker trust and client
+        # credentials as the original object-transfer client.
+        self.ssl_context = context
         self.clock, self.timeout = clock, timeout
         self.max_response_bytes = max_response_bytes
         self.enable_ranges = enable_ranges

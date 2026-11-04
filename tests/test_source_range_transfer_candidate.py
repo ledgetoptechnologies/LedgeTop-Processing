@@ -11,8 +11,8 @@ from contextlib import closing
 from unittest.mock import patch
 
 from processing.source_range_transfer import (
-    CHUNK_BYTES, OBJECT_PREFIX, REQUEST_HEADER, SourceIdentity, SourceObject,
-    SourceRangeClient, TransferError, _request_id, _validator, build_source_transfer_request,
+    CHUNK_BYTES, MAX_RENEWAL_BODY_BYTES, OBJECT_PREFIX, REQUEST_HEADER, SourceIdentity, SourceObject,
+    SourceRangeClient, SourceRenewalInvalid, TransferError, _request_id, _validator, build_source_transfer_request,
     source_version_for_manifest, validate_source_grant,
 )
 from processing import reference_protocol as p
@@ -161,22 +161,6 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
             used = db.execute("SELECT attempts_used,attempt_budget FROM source_budgets").fetchone()
         self.assertEqual(used, (3, 3))
 
-    def test_network_attempt_budget_caps_pending_range_replays(self):
-        self.transfer["attemptBudget"] = 3
-        def fail_second(request, *, timeout):
-            if request.get_header("Range").startswith(f"bytes={CHUNK_BYTES}-"):
-                raise OSError("synthetic first retry failure")
-            return self.opener(request, timeout=timeout)
-        with self.assertRaises(TransferError):
-            self.make_client(fail_second).download_object(grant=self.grant(), object_id=self.obj.id,
-                destination=self.root / "photo.bin")
-        with self.assertRaises(TransferError):
-            self.make_client().download_object(grant=self.grant("rotated"), object_id=self.obj.id,
-                destination=self.root / "photo.bin")
-        with closing(sqlite3.connect(self.root / "progress.sqlite")) as db:
-            used = db.execute("SELECT attempts_used,attempt_budget FROM source_budgets").fetchone()
-        self.assertEqual(used, (3, 3))
-
     def test_committed_corruption_or_missing_partial_holds(self):
         def fail_second(request, *, timeout):
             if request.get_header("Range").startswith(f"bytes={CHUNK_BYTES}-"):
@@ -253,11 +237,81 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
         retried.download_object(grant=self.grant("rotated"), object_id=self.obj.id,
                                 destination=self.root / "photo.bin")
         self.assertEqual((self.root / "photo.bin").read_bytes(), self.body)
-        # The interrupted chunk reuses its intent ID and consumes budget only once.
+
+    def test_short_local_range_write_is_never_committed_and_replays_exact_intent(self):
+        client = self.make_client()
+        original_fdopen = os.fdopen
+        calls = 0
+        calls_seen = []
+
+        class ShortWriter:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return self.stream.__exit__(exc_type, exc, traceback)
+
+            def write(self, data):
+                return self.stream.write(data[:len(data) // 2])
+
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+
+        def short_once(fd, mode, buffering=-1):
+            nonlocal calls
+            stream = original_fdopen(fd, mode, buffering)
+            calls += 1
+            try:
+                opened_path = os.readlink('/proc/self/fd/' + str(fd))
+            except OSError:
+                opened_path = None
+            calls_seen.append((mode, buffering, opened_path))
+            # The first fdopen is the exclusive lock, the second reconciles
+            # the partial file, and the third performs the range write.
+            return ShortWriter(stream) if calls == 3 else stream
+
+        with patch('processing.source_range_transfer.os.fdopen', side_effect=short_once):
+            try:
+                client.download_object(grant=self.grant(), object_id=self.obj.id,
+                    destination=self.root / 'short-write.bin')
+            except TransferError as error:
+                self.assertRegex(str(error), 'short source range file write')
+            else:
+                self.fail(f'short write was not rejected; fdopen calls: {calls_seen}')
+        part = next(self.root.glob('.source-range-*.part'))
+        self.assertEqual(part.stat().st_size, CHUNK_BYTES // 2)
+        with closing(sqlite3.connect(self.root / 'progress.sqlite')) as db:
+            self.assertEqual(db.execute('SELECT committed_bytes FROM source_objects').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT start,state FROM source_ranges').fetchone(), (0, 'intent'))
+        first_request_id = self.calls[0][0].get_header(REQUEST_HEADER)
+
+        # A fresh client truncates uncommitted bytes, replays the same range id,
+        # then commits only after the full write and fsync.
+        target = self.make_client().download_object(grant=self.grant('renewed-token'),
+            object_id=self.obj.id, destination=self.root / 'short-write.bin')
+        self.assertEqual(target.read_bytes(), self.body)
+        self.assertEqual(self.calls[1][0].get_header(REQUEST_HEADER), first_request_id)
+        with closing(sqlite3.connect(self.root / 'progress.sqlite')) as db:
+            self.assertEqual(db.execute('SELECT committed_bytes,published FROM source_objects').fetchone(),
+                (len(self.body), 1))
+        # The interrupted first chunk reuses its intent ID and consumes its
+        # byte/request budget only once; subsequent ranges are requested once.
+        self.assertEqual([(start, end) for _, start, end in self.calls], [
+            (0, CHUNK_BYTES - 1), (0, CHUNK_BYTES - 1),
+            (CHUNK_BYTES, 2 * CHUNK_BYTES - 1),
+            (2 * CHUNK_BYTES, len(self.body) - 1),
+        ])
+        self.assertEqual(self.calls[0][0].get_header(REQUEST_HEADER),
+                         self.calls[1][0].get_header(REQUEST_HEADER))
         second_range = [call for call in self.calls if call[1] == CHUNK_BYTES]
-        self.assertEqual(len(second_range), 2)
-        self.assertEqual(second_range[0][0].get_header("X-processing-request-id"),
-                         second_range[1][0].get_header("X-processing-request-id"))
+        self.assertEqual(len(second_range), 1)
+        with closing(sqlite3.connect(self.root / 'progress.sqlite')) as db:
+            budget = db.execute('SELECT requests_used,bytes_used,attempts_used FROM source_budgets').fetchone()
+        self.assertEqual(budget, (3, len(self.body), 4))
 
     def test_publish_before_partial_unlink_crash_is_cleaned_on_retry(self):
         target = self.root / "photo.bin"
@@ -338,6 +392,55 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
                 destination=self.root / "expired.bin")
         self.assertEqual(len(self.calls), 1)
 
+    def test_expired_grant_renews_between_ranges_without_changing_budget_identity(self):
+        grant = self.grant('old-token')
+        successor = self.grant('renewed-token', expiresAt='2035-06-01T00:00:00Z')
+        client = self.make_client()
+        original_commit = client._commit_range
+
+        def commit_and_expire(identity_key, object_id, request_id, start, length, digest):
+            original_commit(identity_key, object_id, request_id, start, length, digest)
+            if start == 0:
+                self.now = grant.expires
+
+        with patch.object(client, '_commit_range', side_effect=commit_and_expire):
+            target = client.download_object(grant=grant, object_id=self.obj.id,
+                destination=self.root / 'renewed.bin', grant_provider=lambda: successor)
+        self.assertEqual(target.read_bytes(), self.body)
+        self.assertEqual([call[0].get_header('Authorization') for call in self.calls],
+            ['Bearer old-token', 'Bearer renewed-token', 'Bearer renewed-token'])
+        with closing(sqlite3.connect(self.root / 'progress.sqlite')) as db:
+            self.assertEqual(db.execute('SELECT requests_used,bytes_used,attempts_used FROM source_budgets').fetchone(),
+                (3, len(self.body), 3))
+
+    def test_renewal_request_accepts_ten_thousand_max_length_ids_under_shared_cap(self):
+        captured = {}
+        response_body = p.canonical_json({'accepted': True})
+
+        def renewal_opener(request, *, timeout):
+            captured['url'] = request.full_url
+            captured['body'] = request.data
+            return Response(response_body, url=request.full_url, status=200, headers={
+                'Content-Type': 'application/json', 'Content-Length': str(len(response_body)),
+                'Content-Encoding': 'identity'})
+
+        ids = [f'{index:05d}-' + 'a' * 122 for index in range(10000)]
+        payload = {'protocol': 'source-range-v2-renewal', 'renewalId': 'renewal-1', 'sequence': 1,
+            'previousGrantSha256': 'a' * 64, 'previousGrant': {'objectIds': ids}}
+        client = self.make_client(renewal_opener)
+        self.assertEqual(client.renew_grant(payload), (200, {'accepted': True}))
+        self.assertEqual(captured['url'], 'https://broker.example' + '/api/processing/source-range/v2/grants/renew')
+        self.assertLessEqual(len(captured['body']), MAX_RENEWAL_BODY_BYTES)
+
+    def test_renewal_request_and_response_are_bounded(self):
+        called = []
+        client = self.make_client(lambda request, *, timeout: called.append(request))
+        payload = {'protocol': 'source-range-v2-renewal', 'renewalId': 'renewal-1', 'sequence': 1,
+            'previousGrantSha256': 'a' * 64, 'previousGrant': {'padding': 'x' * MAX_RENEWAL_BODY_BYTES}}
+        with self.assertRaises(SourceRenewalInvalid):
+            client.renew_grant(payload)
+        self.assertEqual(called, [])
+
     def test_origin_rejects_whitespace_controls_and_backslashes(self):
         for origin in ("https://broker.example/path", "https://broker.example\\evil",
                        "https://broker.example/\n", "https://broker.example\t", "https:// broker.example"):
@@ -382,6 +485,33 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
             with self.subTest(expiry=invalid_expiry), self.assertRaises(TransferError):
                 build_source_transfer_request(job, reservation_id='reserve-v2',
                     expires_at=invalid_expiry, nonce='nonce-v2')
+
+    def test_prepared_attempt_builder_grant_and_client_use_viewer_request_identity(self):
+        from processing.viewer_source_v2_reconcile_candidate import request_id as viewer_request_id
+        attempt='123e4567-e89b-42d3-a456-426614174000'
+        self.job['sourceViewerAttemptId']=attempt;self.transfer['viewerAttemptId']=attempt
+        built=build_source_transfer_request(self.job,reservation_id='reservation-1',
+            expires_at='2035-01-01T00:00:00.000Z',nonce='nonce-1',clock=lambda:100)
+        self.assertEqual(built['viewerAttemptId'],attempt)
+        grant=self.grant('z'*43)
+        self.assertEqual(grant.identity.canonical()['viewerAttemptId'],attempt)
+        self.make_client().download_object(grant=grant,object_id=self.obj.id,destination=self.root/'prepared.bin')
+        expected=viewer_request_id(grant.identity.canonical(),{'id':self.obj.id,'byteSize':self.obj.byte_size,'sha256':self.obj.sha256},0,CHUNK_BYTES)
+        self.assertEqual(self.calls[0][0].get_header('X-processing-request-id'),expected)
+        bad=self.raw_grant('z'*43);bad['viewerAttemptId']='123e4567-e89b-42d3-a456-426614174001'
+        with self.assertRaises(TransferError):validate_source_grant(bad,job=self.job,clock=lambda:100)
+        bad=self.raw_grant('z'*43);del bad['viewerAttemptId']
+        with self.assertRaises(TransferError):validate_source_grant(bad,job=self.job,clock=lambda:100)
+
+    def test_prepared_identity_cannot_reset_existing_legacy_ledger_budget(self):
+        client=self.make_client();legacy=self.grant();key,wire=client._identity_key(legacy.identity)
+        client._ensure_state(key,wire,self.obj,self.root/'partial',legacy)
+        attempt='123e4567-e89b-42d3-a456-426614174000'
+        self.job['sourceViewerAttemptId']=attempt;self.transfer['viewerAttemptId']=attempt
+        prepared=self.grant('z'*43);new_key,new_wire=client._identity_key(prepared.identity)
+        self.assertNotEqual(new_key,key)
+        with self.assertRaisesRegex(TransferError,'lineage requires reconciliation'):
+            client._ensure_state(new_key,new_wire,self.obj,self.root/'partial',prepared)
 
     def test_second_process_transfer_is_rejected_while_object_lock_is_held(self):
         entered, release = threading.Event(), threading.Event()

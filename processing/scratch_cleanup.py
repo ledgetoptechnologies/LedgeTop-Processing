@@ -22,6 +22,10 @@ class CleanupRefused(ValueError):
     """Identity or filesystem safety cannot be established; retain all evidence."""
 
 
+class ImportConfirmationUnavailable(CleanupRefused):
+    """Accepted copy exists, but durable Viewer import is not confirmed."""
+
+
 class CleanupUnsupported(RuntimeError):
     """Required Linux dirfd, no-replace rename, or directory durability unavailable."""
 
@@ -39,6 +43,11 @@ class ScratchCleanupExecutor:
     def __init__(self, ledger):
         self.ledger = ledger
         self.root = Path(ledger.root)
+
+    def _require_import_confirmation(self):
+        # A verified accepted copy is not evidence of Viewer model import.
+        # Retain results until an authenticated publication proof is available.
+        raise ImportConfirmationUnavailable('viewer_import_confirmation_unavailable')
 
     def _supported(self):
         if not sys.platform.startswith("linux"):
@@ -186,6 +195,7 @@ class ScratchCleanupExecutor:
         proves cleanup: reconciliation requires a matching durable verified fact
         and an unlinking/removed journal phase. No data or journal records expire.
         """
+        self._require_import_confirmation()
         rename = self._supported()  # Fail closed on Windows before creating a fence.
         self.ledger._owned_path(reservation_id, relative_path)
         if intent_token is None:
