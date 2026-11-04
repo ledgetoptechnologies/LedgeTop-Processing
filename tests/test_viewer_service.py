@@ -821,6 +821,45 @@ class ViewerServiceTests(unittest.TestCase):
                                                          'workerStopped': True})
                 self.engines['cluster'].fail = None
 
+    def _check_dispatch_corruption_holds(self, kind):
+        identifier = self.submit(count=2)
+        job_id = self.task(identifier)['job_id']
+        engine = self.engines['cluster']
+        initialize, upload = engine.initialize, engine.upload
+        def corrupt():
+            with self.queue._db() as db:
+                if kind == 'evidence':
+                    db.execute('UPDATE viewer_option_evidence SET sha256=? WHERE uuid=?', ('0'*64, identifier))
+                else:
+                    name = 'photo-00000.jpg' if kind == 'selected' else 'photo-00001.jpg'
+                    db.execute('UPDATE viewer_files SET path=? WHERE uuid=? AND name=?', ('../unsafe', identifier, name))
+        def initialize_then_corrupt(task):
+            return initialize(task)
+        def upload_then_corrupt(engine_id, item):
+            result = upload(engine_id, item)
+            if item['name'] == 'photo-00000.jpg': corrupt()
+            return result
+        engine.initialize = initialize_then_corrupt
+        engine.upload = upload_then_corrupt
+        # The held-row update persists before its full materialization notices
+        # corruption; the caller may see Conflict but the queue stays fenced.
+        with self.assertRaises(Conflict):
+            self.service.tick()
+        self.assertEqual(self.queue.get(job_id)['status'], 'held')
+        self.assertEqual(self.fleet.commits, [])
+        with self.queue._db() as db:
+            row = db.execute('SELECT stage,phase FROM viewer_tasks WHERE uuid=?', (identifier,)).fetchone()
+        self.assertEqual((row['stage'], row['phase']), ('held', 'held'))
+
+    def test_selected_input_corruption_holds_before_engine_commit(self):
+        self._check_dispatch_corruption_holds('selected')
+
+    def test_unrelated_input_corruption_holds_before_engine_commit(self):
+        self._check_dispatch_corruption_holds('unrelated')
+
+    def test_option_evidence_corruption_holds_before_engine_commit(self):
+        self._check_dispatch_corruption_holds('evidence')
+
     def test_lost_commit_ack_polls_known_uuid_without_replay_and_completes(self):
         identifier = self.submit()
         self.engines['cluster'].fail = 'commit'

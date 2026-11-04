@@ -654,6 +654,7 @@ class ViewerService:
                                    'profiles': [VIEWER_PROFILE], 'expectedJobId': task['job_id']})
             if not job:
                 return
+            commit_started = False
             try:
                 self.store.update(task['uuid'], stage='running', phase='claimed', node_id=node_id,
                                   claim_token=job['claimToken'], engine_uuid=str(uuid.uuid4()), error=None)
@@ -663,20 +664,22 @@ class ViewerService:
                 engine.initialize(task)
                 self.store.update(task['uuid'], phase='initialized')
                 for item in task['files']:
-                    self.store.update(task['uuid'], phase='upload_pending')
+                    self.store.update_upload_phase(task['uuid'], 'upload_pending', item)
                     engine.upload(task['engine_uuid'], item)
-                    self.store.update(task['uuid'], phase='uploaded')
+                    self.store.update_upload_phase(task['uuid'], 'uploaded', item)
                 self.store.update(task['uuid'], phase='commit_pending')
+                commit_started = True
                 engine.action('commit', task['engine_uuid'])
                 self.store.update(task['uuid'], phase='processing')
             except Exception:
-                current = self.store.task(task['uuid'])
-                if current['phase'] == 'commit_pending':
+                if commit_started:
                     # Exact assigned engine UUID lets us reconcile a lost commit
                     # ACK by reads. Never send commit again under uncertainty.
                     self.store.update(task['uuid'], error='commit_ack_uncertain')
                 else:
-                    self._hold(current, 'engine_submission_uncertain')
+                    # Use the previously captured identity: reloading the
+                    # task can itself fail when input/evidence is corrupt.
+                    self._hold(task, 'engine_submission_uncertain')
 
     def start(self):
         if self._thread:

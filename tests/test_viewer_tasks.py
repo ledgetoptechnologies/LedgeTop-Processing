@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 from processing.maintenance import Conflict
 from processing.prototype import PROFILE, Queue
@@ -43,6 +44,39 @@ class ViewerTaskStoreTests(unittest.TestCase):
 
     def claim(self, node='cluster'):
         return self.queue.claim({'workerId': 'viewer-broker', 'nodeId': node, 'profiles': [VIEWER_PROFILE]})
+
+    def test_upload_phase_writes_and_validates_selected_input(self):
+        self.initialize(); self.photo()
+        item = self.store.task(self.identifier)['files'][0]
+        self.assertIsNone(self.store.update_upload_phase(self.identifier, 'upload_pending', item))
+        self.assertEqual(self.store.task(self.identifier)['phase'], 'upload_pending')
+        self.store.update_upload_phase(self.identifier, 'uploaded', item)
+        self.assertEqual(self.store.update(self.identifier, phase='processing')['phase'], 'processing')
+        with self.assertRaises(ValueError):
+            self.store.update_upload_phase(self.identifier, 'processing', item)
+        changed = dict(item, sha256='0' * 64)
+        with self.assertRaises(Conflict):
+            self.store.update_upload_phase(self.identifier, 'upload_pending', changed)
+        self.assertEqual(self.store.task(self.identifier)['phase'], 'processing')
+
+    def test_upload_phase_does_not_resolve_every_file_in_10000_row_task(self):
+        self.initialize(); self.photo()
+        item = self.store.task(self.identifier)['files'][0]
+        with self.queue._db() as db:
+            row = db.execute('SELECT * FROM viewer_files WHERE uuid=?', (self.identifier,)).fetchone()
+            db.executemany('INSERT INTO viewer_files (uuid,name_key,name,path,bytes,sha256,is_photo) VALUES (?,?,?,?,?,?,?)',
+                ((self.identifier, f'photo-{i:05}.jpg', f'photo-{i:05}.jpg', row['path'], row['bytes'], row['sha256'], 1)
+                 for i in range(9999)))
+        # Mock only path resolution to count calls; all 10k metadata rows use
+        # the same owned file, avoiding a large disk/fsync benchmark.
+        with patch.object(Path, 'resolve', autospec=True, side_effect=lambda path, **_kw: path.absolute()) as resolve:
+            self.store.update_upload_phase(self.identifier, 'upload_pending', item)
+            selected_calls = resolve.call_count
+            resolve.reset_mock()
+            self.store.update(self.identifier, phase='uploaded')
+            full_calls = resolve.call_count
+        self.assertLess(selected_calls, 20)
+        self.assertGreaterEqual(full_calls, 10000)
 
     def test_initialization_is_durable_idempotent_and_settings_bound(self):
         self.initialize()

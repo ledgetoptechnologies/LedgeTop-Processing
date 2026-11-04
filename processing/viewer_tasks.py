@@ -454,7 +454,7 @@ class TaskStore:
                        (job_id, identifier))
             return {'success': True, 'uuid': identifier}
 
-    def _task(self, db, row):
+    def _task(self, db, row, *, only_name_key=None):
         directory = self._directory(row)
         value = dict(row)
         value['directory'] = str(directory)
@@ -480,7 +480,10 @@ class TaskStore:
                 raise OptionEvidenceConflict('option evidence changed') from None
             value['option_evidence']=definitions
         files = []
-        for item in db.execute('SELECT * FROM viewer_files WHERE uuid=? ORDER BY rowid', (row['uuid'],)):
+        query = ('SELECT * FROM viewer_files WHERE uuid=? ORDER BY rowid' if only_name_key is None else
+                 'SELECT * FROM viewer_files WHERE uuid=? AND name_key=?')
+        parameters = (row['uuid'],) if only_name_key is None else (row['uuid'], only_name_key)
+        for item in db.execute(query, parameters):
             item = dict(item)
             target = directory / item['path']
             if target.parent != directory or target.resolve() != target:
@@ -573,7 +576,10 @@ class TaskStore:
             db.execute("UPDATE viewer_tasks SET stage='held',phase='held',error='operator_resolved',updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
                 (row['uuid'],))
 
-    def update(self, identifier, **fields):
+    def update(self, identifier, *, _upload_item=None, **fields):
+        if _upload_item is not None and (set(fields) != {'phase'} or
+                fields['phase'] not in ('upload_pending', 'uploaded') or not isinstance(_upload_item, dict)):
+            raise ValueError('single input validation only supports upload phases')
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
                    'progress', 'output_lines', 'archive_path'}
         if not fields or not set(fields) <= allowed:
@@ -621,10 +627,25 @@ class TaskStore:
                         or not path.is_file() or path.is_symlink()):
                     raise ValueError('owned regular result archive required')
                 fields['archive_path'] = str(path)
+            if _upload_item is not None:
+                key = self._filename(_upload_item.get('name'))
+                checked = self._task(db, row, only_name_key=key)['files']
+                if len(checked) != 1 or any(checked[0].get(field) != _upload_item.get(field)
+                        for field in ('name', 'name_key', 'path', 'bytes', 'sha256', 'is_photo')):
+                    raise Conflict('input identity changed during dispatch')
             assignments = ','.join(field + '=?' for field in fields)
             db.execute('UPDATE viewer_tasks SET ' + assignments + ',updated_at=CURRENT_TIMESTAMP WHERE uuid=?',
                        (*fields.values(), identifier))
-        return self.task(identifier)
+        if _upload_item is None:
+            return self.task(identifier)
+
+    def update_upload_phase(self, identifier, phase, item):
+        """Write a dispatch phase and validate the one input being sent.
+
+        Unlike update(), this intentionally does not validate unrelated input
+        paths. The caller must fully validate the task again before commit.
+        """
+        self.update(identifier, _upload_item=item, phase=phase)
 
     def info(self, identifier):
         try:
