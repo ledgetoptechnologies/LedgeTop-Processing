@@ -17,6 +17,7 @@ import uuid
 import zipfile
 
 from processing.maintenance import Conflict
+from processing.config import ProcessingNode
 from processing.odx_smoke_worker import SmokeError
 from processing.prototype import PROFILE, VIEWER_PROFILE, Queue
 from processing.viewer_service import EngineUnavailable, ViewerService
@@ -151,6 +152,7 @@ class ViewerServiceTests(unittest.TestCase):
         self.engines = {name: FakeEngine(name, self.fleet) for name in ('cluster', 'main')}
         self.busy = {}
         self.unavailable = set()
+        self.live_limits = {'cluster': 1000}
         self.option_catalog = [dict(item) for item in OPTIONS]
         self.catalog_ready = True
         self.make_queue_service()
@@ -168,9 +170,9 @@ class ViewerServiceTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def probe(self, role, origin, token):
-        node = 'cluster' if role == 'local' else 'main'
+        node = role
         return {'ready': node not in self.unavailable,
-                'maxImages': 1000 if node == 'cluster' else None,
+                'maxImages': self.live_limits.get(node),
                 'taskQueueCount': self.busy.get(node, sum(x.startswith(node + ':') for x in self.fleet.active))}
 
     def initialize(self, *, environment='production', options=None):
@@ -216,6 +218,28 @@ class ViewerServiceTests(unittest.TestCase):
         with patch.object(self.service, 'options', return_value=[]):
             capabilities = self.service.capabilities()
         self.assertEqual(capabilities['maxParallelTasks'], 2)
+
+    def test_dynamic_ordered_third_node_receives_jobs_between_small_and_main_limits(self):
+        self.service.close()
+        self.queue.close()
+        self.config.processing_nodes = (
+            ProcessingNode('cluster', self.config.local_node_url, self.config.local_node_token, 20 * 1024**3),
+            ProcessingNode('middle', 'http://synthetic-middle.invalid:3000', 'private-middle', None),
+            ProcessingNode('main', self.config.main_node_url, self.config.main_node_token, None),
+        )
+        self.live_limits = {'cluster': 2, 'middle': 4, 'main': None}
+        self.engines = {name: FakeEngine(name, self.fleet) for name in ('cluster', 'middle', 'main')}
+        self.queue = Queue(self.root / 'state', node_ids=('cluster', 'middle', 'main'),
+                           treedar_node_ids=('main',), viewer_enabled=True)
+        self.service = ViewerService(self.queue, self.config, engines=self.engines, probe=self.probe)
+        self.service._catalog = lambda: {'ready': True, 'commonOptions': [dict(item) for item in OPTIONS]}
+        identifier = self.submit(count=3)
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['node_id'], 'middle')
+        self.assertFalse(self.engines['cluster'].calls)
+        self.assertTrue(self.engines['middle'].calls)
+        self.assertFalse(self.engines['main'].calls)
+        self.assertEqual(self.service.capabilities()['maxParallelTasks'], 3)
 
     def test_provider_queue_count_includes_queued_running_and_held_jobs(self):
         identifier = self.submit()

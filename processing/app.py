@@ -8,13 +8,26 @@ import signal
 import sys
 import threading
 
-from .config import Config, from_environment
-from .policy import plan
+from .config import Config, ProcessingNode, from_environment
+from .policy import plan_ordered_nodes
 from .provider import probe_node
 from .prototype import Queue, Conflict, VIEWER_PROFILE
 from .options import catalog
 
 MAX_BODY = 8192
+
+
+def _node_configs(config):
+    configured = getattr(config, 'processing_nodes', ())
+    if configured:
+        return tuple(configured)
+    if hasattr(config, 'node_endpoints'):
+        return tuple(config.node_endpoints)
+    return (
+        ProcessingNode('cluster', config.local_node_url, config.local_node_token,
+                       config.local_max_input_bytes),
+        ProcessingNode('main', config.main_node_url, config.main_node_token),
+    )
 
 
 def make_handler(config: Config):
@@ -86,9 +99,22 @@ def make_handler(config: Config):
                 return False
             return True
 
-        def _nodes(self) -> tuple[dict, dict]:
-            return (probe_node("local", config.local_node_url, config.local_node_token),
-                    probe_node("main", config.main_node_url, config.main_node_token))
+        def _nodes(self) -> list[dict]:
+            result = []
+            for node in _node_configs(config):
+                snapshot = {**probe_node(node.id, node.url, node.token), 'id': node.id}
+                if node.id == 'cluster':
+                    live_max = snapshot.get('maxImages')
+                    snapshot['maxImages'] = min(live_max, config.local_max_photos) if type(live_max) is int else config.local_max_photos
+                if node.max_input_bytes is not None:
+                    snapshot['maxInputBytes'] = node.max_input_bytes
+                if queue is not None:
+                    state = queue.get_node(node.id)
+                    if state:
+                        snapshot['state'] = state['state']
+                        snapshot['maintenanceState'] = state['maintenanceState']
+                result.append(snapshot)
+            return result
 
         def do_GET(self):
             if facade and facade.handle(self):
@@ -141,9 +167,7 @@ def make_handler(config: Config):
                                   "viewerEnabled": config.viewer_enabled})
             elif self.path == '/v1/options':
                 if self._authorized(observer=True):
-                    snapshot = catalog([
-                        ('local', config.local_node_url, config.local_node_token),
-                        ('main', config.main_node_url, config.main_node_token)])
+                    snapshot = catalog([(node.id, node.url, node.token) for node in _node_configs(config)])
                     self._reply(200, {'mode': 'engine_option_discovery', 'executesWork': False,
                         'viewerNativeApiEnabled': config.viewer_enabled,
                         'viewerProviderReady': config.viewer_enabled and snapshot['ready'],
@@ -233,11 +257,14 @@ def make_handler(config: Config):
             except (ValueError, TypeError, RecursionError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 self._reply(400, {"error": "invalid_request", "detail": str(exc)[:160]})
                 return
-            local, main = self._nodes()
-            decision = plan(photos, size, local, main,
-                            config.local_max_photos, config.local_max_input_bytes)
+            nodes = self._nodes()
+            decision = plan_ordered_nodes(photos, size, nodes)
+            if decision['decision'] == 'node':
+                node_id = decision['nodeId']
+                decision = {'decision': 'local' if node_id == 'cluster' else node_id,
+                            'nodeId': node_id, 'reason': 'first_available_eligible_node'}
             self._reply(200, {"mode": "routing_probe", "executesWork": False,
-                              **decision, "nodes": [local, main]})
+                              **decision, "nodes": nodes})
 
     return Handler
 

@@ -19,6 +19,20 @@ responses expose `allowedProfiles`; the queue checks eligibility atomically when
 claiming. Omitting TreeDar eligibility preserves older fixture configurations,
 which permit TreeDar on their configured nodes.
 
+The Viewer-compatible dispatcher and read-only `/v1/plan` probe accept up to
+eight ordered node IDs. Set `PROCESSING_PROTOTYPE_NODE_IDS=cluster,middle,main`
+to prefer the small cluster, then an intermediate node, then main. For each ID,
+configure `PROCESSING_NODE_<ID>_URL` and `PROCESSING_NODE_<ID>_TOKEN` (uppercase
+the ID and replace punctuation with underscores); `_MAX_INPUT_BYTES` is an
+optional per-node ceiling. The legacy `LOCAL_NODE_*` and `MAIN_NODE_*` names
+remain supported for cluster and main. All configured nodes participate in the
+fresh exact-definition options intersection, and a configured unavailable node
+closes option admission. The cluster's photo ceiling remains the lower of its
+configured `LOCAL_MAX_PHOTOS` and the node's live `/info` maximum. This dynamic
+configuration applies to the Viewer-compatible native dispatcher; the separate
+ReferenceStore worker path still needs equivalent multi-node capacity wiring
+before that path can make the same claim.
+
 For a synthetic main worker, pass `--node-id main --resource-policy
 main-unrestricted` to the worker or dispatcher. This omits Docker CPU, RAM and PID
 limits and fixed numerical-library thread counts. It retains fixture-specific

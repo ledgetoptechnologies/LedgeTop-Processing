@@ -185,7 +185,23 @@ class OptionsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             catalog([('local', '', ''), ('local', '', '')])
         with self.assertRaises(ValueError):
-            catalog([('user-chosen-origin', '', '')])
+            catalog([('invalid/node', '', '')])
+
+    def test_three_node_catalog_intersects_all_configured_nodes_in_order(self):
+        middle = Engine()
+        main = Engine()
+        self.addCleanup(middle.close)
+        self.addCleanup(main.close)
+        middle.options = [dict(self.engine.options[0]), {'name': 'middle-only', 'value': 1}]
+        main.options = [dict(self.engine.options[0]), {'name': 'main-only', 'value': 2}]
+        result = catalog([('cluster', self.engine.origin, self.engine.token),
+                          ('middle', middle.origin, middle.token),
+                          ('main', main.origin, main.token)])
+        self.assertTrue(result['ready'])
+        self.assertEqual([node['role'] for node in result['nodes']], ['cluster', 'middle', 'main'])
+        self.assertEqual([item['name'] for item in result['commonOptions']], ['engine-new-flag'])
+        self.assertEqual(result['unsupportedByNode'], {
+            'cluster': ['main-only', 'middle-only'], 'middle': ['main-only'], 'main': ['middle-only']})
 
 
 if __name__ == '__main__':

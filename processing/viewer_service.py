@@ -18,9 +18,10 @@ import uuid
 import zipfile
 
 from .maintenance import Conflict
+from .config import ProcessingNode
 from .odx_smoke_worker import Client, SmokeError
 from .options import catalog, _NoRedirect
-from .policy import plan
+from .policy import plan_ordered_nodes
 from .prototype import VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
@@ -110,8 +111,14 @@ class ViewerService:
         self.queue, self.config = queue, config
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
                                        config.viewer_max_input_bytes)
-        self.engines = engines or {'cluster': NativeEngine(config.local_node_url, config.local_node_token),
-                                  'main': NativeEngine(config.main_node_url, config.main_node_token)}
+        node_configs = getattr(config, 'processing_nodes', ())
+        if not node_configs:
+            node_configs = config.node_endpoints if hasattr(config, 'node_endpoints') else (
+                ProcessingNode('cluster', config.local_node_url, config.local_node_token,
+                               config.local_max_input_bytes),
+                ProcessingNode('main', config.main_node_url, config.main_node_token))
+        self.node_configs = tuple(node_configs)
+        self.engines = engines or {node.id: NativeEngine(node.url, node.token) for node in self.node_configs}
         self.probe = probe
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -120,8 +127,7 @@ class ViewerService:
         self._downloads = {}
 
     def _catalog(self):
-        return catalog([('local', self.config.local_node_url, self.config.local_node_token),
-                        ('main', self.config.main_node_url, self.config.main_node_token)])
+        return catalog([(node.id, node.url, node.token) for node in self.node_configs])
 
     def options(self):
         current = self._catalog()
@@ -326,22 +332,30 @@ class ViewerService:
             if not candidates:
                 return
             nodes = {}
-            for node, role, origin, token in (
-                    ('cluster', 'local', self.config.local_node_url, self.config.local_node_token),
-                    ('main', 'main', self.config.main_node_url, self.config.main_node_token)):
-                nodes[node] = {**self.probe(role, origin, token),
-                               'state': self.queue.get_node(node)['state']}
+            ordered_nodes = []
+            for node_config in self.node_configs:
+                node_id = node_config.id
+                snapshot = self.probe(node_id, node_config.url, node_config.token)
+                snapshot = {**snapshot, 'id': node_id,
+                            'state': self.queue.get_node(node_id)['state']}
+                if node_id == 'cluster':
+                    live_max = snapshot.get('maxImages')
+                    configured_max = self.config.local_max_photos
+                    snapshot['maxImages'] = min(live_max, configured_max) if type(live_max) is int else configured_max
+                if node_config.max_input_bytes is not None:
+                    snapshot['maxInputBytes'] = node_config.max_input_bytes
+                nodes[node_id] = snapshot
+                ordered_nodes.append(snapshot)
             for queued_job in candidates:
                 task = next((t for t in tasks if t['job_id'] == queued_job['id']), None)
                 if task is None:
                     raise Conflict('execution metadata unavailable')
-                decision = plan(task['images_count'], task['input_bytes'], nodes['cluster'], nodes['main'],
-                                self.config.local_max_photos, self.config.local_max_input_bytes,
-                                allow_main_fallback=True)
+                decision = plan_ordered_nodes(task['images_count'], task['input_bytes'], ordered_nodes,
+                                              required_profile=VIEWER_PROFILE)
                 if decision['decision'] == 'wait':
                     self.store.update(task['uuid'], phase='waiting_node', error=decision['reason'])
                     continue
-                node_id = 'cluster' if decision['decision'] == 'local' else 'main'
+                node_id = decision['nodeId']
                 self._check_options(task['options'])
                 job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': node_id,
                                        'profiles': [VIEWER_PROFILE], 'expectedJobId': task['job_id']})

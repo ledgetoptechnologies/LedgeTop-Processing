@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from processing.config import from_environment
+from processing.config import ProcessingNode
 from processing.policy import plan
 from processing.prototype import PHOTO_PROFILE, PROFILE, Queue
 from tests.test_service import TOKEN
@@ -143,3 +144,28 @@ class NodeRoleConfigTests(unittest.TestCase):
                                                             PROCESSING_TREEDAR_NODE_IDS=value):
                 with self.assertRaises(ValueError):
                     from_environment()
+
+    def test_ordered_config_accepts_distinct_dynamic_endpoints_and_hides_tokens(self):
+        values = {
+            'PROCESSING_PROTOTYPE_NODE_IDS': 'cluster,middle,main',
+            'PROCESSING_PROTOTYPE_STATE_DIR': 'C:/state',
+            'PROCESSING_VIEWER_ENABLED': '1',
+            'PROCESSING_VIEWER_TOKEN': 'viewer-production-secret-000000000000',
+            'PROCESSING_NODE_CLUSTER_URL': 'http://cluster.invalid:3000',
+            'PROCESSING_NODE_CLUSTER_TOKEN': 'cluster-private-secret-000000000000',
+            'PROCESSING_NODE_CLUSTER_MAX_INPUT_BYTES': '2000',
+            'PROCESSING_NODE_MIDDLE_URL': 'http://middle.invalid:3000',
+            'PROCESSING_NODE_MIDDLE_TOKEN': 'middle-private-secret-000000000000',
+            'PROCESSING_NODE_MAIN_URL': 'http://main.invalid:3000',
+            'PROCESSING_NODE_MAIN_TOKEN': 'main-private-secret-000000000000',
+        }
+        with self.environment(**values):
+            config = from_environment()
+        self.assertEqual([node.id for node in config.node_endpoints], ['cluster', 'middle', 'main'])
+        self.assertEqual([node.max_input_bytes for node in config.node_endpoints], [2000, None, None])
+        self.assertNotIn('private-secret', repr(config.node_endpoints))
+
+    def test_dynamic_node_environment_names_must_not_collide(self):
+        with self.environment(PROCESSING_PROTOTYPE_NODE_IDS='cluster,a-b,a_b'):
+            with self.assertRaisesRegex(ValueError, 'unique environment'):
+                from_environment()

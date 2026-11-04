@@ -16,7 +16,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z')
-ROLES = frozenset(('local', 'main'))
+NODE_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
 MAX_INFO = 65536
 MAX_OPTIONS = 262144
 MAX_COUNT = 2048
@@ -105,8 +105,8 @@ def _contains_secret(value, token):
 
 def discover_node(role, origin, token=''):
     """Fetch a fresh snapshot; errors contain no URL, credential or server body."""
-    if role not in ROLES:
-        raise ValueError('unknown configured node role')
+    if not isinstance(role, str) or not NODE_ID.fullmatch(role):
+        raise ValueError('invalid configured node ID')
     unavailable = {'role': role, 'configured': bool(origin), 'available': False,
                    'options': [], 'optionsSha256': None, 'capabilitiesSha256': None,
                    'version': None, 'engine': None, 'engineVersion': None,
@@ -138,31 +138,31 @@ def discover_node(role, origin, token=''):
 def catalog(nodes):
     """Exact-definition intersection across every configured node, never a cache.
 
-    ``nodes`` contains at most the unique fixed roles local/main, each as
-    (role, configured_origin, optional_token). Unconfigured roles are reported
+    ``nodes`` contains up to eight unique configured node IDs, each as
+    (node_id, configured_origin, optional_token). Unconfigured nodes are reported
     but do not constrain the intersection. Any configured unavailable node closes
     the fleet catalog; healthy per-node snapshots remain available for inspection.
     """
     nodes = list(nodes)
-    if (not 1 <= len(nodes) <= 2 or any(not isinstance(node, (tuple, list)) or len(node) != 3 for node in nodes)
-            or any(node[0] not in ROLES for node in nodes)
+    if (not 1 <= len(nodes) <= 8 or any(not isinstance(node, (tuple, list)) or len(node) != 3 for node in nodes)
+            or any(not isinstance(node[0], str) or not NODE_ID.fullmatch(node[0]) for node in nodes)
             or len({node[0] for node in nodes}) != len(nodes)):
-        raise ValueError('catalog requires unique fixed local/main node configurations')
+        raise ValueError('catalog requires one to eight unique node configurations')
     with ThreadPoolExecutor(max_workers=len(nodes)) as executor:
         snapshots = list(executor.map(lambda node: discover_node(*node), nodes))
     configured = [node for node in snapshots if node['configured']]
     ready = bool(configured) and all(node['available'] for node in configured)
     available = [node for node in configured if node['available']]
-    by_role = {node['role']: {option['name']: option for option in node['options']} for node in available}
-    union = set().union(*(set(options) for options in by_role.values())) if by_role else set()
-    common = set.intersection(*(set(options) for options in by_role.values())) if by_role else set()
+    by_node = {node['role']: {option['name']: option for option in node['options']} for node in available}
+    union = set().union(*(set(options) for options in by_node.values())) if by_node else set()
+    common = set.intersection(*(set(options) for options in by_node.values())) if by_node else set()
     conflicting = sorted(name for name in common
-        if len({_canonical(options[name]) for options in by_role.values()}) > 1)
+        if len({_canonical(options[name]) for options in by_node.values()}) > 1)
     safe_names = common - set(conflicting) if ready else set()
-    reference = next(iter(by_role.values()), {})
+    reference = next(iter(by_node.values()), {})
     common_options = [reference[name] for name in sorted(safe_names)]
     return {'ready': ready, 'reason': None if ready else ('node_unavailable' if configured else 'not_configured'),
             'nodes': snapshots, 'commonOptions': common_options,
             'commonOptionsSha256': _sha(common_options) if ready else None,
             'conflictingNames': conflicting,
-            'unsupportedByNode': {role: sorted(union - set(options)) for role, options in by_role.items()}}
+            'unsupportedByNode': {node_id: sorted(union - set(options)) for node_id, options in by_node.items()}}
