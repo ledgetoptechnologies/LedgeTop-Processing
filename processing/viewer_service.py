@@ -1745,6 +1745,11 @@ class ViewerService:
                     _check_archive_members(Path(task['archive_path'] or path), self._eager_stop(closing))
                 except EngineUnavailable:
                     raise _CustodyRefused('archive_members_unreadable') from None
+                # The Viewer-first path performed both engine reads and checked
+                # the archive members above, just as before_publish does for a
+                # custody-first transfer. Record that evidence before claiming
+                # the result verified.
+                record = {**record, 'checked': True}
             receipt = self._archive_receipt(task, receipt_path)
             state = 'refused' if record['overridden'] else 'verified'
             self.store.save_custody(task, {**record, 'state': state, 'reason': record['overridden'],
@@ -1779,7 +1784,17 @@ class ViewerService:
             return None  # Info and the list report the record as invalid.
         if record is not None and record['state'] in CUSTODY_SETTLED:
             if record['state'] == 'verified':
-                self.store.settle_custody(task)
+                # The sidecar is only an assertion. Recheck its task-bound
+                # receipt and bytes before allowing a restart to clear intent.
+                path = Path(task['directory']) / 'all.zip'
+                try:
+                    receipt = self._archive_receipt(task, path.with_suffix('.zip.receipt'))
+                    if record['archive'] != {'bytes': receipt['bytes'], 'sha256': receipt['sha256']}:
+                        raise Conflict('custody receipt differs from record')
+                    with self._verify_archive(path, receipt):
+                        self.store.settle_custody(task)
+                except Conflict:
+                    self._eager_notes[identifier] = 'archive_requires_inspection'
             return None
         try:
             if record is None or record['rebind']:

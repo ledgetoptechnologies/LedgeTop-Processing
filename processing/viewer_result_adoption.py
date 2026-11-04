@@ -14,6 +14,7 @@ a code 40 being fetched, ``verified`` a result in custody, ``refused`` a reason.
 import hashlib
 import json
 import math
+import re
 
 ADOPTION_NAME = '.ledgetop-adopt.json'
 ADOPTION_VERSION = 1
@@ -70,7 +71,10 @@ def new_custody(identity, info):
 
 def valid_custody(record, identity):
     return (type(record) is dict and set(record) == set(new_custody(identity, {}))
-            and record['version'] == CUSTODY_VERSION and record['identity'] == identity
+            and type(record['version']) is int and record['version'] == CUSTODY_VERSION
+            and type(record['identity']) is dict and set(record['identity']) == set(identity)
+            and all(type(record['identity'][key]) is type(value) and record['identity'][key] == value
+                    for key, value in identity.items())
             and type(record['checked']) is bool and type(record['rebind']) is bool
             and type(record['attempts']) is int and record['attempts'] >= 0
             and record['state'] in CUSTODY_STATES
@@ -79,7 +83,16 @@ def valid_custody(record, identity):
             and (record['abandoned'] is None or type(record['abandoned']) is dict)
             and type(record['operator']) is list and len(record['operator']) <= CUSTODY_ACTIONS_KEPT
             and type(record['result']) is dict
-            and (record['archive'] is None or type(record['archive']) is dict))
+            and (record['archive'] is None or type(record['archive']) is dict)
+            and (record['state'] != 'verified' or (
+                record['checked'] is True and record['reason'] is None
+                and record['overridden'] is None and record['abandoned'] is None
+                and set(record['result']) == {'dateCreated', 'imagesCount', 'options', 'processingTime'}
+                and evidence_complete(record['result'])
+                and type(record['archive']) is dict and set(record['archive']) == {'bytes', 'sha256'}
+                and type(record['archive']['bytes']) is int and record['archive']['bytes'] >= 4
+                and type(record['archive']['sha256']) is str
+                and re.fullmatch(r'[a-f0-9]{64}', record['archive']['sha256']) is not None)))
 
 
 def _options_digest(options):
