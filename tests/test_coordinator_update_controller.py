@@ -1,5 +1,6 @@
 """Controller tests use real local children/pipes, never SSH or a Docker daemon."""
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -58,6 +59,19 @@ class ControllerTests(unittest.TestCase):
         for changes in invalid:
             with self.subTest(changes=changes), self.assertRaises(BridgeError):
                 specification(**changes)
+
+    def test_recover_helper_is_explicitly_supported_by_cli_and_cluster_payload(self):
+        output=subprocess.run([sys.executable,'-B','-m','ops.run_coordinator_update_bridge','--help'],
+            capture_output=True,text=True,check=True).stdout
+        self.assertIn('recover-helper',output)
+        spec=specification(action='recover-helper'); config=configuration()
+        main=json.loads(shlex.split(controller.ssh_argv('main',spec,config)[-1])[4])
+        cluster=json.loads(shlex.split(controller.ssh_argv('cluster',spec,config)[-1])[4])
+        self.assertEqual(cluster['arguments'][0],'recover-helper')
+        self.assertEqual(cluster['operation'],spec.operation_id)
+        self.assertEqual(main['operation'],spec.operation_id)
+        self.assertEqual(cluster['arguments'][cluster['arguments'].index('--receipt-dir')+1],spec.receipt_dir)
+        self.assertEqual(cluster['arguments'][cluster['arguments'].index('--gate-config')+1],spec.gate_config)
 
     def test_rejects_binding_drift_and_unknown_fields(self):
         cases = []
@@ -144,6 +158,63 @@ class ControllerTests(unittest.TestCase):
                 controller.run(specification(), configuration(), Path(root),
                     popen=lambda *a, **k: self.fail('must not launch a child'))
 
+    @unittest.skipUnless(os.name=='posix','actual POSIX journal and child locks')
+    def test_recover_helper_through_real_relay_and_updater_method(self):
+        # Real controller and framed pipes; synthetic local Docker and gate
+        # holder. Separate updater-method tests cover the engine/gate failures.
+        holder='''import json,sys
+from ops.coordinator_gate_bridge import BridgeBinding,_common
+p=json.loads(sys.argv[1]); r=p['binding']; b=BridgeBinding(engine_id=r['engineId'],node_id=r['nodeId'],authority_id=r['authorityId'],coordinator_origin=r['coordinatorOrigin'],gate_generation=r['generation'],helper_sha256=r['helperSha256'])
+i=dict(pid=123,rootDevice=1,rootInode=2,lockDevice=1,lockInode=3,stateDevice=1,stateInode=4)
+base=_common(b,p['operation'],p['sessionNonce'],'f'*64,i)
+print(json.dumps(dict(base,type='main-gate-ready')),flush=True)
+for line in sys.stdin.buffer:
+ q=json.loads(line);q['type']='main-gate-checked';print(json.dumps(q),flush=True)
+'''
+        executor='''import contextlib,fcntl,json,os,sys
+from pathlib import Path
+from ops import update_reference_coordinator as u
+from ops.coordinator_gate_bridge import BridgeBinding,BridgeGateClient
+from ops.durable_helper_journal import HelperJournal
+p=json.loads(sys.argv[1]);root=Path(p['root']);root.mkdir(mode=0o700)
+r=p['binding'];b=BridgeBinding(engine_id=r['engineId'],node_id=r['nodeId'],authority_id=r['authorityId'],coordinator_origin=r['coordinatorOrigin'],gate_generation=r['generation'],helper_sha256=r['helperSha256'])
+binding={'cluster':{'engineId':'fixture-cluster'},'main':r};op=p['operation'];cid='a'*64;hop='1'*32
+state=dict(schemaVersion=2,mode=u.MODE,operation=op,phase='needs_inspection',image='sha256:'+'b'*64,sourceCommit='c'*40,oldSourceCommit=u.OLD_SOURCE,old={'containerId':u.OLD_ID,'image':u.OLD_IMAGE},authorityId=u.AUTHORITY,gateBinding=binding,engineImages={'cluster':'sha256:'+'d'*64,'main':'sha256:'+'e'*64},clusterContainerId='f'*64,rollbackName=u.NAME+'-pre-reference-update-'+op,failedName=u.NAME+'-failed-reference-update-'+op)
+u.legacy.save(root,state);marker=root/'owned-helper';marker.write_text('running')
+with HelperJournal(root,u.helper_binding(state)) as journal:
+ journal.write(hop,'create_pending');journal.write(hop,'created',cid);journal.write(hop,'start_pending',cid)
+class T:
+ save=staticmethod(u.legacy.save);private_file=staticmethod(u.legacy.private_file)
+ @contextlib.contextmanager
+ def operation_lock(self):
+  f=open(root/'global.lock','w');fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
+  try:yield
+  finally:f.close()
+ def docker(self,*args,**kw):
+  if args[0]=='info':return 'fixture-cluster'
+  if args[0]=='ps':return cid if marker.exists() else ''
+  if args[0]=='rm':assert args[-1]==cid;marker.unlink();return ''
+  raise AssertionError(args)
+ def inspected(self,identifier,**kw):return {'Id':cid,'Name':'/ledgetop-update-helper-'+hop,'Config':{'Labels':{'io.ledgetop.update-helper':hop}}}
+class Factory:
+ binding=binding
+ def __call__(self):return BridgeGateClient(sys.stdin.buffer,sys.stdout.buffer,binding=b,operation_id=op,session_nonce=p['sessionNonce'],timeout_seconds=2)
+u.ReferenceCoordinatorUpdate(root,gate_factory=Factory(),transport=T()).recover_helper(state)
+assert not marker.exists()
+with HelperJournal(root,u.helper_binding(state)) as journal:assert journal.read()['phase']=='resolved'
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            config=configuration();spec=specification(action='recover-helper');calls=[];children=[]
+            payload=dict(binding=config['main'],operation=spec.operation_id,sessionNonce=config['sessionNonce'],root=str(Path(temp)/'operation'))
+            def launch(argv,**kwargs):
+                calls.append(argv);routed=json.loads(shlex.split(argv[-1])[4])
+                if len(calls)==2:self.assertEqual(routed['arguments'][0],'recover-helper')
+                child=subprocess.Popen([sys.executable,'-B','-c',holder if len(calls)==1 else executor,json.dumps(payload)],**kwargs)
+                children.append(child);return child
+            self.assertEqual(controller.run(spec,config,Path(temp)/'evidence',popen=launch),0)
+            self.assertEqual(len(children),2)
+            for child in children:self.assertIsNotNone(child.poll())
+
     def test_real_relay_with_portable_children_accepts_only_fresh_protocol(self):
         # Synthetic holder identity only: this checks actual Windows/Linux root
         # pipe handling, not the Linux NodeGate ownership tested separately.
@@ -166,16 +237,18 @@ b=BridgeBinding(engine_id=r['engineId'],node_id=r['nodeId'],authority_id=r['auth
 with BridgeGateClient(sys.stdin.buffer,sys.stdout.buffer,binding=b,operation_id=p['operation'],session_nonce=p['sessionNonce'],timeout_seconds=2) as gate:
  gate.check();gate.check()
 '''
-        for corrupt in (False, True):
-            calls = []; children = []; config = configuration(); spec = specification()
+        for action,corrupt in (('activate',False),('activate',True),('recover-helper',False),('recover-helper',True)):
+            calls = []; children = []; config = configuration(); spec = specification(action=action)
             payload = dict(binding=config['main'], operation=spec.operation_id,
                 sessionNonce=config['sessionNonce'], corrupt=corrupt)
             def launch(argv, **kwargs):
                 calls.append(argv)
+                routed=json.loads(shlex.split(argv[-1])[4])
+                if len(calls)==2:self.assertEqual(routed['arguments'][0],action)
                 program = main_program if len(calls) == 1 else cluster_program
                 child = subprocess.Popen([sys.executable, '-B', '-c', program, json.dumps(payload)], **kwargs)
                 children.append(child); return child
-            with self.subTest(corrupt=corrupt), tempfile.TemporaryDirectory() as root:
+            with self.subTest(action=action,corrupt=corrupt), tempfile.TemporaryDirectory() as root:
                 if corrupt:
                     with self.assertRaises(BridgeError):
                         controller.run(spec, config, Path(root) / 'new', popen=launch)

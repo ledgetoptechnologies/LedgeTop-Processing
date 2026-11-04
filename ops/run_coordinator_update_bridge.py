@@ -91,7 +91,7 @@ class RunSpec:
     gate_config: str
 
     def __post_init__(self):
-        if self.action not in ('activate', 'rollback'):
+        if self.action not in ('activate', 'rollback', 'recover-helper'):
             raise BridgeError('prepared_update_action_required')
         _commit(self.source_commit); _image(self.image); _image(self.main_image)
         if type(self.operation_id) is not str or not re.fullmatch(r'[a-f0-9]{32}', self.operation_id):
@@ -200,7 +200,7 @@ def run(spec, config, evidence_dir, *, popen=subprocess.Popen, relay_factory=Roo
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('activate', 'rollback'))
+    parser.add_argument('action', choices=('activate', 'rollback', 'recover-helper'))
     for flag in ('source-commit', 'image', 'main-image', 'operation-id', 'receipt-dir',
                  'gate-config', 'local-gate-config', 'evidence-dir'):
         parser.add_argument('--' + flag, required=True)
