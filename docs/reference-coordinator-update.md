@@ -8,7 +8,8 @@ Linux run and the two-PC gate preflight in
 `docs/evidence/coordinator-gate-preflight-20261028.json`. Retargeting to the
 installed `693cb7e` predecessor, retained Viewer tasks and the pinned additive
 migration are not yet reviewed against the live host, so `ACTIVATION_REVIEWED`
-is false: activation and rollback are refused; only prepare runs.
+is false: activation and rollback are refused; only prepare runs, and prepare
+itself holds until `REVIEWED_PILOT_JOURNALS_SHA256` is pinned (see Pilot journals).
 
 ## Exact operation binding
 
@@ -87,8 +88,10 @@ scopes stay live through drain, stop, backup, candidate verification and reopen.
 Each host/operator mutation and each node reopen rechecks them. Saved JSON is
 never substituted for a live gate. The bridge does not provision or clear gates.
 
-The local cluster check additionally pins the prepared full `node-odx-gpu`
-container ID/image/name, exact Compose ownership and private loopback port 13001.
+The local cluster check additionally pins the prepared full ID, image and name
+of the adopted `lt-migration-1120ae14a8988e84513a4a8a46b78741-candidate` container
+(a container name; its Compose service is `nodeodm`), exact Compose ownership and
+private loopback port 13001.
 It reads the existing `LOCAL_NODE_TOKEN` from the native environment file in
 memory, verifies actual NodeODM `/info` and an empty `/task/list`, and reuses the
 fixed `ComposeNode` upload-directory and child-process inspectors. Queue count
@@ -111,7 +114,9 @@ Prepare hashes the full public job history and captures every SQLite schema
 object, table column and row digest, including private job fields and empty
 receipt/claim/outbox tables. It also hashes each allowed state file. Symlinks,
 hardlinks, unexpected files/tables/indexes/triggers/views, active jobs, reference
-rows, reservations and owned-schedule rows fail closed. Viewer tasks are kept
+rows and reservations fail closed. Existing `owned_maintenance_schedules` rows are
+kept: each must validate against its authority, node and digests, and is hashed
+with every other row. Viewer tasks are kept
 only when `phase='complete' AND stage IN ('succeeded','failed','cancelled')`
 (`TERMINAL_VIEWER_TASK`, shared by install, update, backup and rollback); their
 `viewer_files`/`viewer_incarnations`/`viewer_option_evidence` rows must not be
@@ -130,7 +135,9 @@ fixture and held before draining. That held checkpoint is retained unchanged;
 the correction requires a fresh reviewed source/image/operation rather than
 resetting or reinterpreting the held operation.
 
-The old API lacks durable caller-correlated scheduling. Before each single
+The updater schedules through the legacy `/schedule` route, which has no durable
+caller correlation; it does not use the `schedule-owned` route that 693cb7e also
+has. Before each single
 legacy schedule POST the executor FULL-saves the exact payload. A lost response
 is held forever for explicit inspection: it never adopts a matching target,
 reposts, or infers ownership. Successful ACKs save the exact plan and revision.
@@ -146,7 +153,18 @@ be zero running volume owners, and a read-only network-none helper must match
 the stopped volume to that post-drain census before backup or candidate creation.
 Logical SQLite contents are compared exactly; raw SQLite file hashes are retained
 as evidence, while expected page-layout differences do not substitute for logical
-proof. Non-database file contents/modes are compared exactly.
+proof. Non-database file contents/modes are compared exactly. Every volume
+census runs under `CENSUS_TIMEOUT`, the reviewed `BACKUP_TIMEOUT` budget, because
+it reads the same bytes and, online, at 0.5 CPU; the small TLS/configuration reads
+keep the 60-second default. A timeout after stop leaves `needs_inspection`.
+
+Admission is not fenced between the drained census and stop: the predecessor has
+`ADMISSION_DRAIN_QUALIFIED = False`. A job admitted in that window fails the
+stopped-volume census, so the operation ends in `needs_inspection` with the old
+coordinator stopped, no candidate created and nothing running; rollback's offline
+census refuses the same job. Automatic restart of the predecessor is not safe
+(Codex audit) and is not attempted. The queued job stays on the volume for the
+operator.
 
 The offline backup is newly created with numeric UID/GID 10001 and mode 0700.
 The helper copies and hashes all bytes, rejects links, fsyncs files/directories,
@@ -161,11 +179,13 @@ response leaves a checkpoint for a separate explicit guarded operation.
 
 Candidate verification requires sole volume ownership, unchanged authority,
 history, full stopped-state logical census, native health, actual TLS role
-separation, and the new operator-owned lookup API. The new API probe is only a
-GET for a missing receipt: exact authenticated HTTP 404
+separation, and a working operator lookup. The lookup probe is only a GET for a
+missing receipt: exact authenticated HTTP 404
 `{"error":"owned_schedule_not_found"}` is required. Generic 404, 401, timeout,
-malformed body or server error is not evidence of support. No plan is created
-by this probe.
+malformed body or server error fails it. The 693cb7e predecessor already has this
+route, so the probe proves that the running coordinator answers operator-authenticated
+lookups, not that it is the candidate; candidate identity comes from the exact
+container, image and sole-owner checks. No plan is created by this probe.
 
 Immediately before the first reopen, the full idle/workload census is fenced
 again. Each reopen checks both live gates and its exact own plan/revision/target,
@@ -179,6 +199,39 @@ match the old idle baseline for the remaining exact plan to reopen. Gate checks
 are fresh point-in-time proofs; loss after a final check remains a failed root
 relay operation even if local terminal evidence was already written.
 
+## Pilot journals
+
+The live state root also holds `pilot-journals/`: operator pilot records with no
+writer in this source. `volume_census` allows only that directory, its depth-1
+directories and their depth-2 regular files, owned by the census UID, not
+symlinks, with `nlink` 1. Directories must be mode 0700 and files must have no
+group, other or special bits. Elsewhere the census only records modes; this tree
+must meet them so the backup, under its umask, reproduces it. At most 64 files,
+64 KiB each and
+1 MiB in total. Anything else raises, so the census emits no digest for such a tree.
+
+Bytes are opaque and never parsed. Files join the ordinary `files` census, and
+`pilotJournals` adds a digest of the manifest sorted by relative path: rows of path,
+mode, size and SHA-256 (size and SHA-256 null for directories, so an empty directory
+or a directory mode is bound too), with file and byte counts. The same function runs
+online, offline and inside the backup helper, and the generic backup copies these
+files byte for byte, so `compatible()` has no allowance: every comparison, including
+rollback's, is exact, and a changed, added or removed file is `full_census_changed`.
+Rollback reuses the volume and restores nothing.
+
+`REVIEWED_PILOT_JOURNALS_SHA256` is `None` in source. While it is `None`, prepare
+holds with `reviewed_pilot_journals_required`; a different pinned digest holds with
+`reviewed_pilot_journals_changed`, and activation rechecks the pin. A prepare hold
+keeps the observed manifest in the private checkpoint (phase `pilot_journals_held`)
+and leaves no baseline. A human reviewer pins the value from the live read-only
+census. An absent directory is the digest of the empty manifest and is accepted only
+if the pin is that digest. No live value is recorded here.
+
+Before pinning, a one-time pre-live audit is required, because a hash cannot show a
+pilot finished: no pilot supervisor is running, each `child-start` has a
+`child-exit`, each `.cancel-intent` has a resolved node outcome, and the writer is
+identified from operator history.
+
 ## Rollback boundary
 
 Rollback is explicit, never automatic on activation failure. It can stop only
@@ -188,12 +241,17 @@ running candidate. A second stopped-volume census fences admissions that arrive
 while shutdown drains. Any new work, private-field change, receipt, unknown
 schema/progress, native metadata, or unverifiable census blocks downgrade.
 
-The additive schema exceptions are the exact reviewed empty
-`owned_maintenance_schedules` table and its implicit primary-key index, and the
-pinned candidate start-up migration (`MIGRATION_TABLES`/`MIGRATION_COLUMNS`):
-empty `reference_viewer_receipts`, `reference_viewer_transfers` and
-`viewer_full_option_evidence`, plus `viewer_tasks.full_option_evidence_required`,
-`viewer_tasks.node_guarded` and `reference_jobs.viewer_receipt_required`. Only
+The additive schema exceptions are the exact reviewed `owned_maintenance_schedules`
+table and its implicit primary-key index, and the pinned candidate start-up
+migration (`MIGRATION_TABLES`/`MIGRATION_COLUMNS`): empty
+`reference_viewer_receipts`, `reference_viewer_transfers` (with
+`verified_full_coverage`), `reference_released_claims`,
+`viewer_full_option_evidence`, `viewer_guarded_dispatch_checkpoint` and
+`viewer_guarded_dispatch_history`, plus
+`viewer_tasks.full_option_evidence_required`, `viewer_tasks.node_guarded` and
+`reference_jobs.viewer_receipt_required`. An owned table already in the baseline
+keeps its rows, which are validated and hashed and must match exactly; only an
+owned table absent from the baseline counts as an addition, and it must be empty. Only
 items absent from the drained baseline count as additions, and a table must lack
 all of its pinned columns. Column DDL is replayed in memory over the baseline
 table DDL and must match exactly. New tables must be empty. Because retained
@@ -241,7 +299,8 @@ cannot use rollback.
 `tests.test_reference_coordinator_update` uses real temporary SQLite and local
 coordinator HTTP with fake Docker/host transports. It covers reference recipe
 and environment-default preservation, full private-content and exact-node
-censuses, byte-identical backup copying, late admissions, exact API probing,
+censuses, the pilot-journals tree, pin and census timeouts, byte-identical backup
+copying, late admissions, exact API probing,
 lost schedule/create/stop/rename/start/cancel responses, foreign identity refusal,
 gate loss, TLS-preserving rollback, and partial-reopen downgrade refusal. Bridge
 process/OS gate tests are maintained separately. No live host/container, image
