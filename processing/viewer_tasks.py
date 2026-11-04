@@ -927,6 +927,7 @@ class TaskStore:
         if state == 'held':
             # Fixed marker only: held notes and engine error text can be private.
             info['ledgetopHeld'] = True
+            info['ledgetopHoldReason'] = 'execution_held'
         return info
 
     def output(self, identifier, line=0):

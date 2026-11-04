@@ -455,6 +455,14 @@ class ViewerService:
         self.store.task(identifier)
         raise EngineUnavailable('versioned_output_required')
 
+    def _qualified_node_log_epoch(self, task):
+        # NodeODM's in-memory output has no authenticated incarnation/stream
+        # epoch. A process restart may reuse the task ID with truncated output.
+        # Do not enable until the node can attest an epoch that changes on
+        # every reset and bind it atomically to the exact output read. A
+        # separate epoch probe races a backend restart and is insufficient.
+        return None
+
     def output_v2(self, identifier, line=0, stream=None):
         if type(line) is not int or not 0 <= line <= 2 ** 53 - 1:
             raise ValueError('nonnegative output cursor required')
@@ -463,14 +471,17 @@ class ViewerService:
         task = self.store.task(identifier)
         held = task['stage'] == 'held' or bool(task.get('job') and task['job']['status'] == 'held')
         base = {'streamId': None, 'fromLine': 0, 'lines': [], 'resetRequired': False,
-                'held': held, 'holdReason': (task['error'] or 'execution_held') if held else None}
+                'held': held, 'holdReason': 'execution_held' if held else None}
         # A cursor is meaningful only together with a stream identity.
         if not task['engine_uuid']:
             base['resetRequired'] = stream is not None or line != 0
             return base
         if task['node_id'] not in self.engines:
             raise EngineUnavailable('engine_output_unavailable')
-        identity = json.dumps([identifier, task['generation'], task['node_id'], task['engine_uuid']],
+        epoch = self._qualified_node_log_epoch(task)
+        if not isinstance(epoch, str) or not re.fullmatch(r'[0-9a-f]{64}', epoch):
+            raise EngineUnavailable('engine_output_unavailable')
+        identity = json.dumps([identifier, task['generation'], task['node_id'], task['engine_uuid'], epoch],
                               separators=(',', ':'), ensure_ascii=True).encode('ascii')
         base['streamId'] = hashlib.sha256(identity).hexdigest()
         if (stream is None and line != 0) or (stream is not None and stream != base['streamId']):

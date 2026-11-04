@@ -1024,7 +1024,8 @@ class ViewerServiceTests(unittest.TestCase):
         second = self.submit(); self.service.tick()
         self.assertEqual(self.task(second)['node_id'], 'tiny')
 
-    def test_ordered_three_node_inventory_prefers_first_eligible_and_falls_through(self):
+    @patch.object(ViewerService, '_qualified_node_log_epoch', return_value='a' * 64)
+    def test_ordered_three_node_inventory_prefers_first_eligible_and_falls_through(self, _epoch):
         from processing.config import parse_node_inventory
         class DistinctEngine(FakeEngine):
             def read(self, route, *, missing=False, **query):
@@ -2631,15 +2632,19 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         self.assertEqual(self.task(identifier)['node_id'], 'main')
         self.assertEqual(self.engines['cluster'].calls, [])
 
-    def test_native_output_cursor_preserves_blank_and_comma_records(self):
+    @patch.object(ViewerService, '_qualified_node_log_epoch', return_value='a' * 64)
+    def test_native_output_cursor_preserves_blank_and_comma_records(self, epoch):
         identifier = self.submit()
         self.service.store.update(identifier, output_lines=['unrelated coordinator message'])
         self.assertEqual(self.service.output_v2(identifier, 0)['lines'], [])
         self.assertTrue(self.service.output_v2(identifier, 5)['resetRequired'])
         self.service.store.update(identifier, stage='held', error='synthetic_queue_hold')
+        # Legacy databases may contain text that predates validation.
+        with self.queue._db() as db:
+            db.execute('UPDATE viewer_tasks SET error=? WHERE uuid=?', ('secret: private details', identifier))
         waiting = self.service.output_v2(identifier, 0)
         self.assertTrue(waiting['held'])
-        self.assertEqual(waiting['holdReason'], 'synthetic_queue_hold')
+        self.assertEqual(waiting['holdReason'], 'execution_held')
         self.service.store.update(identifier, stage='queued', error=None)
         with self.assertRaises(EngineUnavailable):
             self.service.output(identifier, 5)
@@ -2650,6 +2655,11 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         self.assertTrue(self.service.output_v2(identifier, 2)['resetRequired'])
         self.assertTrue(self.service.output_v2(identifier, 2, 'a' * 64)['resetRequired'])
         self.assertEqual(self.service.output_v2(identifier, 1, stream)['lines'], ['', 'comma,record'])
+        epoch.return_value = 'b' * 64  # simulated qualified backend stream reset
+        reset = self.service.output_v2(identifier, 1, stream)
+        self.assertTrue(reset['resetRequired'])
+        self.assertEqual(reset['lines'], [])
+        epoch.return_value = 'a' * 64
         self.engines['cluster'].output_unavailable = True
         self.service.store.update(identifier, output_lines=['retained output'])
         with self.assertRaises(EngineUnavailable):
@@ -2664,7 +2674,8 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         with self.assertRaises(ValueError):
             self.service.output_v2(identifier, True)
 
-    def test_held_output_reads_only_bound_engine_without_resuming(self):
+    @patch.object(ViewerService, '_qualified_node_log_epoch', return_value='a' * 64)
+    def test_held_output_reads_only_bound_engine_without_resuming(self, _epoch):
         identifier = self.submit()
         self.service.tick()
         task = self.task(identifier)
@@ -2673,7 +2684,7 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         output = self.service.output_v2(identifier)
         self.assertEqual(output['lines'], ['synthetic engine output', '', 'comma,record'])
         self.assertTrue(output['held'])
-        self.assertEqual(output['holdReason'], 'synthetic_uncertainty')
+        self.assertEqual(output['holdReason'], 'execution_held')
         held = self.task(identifier)
         self.assertEqual(held['job']['status'], 'held')
         self.assertEqual((held['node_id'], held['engine_uuid']), (task['node_id'], task['engine_uuid']))
@@ -2687,6 +2698,14 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
                 self.assertEqual(calls, [])
         self.engines[task['node_id']].output_unavailable = True
         self.service.store.update(identifier, output_lines=['retained output'])
+        with self.assertRaises(EngineUnavailable):
+            self.service.output_v2(identifier, 0)
+        self.assertTrue(self.service.info(identifier)['ledgetopHeld'])
+        self.assertEqual(self.service.info(identifier)['ledgetopHoldReason'], 'execution_held')
+
+    def test_unqualified_node_log_epoch_fails_closed(self):
+        identifier = self.submit()
+        self.service.tick()
         with self.assertRaises(EngineUnavailable):
             self.service.output_v2(identifier, 0)
 
