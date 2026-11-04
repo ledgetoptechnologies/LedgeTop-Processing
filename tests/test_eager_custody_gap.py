@@ -3,6 +3,7 @@
 The fake engine is configured to reject a download after its task is removed,
 as a NodeODM terminal cleanup would. These tests do not simulate a real timer.
 """
+import hashlib
 import unittest
 from unittest.mock import patch
 
@@ -38,6 +39,22 @@ class NormalCompletionCustody(unittest.TestCase):
                 fixture.service.download(identifier)
         self.assertIsNone(fixture.task(identifier)['archive_path'])
         self.assertTrue(fixture.task(identifier)['files'])
+
+    def test_verified_local_archive_survives_later_engine_cleanup(self):
+        fixture = self.fixture
+        identifier = self.complete_without_viewer()
+        task = fixture.task(identifier)
+        engine = fixture.engines[task['node_id']]
+        # This manually triggers the existing custody path. It is not evidence
+        # that eager/background acquisition has been implemented.
+        with fixture.service.download(identifier)[0] as result:
+            first = result.read()
+        del engine.tasks[task['engine_uuid']]
+        with patch.object(engine, 'download', side_effect=EngineUnavailable('synthetic_terminal_cleanup')):
+            with fixture.service.download(identifier)[0] as result:
+                retained = result.read()
+        self.assertEqual(hashlib.sha256(retained).digest(), hashlib.sha256(first).digest())
+        self.assertEqual(engine.download_calls, 1)
 
 if __name__ == '__main__':
     unittest.main()
