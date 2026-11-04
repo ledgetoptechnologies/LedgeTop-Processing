@@ -79,6 +79,29 @@ class NumericDomainGrammarTests(unittest.TestCase):
         self.assertFalse(_numeric_domain_supported({'type':'int','domain':'integer'},
             {'type':'float','domain':None}))
 
+    def test_float_positive_integer_accepts_only_explicit_whole_values(self):
+        engine={'type':'float','domain':'positive integer'}
+        cases=[([1,2.0,14],True),([1,2.5],False),([0,1],False),([-1],False),([],False),
+               ({'min':1,'max':1},True),({'min':1.5,'max':1.5},False),
+               ({'min':0,'max':0},False),({'min':1,'max':2},False),(None,False)]
+        for domain,expected in cases:
+            with self.subTest(domain=domain):
+                self.assertEqual(_numeric_domain_supported(engine,{'type':'float','domain':domain}),expected)
+        self.assertFalse(_numeric_domain_supported({'type':'float','domain':'positive integers'},
+            {'type':'float','domain':[1]}))
+
+    def test_float_integer_domain_passes_real_shaped_common_catalog(self):
+        fixture=PreparedPolicyFreshnessTests('test_current_fresh_policy_only_returns_held')
+        fixture.setUp();self.addCleanup(fixture.doCleanups)
+        for engine in (fixture.local,fixture.main):
+            engine.options=[{'name':'engine-flag','type':'float','domain':'positive integer','value':'2'}]
+        capability,options,_=discovered_policy(catalog(fixture.nodes),fixture.config)
+        policy=dict(capabilityFingerprint=capability,optionsFingerprint=options,availableEngines=['odm'],
+            optionDefinitions={'engine-flag':{'type':'float','domain':[1,2,3]}})
+        self.assertEqual(fixture.check(policy)['state'],'held')
+        policy['optionDefinitions']['engine-flag']['domain']={'min':1,'max':3}
+        with self.assertRaises(PreparedPolicyHeld):fixture.check(policy)
+
     def test_boolean_and_string_text_are_not_guessed(self):
         for kind,domain in (('bool','boolean'),('string','string')):
             self.assertFalse(_numeric_domain_supported({'type':kind,'domain':domain},

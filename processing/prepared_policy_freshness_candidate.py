@@ -29,6 +29,19 @@ def _numeric_domain_supported(option, definition):
     if type(domain) is not str:
         # Preserve exact structured-fixture comparison; never infer a domain.
         return 'domain' in option and p.canonical_json(domain)==p.canonical_json(definition['domain'])
+    configured=definition['domain']
+    if kind == 'float' and domain == 'positive integer':
+        # A float-typed UI value may be integral, but a positive continuous
+        # range would still admit fractional values. Only explicit integral
+        # choices or a singleton integral interval are provable subsets.
+        def positive_whole(value):
+            return type(value) in (int,float) and value > 0 and float(value).is_integer()
+        if type(configured) is list:
+            return bool(configured) and all(positive_whole(value) for value in configured)
+        if type(configured) is dict:
+            return (set(configured)=={'min','max'} and configured['min']==configured['max']
+                    and positive_whole(configured['min']) and positive_whole(configured['max']))
+        return False
     grammar={
         ('int','integer'):(None,None,False),
         ('int','positive integer'):(1,None,False),
