@@ -23,7 +23,7 @@ from functools import wraps
 
 from .maintenance import Conflict
 from .viewer_output_log import OUTPUT_LOG_MAX_FILE_BYTES, OUTPUT_LOG_NAME, upgrade_output_log, valid_output_log
-from .viewer_result_adoption import (ADOPTION_MAX_FILE_BYTES, ADOPTION_NAME, CUSTODY_INTENT, CUSTODY_NAME, valid_adoption,
+from .viewer_result_adoption import (ADOPTION_MAX_FILE_BYTES, ADOPTION_NAME, CUSTODY_INTENT, CUSTODY_UNAVAILABLE, CUSTODY_NAME, valid_adoption,
                                      valid_custody)
 
 
@@ -756,6 +756,28 @@ class TaskStore:
             db.execute('UPDATE viewer_tasks SET error=NULL WHERE uuid=? AND generation=? AND error=?',
                        (task['uuid'],task['generation'],CUSTODY_INTENT))
 
+    def hold_custody_unavailable(self, task):
+        """Retain an operator-visible hold without retrying an unsafe transfer."""
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, task['uuid'])
+            if row['generation'] != task['generation'] or row['error'] != CUSTODY_INTENT:
+                raise Conflict('custody intent changed')
+            db.execute('UPDATE viewer_tasks SET error=? WHERE uuid=?',
+                       (CUSTODY_UNAVAILABLE, task['uuid']))
+
+    def retry_custody_intent(self, task):
+        """Restore only the exact held task's intent; never change its job."""
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, task['uuid'])
+            if (row['generation'] != task['generation'] or row['error'] != CUSTODY_UNAVAILABLE
+                    or row['phase'] != 'complete' or row['stage'] != 'succeeded'
+                    or row['job_id'] != task['job_id'] or row['node_id'] != task['node_id']
+                    or row['engine_uuid'] != task['engine_uuid']):
+                raise Conflict('custody identity changed')
+            db.execute('UPDATE viewer_tasks SET error=? WHERE uuid=?', (CUSTODY_INTENT, task['uuid']))
+
     def adopt_held_task(self, task, result, reasons):
         """Finish a lost hold as the success its verified result proved, in one step."""
         with self._lock, self.queue._db() as db:
@@ -1129,6 +1151,8 @@ class TaskStore:
             db.execute('BEGIN IMMEDIATE')
             self._reservation(db,identifier,None,None)
             row = self._row(db, identifier, removed=True)
+            if row['error'] in (CUSTODY_INTENT, CUSTODY_UNAVAILABLE):
+                raise Conflict('result custody must be resolved before removal')
             self._reject_guarded_pending_action(row)
             job = self._job(db, row)
             if job and job['status'] in ('running', 'held'):

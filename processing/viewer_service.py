@@ -1137,10 +1137,56 @@ class ViewerService:
         """Serialize operator state changes with Viewer engine mutations."""
         if action == 'adopt' and self._adopt_lost_result:
             return self._adopt_held_result(identifier, request)
+        if action == 'retry-custody' and self._eager_custody:
+            gate = getattr(self.queue, 'admission_drain', None)
+            try:
+                with gate.admit() if gate is not None else nullcontext():
+                    return self._retry_missing_custody(identifier, request)
+            except AdmissionClosed:
+                raise Conflict('admission is draining') from None
         with self._lock:
             if any(job_id == identifier for job_id, _ in self._dispatch_threads.values()):
                 raise Conflict('submission in progress; inspect before operator action')
             return self.queue.operator(identifier, action, request)
+
+    def _retry_missing_custody(self, job_id, request):
+        """Explicitly retry a missing engine task only after rechecking its result."""
+        self.queue.fields(request, ('note',))
+        if not isinstance(request['note'], str) or not 1 <= len(request['note']) <= 256:
+            raise ValueError('operator inspection note required')
+        with self._lock:
+            task = self.store.task_for_job(job_id)
+            lock = self._downloads.setdefault(task['uuid'], threading.Lock())
+        with lock, self._lock:
+            task = self.store.task_for_job(job_id)
+            record = self.store.custody(task)
+            if (not task['job'] or task['job']['status'] != 'succeeded'
+                    or record is None or record['state'] != 'unavailable'
+                    or record['reason'] != 'engine_task_missing'
+                    or not evidence_complete(record['result'])):
+                raise Conflict('custody retry requires inspection')
+            try:
+                self._eager_result(task, record)
+            except (EngineUnavailable, EngineTaskMissing, _CustodyRefused):
+                raise Conflict('custody retry identity unavailable') from None
+            # Intent first: a crash before the sidecar rewrite leaves the old
+            # unavailable record intact and is held again on restart.
+            self.store.retry_custody_intent(task)
+            try:
+                self.store.save_custody(task, {**record, 'state': 'pending', 'reason': None})
+            except Exception:
+                # Keep removal blocked even if recovery bookkeeping fails.
+                # If this also fails, the durable intent remains for restart.
+                try:
+                    self.store.hold_custody_unavailable(task)
+                except Exception:
+                    pass
+                raise Conflict('custody retry could not be recorded') from None
+            self._eager_missing.pop(task['uuid'], None)
+            self._eager_due[task['uuid']] = 0
+            logging.getLogger(__name__).info('Operator requested result custody retry for %s; note=%s',
+                                             job_id, json.dumps(request['note'], ensure_ascii=True))
+            return self.queue.get(job_id)
 
     def _send_claimed_task(self, identifier):
         """Run one already-claimed submission; never replay a mutation on error."""
@@ -1693,8 +1739,11 @@ class ViewerService:
                 record = self.store.custody(task)
             except (Conflict, KeyError):
                 return None  # Removed since, or info reports the record as invalid.
-            if record is not None and record['state'] in ('verified', 'unavailable'):
+            if record is not None and record['state'] == 'verified':
                 self.store.settle_custody(task)
+                return None
+            if record is not None and record['state'] == 'unavailable':
+                self.store.hold_custody_unavailable(task)
                 return None
             try:
                 record = record or self._record_eager_result(task)
@@ -1727,7 +1776,7 @@ class ViewerService:
         """No further attempts. Viewer's own download stays exactly as it was."""
         record = record or new_custody(self._adoption_identity(task), {})
         self.store.save_custody(task, {**record, 'state': 'unavailable', 'reason': reason})
-        self.store.settle_custody(task)
+        self.store.hold_custody_unavailable(task)
         logging.getLogger(__name__).error('Viewer result custody unavailable: %s', reason)
 
     def _adoptable_result(self, job_id):

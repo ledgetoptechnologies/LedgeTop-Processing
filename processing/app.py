@@ -269,6 +269,7 @@ def make_handler(config: Config):
                 return
             operator = prototype and (self.path == '/v1/prototype/admission-drain' or self.path.endswith(("/hold", "/resolve"))
                                       or (getattr(config, 'viewer_lost_result_adopt', False) and self.path.endswith("/adopt"))
+                                      or (getattr(config, 'viewer_eager_result_custody', False) and self.path.endswith('/retry-custody'))
                                       or self.path.startswith("/v1/prototype/nodes/"))
             if not self._authorized(operator=operator):
                 return

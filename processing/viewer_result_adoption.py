@@ -30,6 +30,8 @@ CUSTODY_STATES = ('pending', 'verified', 'deferred', 'unavailable')
 # unread ``viewer_tasks.error``, set in the transaction that makes the job succeed.
 # No table or file is added, a sidecar failure cannot lose it, and a query lists it.
 CUSTODY_INTENT = 'eager_custody_pending'
+# A failed custody decision is retained until explicit operator recovery exists.
+CUSTODY_UNAVAILABLE = 'eager_custody_unavailable'
 
 
 def new_adoption(identity):

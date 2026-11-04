@@ -29,7 +29,7 @@ from processing.app import CoordinatorService, make_handler
 from processing.config import Config, from_environment
 from processing.maintenance import Conflict
 from processing.prototype import Queue
-from processing.viewer_result_adoption import (CUSTODY_INTENT, CUSTODY_NAME, IDENTITY_MISMATCH, IDENTITY_UNAVAILABLE,
+from processing.viewer_result_adoption import (CUSTODY_INTENT, CUSTODY_UNAVAILABLE, CUSTODY_NAME, IDENTITY_MISMATCH, IDENTITY_UNAVAILABLE,
                                                RESULT_CHANGED)
 from processing import viewer_service as service_module
 from processing.viewer_service import (CENSUS_RETAINED_FILE_BYTES, EAGER_DEFERRED_RETRY_SECONDS, EAGER_FETCH_CONCURRENCY,
@@ -381,7 +381,7 @@ class EagerCustody(unittest.TestCase):
     def assert_job_succeeded(self, identifier):
         task = self.fixture.task(identifier)
         self.assertEqual((task['job']['status'], task['stage'], task['phase']), ('succeeded', 'succeeded', 'complete'))
-        self.assertIn(task['error'], (None, CUSTODY_INTENT))  # The intent is no failure, and info never shows it.
+        self.assertIn(task['error'], (None, CUSTODY_INTENT, CUSTODY_UNAVAILABLE))  # Custody status does not change job success.
         self.assertEqual(self.service.info(identifier)['status'], {'code': 40})
 
     def assert_no_half_archive(self, identifier):
@@ -687,6 +687,41 @@ class EagerCustody(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual((body['resultCustody']['reserveBytes'], body['resultCustody']['maxBytes']), (7, 9))
         self.assertGreater(body['resultCustody']['lastFree']['bytes'], 0)
+
+    def test_retry_custody_http_requires_operator_credential(self):
+        startup = startup_fixture.StartupTests('test_invalid_values_refuse')
+        startup.setUp()
+        self.addCleanup(startup.doCleanups)
+        startup.state.mkdir()
+        operator_token = 'operator-' + 'x' * 40
+        env = {**startup.env, 'PROCESSING_PROTOTYPE_OPERATOR_TOKEN': operator_token,
+               'PROCESSING_VIEWER_EAGER_RESULT_CUSTODY': '1',
+               'PROCESSING_VIEWER_EAGER_CUSTODY_RESERVE_BYTES': '7',
+               'PROCESSING_VIEWER_EAGER_CUSTODY_MAX_BYTES': '9'}
+        with patch.dict(os.environ, env, clear=True):
+            handler = make_handler(from_environment())
+        server = start_server(handler)
+        try:
+            path = 'http://127.0.0.1:%d/v1/prototype/jobs/job/retry-custody' % server.server_port
+            def call(token):
+                request = Request(path, data=b'{"note":"inspection"}',
+                                  headers={'Authorization': 'Bearer ' + token,
+                                           'Content-Type': 'application/json'})
+                try:
+                    with urlopen(request, timeout=5) as response:
+                        return response.status
+                except HTTPError as error:
+                    return error.code
+            with patch.object(handler.viewer_service, 'operator', return_value={'id': 'job'}) as operation:
+                self.assertEqual(call(startup.env['PROCESSING_API_TOKEN']), 401)
+                operation.assert_not_called()
+                self.assertEqual(call(operator_token), 200)
+                operation.assert_called_once_with('job', 'retry-custody', {'note': 'inspection'})
+        finally:
+            server.shutdown()
+            server.server_close()
+            handler.viewer_service.close()
+            handler.prototype_queue.close()
 
     def test_disk_filling_during_the_transfer_defers_and_frees_the_partial(self):
         identifier = self.finished(wait=False)
@@ -1197,15 +1232,132 @@ class EagerCustody(unittest.TestCase):
         self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': 'archive_requires_inspection'})
         self.assertTrue(partial.exists())
 
-    def test_task_removed_before_its_fetch_is_dropped(self):
+    def test_remove_waits_for_verified_custody(self):
         identifier = self.finished(wait=False)
         engine = self.engine(identifier)
         with patch.object(self.service, '_advance_eager_custody', lambda: None):
             self.service.tick()
-        self.service.remove(identifier)
+        with self.assertRaises(Conflict):
+            self.service.remove(identifier)
+        self.assertIn(identifier, self.service.store.pending_custody())
         self.settle()
-        self.assertNotIn(identifier, self.service._eager_due)
-        self.assertEqual(engine.download_calls, 0)
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
+        self.assertEqual(engine.download_calls, 1)
+        self.assertTrue(self.service.remove(identifier)['success'])
+
+    def test_unavailable_custody_blocks_remove_across_restart(self):
+        identifier = self.finished(wait=False)
+        task = self.fixture.task(identifier)
+        engine = self.engine(identifier)
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
+            self.service.tick()
+        del engine.tasks[task['engine_uuid']]
+        for _ in range(ENGINE_MISSING_POLLS):
+            self.settle()
+        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': 'engine_task_missing'})
+        self.assertEqual(self.service.store.pending_custody(), [])
+        with self.assertRaises(Conflict):
+            self.service.remove(identifier)
+        self.restart()
+        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': 'engine_task_missing'})
+        with self.assertRaises(Conflict):
+            self.service.remove(identifier)
+
+    def test_operator_can_retry_only_same_missing_engine_result(self):
+        identifier = self.finished(wait=False)
+        task = self.fixture.task(identifier)
+        engine = self.engine(identifier)
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
+            self.service.tick()
+        engine_task = engine.tasks.pop(task['engine_uuid'])
+        for _ in range(ENGINE_MISSING_POLLS):
+            self.settle()
+        with self.assertRaises(Conflict):
+            self.service.operator(task['job_id'], 'retry-custody', {'note': 'check recovered node'})
+        engine.tasks[task['engine_uuid']] = engine_task
+        self.service.operator(task['job_id'], 'retry-custody', {'note': 'check recovered node'})
+        self.settle()
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
+        self.assertTrue(self.service.remove(identifier)['success'])
+
+    def test_operator_retry_refuses_changed_result_and_keeps_hold(self):
+        identifier = self.finished(wait=False)
+        task = self.fixture.task(identifier)
+        engine = self.engine(identifier)
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
+            self.service.tick()
+        engine_task = engine.tasks.pop(task['engine_uuid'])
+        for _ in range(ENGINE_MISSING_POLLS):
+            self.settle()
+        engine_task['identity']['dateCreated'] += 1
+        engine.tasks[task['engine_uuid']] = engine_task
+        with self.assertRaises(Conflict):
+            self.service.operator(task['job_id'], 'retry-custody', {'note': 'check recovered node'})
+        with self.assertRaises(Conflict):
+            self.service.remove(identifier)
+        self.restart()
+        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': 'engine_task_missing'})
+        with self.assertRaises(Conflict):
+            self.service.remove(identifier)
+
+    def test_operator_retry_record_failure_preserves_hold_and_can_be_retried(self):
+        identifier = self.finished(wait=False)
+        task = self.fixture.task(identifier)
+        engine = self.engine(identifier)
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
+            self.service.tick()
+        engine_task = engine.tasks.pop(task['engine_uuid'])
+        for _ in range(ENGINE_MISSING_POLLS):
+            self.settle()
+        engine.tasks[task['engine_uuid']] = engine_task
+        with patch.object(TaskStore, 'save_custody', side_effect=OSError('synthetic')):
+            with self.assertRaises(Conflict):
+                self.service.operator(task['job_id'], 'retry-custody', {'note': 'retry'})
+        with self.assertRaises(Conflict):
+            self.service.remove(identifier)
+        self.service.operator(task['job_id'], 'retry-custody', {'note': 'retry'})
+        self.settle()
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
+
+    def test_operator_retry_refuses_when_admission_closed(self):
+        identifier = self.finished(wait=False)
+        task = self.fixture.task(identifier)
+        engine = self.engine(identifier)
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
+            self.service.tick()
+        engine_task = engine.tasks.pop(task['engine_uuid'])
+        for _ in range(ENGINE_MISSING_POLLS):
+            self.settle()
+        engine.tasks[task['engine_uuid']] = engine_task
+        class ClosedGate:
+            def admit(self):
+                raise AdmissionClosed()
+        with patch.object(self.fixture.queue, 'admission_drain', ClosedGate(), create=True):
+            with self.assertRaises(Conflict):
+                self.service.operator(task['job_id'], 'retry-custody', {'note': 'retry'})
+        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': 'engine_task_missing'})
+
+    def test_interrupted_retry_intent_reholds_unavailable_after_restart(self):
+        identifier = self.finished(wait=False)
+        task = self.fixture.task(identifier)
+        engine = self.engine(identifier)
+        with patch.object(self.service, '_advance_eager_custody', lambda: None):
+            self.service.tick()
+        engine_task = engine.tasks.pop(task['engine_uuid'])
+        for _ in range(ENGINE_MISSING_POLLS):
+            self.settle()
+        engine.tasks[task['engine_uuid']] = engine_task
+        # Model process loss after restoring the durable intent but before the
+        # unavailable sidecar could be rewritten or compensated.
+        self.service.store.retry_custody_intent(self.fixture.task(identifier))
+        self.restart()
+        self.settle()
+        self.assertEqual(self.custody(identifier), {'state': 'unavailable', 'reason': 'engine_task_missing'})
+        with self.assertRaises(Conflict):
+            self.service.remove(identifier)
+        self.service.operator(task['job_id'], 'retry-custody', {'note': 'inspect and retry'})
+        self.settle()
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
 
     def test_kept_archive_survives_resolve(self):
         identifier = self.finished()
