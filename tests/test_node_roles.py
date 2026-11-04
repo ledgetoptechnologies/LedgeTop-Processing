@@ -169,3 +169,22 @@ class NodeRoleConfigTests(unittest.TestCase):
         with self.environment(PROCESSING_PROTOTYPE_NODE_IDS='cluster,a-b,a_b'):
             with self.assertRaisesRegex(ValueError, 'unique environment'):
                 from_environment()
+
+    def test_multiple_nodes_may_share_engine_token_but_not_application_token(self):
+        shared = 'shared-engine-secret-000000000000000000'
+        values = {
+            'PROCESSING_PROTOTYPE_NODE_IDS': 'cluster,main',
+            'PROCESSING_PROTOTYPE_STATE_DIR': 'C:/state',
+            'PROCESSING_VIEWER_ENABLED': '1',
+            'PROCESSING_VIEWER_TOKEN': 'viewer-production-secret-000000000000',
+            'PROCESSING_NODE_CLUSTER_URL': 'http://cluster.invalid:3000',
+            'PROCESSING_NODE_CLUSTER_TOKEN': shared,
+            'PROCESSING_NODE_MAIN_URL': 'http://main.invalid:3000',
+            'PROCESSING_NODE_MAIN_TOKEN': shared,
+        }
+        with self.environment(**values):
+            config = from_environment()
+        self.assertEqual([node.token for node in config.node_endpoints], [shared, shared])
+        values['PROCESSING_VIEWER_TOKEN'] = shared
+        with self.environment(**values), self.assertRaisesRegex(ValueError, 'credentials must be distinct'):
+            from_environment()

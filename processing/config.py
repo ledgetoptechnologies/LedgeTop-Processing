@@ -148,10 +148,11 @@ def from_environment() -> Config:
                 raise ValueError('Viewer credentials must be separate printable secrets')
         if not viewer_token or (viewer_staging and viewer_staging == viewer_token):
             raise ValueError('separate Viewer production credential required')
-    all_credentials = [value for value in (token, operator, observer, viewer_token,
-                                             viewer_staging, *node_tokens) if value]
-    if len(all_credentials) != len(set(all_credentials)):
-        raise ValueError('processing credentials must be distinct')
+    application_credentials = [value for value in (token, operator, observer, viewer_token,
+                                                     viewer_staging) if value]
+    if (len(application_credentials) != len(set(application_credentials))
+            or set(application_credentials).intersection(node_tokens)):
+        raise ValueError('application and processing node credentials must be distinct')
     if operator and (len(operator) < 32 or operator == token
                      or any(ord(char) < 33 or ord(char) > 126 for char in operator)):
         raise ValueError("prototype operator token must be a separate printable credential of at least 32 characters")
