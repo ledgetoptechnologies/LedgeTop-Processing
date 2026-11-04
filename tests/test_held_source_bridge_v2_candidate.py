@@ -69,7 +69,7 @@ class HeldSourceBridgeTests(unittest.TestCase):
                               ('selectedFrameStream',selected),('gcpEvidenceStream',evidence),('gcpFileStream',generated)):
             bridge[name+'Sha256'], bridge[name+'ByteCount'] = pair(payload)
         g = local['gcp']
-        outer = {k:v for k,v in context.items() if k not in ('revocationEpoch','localIssuerId','localKeyId','maxSelectedBytes','maxObjectBytes')}
+        outer = {k:v for k,v in context.items() if k not in ('localIssuerId','localKeyId','maxSelectedBytes','maxObjectBytes')}
         outer.update(protocol=PROTOCOL, schemaVersion=2, snapshotId=local['snapshotId'],
             sourcePageHashes=local['sourcePageHashes'], sourcePageBytes=[len(x)-1 for x in source.splitlines(keepends=True)],
             sourceCount=local['sourceCount'], selectedPageHashes=local['selectedPageHashes'],
@@ -122,6 +122,7 @@ class HeldSourceBridgeTests(unittest.TestCase):
                          {'local_key':Ed25519PrivateKey.generate().public_key()},
                          {'context':{**context,'principalId':'other'}}, {'now_ms':1893456600000},
                          {'context':{**context,'processingManifestSha256':'d'*64}},
+                         {'context':{**context,'revocationEpoch':2}},
                          {'context':{**context,'maxSelectedBytes':1}},
                          {'context':{**context,'maxObjectBytes':1}},
                          {'selected_frames':selected[:-1]}, {'file_frames':generated[:-1]},
@@ -132,14 +133,15 @@ class HeldSourceBridgeTests(unittest.TestCase):
             forged=copy.deepcopy(outer); forged[field]=0 if field=='sourceCount' else '0'*64
             with self.subTest(forged=field), self.assertRaises(ValueError):
                 verify(**{**args,'statement_bytes':signed(forged)})
-        for change in ('source-page-size', 'local-intent-hash', 'gcp-file-size', 'wrong-attempt', 'version', 'total-bytes'):
+        for change in ('source-page-size', 'local-intent-hash', 'gcp-file-size', 'wrong-attempt', 'version', 'total-bytes', 'epoch'):
             forged=copy.deepcopy(outer)
             if change=='source-page-size': forged['sourcePageBytes'][0] += 1
             elif change=='local-intent-hash': forged['viewerHeldSource']['intentSha256'] = '0'*64
             elif change=='gcp-file-size': forged['viewerHeldSource']['gcpFileStreamByteCount'] += 1
             elif change=='wrong-attempt': forged['viewerAttemptId'] = random_uuid()
             elif change=='version': forged['schemaVersion'] = 1
-            else: forged['selectedTotalBytes'] += 1
+            elif change=='total-bytes': forged['selectedTotalBytes'] += 1
+            else: forged['revocationEpoch'] += 1
             with self.subTest(forged=change), self.assertRaises(ValueError):
                 verify(**{**args,'statement_bytes':signed(forged)})
         # A separate photo-only case covers the near-term non-GCP workflow.
@@ -254,6 +256,9 @@ class HeldSourceBridgeTests(unittest.TestCase):
                 with queue._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM held_source_bridge_v2').fetchone()[0],0)
                 self.assertTrue(inspect_bound(store,submission['submissionId'],**bound_args)['created'])
                 self.assertFalse(inspect_bound(store,submission['submissionId'],**bound_args)['created'])
+                revoked=BoundBridgeTrust(**{**trust_args,'revocation_epoch':2})
+                with self.assertRaises(ValueError):
+                    inspect_bound(store,submission['submissionId'],**{**bound_args,'trust':revoked})
                 for mutation in ({'authenticated_principal':'other'}, {'authenticated_environment':'production'},
                                  {'processing_pages':[]}, {'statement_bytes':signed({**bound_outer,'jobId':random_uuid()})}):
                     with self.subTest(bound=list(mutation)),self.assertRaises(ValueError):

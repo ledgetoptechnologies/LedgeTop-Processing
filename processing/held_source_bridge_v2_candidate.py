@@ -47,7 +47,7 @@ def verify(*, statement_bytes, outer_key, local_key, context, now_ms, intent_byt
             raise ValueError()
         statement = json.loads(statement_bytes.decode('utf8'), object_pairs_hook=_pairs,
                                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
-        p._closed(statement, (*V1_FIELDS, 'processingManifestSha256', 'selectedTotalBytes', 'viewerHeldSource'), 'bridge statement')
+        p._closed(statement, (*V1_FIELDS, 'processingManifestSha256', 'selectedTotalBytes', 'revocationEpoch', 'viewerHeldSource'), 'bridge statement')
         if (p.canonical_json(statement) != statement_bytes or statement['protocol'] != PROTOCOL
                 or type(statement['schemaVersion']) is not int or statement['schemaVersion'] != 2):
             raise ValueError()
@@ -59,7 +59,7 @@ def verify(*, statement_bytes, outer_key, local_key, context, now_ms, intent_byt
             raise ValueError()
         outer_key.verify(decoded, DOMAIN + p.canonical_json({k: v for k, v in statement.items() if k != 'signature'}))
         for key in CONTEXT_FIELDS:
-            if key not in ('revocationEpoch', 'localIssuerId', 'localKeyId', 'maxSelectedBytes', 'maxObjectBytes') and statement[key] != context[key]:
+            if key not in ('localIssuerId', 'localKeyId', 'maxSelectedBytes', 'maxObjectBytes') and statement[key] != context[key]:
                 raise ValueError()
         p._environment(context['environment']); p._uuid(context['coordinatorAuthorityId'], 'authority')
         for key in ('submissionId', 'activationId', 'viewerTaskId', 'viewerAttemptId'):
@@ -69,6 +69,8 @@ def verify(*, statement_bytes, outer_key, local_key, context, now_ms, intent_byt
         for key in ('preparedEnvelopeSha256', 'datasetManifestSha256', 'pipelineDigest', 'processingManifestSha256', 'processingClosureSha256'):
             p._hash(context[key], key)
         p._integer(context['generation'], 'generation'); p._integer(context['revocationEpoch'], 'epoch', allow_zero=True)
+        if type(statement['revocationEpoch']) is not int:
+            raise ValueError()
         for key in ('maxSelectedBytes', 'maxObjectBytes'):
             p._integer(context[key], key)
         p._integer(statement['selectedTotalBytes'], 'selected bytes')
