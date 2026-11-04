@@ -60,6 +60,14 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
                 from processing.reference_driver import ReferenceDriver
                 import time
                 driver=object.__new__(ReferenceDriver);driver.source_range_v2_enabled=True;driver.transfer_ttl=3600;driver.clock=time.time
+                # Validate the actual durable claim through the real driver's
+                # normal submission check, with only engine metadata synthetic.
+                from types import SimpleNamespace
+                driver.execution_router=None;driver._combined_policy=None
+                driver.worker=SimpleNamespace(allowed_options=['resolution'])
+                driver.allowed_environments=('production',);driver.node_id='cluster'
+                driver._option_definitions={'resolution':{'type':'float'}}
+                driver._validate_job(claim)
                 self.assertEqual(driver._new_transfer_request(claim)['viewerAttemptId'],env['viewerAttemptId'])
                 from processing.reference_worker_api import ReferenceWorkerAPI,PREFIX
                 from processing.reference_delivery import DeliveryReceiver
@@ -80,6 +88,17 @@ class JCSHTTPIntegrationTests(unittest.TestCase):
                 self.assertEqual(stored['transferRequest'],transfer)
                 claim['transferRequest']=stored['transferRequest']
                 self.assertEqual(validate_source_grant(grant,job=claim).identity.viewer_attempt_id,env['viewerAttemptId'])
+                from processing.source_range_transfer import TransferError
+                for wrong_attempt in (str(uuid.uuid4()), None):
+                    bad_claim=copy.deepcopy(claim);bad_grant=copy.deepcopy(grant)
+                    if wrong_attempt is None:
+                        bad_claim['transferRequest'].pop('viewerAttemptId')
+                        bad_grant.pop('viewerAttemptId')
+                    else:
+                        bad_claim['transferRequest']['viewerAttemptId']=wrong_attempt
+                        bad_grant['viewerAttemptId']=wrong_attempt
+                    with self.subTest(attempt=wrong_attempt),self.assertRaises(TransferError):
+                        validate_source_grant(bad_grant,job=bad_claim)
                 self.assertEqual(driver._source_range_grant(job['jobId'],claim,{'grant':grant}).identity.viewer_attempt_id,env['viewerAttemptId'])
                 self.assertEqual(store.reserve(job['jobId'],transfer,node_id='cluster')['transferRequest'],transfer)
                 changed=copy.deepcopy(transfer);changed['viewerAttemptId']=str(uuid.uuid4())
