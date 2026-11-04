@@ -30,10 +30,17 @@ def _numeric_domain_supported(option, definition):
         # Preserve exact structured-fixture comparison; never infer a domain.
         return 'domain' in option and p.canonical_json(domain)==p.canonical_json(definition['domain'])
     configured=definition['domain']
+    if kind == 'bool' and domain == '':
+        # NodeODM d45bc41 filterOptions converts booleans and skips falsy
+        # domains. Live deployed source has not been pinned; this evidence is
+        # held only and must never authorize actual processing on its own.
+        return configured is None or (type(configured) is list and bool(configured)
+                                      and all(type(value) is bool for value in configured))
     if kind == 'float' and domain == 'positive integer':
-        # A float-typed UI value may be integral, but a positive continuous
-        # range would still admit fractional values. Only explicit integral
-        # choices or a singleton integral interval are provable subsets.
+        # This is intentionally narrower than upstream d45bc41, whose
+        # positive-domain branch accepts zero and fractional floats. Until the
+        # installed engine is pinned, accept only positive integral choices or
+        # a singleton integral interval as a conservative subset.
         def positive_whole(value):
             return type(value) in (int,float) and value > 0 and float(value).is_integer()
         if type(configured) is list:

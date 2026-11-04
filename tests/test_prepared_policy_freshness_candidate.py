@@ -102,6 +102,25 @@ class NumericDomainGrammarTests(unittest.TestCase):
         policy['optionDefinitions']['engine-flag']['domain']={'min':1,'max':3}
         with self.assertRaises(PreparedPolicyHeld):fixture.check(policy)
 
+    def test_bool_empty_domain_accepts_only_actual_booleans(self):
+        engine={'type':'bool','domain':''}
+        for domain,expected in ((None,True),([True,False],True),([False],True),
+                                ([1],False),(['true'],False),([],False)):
+            with self.subTest(domain=domain):
+                self.assertEqual(_numeric_domain_supported(engine,{'type':'bool','domain':domain}),expected)
+        self.assertFalse(_numeric_domain_supported({'type':'bool','domain':'unrecognized'},
+            {'type':'bool','domain':None}))
+
+    def test_bool_empty_domain_catalog_only_yields_held(self):
+        fixture=PreparedPolicyFreshnessTests('test_current_fresh_policy_only_returns_held')
+        fixture.setUp();self.addCleanup(fixture.doCleanups)
+        for engine in (fixture.local,fixture.main):
+            engine.options=[{'name':'dynamic-boolean','type':'bool','domain':'','value':'false'}]
+        capability,options,_=discovered_policy(catalog(fixture.nodes),fixture.config)
+        policy=dict(capabilityFingerprint=capability,optionsFingerprint=options,availableEngines=['odm'],
+            optionDefinitions={'dynamic-boolean':{'type':'bool','domain':None}})
+        self.assertEqual(fixture.check(policy)['state'],'held')
+
     def test_boolean_and_string_text_are_not_guessed(self):
         for kind,domain in (('bool','boolean'),('string','string')):
             self.assertFalse(_numeric_domain_supported({'type':kind,'domain':domain},
