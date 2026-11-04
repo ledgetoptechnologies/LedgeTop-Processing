@@ -38,7 +38,7 @@ class PreparedRuntimeTLS(unittest.TestCase):
         bindings.extend(dict(certificateSha256=str(i+1)*64,bearer=worker['bearer']) for i,worker in enumerate(self.fixture.workers.values()))
         config=dict(schemaVersion=6,listener={**self.fixture.listener,'port':19443},viewerBearers={'staging':self.fixture.token},workers=self.fixture.workers,
             streamBudget=dict(maxConcurrent=1,maxObjectBytes=1000),inboundClientCA=str(bundle),inboundClientBindings=bindings,preparedViewer=prepared)
-        path=self.root/'prepared-runtime.json';path.write_text(json.dumps(config));path.chmod(0o600)
+        path=self.root/'prepared-runtime.json';path.write_text(json.dumps(config));path.chmod(0o600);self.config_path=path
         self.settings=load_reference_settings(str(path),self.fixture.config)
         self.settings=replace(self.settings,listener=dict(self.settings.listener,port=0))
 
@@ -74,6 +74,30 @@ class PreparedRuntimeTLS(unittest.TestCase):
         stored=runtime.store.find_viewer_envelope_v2(self.submission['submissionId'],authenticated_principal='viewer-a',authenticated_environment='staging',expected_protocol=env['protocol'])
         activation=dict(activationId=env['activationId'],viewerTaskId=env['viewerTaskId'],viewerAttemptId=env['viewerAttemptId'],envelopeSha256=stored['envelopeSha256'])
         self.assertEqual(self.request(runtime,'other',self.staging,path+'/'+self.submission['submissionId']+'/activation',activation)[0],503)
+
+    def test_make_handler_refuses_before_queue_or_lease_and_preserves_running_state(self):
+        from dataclasses import replace
+        import sqlite3
+        from processing.app import make_handler
+        jobid=str(uuid.uuid4())
+        with self.fixture.queue._db() as db:
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status,node_id) VALUES(?,?,?,?,?,?)",
+                (jobid,'synthetic-running','staging','photo','running','cluster'))
+        dbpath=Path(self.fixture.queue.path);self.fixture.queue.close()
+        def snapshot():
+            db=sqlite3.connect(dbpath.as_uri()+'?mode=ro',uri=True)
+            try: rows=db.execute('SELECT id,status,node_id FROM jobs ORDER BY seq').fetchall()
+            finally: db.close()
+            return (dbpath.read_bytes(),dbpath.stat().st_mode,dbpath.stat().st_mtime_ns,rows)
+        before=snapshot()
+        config=replace(self.fixture.config,reference_config_path=str(self.config_path))
+        with patch('processing.reference_runtime.PREPARED_RUNTIME_SCHEMA_QUALIFIED',True), \
+             patch('processing.app.Queue',side_effect=AssertionError('Queue must not be created')), \
+             patch('processing.authority_lease.acquire',side_effect=AssertionError('lease must not be acquired')):
+            with self.assertRaisesRegex(RuntimeError,'prepared_runtime_prequeue_qualification_required'):
+                make_handler(config)
+        self.assertEqual(before,snapshot())
+        self.assertEqual(before[-1],[(jobid,'running','cluster')])
 
     def test_default_runtime_does_not_mount_prepared(self):
         runtime=self.fixture.runtime();self.assertEqual(self.request(runtime,'client',self.fixture.token,'/ltds/prepared/v3/submissions',{})[0],404)
