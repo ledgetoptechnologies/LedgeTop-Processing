@@ -2,9 +2,14 @@ import copy
 import json
 from pathlib import Path
 import unittest
+import base64
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from processing import reference_protocol
 
 from processing.viewer_acceptance_receipt import (
     ViewerReceiptRejected,
+    SIGNATURE_DOMAIN,
     verify_viewer_acceptance_receipt,
 )
 
@@ -65,6 +70,21 @@ class ViewerAcceptanceReceiptTests(unittest.TestCase):
         receipt["objects"][0]["byteSize"] += 1
         with self.assertRaisesRegex(ViewerReceiptRejected, "receipt_object_binding_mismatch"):
             self.verify(receipt)
+
+    def test_rejects_valid_signature_for_different_expected_manifest_digest(self):
+        receipt=copy.deepcopy(self.vector['receipt'])
+        expected=copy.deepcopy(self.vector['expected'])
+        other='f'*64 if expected['resultManifestSha256']!='f'*64 else 'e'*64
+        receipt['resultManifestSha256']=expected['resultManifestSha256']=other
+        key=Ed25519PrivateKey.generate()
+        body={k:v for k,v in receipt.items() if k!='signature'}
+        signature=key.sign(SIGNATURE_DOMAIN+reference_protocol.canonical_json(body))
+        key.public_key().verify(signature,SIGNATURE_DOMAIN+reference_protocol.canonical_json(body))
+        receipt['signature']=base64.urlsafe_b64encode(signature).decode().rstrip('=')
+        trusted={receipt['keyId']:{'issuerId':receipt['issuerId'],'publicKeyPem':key.public_key().public_bytes(
+            serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode('ascii')}}
+        with self.assertRaisesRegex(ViewerReceiptRejected,'expected_result_manifest_digest_mismatch'):
+            self.verify(receipt,trusted=trusted,expected=expected)
 
 
 if __name__ == "__main__":

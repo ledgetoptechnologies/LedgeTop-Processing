@@ -142,6 +142,8 @@ def verify_viewer_acceptance_receipt(receipt: object, *, trusted_keys: dict,
         )
     except (ValueError, KeyError, TypeError):
         raise ViewerReceiptRejected("invalid_expected_result_manifest") from None
+    _need(validated_manifest["resultManifestSha256"] == expected["resultManifestSha256"],
+          "expected_result_manifest_digest_mismatch")
     object_map = {item["id"]: item for item in validated_manifest["objects"]}
     _need(set(accepted_object_ids) <= set(object_map), "unexpected_expected_object")
     if validated_manifest["schemaVersion"] == 2:

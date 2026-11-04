@@ -20,3 +20,8 @@ adds runtime dependency, trust configuration and its security boundaries.
 The v1 verifier does not implement the proposed v2 acceptance protocol, and
 neither module proves authenticated peer identity, durable custody or replay
 fencing. Those remain separate work.
+
+The existing v1 result manifest accepts a caller-specified subset of objects;
+the caller must establish the required closure from trusted policy. Version 2
+manifest acceptance requires the full manifest order. Neither behavior itself
+authorizes cleanup.
