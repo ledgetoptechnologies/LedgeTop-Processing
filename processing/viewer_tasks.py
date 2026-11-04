@@ -854,6 +854,8 @@ class TaskStore:
                 raise Conflict('guard marker cannot be cleared')
             if row['engine_uuid'] and fields.get('engine_uuid', row['engine_uuid']) != row['engine_uuid']:
                 raise Conflict('engine task identity is immutable')
+            if row['engine_uuid'] and fields.get('node_id', row['node_id']) != row['node_id']:
+                raise Conflict('engine node identity is immutable')
             if fields.get('engine_uuid') and db.execute(
                     'SELECT 1 FROM viewer_tasks WHERE engine_uuid=? AND uuid<>?',
                     (fields['engine_uuid'], identifier)).fetchone():

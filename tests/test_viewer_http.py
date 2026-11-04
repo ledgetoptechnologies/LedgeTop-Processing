@@ -243,6 +243,15 @@ class ViewerHTTPTests(unittest.TestCase):
             self.assertEqual(self.request('/task/' + action, urlencode({'uuid': IDENTIFIER}).encode(),
                 headers={'Content-Type': 'application/x-www-form-urlencoded'})[1], {'success': True})
 
+    def test_output_unavailable_returns_retryable_sanitized_http_error(self):
+        self.initialize()
+        with patch.object(self.service, 'output', side_effect=OSError('secret endpoint and token')):
+            with self.assertRaises(HTTPError) as caught:
+                self.request('/task/' + IDENTIFIER + '/output', query={'line': 1})
+        self.assertEqual(caught.exception.code, 503)
+        self.assertEqual(json.loads(caught.exception.read()), {'error': 'service_unavailable'})
+        self.assertEqual(self.request('/task/' + IDENTIFIER + '/output', query={'line': 1})[1], ['', 'third'])
+
     def test_input_ceiling_has_a_stable_sanitized_http_error(self):
         self.initialize()
         with patch.object(self.service, 'upload', side_effect=InputLimitExceeded('private detail')):

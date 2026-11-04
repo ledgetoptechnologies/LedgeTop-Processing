@@ -2633,11 +2633,23 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
 
     def test_native_output_cursor_preserves_blank_and_comma_records(self):
         identifier = self.submit()
+        self.service.store.update(identifier, output_lines=['unrelated coordinator message'])
+        self.assertEqual(self.service.output(identifier, 0), [])
         self.service.tick()
         self.assertEqual(self.service.output(identifier, 1), ['', 'comma,record'])
         self.engines['cluster'].output_unavailable = True
         self.service.store.update(identifier, output_lines=['retained output'])
-        self.assertEqual(self.service.output(identifier, 0), ['retained output'])
+        with self.assertRaises(EngineUnavailable):
+            self.service.output(identifier, 1)
+        self.engines['cluster'].output_unavailable = False
+        self.assertEqual(self.service.output(identifier, 1), ['', 'comma,record'])
+        self.service.store.update(identifier, phase='commit_pending')
+        self.assertEqual(self.service.output(identifier, 1), ['', 'comma,record'])
+        with self.assertRaises(Conflict):
+            self.service.store.update(identifier, node_id='main')
+        self.assertEqual(self.task(identifier)['node_id'], 'cluster')
+        with self.assertRaises(ValueError):
+            self.service.output(identifier, True)
 
     def test_held_output_reads_only_bound_engine_without_resuming(self):
         identifier = self.submit()
@@ -2659,7 +2671,8 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
                 self.assertEqual(calls, [])
         self.engines[task['node_id']].output_unavailable = True
         self.service.store.update(identifier, output_lines=['retained output'])
-        self.assertEqual(self.service.output(identifier, 0), ['retained output'])
+        with self.assertRaises(EngineUnavailable):
+            self.service.output(identifier, 0)
 
 
 if __name__ == '__main__':

@@ -449,17 +449,25 @@ class ViewerService:
             raise KeyError('unknown task')
 
     def output(self, identifier, line=0):
+        if type(line) is not int or not 0 <= line <= 2 ** 53 - 1:
+            raise ValueError('nonnegative output cursor required')
         task = self.store.task(identifier)
-        if task['engine_uuid'] and task['node_id'] in self.engines and task['phase'] in ('processing', 'complete', 'cancel_pending', 'held'):
-            try:
-                result = self._task_engine(task).read('/task/' + task['engine_uuid'] + '/output', line=line)
-                if not isinstance(result, list) or any(not isinstance(x, str) for x in result):
-                    raise EngineUnavailable('engine_output_unavailable')
-                return result
-            except EngineUnavailable:
-                # Never return engine error bodies, query tokens or host paths.
-                return self.store.output(identifier, line)
-        return self.store.output(identifier, line)
+        # A cursor must refer to exactly one stream for the lifetime of a task.
+        # Before an engine is bound there are no engine lines. Coordinator
+        # messages are not part of that stream, even if stored locally.
+        if not task['engine_uuid']:
+            return []
+        if task['node_id'] not in self.engines:
+            raise EngineUnavailable('engine_output_unavailable')
+        try:
+            result = self._task_engine(task).read('/task/' + task['engine_uuid'] + '/output', line=line)
+            if not isinstance(result, list) or any(not isinstance(x, str) for x in result):
+                raise EngineUnavailable('engine_output_unavailable')
+            return result
+        except EngineUnavailable:
+            # A caller can retry the same cursor after a 503; returning local
+            # lines here would silently advance it in a different stream.
+            raise EngineUnavailable('engine_output_unavailable') from None
 
     def _archive_identity(self, task):
         return {'version': 1, 'task': task['uuid'], 'generation': task['generation'],
