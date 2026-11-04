@@ -8,7 +8,7 @@ import io
 import zipfile
 import hashlib
 import struct
-import base64
+import zlib
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -19,7 +19,9 @@ from tests.test_viewer_service import FakeEngine, FakeFleet, OPTIONS
 
 def synthetic_assets():
     # An invented textured square, with matching OBJ and embedded-texture GLB.
-    png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+cFQAAAABJRU5ErkJggg==')
+    def chunk(kind, value):
+        return struct.pack('>I',len(value))+kind+value+struct.pack('>I',zlib.crc32(kind+value)&0xffffffff)
+    png = b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',16,16,8,2,0,0,0))+chunk(b'IDAT',zlib.compress((b'\x00'+bytes([220,130,60])*16)*16))+chunk(b'IEND',b'')
     points = [(0,0,0),(1,0,0),(1,1,0),(0,0,0),(1,1,0),(0,1,0)]
     position = b''.join(struct.pack('<fff',*p) for p in points)
     normal = b''.join(struct.pack('<fff',0,0,1) for _ in points)
