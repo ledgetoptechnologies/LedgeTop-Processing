@@ -1066,7 +1066,7 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick()
         self.assertEqual(self.service.info(first)['progress'], 67)
         self.assertEqual(self.service.info(third)['status']['code'], 20)
-        self.assertEqual(self.service.output(first), ['tiny:' + self.task(first)['engine_uuid']])
+        self.assertEqual(self.service.output_v2(first)['lines'], ['tiny:' + self.task(first)['engine_uuid']])
         self.assertIn(('read', self.task(first)['engine_uuid'], 'output'), self.engines['tiny'].calls)
         self.finish(first)
         blocked = self.submit(count=3)
@@ -1093,7 +1093,7 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick()
         self.assertEqual(self.service.info(blocked)['status']['code'], 20)
         self.assertEqual(self.service.info(blocked)['ledgetopNodeId'], 'large')
-        self.assertEqual(self.service.output(blocked), ['large:' + self.task(blocked)['engine_uuid']])
+        self.assertEqual(self.service.output_v2(blocked)['lines'], ['large:' + self.task(blocked)['engine_uuid']])
         self.assertIn(('read', self.task(blocked)['engine_uuid'], 'output'), self.engines['large'].calls)
         staging = self.submit(environment='staging')
         production = self.submit(environment='production')
@@ -2634,22 +2634,35 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
     def test_native_output_cursor_preserves_blank_and_comma_records(self):
         identifier = self.submit()
         self.service.store.update(identifier, output_lines=['unrelated coordinator message'])
-        self.assertEqual(self.service.output(identifier, 0), [])
+        self.assertEqual(self.service.output_v2(identifier, 0)['lines'], [])
+        self.assertTrue(self.service.output_v2(identifier, 5)['resetRequired'])
+        self.service.store.update(identifier, stage='held', error='synthetic_queue_hold')
+        waiting = self.service.output_v2(identifier, 0)
+        self.assertTrue(waiting['held'])
+        self.assertEqual(waiting['holdReason'], 'synthetic_queue_hold')
+        self.service.store.update(identifier, stage='queued', error=None)
+        with self.assertRaises(EngineUnavailable):
+            self.service.output(identifier, 5)
         self.service.tick()
-        self.assertEqual(self.service.output(identifier, 1), ['', 'comma,record'])
+        initial = self.service.output_v2(identifier, 0)
+        stream = initial['streamId']
+        self.assertEqual(initial['lines'], ['synthetic engine output', '', 'comma,record'])
+        self.assertTrue(self.service.output_v2(identifier, 2)['resetRequired'])
+        self.assertTrue(self.service.output_v2(identifier, 2, 'a' * 64)['resetRequired'])
+        self.assertEqual(self.service.output_v2(identifier, 1, stream)['lines'], ['', 'comma,record'])
         self.engines['cluster'].output_unavailable = True
         self.service.store.update(identifier, output_lines=['retained output'])
         with self.assertRaises(EngineUnavailable):
-            self.service.output(identifier, 1)
+            self.service.output_v2(identifier, 1, stream)
         self.engines['cluster'].output_unavailable = False
-        self.assertEqual(self.service.output(identifier, 1), ['', 'comma,record'])
+        self.assertEqual(self.service.output_v2(identifier, 1, stream)['lines'], ['', 'comma,record'])
         self.service.store.update(identifier, phase='commit_pending')
-        self.assertEqual(self.service.output(identifier, 1), ['', 'comma,record'])
+        self.assertEqual(self.service.output_v2(identifier, 1, stream)['lines'], ['', 'comma,record'])
         with self.assertRaises(Conflict):
             self.service.store.update(identifier, node_id='main')
         self.assertEqual(self.task(identifier)['node_id'], 'cluster')
         with self.assertRaises(ValueError):
-            self.service.output(identifier, True)
+            self.service.output_v2(identifier, True)
 
     def test_held_output_reads_only_bound_engine_without_resuming(self):
         identifier = self.submit()
@@ -2657,7 +2670,10 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         task = self.task(identifier)
         self.service._hold(task, 'synthetic_uncertainty')
         before = {node: list(engine.calls) for node, engine in self.engines.items()}
-        self.assertEqual(self.service.output(identifier, 1), ['', 'comma,record'])
+        output = self.service.output_v2(identifier)
+        self.assertEqual(output['lines'], ['synthetic engine output', '', 'comma,record'])
+        self.assertTrue(output['held'])
+        self.assertEqual(output['holdReason'], 'synthetic_uncertainty')
         held = self.task(identifier)
         self.assertEqual(held['job']['status'], 'held')
         self.assertEqual((held['node_id'], held['engine_uuid']), (task['node_id'], task['engine_uuid']))
@@ -2672,7 +2688,7 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         self.engines[task['node_id']].output_unavailable = True
         self.service.store.update(identifier, output_lines=['retained output'])
         with self.assertRaises(EngineUnavailable):
-            self.service.output(identifier, 0)
+            self.service.output_v2(identifier, 0)
 
 
 if __name__ == '__main__':

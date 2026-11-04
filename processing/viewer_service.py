@@ -449,21 +449,39 @@ class ViewerService:
             raise KeyError('unknown task')
 
     def output(self, identifier, line=0):
+        # Existing Viewer attempts can retain a cursor from the old mixed
+        # coordinator/node stream.  That cursor has no safe interpretation in
+        # the new stream; legacy clients must keep their cursor and retry.
+        self.store.task(identifier)
+        raise EngineUnavailable('versioned_output_required')
+
+    def output_v2(self, identifier, line=0, stream=None):
         if type(line) is not int or not 0 <= line <= 2 ** 53 - 1:
             raise ValueError('nonnegative output cursor required')
+        if stream is not None and (not isinstance(stream, str) or not re.fullmatch(r'[0-9a-f]{64}', stream)):
+            raise ValueError('invalid output stream')
         task = self.store.task(identifier)
-        # A cursor must refer to exactly one stream for the lifetime of a task.
-        # Before an engine is bound there are no engine lines. Coordinator
-        # messages are not part of that stream, even if stored locally.
+        held = task['stage'] == 'held' or bool(task.get('job') and task['job']['status'] == 'held')
+        base = {'streamId': None, 'fromLine': 0, 'lines': [], 'resetRequired': False,
+                'held': held, 'holdReason': (task['error'] or 'execution_held') if held else None}
+        # A cursor is meaningful only together with a stream identity.
         if not task['engine_uuid']:
-            return []
+            base['resetRequired'] = stream is not None or line != 0
+            return base
         if task['node_id'] not in self.engines:
             raise EngineUnavailable('engine_output_unavailable')
+        identity = json.dumps([identifier, task['generation'], task['node_id'], task['engine_uuid']],
+                              separators=(',', ':'), ensure_ascii=True).encode('ascii')
+        base['streamId'] = hashlib.sha256(identity).hexdigest()
+        if (stream is None and line != 0) or (stream is not None and stream != base['streamId']):
+            base['resetRequired'] = True
+            return base
         try:
             result = self._task_engine(task).read('/task/' + task['engine_uuid'] + '/output', line=line)
             if not isinstance(result, list) or any(not isinstance(x, str) for x in result):
                 raise EngineUnavailable('engine_output_unavailable')
-            return result
+            base.update(fromLine=line, lines=result)
+            return base
         except EngineUnavailable:
             # A caller can retry the same cursor after a 503; returning local
             # lines here would silently advance it in a different stream.

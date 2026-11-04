@@ -92,6 +92,11 @@ class Service:
         self.info(identifier)
         return ['first', '', 'third'][line:]
 
+    def output_v2(self, identifier, line, stream):
+        self.info(identifier)
+        return {'streamId': 'a' * 64, 'fromLine': line, 'lines': ['first', '', 'third'][line:],
+                'resetRequired': False, 'held': False, 'holdReason': None}
+
     def download(self, identifier):
         self.info(identifier)
         self.download_stream = BoundedStream(self.result)
@@ -251,6 +256,14 @@ class ViewerHTTPTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 503)
         self.assertEqual(json.loads(caught.exception.read()), {'error': 'service_unavailable'})
         self.assertEqual(self.request('/task/' + IDENTIFIER + '/output', query={'line': 1})[1], ['', 'third'])
+
+    def test_versioned_output_routes_cursor_and_stream(self):
+        self.initialize()
+        with patch.object(self.service, 'output_v2', wraps=self.service.output_v2) as output:
+            result = self.request('/task/' + IDENTIFIER + '/ledgetop-output-v2',
+                                  query={'line': 1, 'stream': 'a' * 64})[1]
+        output.assert_called_once_with(IDENTIFIER, 1, 'a' * 64)
+        self.assertEqual(result['lines'], ['', 'third'])
 
     def test_input_ceiling_has_a_stable_sanitized_http_error(self):
         self.initialize()

@@ -223,8 +223,9 @@ class ViewerFacade:
         try:
             query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=4)
             environment = self._environment(query)
-            output_route = re.fullmatch(r'/task/([^/]+)/output', path)
-            allowed_query = {'token', 'line'} if output_route else {'token'}
+            output_route = re.fullmatch(r'/task/([^/]+)/(output|ledgetop-output-v2)', path)
+            allowed_query = ({'token', 'line', 'stream'} if output_route and output_route[2] == 'ledgetop-output-v2'
+                             else {'token', 'line'} if output_route else {'token'})
             if set(query) - allowed_query or any(len(values) != 1 for values in query.values()):
                 raise RequestError(400, 'invalid_query')
             if handler.command == 'GET':
@@ -306,18 +307,21 @@ class ViewerFacade:
         elif path == '/options':
             value = self.service.options()
         else:
-            route = re.fullmatch(r'/task/([^/]+)/(info|output|download/all\.zip)', path)
+            route = re.fullmatch(r'/task/([^/]+)/(info|output|ledgetop-output-v2|download/all\.zip)', path)
             if not route:
                 raise RequestError(404, 'not_found')
             identifier, action = task_uuid(unquote(route[1])), route[2]
             self._authorize(identifier, environment, handler)
             if action == 'info':
                 value = self.service.info(identifier)
-            elif action == 'output':
+            elif action in ('output', 'ledgetop-output-v2'):
                 line = query.get('line', ['0'])[0]
                 if not re.fullmatch(r'0|[1-9][0-9]{0,14}', line) or int(line) > 2 ** 53 - 1:
                     raise RequestError(400, 'invalid_output_cursor')
-                value = self.service.output(identifier, int(line))
+                if action == 'output':
+                    value = self.service.output(identifier, int(line))
+                else:
+                    value = self.service.output_v2(identifier, int(line), query.get('stream', [None])[0])
             else:
                 stream, length = self.service.download(identifier)
                 try:
