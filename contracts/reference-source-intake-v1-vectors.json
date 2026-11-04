@@ -1,0 +1,69 @@
+{
+  "protocol": "ltds-reference-source-intake-v1",
+  "canonicalization": "UTF-8 JSON, sorted keys, compact separators, literal Unicode, arrays preserved",
+  "sourceManifest": {
+    "schemaVersion": 1,
+    "id": "00000000-0000-4000-8000-000000000002",
+    "datasetManifestSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "sha256": "743daecfa6629e0db61883d4eb14458969324dcb1f0954c9902818e251631d0f",
+    "totalBytes": 20,
+    "objectCount": 2,
+    "objects": [
+      {
+        "id": "00000000-0000-4000-8000-000000000010",
+        "name": "Survey_001.JPG",
+        "byteSize": 3,
+        "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        "sourceType": "raw_input",
+        "retentionClass": "release_after_acceptance",
+        "retentionHoldId": null
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000020",
+        "name": "Survey_GCP.csv",
+        "byteSize": 17,
+        "sha256": "278afb48e7576c795815251ef1fae066c4f01c128fe40cba9c360de92c3d1eed",
+        "sourceType": "gcp_source_csv",
+        "retentionClass": "permanent_viewer_hold",
+        "retentionHoldId": "00000000-0000-4000-8000-000000000020"
+      }
+    ]
+  },
+  "sourceManifestSha256": "743daecfa6629e0db61883d4eb14458969324dcb1f0954c9902818e251631d0f",
+  "derivedManifest": {
+    "schemaVersion": 1,
+    "attemptId": "00000000-0000-4000-8000-000000000001",
+    "sha256": "764d1b626fc148436f2e931d3018c0f73fae3a226a4fdd4c800040031e1366f6",
+    "objects": [
+      {
+        "id": "gcp_00000000-0000-4000-8000-000000000001",
+        "name": "gcp_list.txt",
+        "byteSize": 6,
+        "sha256": "7a8988e95e356e2b5b8fecf5e31f7c2e7e8fb44a5cd9d89ebb0d1e60b1f5c689",
+        "sourceType": "attempt_derived_gcp_list",
+        "retentionClass": "release_after_acceptance",
+        "retentionHoldId": null,
+        "snapshotAttemptId": "00000000-0000-4000-8000-000000000001",
+        "snapshotContentSha256": "7a8988e95e356e2b5b8fecf5e31f7c2e7e8fb44a5cd9d89ebb0d1e60b1f5c689",
+        "snapshotEvidenceSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    ]
+  },
+  "derivedManifestSha256": "764d1b626fc148436f2e931d3018c0f73fae3a226a4fdd4c800040031e1366f6",
+  "pipeline": {
+    "odm": {
+      "requested": true,
+      "options": {},
+      "optionsFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "treedar": {
+      "requested": false,
+      "inputObjectIds": [],
+      "provenanceReceiptId": null
+    },
+    "gaussian_splat": {
+      "requested": false
+    }
+  },
+  "pipelineDigest": "16f9955e03e11ee6539acc6e3e4ebde3de339bb944d135e37aad58b37eae8e9e"
+}
