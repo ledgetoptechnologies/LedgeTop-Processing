@@ -269,6 +269,60 @@ class RealViewerSourceRenewalTests(unittest.TestCase):
         self.assertNotEqual(status, 200, value)
         self.assertEqual(host.control(op='head')['head']['sequence'], 0)  # head advances only on the exact ACK
 
+    def test_driver_renewal_journal_against_real_viewer_services(self):
+        from tests.test_reference_driver import ReferenceDriverTests
+        from processing.reference_driver import DriverWait
+        fixture = ReferenceDriverTests('test_expired_source_grant_is_durably_renewed_and_ack_replays_without_new_grant')
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        host = self.start()
+        job = self.queued_job(host)
+        initial = host.control(op='dispatch', transferRequest=job['transferRequest'])['grant']
+        self.advance(host, TEN_MINUTES)
+        state = self.root / 'driver.sqlite'
+        calls = {'renew': [], 'ack': []}
+        def opener(request, *, timeout):
+            path = urlsplit(request.full_url).path
+            kind = 'ack' if path.endswith('/ack') else 'renew' if path.endswith('/renew') else None
+            response = host.opener(request, timeout=timeout)
+            if kind is not None:
+                calls[kind].append(request.data)
+                if len(calls[kind]) == 1:
+                    response.read(); response.close()
+                    raise OSError('synthetic lost response after durable Viewer write')
+            return response
+        def make_driver():
+            driver = fixture.make_driver(source_range_v2_enabled=True, state_path=state, clock=self.clock)
+            fixture.driver = driver
+            driver.source_range_client.origin = ORIGIN
+            driver.source_range_client._open = opener
+            return driver
+        driver = make_driver()
+        data = {'grant': initial}
+        with driver._db() as db:
+            db.execute('INSERT INTO driver_jobs(job,claim_request,stage,data) VALUES(?,?,?,?)',
+                       (job['jobId'], 'synthetic-claim', 'fetching', json.dumps(data)))
+        with self.assertRaises(DriverWait):
+            driver._source_range_grant(job['jobId'], job, data)
+        with driver._db() as db:
+            saved = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+        self.assertEqual(saved['sourceRenewal']['phase'], 'request_pending')
+        driver = make_driver()
+        with self.assertRaises(DriverWait):
+            driver._source_range_grant(job['jobId'], job, saved)
+        with driver._db() as db:
+            saved = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+        self.assertEqual(saved['sourceRenewal']['phase'], 'ack_pending')
+        driver = make_driver()
+        grant = driver._source_range_grant(job['jobId'], job, saved)
+        self.assertEqual(calls['renew'][0], calls['renew'][1])
+        self.assertEqual(calls['ack'][0], calls['ack'][1])
+        self.assertEqual(host.control(op='head')['head']['sequence'], 1)
+        self.assertEqual(saved['sourceRenewalSequence'], 1)
+        target = self.root / 'dest' / 'driver.jpg'
+        result = driver.source_range_client.download_object(grant=grant, object_id=grant.objects[0].id, destination=target)
+        self.assertEqual(result.read_bytes(), self.body)
+
 
 if __name__ == '__main__':
     unittest.main()

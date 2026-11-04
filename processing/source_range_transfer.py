@@ -209,6 +209,19 @@ def validate_source_grant(grant, *, job, clock=time.time, allow_expired=False):
                                   grant.get("viewerAttemptId"))
         identity.canonical()
         transfer = job["transferRequest"]
+        submission = job["submission"]
+        if type(submission) is not dict:
+            raise TransferError("invalid queued source submission")
+        bound = "viewerAttemptId" in submission
+        if bound:
+            attempt = submission["viewerAttemptId"]
+            if type(attempt) is not str or not VIEWER_ATTEMPT_ID.fullmatch(attempt):
+                raise TransferError("invalid submission attempt binding")
+        if (("viewerAttemptId" in transfer) != bound
+                or ("viewerAttemptId" in grant) != bound
+                or (bound and (transfer.get("viewerAttemptId") != attempt
+                               or grant.get("viewerAttemptId") != attempt))):
+            raise TransferError("source grant attempt differs from queued submission")
         transfer_fields = ("protocol", "reservationId", "generation", "expiresAt", "manifestSha256",
                            "sourceVersion", "objectIds", "chunkBytes", "requestBudget", "byteBudget", "nonce")
         transfer_fields = (*transfer_fields, "attemptBudget")

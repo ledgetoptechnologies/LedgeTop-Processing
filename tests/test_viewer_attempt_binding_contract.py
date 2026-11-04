@@ -122,6 +122,26 @@ class ViewerAttemptBindingContractTests(unittest.TestCase):
         with self.assertRaises(TransferError):  # an attempt-bound grant cannot satisfy an unbound job
             validate_source_grant(self.viewer_grant(), job=legacy)
 
+    def test_attempt_binding_must_match_immutable_submission(self):
+        for replacement in ('00000000-0000-4000-8000-000000000002', None):
+            transfer = dict(self.transfer)
+            grant = self.viewer_grant()
+            if replacement is None:
+                transfer.pop('viewerAttemptId')
+                grant.pop('viewerAttemptId')
+            else:
+                transfer['viewerAttemptId'] = replacement
+                grant['viewerAttemptId'] = replacement
+            with self.subTest(replacement=replacement), self.assertRaises(TransferError):
+                validate_source_grant(grant, job={**self.job, 'transferRequest': transfer})
+        for invalid in (None, '', 42, '00000000-0000-4000-8000-00000000000X'):
+            with self.subTest(invalid=invalid), self.assertRaises(TransferError):
+                validate_source_grant(self.viewer_grant(), job={**self.job,
+                    'submission': {**self.job['submission'], 'viewerAttemptId': invalid}})
+        legacy = {**self.job, 'submission': {'manifest': self.manifest}}
+        with self.assertRaises(TransferError):
+            validate_source_grant(self.viewer_grant(), job=legacy)
+
     def test_both_sides_keep_the_same_chunk_and_identity(self):
         self.assertEqual(self.transfer['chunkBytes'], CHUNK_BYTES)
         self.assertEqual(json.loads(self.processing_identity_json()), self.viewer_identity())
