@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import unittest
 
 from processing.options import catalog
-from processing.prepared_policy_freshness_candidate import PreparedPolicyHeld, inspect_policy_held
+from processing.prepared_policy_freshness_candidate import PreparedPolicyHeld, inspect_policy_held, _numeric_domain_supported
 from processing.reference_runtime import discovered_policy
 from tests.test_options import Engine
 
@@ -52,6 +52,47 @@ class PreparedPolicyFreshnessTests(unittest.TestCase):
     def test_unknown_configured_option_is_refused_even_with_current_fingerprint(self):
         policy=copy.deepcopy(self.policy);policy['optionDefinitions']['unknown']={'type':'bool','domain':None}
         with self.assertRaises(PreparedPolicyHeld):self.check(policy)
+
+
+class NumericDomainGrammarTests(unittest.TestCase):
+    def test_observed_integer_domains_and_strict_subsets(self):
+        cases=[('integer',None,True),('positive integer',{'min':1,'max':100},True),
+               ('positive integer',{'min':0,'max':100},False),
+               ('integer: 1 <= x <= 14',{'min':1,'max':14},True),
+               ('integer: 1 <= x <= 14',{'min':1,'max':15},False),
+               ('integer: 1 <= x <= 14',[1,14],True),
+               ('integer: 1 <= x <= 14',[0,14],False),
+               ('integer: 1 <= x <= 14',None,False),
+               ('integer: 1 <= x <= 15',{'min':1,'max':14},False)]
+        for text,domain,expected in cases:
+            with self.subTest(engine=text,configured=domain):
+                self.assertEqual(_numeric_domain_supported({'type':'int','domain':text},{'type':'int','domain':domain}),expected)
+
+    def test_positive_float_rejects_zero_and_unknown_grammar(self):
+        for text in ('positive float','float > 0.0'):
+            for minimum,expected in ((0,False),(0.01,True),(-1,False)):
+                with self.subTest(engine=text,minimum=minimum):
+                    self.assertEqual(_numeric_domain_supported({'type':'float','domain':text},
+                        {'type':'float','domain':{'min':minimum,'max':10}}),expected)
+        self.assertFalse(_numeric_domain_supported({'type':'float','domain':'float: unknown'},
+            {'type':'float','domain':{'min':1,'max':10}}))
+        self.assertFalse(_numeric_domain_supported({'type':'int','domain':'integer'},
+            {'type':'float','domain':None}))
+
+    def test_boolean_and_string_text_are_not_guessed(self):
+        for kind,domain in (('bool','boolean'),('string','string')):
+            self.assertFalse(_numeric_domain_supported({'type':kind,'domain':domain},
+                {'type':kind,'domain':None}))
+
+    def test_real_shaped_domain_runs_through_actual_catalog(self):
+        fixture=PreparedPolicyFreshnessTests('test_current_fresh_policy_only_returns_held')
+        fixture.setUp();self.addCleanup(fixture.doCleanups)
+        for engine in (fixture.local,fixture.main):
+            engine.options=[{'name':'mesh-depth','type':'int','domain':'integer: 1 <= x <= 14','value':'11'}]
+        capability,options,_=discovered_policy(catalog(fixture.nodes),fixture.config)
+        policy=dict(capabilityFingerprint=capability,optionsFingerprint=options,availableEngines=['odm'],
+                    optionDefinitions={'mesh-depth':{'type':'int','domain':{'min':1,'max':14}}})
+        self.assertEqual(fixture.check(policy)['state'],'held')
 
 
 if __name__=='__main__':unittest.main()
