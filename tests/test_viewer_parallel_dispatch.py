@@ -133,6 +133,22 @@ class Harness(unittest.TestCase):
 class FlagOffTests(Harness):
     parallel = False
 
+    def test_direct_queue_close_cannot_release_authority_during_synchronous_sender(self):
+        self.block_uploads()
+        self.submit()
+        sender = threading.Thread(target=self.service.tick, daemon=True)
+        sender.start()
+        self.assertTrue(self.entered.wait(WAIT))
+        with self.assertRaisesRegex(RuntimeError, 'worker still active'):
+            self.queue.close()
+        with self.assertRaisesRegex(RuntimeError, 'already owned'):
+            Queue(self.root / 'state', node_ids=('cluster', 'main'))
+        self.release.set()
+        sender.join(WAIT)
+        self.assertFalse(sender.is_alive())
+        self.service.close()
+        self.queue.close()
+
     def test_absent_configuration_keeps_synchronous_transfer_and_lock(self):
         self.assertFalse(self.service._parallel_dispatch)
         self.assertFalse(self.service.store.parallel_dispatch)
@@ -477,6 +493,21 @@ class ParallelDispatchTests(Harness):
         self.assertEqual((task['job']['status'], task['error']), ('held', 'dispatch_interrupted_for_shutdown'))
         self.assertFalse(any(call[0] == 'commit' for call in self.engines['cluster'].calls))
         self.assertEqual(len([c for c in self.engines['cluster'].calls if c[0] == 'upload']), 1)
+
+    def test_direct_queue_close_cannot_release_authority_during_sender(self):
+        self.start_blocked()
+        with self.assertRaisesRegex(RuntimeError, 'worker still active'):
+            self.queue.close()
+        self.assertFalse(self.queue._lock.closed)
+        with self.assertRaisesRegex(RuntimeError, 'already owned'):
+            Queue(self.root / 'state', node_ids=('cluster', 'main'))
+        self.release.set()
+        self.service.wait_for_transfers()
+        self.service.close()
+        self.queue.close()
+        self.assertTrue(self.queue._lock.closed)
+        with self.assertRaisesRegex(RuntimeError, 'authority unavailable'):
+            self.queue.register_external_worker()
 
 
 class InventoryTests(Harness):

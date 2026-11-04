@@ -91,6 +91,7 @@ class Queue(Maintenance):
         self._creator_pid = os.getpid()
         self._lifecycle_lock = threading.RLock()
         self._database_users = 0
+        self._external_workers = 0
         if type(parallel_viewer_uploads) is not bool:
             raise ValueError('parallel_viewer_uploads must be boolean')
         self.parallel_viewer_uploads = parallel_viewer_uploads
@@ -183,9 +184,22 @@ class Queue(Maintenance):
         if os.getpid() != self._creator_pid:
             raise RuntimeError('coordinator process changed')
         with self._lifecycle_lock:
-            if self._database_users:
-                raise RuntimeError('coordinator transaction still active')
+            if self._database_users or self._external_workers:
+                raise RuntimeError('coordinator transaction or worker still active')
             self._lock.close()
+
+    def register_external_worker(self):
+        """Fence queue authority before starting work that can mutate an engine."""
+        with self._lifecycle_lock:
+            if os.getpid() != self._creator_pid or self._lock.closed:
+                raise RuntimeError('coordinator authority unavailable')
+            self._external_workers += 1
+
+    def release_external_worker(self):
+        with self._lifecycle_lock:
+            if os.getpid() != self._creator_pid or self._external_workers < 1:
+                raise RuntimeError('coordinator worker registration invalid')
+            self._external_workers -= 1
 
     def node_profiles(self, node_id):
         return sorted(profile for profile in self.allowed_profiles

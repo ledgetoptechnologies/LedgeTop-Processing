@@ -720,6 +720,7 @@ class ViewerService:
                 pass
         finally:
             with self._lock:
+                self.queue.release_external_worker()
                 self._dispatch_threads.pop(identifier, None)
 
     def _check_dispatch_boundary(self, task):
@@ -934,16 +935,22 @@ class ViewerService:
                 if self._parallel_dispatch:
                     if not self.queue.per_node_slots:
                         raise Conflict('parallel dispatch requires per-node slots')
-                    thread = threading.Thread(target=self._transfer_claimed_task, args=(task['uuid'], job['id']),
-                                              name='viewer-node-transfer', daemon=True)
-                    self._dispatch_threads[task['uuid']] = (job['id'], thread)
+                    self.queue.register_external_worker()
                     try:
+                        thread = threading.Thread(target=self._transfer_claimed_task, args=(task['uuid'], job['id']),
+                                                  name='viewer-node-transfer', daemon=True)
+                        self._dispatch_threads[task['uuid']] = (job['id'], thread)
                         thread.start()
                     except BaseException:
                         self._dispatch_threads.pop(task['uuid'], None)
+                        self.queue.release_external_worker()
                         raise
                 else:
-                    self._send_claimed_task(task['uuid'])
+                    self.queue.register_external_worker()
+                    try:
+                        self._send_claimed_task(task['uuid'])
+                    finally:
+                        self.queue.release_external_worker()
             except Exception:
                 current = self.store.task(task['uuid'])
                 if current['phase'] == 'commit_pending':
