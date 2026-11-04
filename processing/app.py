@@ -206,6 +206,12 @@ def make_handler(config: Config):
                         self._reply(200, {"resultCustody": self.viewer_service.eager_custody_status(**_custody_page(self.path))})
                     except ValueError:
                         self._reply(400, {"error": "invalid_request"})
+                elif (urlsplit(self.path).path == "/v1/prototype/legacy-custody-census" and self.viewer_service is not None
+                        and getattr(config, 'viewer_eager_result_custody', False) is True):
+                    try:
+                        self._reply(200, {"legacyCustody": self.viewer_service.legacy_custody_census(**_custody_page(self.path))})
+                    except ValueError:
+                        self._reply(400, {"error": "invalid_request"})
                 elif self.path == "/v1/prototype/jobs":
                     self._reply(200, {"jobs": queue.list(), "mode": "bounded_photo_test" if config.photo_smoke_enabled else "synthetic_prototype"})
                 elif self.path == "/v1/prototype/nodes":
@@ -273,7 +279,7 @@ def make_handler(config: Config):
             if self.path not in ("/v1/plan", "/v2/plan") and not prototype:
                 self._reply(404, {"error": "not_found"})
                 return
-            custody = (re.fullmatch(r'/v1/prototype/jobs/([^/]+)/custody/(abandon|retry)', self.path)
+            custody = (re.fullmatch(r'/v1/prototype/jobs/([^/]+)/custody/(abandon|retry|migrate-legacy)', self.path)
                        if service is not None and getattr(config, 'viewer_eager_result_custody', False) is True else None)
             operator = prototype and (self.path == '/v1/prototype/admission-drain' or self.path.endswith(("/hold", "/resolve"))
                                       or (getattr(config, 'viewer_lost_result_adopt', False) and self.path.endswith("/adopt"))
