@@ -116,7 +116,9 @@ public key and issuer, scoped to the principal/environment; reject a key or
 issuer reused across identities unless a separately reviewed rotation policy
 explicitly permits it. Check all these values against the signed body; never
 construct expected values from the receipt. Reject duplicate keys from the raw
-HTTP bytes before ordinary JSON parsing can collapse them, then compare the
+HTTP bytes at every ingress accepting or signing the acceptance, before
+ordinary JSON parsing can collapse them; authenticate the transport separately
+from JSON interpretation. Then compare the
 outer acceptance digest, IDs and binding/closure against signed values and
 trusted state. Require four distinct
 receipt IDs if retaining the current v3 envelope's namespace rule, and require
@@ -147,6 +149,9 @@ node termination, worker deletion safety, physical disk redundancy, nor
 permission to delete inputs/results. Cleanup stays separately gated on a
 complete acknowledged custody chain, object identity, retention, writer
 fencing and ownership. `acceptedAt` is informational, not a replay expiry.
+The result-copy receipt is never evidence for deletion of the raw Emlid GCP
+CSV: that input needs a separate immutable/no-purge ownership and retention
+contract with its own independent evidence.
 
 The current proposal has no independently validated source snapshot epoch or
 worker-to-coordinator deletion authority. Those remain hard release blockers;
