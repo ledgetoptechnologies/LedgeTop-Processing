@@ -69,6 +69,7 @@ def main():
             engine.archive = archive.getvalue()
             engine.interrupt_download_once = sys.argv[2] == 'result-retry'
     handler.viewer_service.probe = lambda role, origin, token: {'ready': True, 'maxImages': 1000, 'taskQueueCount': 0}
+    handler.viewer_service._catalog = lambda: {'ready': True, 'commonOptions': [dict(x) for x in OPTIONS]}
     handler.viewer_service.options = lambda: [dict(x) for x in OPTIONS]
     handler.viewer_service._selected_options = lambda _: [dict(x) for x in OPTIONS]
     mode = sys.argv[2]
