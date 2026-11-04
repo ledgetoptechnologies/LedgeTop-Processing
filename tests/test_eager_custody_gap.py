@@ -11,6 +11,9 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
+import subprocess
+import sys
 from types import SimpleNamespace
 import threading
 import time
@@ -20,13 +23,16 @@ import uuid
 import zipfile
 
 from processing.admission_drain import AdmissionClosed, AdmissionDrain
+from processing.app import CoordinatorService
 from processing.config import Config, from_environment
 from processing.maintenance import Conflict
+from processing.prototype import Queue
 from processing.viewer_limits import EAGER_CUSTODY_MAX_BYTES, EAGER_CUSTODY_RESERVE_BYTES
 from processing.viewer_result_adoption import CUSTODY_NAME, RESULT_CHANGED
 from processing import viewer_service as service_module
 from processing.viewer_service import (CENSUS_RETAINED_FILE_BYTES, EAGER_DEFERRED_RETRY_SECONDS, EAGER_FETCH_CONCURRENCY,
-                                       EAGER_RESUME_SCAN_JOBS, ENGINE_MISSING_POLLS, EngineUnavailable, NODE_LOST_POLLS)
+                                       EAGER_RESUME_SCAN_JOBS, ENGINE_MISSING_POLLS, EngineUnavailable, NODE_LOST_POLLS,
+                                       NativeEngine)
 from processing.viewer_tasks import TaskStore
 from tests import test_viewer_parallel_dispatch as startup_fixture, test_viewer_service as viewer_fixture
 
@@ -143,6 +149,101 @@ class Blocked:
     def undo(self):
         self.release.set()
         self.engine.download = self.original
+
+
+class StalledOrigin:
+    """A real loopback engine that answers a download, then stops sending.
+
+    ``NativeEngine`` reads it through a real socket, so a fetch waits in recv and
+    no flag or mock can reach it; only the socket or the process ending can.
+    """
+    def __init__(self):
+        self.listener = socket.create_server(('127.0.0.1', 0))
+        self.url = 'http://127.0.0.1:%d' % self.listener.getsockname()[1]
+        self.sent, self.connections = threading.Event(), []
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        try:
+            while True:
+                connection, _ = self.listener.accept()
+                self.connections.append(connection)
+                while b'\r\n\r\n' not in connection.recv(65536):
+                    pass
+                connection.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\n'
+                                   b'Content-Length: 100000\r\n\r\nPK')
+                self.sent.set()
+        except OSError:
+            pass
+
+    def close(self):
+        for item in (self.listener, *self.connections):
+            item.close()
+
+
+class StubServer:
+    """The native listener's lifecycle with no socket of its own."""
+    daemon_threads, block_on_close = True, False
+
+    def __init__(self):
+        self.stopped = threading.Event()
+
+    def serve_forever(self, **_kwargs):
+        self.stopped.wait(30)
+
+    def shutdown(self):
+        self.stopped.set()
+
+    def server_close(self):
+        pass
+
+
+def coordinator_for(service, queue):
+    return CoordinatorService(StubServer(), SimpleNamespace(viewer_service=service, reference_listener=None,
+                                                            prototype_queue=queue, lifecycle_service=None))
+
+
+# A real process with a real read that nothing can wake, as a wedged kernel socket
+# would be: a response hiding its descriptor. Reports, then lives until killed.
+WEDGED_WRITER = """
+import json, sys, threading
+from processing.viewer_service import NativeEngine
+from tests.test_eager_custody_gap import EagerCustody, StalledOrigin, coordinator_for
+
+class Opaque:
+    def __init__(self, response):
+        self.response = response
+    def __getattr__(self, name):
+        return getattr(self.response, name)
+    def __enter__(self):
+        return self
+    def __exit__(self, *details):
+        self.response.close()
+    def fileno(self):
+        raise OSError('synthetic wedge')
+
+case = EagerCustody('test_outage_after_completion_keeps_the_result')
+case.setUp()
+identifier = case.finished(wait=False)
+origin = StalledOrigin()
+real = NativeEngine(origin.url).download
+case.engine(identifier).download = lambda task: Opaque(real(task))
+case.service.tick()
+assert origin.sent.wait(10)
+fetch = case.service._eager_threads[identifier]
+join = threading.Thread.join
+threading.Thread.join = lambda thread, timeout=None: join(
+    thread, min(timeout, 0.2) if thread is fetch and timeout is not None else timeout)
+stop = threading.Event()
+stop.set()
+service = coordinator_for(case.service, case.fixture.queue)
+code = service.run(stop)
+task = case.fixture.task(identifier)
+print(json.dumps({'code': code, 'alive': fetch.is_alive(), 'state': service.health()['state'],
+                  'reason': service.health()['reason'], 'root': str(case.fixture.root), 'identifier': identifier,
+                  'engine': task['engine_uuid'], 'node': task['node_id']}), flush=True)
+sys.stdin.read()
+"""
 
 
 class EagerCustody(unittest.TestCase):
@@ -844,6 +945,123 @@ class EagerCustody(unittest.TestCase):
         self.assertFalse((self.directory(held) / CUSTODY_NAME).exists())
         self.assertIn(task['engine_uuid'], engine.tasks)
         self.assertFalse({call[0] for call in engine.calls} - {'initialize', 'upload', 'commit', 'read', 'download'})
+
+    def stalled(self, identifier):
+        origin = StalledOrigin()
+        self.addCleanup(origin.close)
+        self.engine(identifier).download = NativeEngine(origin.url).download
+        return origin
+
+    def blocked_in_recv(self, origin, threads, identifier):
+        self.assertTrue(origin.sent.wait(10))
+        fetch = threads[identifier]
+        fetch.join(0.2)
+        self.assertTrue(fetch.is_alive())
+        return fetch
+
+    def test_close_wakes_an_eager_fetch_blocked_on_a_real_socket(self):
+        identifier = self.finished(wait=False)
+        engine = self.engine(identifier)
+        download = engine.download
+        origin = self.stalled(identifier)
+        self.service.tick()
+        fetch = self.blocked_in_recv(origin, self.service._eager_threads, identifier)
+        began = time.monotonic()
+        self.service.close()
+        self.assertLess(time.monotonic() - began, 5)  # The socket timeout is 60.
+        self.assertFalse(fetch.is_alive())
+        self.assertFalse(self.service.custody_writers_alive())
+        self.assert_no_half_archive(identifier)
+        self.assertFalse((self.directory(identifier) / 'all.zip.partial').exists())
+        self.fixture.queue.close()
+        self.fixture.make_queue_service()
+        engine.download = download
+        self.service.tick()
+        self.join()
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
+
+    def test_close_wakes_an_adopt_fetch_blocked_on_a_real_socket(self):
+        fixture = self.fixture
+        identifier, _, engine_task = fixture.adoptable()
+        fixture.report_finished(identifier, engine_task)
+        origin = self.stalled(identifier)
+        task = fixture.task(identifier)
+        self.service._review_held_result(task, self.service._read_status(task))
+        fetch = self.blocked_in_recv(origin, self.service._adopt_threads, identifier)
+        began = time.monotonic()
+        self.service.close()
+        self.assertLess(time.monotonic() - began, 5)
+        self.assertFalse(fetch.is_alive())
+        fixture.assert_no_custody_files(identifier)
+        self.assertEqual(fixture.custody(identifier)['state'], 'fetching')
+
+    def test_app_shutdown_closes_the_queue_only_after_a_woken_fetch_exits(self):
+        identifier = self.finished(wait=False)
+        origin = self.stalled(identifier)
+        self.service.tick()
+        fetch = self.blocked_in_recv(origin, self.service._eager_threads, identifier)
+        queue = self.fixture.queue
+        original, closed = queue.close, []
+        queue.close = lambda: (closed.append(fetch.is_alive()), original())
+        self.addCleanup(setattr, queue, 'close', original)
+        stop = threading.Event()
+        stop.set()
+        self.assertEqual(coordinator_for(self.service, queue).run(stop), 0)
+        self.assertEqual(closed, [False])
+
+    def test_close_reports_a_writer_it_could_not_stop(self):
+        identifier = self.finished(wait=False)
+        blocked = Blocked(self.engine(identifier))
+        self.addCleanup(blocked.undo)
+        self.service.tick()
+        self.assertTrue(blocked.reading.wait(10))
+        fetch = self.service._eager_threads[identifier]
+        join = threading.Thread.join
+        bounded = lambda thread, timeout=None: join(thread, min(timeout, 0.05) if thread is fetch and timeout else timeout)
+        with patch.object(threading.Thread, 'join', new=bounded):
+            with self.assertRaisesRegex(RuntimeError, 'retain queue ownership'):
+                self.service.close()
+        self.assertTrue(self.service.custody_writers_alive())
+        blocked.undo()
+        fetch.join(10)
+        self.assertFalse(self.service.custody_writers_alive())
+
+    @unittest.skipIf(os.name == 'nt', 'proves a POSIX flock released by process death')
+    def test_a_wedged_writer_keeps_authority_until_the_process_is_killed(self):
+        fixture = self.fixture
+        home = fixture.root / 'child'
+        home.mkdir()
+        child = subprocess.Popen([sys.executable, '-c', WEDGED_WRITER], cwd=ROOT, stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, text=True, env={**os.environ, 'TMPDIR': str(home)})
+        self.addCleanup(child.stdout.close)
+        self.addCleanup(child.stdin.close)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        watchdog = threading.Timer(60, child.kill)
+        self.addCleanup(watchdog.cancel)
+        watchdog.start()
+        report = json.loads(child.stdout.readline())
+        self.assertEqual((report['code'], report['alive'], report['state'], report['reason']),
+                         (2, True, 'failed', 'result_fetch_drain_failed'))
+        root = Path(report['root'])
+        arguments = dict(node_ids=('cluster', 'main'), treedar_node_ids=('main',), viewer_enabled=True)
+        with self.assertRaisesRegex(RuntimeError, 'already owned'):
+            Queue(root / 'state', **arguments)
+        child.kill()
+        self.assertEqual(child.wait(10), -9)
+        self.service.close()
+        fixture.queue.close()
+        fixture.root, fixture.config.prototype_state_dir = root, str(root / 'state')
+        fixture.engines[report['node']].tasks[report['engine']] = {
+            'uuid': report['engine'], 'status': {'code': 40}, 'progress': 100, 'files': {}, 'cancel_requested': False}
+        fixture.make_queue_service()
+        identifier = report['identifier']
+        names = {path.name for path in self.directory(identifier).iterdir()}
+        self.assertFalse(names & {'all.zip', 'all.zip.receipt'}, names)  # The partial is what a kill leaves.
+        self.service.tick()
+        self.join()
+        self.assertEqual(self.custody(identifier), {'state': 'verified'})
+        self.assertFalse((self.directory(identifier) / 'all.zip.partial').exists())
 
     def test_sidecar_is_a_private_regular_file_the_census_allows(self):
         identifier = self.finished()

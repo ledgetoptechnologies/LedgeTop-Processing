@@ -5,7 +5,7 @@ HTTP; uncertain mutations hold the applicable slot instead of replaying a job.
 Completed engine tasks and downloaded archives remain until operator cleanup.
 """
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import http.client
 import hashlib
 import json
@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import stat
 import threading
 import time
@@ -146,6 +147,23 @@ def _reports_missing(value):
     # NodeODX reports an unknown task as a JSON error, often with a 200 status.
     return (isinstance(value, dict) and isinstance(value.get('error'), str)
             and value['error'].rstrip().lower().endswith('not found'))
+
+
+def _response_socket(response):
+    """A private handle on a response's socket, or None if it has none.
+
+    Taken by the reading thread, so the descriptor cannot have been reused, and
+    private so a shutdown never touches the buffered reader that thread may hold.
+    """
+    try:
+        duplicate = os.dup(response.fileno())
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    try:
+        return socket.socket(fileno=duplicate)
+    except OSError:
+        os.close(duplicate)
+        return None
 
 
 class _DispatchInterrupted(Exception):
@@ -367,6 +385,8 @@ class ViewerService:
         self._adopt_due = {}
         self._adopt_bound = set()
         self._downloads = {}
+        self._fetch_sockets = set()
+        self._fetch_sockets_lock = threading.Lock()
         # Prototype only, absent leaves a normal result on the engine until the
         # Viewer's first download. As above, only the file is the record.
         self._eager_custody = getattr(config, 'viewer_eager_result_custody', False) is True
@@ -917,6 +937,23 @@ class ViewerService:
             self._require_downloadable(task)
             return self._archive_stream(task)
 
+    @contextmanager
+    def _stoppable_read(self, response):
+        """Let ``stop_result_fetches`` wake this thread's read of ``response``."""
+        handle = _response_socket(response)
+        with self._fetch_sockets_lock:
+            if handle is not None:
+                self._fetch_sockets.add(handle)
+        try:
+            if self._stop.is_set():  # Set before the socket above could be seen.
+                raise EngineUnavailable('archive_transfer_interrupted')
+            yield
+        finally:
+            with self._fetch_sockets_lock:
+                self._fetch_sockets.discard(handle)
+            if handle is not None:
+                handle.close()
+
     def _archive_stream(self, task, before_publish=None, guard=None):
         """Open the verified archive, copying it from the engine if needed.
 
@@ -989,7 +1026,8 @@ class ViewerService:
                 partial.unlink()
             total = 0
             digest = hashlib.sha256()
-            with self._task_engine(task).download(task['engine_uuid']) as response:
+            with (self._task_engine(task).download(task['engine_uuid']) as response,
+                  self._stoppable_read(response) if before_publish is not None else nullcontext()):
                 if getattr(response, 'status', 200) != 200:
                     raise EngineUnavailable('archive_unavailable')
                 media_type = response.headers.get('Content-Type', '').split(';')[0].lower()
@@ -1014,6 +1052,8 @@ class ViewerService:
                             guard(total, expected)
                         digest.update(chunk)
                         output.write(chunk)
+                    if before_publish is not None and self._stop.is_set():
+                        raise EngineUnavailable('archive_transfer_interrupted')  # A woken read ends as a short one.
                     if declared is not None and total != int(declared):
                         raise EngineUnavailable('archive_transfer_incomplete')
                     output.flush()
@@ -2168,8 +2208,28 @@ class ViewerService:
                     reported_error = True
             self._stop.wait(2)
 
-    def close(self):
+    def stop_result_fetches(self):
+        """Stop now, waking any custody read. No flag reaches a blocked socket.
+
+        An HTTP drain comes first and a Viewer download may wait on a fetch's task
+        lock, so this cannot wait for ``close``. Taking no service lock, it never
+        waits on a scheduler turn either.
+        """
         self._stop.set()
+        with self._fetch_sockets_lock:
+            for handle in self._fetch_sockets:
+                try:
+                    handle.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass  # Already disconnected; the read has ended.
+
+    def custody_writers_alive(self):
+        """Whether a fetch can still write. No lock: it may be asked of a wedged one."""
+        return any(thread.is_alive() for threads in (self._adopt_threads, self._eager_threads)
+                   for thread in list(threads.values()))
+
+    def close(self):
+        self.stop_result_fetches()
         if self._thread:
             self._thread.join(timeout=10)
             if self._thread.is_alive():
@@ -2181,6 +2241,8 @@ class ViewerService:
             thread.join(timeout=10)
         if any(thread.is_alive() for thread in transfers):
             raise RuntimeError('active Viewer transfer did not stop; retain queue ownership')
+        if any(thread.is_alive() for thread in fetches):
+            raise RuntimeError('result fetch did not stop; retain queue ownership')
 
     def wait_for_transfers(self):
         """Keep coordinator authority until every task-owned sender exits.

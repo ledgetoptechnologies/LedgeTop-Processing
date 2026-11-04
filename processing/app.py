@@ -501,6 +501,8 @@ class CoordinatorService:
             service = self.handler.viewer_service
             if service is not None and hasattr(service, '_stop'):
                 service._stop.set()  # Prevent another dispatcher tick during HTTP drain.
+                if hasattr(service, 'stop_result_fetches'):
+                    service.stop_result_fetches()  # A Viewer download may be waiting on one.
             # Stop admission on BOTH listeners before waiting for either set of
             # handlers. A slow native upload must not leave reference admission
             # open throughout the drain (or vice versa).
@@ -528,7 +530,12 @@ class CoordinatorService:
                 if thread is not None:
                     thread.join()  # close()'s legacy ten-second join is insufficient.
                 service.wait_for_transfers()  # Keep queue authority until senders actually exit.
-            if self.handler.prototype_queue:
+            # A custody writer past its bounded join cannot be stopped from here.
+            # Keep the queue lock and lease and exit nonzero: process death, which
+            # also ends that daemon thread, is what releases them.
+            if service is not None and hasattr(service, 'custody_writers_alive') and service.custody_writers_alive():
+                self._failed('result_fetch_drain_failed', stop)
+            elif self.handler.prototype_queue:
                 self.handler.prototype_queue.close()
             with self._lock:
                 failed = self._state == 'failed'
