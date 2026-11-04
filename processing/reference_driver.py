@@ -184,6 +184,9 @@ class ReferenceDriver:
         self.origin, self._bearer = coordinator_origin.rstrip('/'), worker_bearer
         self.node_id, self.worker_id, self.clock = node_id, worker_id, clock
         self._lock = threading.Lock()
+        # At most one validated grant, keyed by the complete immutable JSON
+        # snapshot. Never persist this bearer-bearing optimization.
+        self._source_grant_cache = None
         self.path = Path(state_path).absolute()
         if type(source_range_v2_enabled) is not bool:
             raise ValueError('explicit source-range-v2 enablement required')
@@ -327,6 +330,39 @@ class ReferenceDriver:
         raw_grant = data.get('grant')
         pending = data.get('sourceRenewal')
         expected_pending_fields = {'renewalId', 'sequence', 'previousGrantSha256', 'request', 'phase'}
+        if pending is None:
+            # Each object advances one durable driver tick. Revalidating and
+            # rebuilding a large manifest twice per object is quadratic. Hash
+            # the complete canonical input snapshot instead: any change to the
+            # grant, token, transfer request or job invalidates the cache. The
+            # snapshot used for validation is also the snapshot hashed, so the
+            # cache cannot bind a mutated input to an earlier key.
+            try:
+                snapshot = p.canonical_json({'job': claim, 'grant': raw_grant})
+                if len(snapshot) > 2 * p.MAX_BODY_BYTES + 1024:
+                    raise ValueError('source grant snapshot too large')
+                cache_key = hashlib.sha256(snapshot).digest()
+                cached = self._source_grant_cache
+                if cached is not None and cached[0] == cache_key and cached[1].expires > _now(self.clock):
+                    if p.canonical_json({'job': claim, 'grant': raw_grant}) != snapshot:
+                        raise ValueError('source grant inputs changed')
+                    return cached[1]
+                decoded = json.loads(snapshot)
+                previous = validate_source_grant(decoded['grant'], job=decoded['job'],
+                    clock=self.clock, allow_expired=True)
+                if previous.expires > _now(self.clock):
+                    if p.canonical_json({'job': claim, 'grant': raw_grant}) != snapshot:
+                        raise ValueError('source grant inputs changed')
+                    self._source_grant_cache = (cache_key, previous)
+                    return previous
+                self._source_grant_cache = None
+            except Exception:
+                self._source_grant_cache = None
+                raise DriverHeld('source_transfer_grant_unavailable') from None
+        else:
+            # A pending renewal changes the authority state; never reuse the
+            # pre-renewal cache while replaying its durable request or ack.
+            self._source_grant_cache = None
         try:
             previous = validate_source_grant(raw_grant, job=claim, clock=self.clock, allow_expired=True)
         except Exception:

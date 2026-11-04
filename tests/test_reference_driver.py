@@ -310,6 +310,52 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(transfer['objectIds'], [obj['id'] for obj in persisted['submission']['manifest']['objects']])
         self.assertEqual(downloads, [(transfer['sourceVersion'], transfer['objectIds'][0])])
 
+    def test_source_grant_cache_invalidates_changed_input_token_and_expiry(self):
+        from processing import source_range_transfer as source
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-cache.sqlite')
+        job = self.submit(contents=(b'cache-test-photo',))
+        self.advance(job, 'fetching')
+        with self.driver._db() as db:
+            data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+        claim = data['claim']
+        self.driver._source_grant_cache = None
+        with patch.object(source, 'validate_source_grant', wraps=source.validate_source_grant) as validate:
+            first = self.driver._source_range_grant(job['jobId'], claim, data)
+            second = self.driver._source_range_grant(job['jobId'], copy.deepcopy(claim), copy.deepcopy(data))
+            self.assertEqual(first, second)
+            self.assertEqual(validate.call_count, 1)
+            changed = copy.deepcopy(claim)
+            changed['submission']['manifest']['objects'][0]['byteSize'] += 1
+            with self.assertRaises(DriverHeld):
+                self.driver._source_range_grant(job['jobId'], changed, data)
+            rotated = copy.deepcopy(data)
+            rotated['grant']['token'] = 'replacement-token'
+            replacement = self.driver._source_range_grant(job['jobId'], claim, rotated)
+            self.assertEqual(replacement.token, 'replacement-token')
+            self.assertNotEqual(replacement.token, first.token)
+            self.assertEqual(validate.call_count, 3)
+            # Even a mutation during expiry checking must not return a grant
+            # bound to an input snapshot that is no longer the caller's.
+            mutated = copy.deepcopy(rotated)
+            def change_during_lookup():
+                mutated['grant']['token'] = 'changed-during-check'
+                return replacement.expires - 1
+            self.driver.clock = change_during_lookup
+            with self.assertRaises(DriverHeld):
+                self.driver._source_range_grant(job['jobId'], claim, mutated)
+            self.assertIsNone(self.driver._source_grant_cache)
+            # A matching cache entry cannot outlive the grant: expiration
+            # starts durable renewal rather than returning the cached token.
+            self.driver.clock = lambda: replacement.expires
+            with patch.object(self.driver.source_range_client, 'renew_grant',
+                    side_effect=source.SourceRenewalUnavailable('offline')) as renew:
+                with self.assertRaises(DriverWait):
+                    self.driver._source_range_grant(job['jobId'], claim, rotated)
+            self.assertEqual(renew.call_count, 1)
+            self.assertIsNone(self.driver._source_grant_cache)
+            self.assertEqual(rotated['sourceRenewal']['phase'], 'request_pending')
+
     def test_expired_source_grant_is_durably_renewed_and_ack_replays_without_new_grant(self):
         from processing.source_range_transfer import SourceRenewalUnavailable
         state_path = self.root / 'driver-source-range-renewal.sqlite'
