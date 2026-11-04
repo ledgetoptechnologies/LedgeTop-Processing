@@ -509,6 +509,34 @@ class ParallelDispatchTests(Harness):
         with self.assertRaisesRegex(RuntimeError, 'authority unavailable'):
             self.queue.register_external_worker()
 
+    def test_direct_queue_close_cannot_release_authority_during_cancel(self):
+        identifier = self.submit()
+        self.service.tick()
+        self.service.wait_for_transfers()
+        self.phase(identifier, 'processing')
+        original = self.engines['cluster'].action
+        def blocked(action, engine_id):
+            if action == 'cancel':
+                self.entered.set()
+                if not self.release.wait(WAIT):
+                    raise RuntimeError('synthetic cancel timeout')
+            return original(action, engine_id)
+        self.engines['cluster'].action = blocked
+        results = []
+        cancel = threading.Thread(target=lambda: results.append(self.service.cancel(identifier)), daemon=True)
+        cancel.start()
+        self.assertTrue(self.entered.wait(WAIT))
+        with self.assertRaisesRegex(RuntimeError, 'worker still active'):
+            self.queue.close()
+        with self.assertRaisesRegex(RuntimeError, 'already owned'):
+            Queue(self.root / 'state', node_ids=('cluster', 'main'))
+        self.release.set()
+        cancel.join(WAIT)
+        self.assertFalse(cancel.is_alive())
+        self.assertEqual(results, [{'success': True}])
+        self.service.close()
+        self.queue.close()
+
 
 class InventoryTests(Harness):
     def open_queue(self):

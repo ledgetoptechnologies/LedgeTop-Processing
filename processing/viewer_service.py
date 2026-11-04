@@ -659,12 +659,18 @@ class ViewerService:
                 return {'success': True}
             if task['phase'] != 'processing':
                 raise Conflict('submission in progress; inspect before cancelling')
-            self.store.update(identifier, phase='cancel_pending')
+            # The external engine mutation must keep this coordinator's
+            # authority until both the request and local reconciliation exit.
+            self.queue.register_external_worker()
             try:
-                self.engines[task['node_id']].action('cancel', task['engine_uuid'])
-            except Exception:
-                self._hold(task, 'cancel_ack_uncertain')
-                raise Conflict('cancellation acknowledgment uncertain') from None
+                self.store.update(identifier, phase='cancel_pending')
+                try:
+                    self.engines[task['node_id']].action('cancel', task['engine_uuid'])
+                except Exception:
+                    self._hold(task, 'cancel_ack_uncertain')
+                    raise Conflict('cancellation acknowledgment uncertain') from None
+            finally:
+                self.queue.release_external_worker()
             # Keep the execution slot until the engine reports a terminal state.
             return {'success': True}
 
