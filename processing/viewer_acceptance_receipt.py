@@ -130,6 +130,8 @@ def verify_viewer_acceptance_receipt(receipt: object, *, trusted_keys: dict,
 
     _need(type(expected) is dict and set(expected) == EXPECTED_FIELDS,
           "invalid_expected_binding")
+    _need(all(type(expected[field]) is type(receipt[field]) for field in EXPECTED_FIELDS),
+          "invalid_expected_binding")
     _need(type(accepted_object_ids) is list and accepted_object_ids
           and all(type(item) is str and _ID.fullmatch(item) for item in accepted_object_ids)
           and len(set(accepted_object_ids)) == len(accepted_object_ids),
@@ -155,6 +157,14 @@ def verify_viewer_acceptance_receipt(receipt: object, *, trusted_keys: dict,
          "sha256": object_map[object_id]["sha256"]}
         for object_id in expected_sorted_ids
     ]
+    _need(type(receipt["objects"]) is list, "invalid_receipt_objects")
+    for item in receipt["objects"]:
+        _need(type(item) is dict and set(item) == {"id", "byteSize", "sha256"},
+              "invalid_receipt_objects")
+        _identifier(item["id"], "invalid_receipt_objects")
+        _need(type(item["byteSize"]) is int and 0 <= item["byteSize"] <= protocol.MAX_SAFE_INTEGER,
+              "invalid_receipt_objects")
+        _hash(item["sha256"], "invalid_receipt_objects")
     actual_binding = {field: receipt[field] for field in EXPECTED_FIELDS}
     _need(actual_binding == expected, "receipt_job_binding_mismatch")
     _need(receipt["acceptedObjectIds"] == expected_sorted_ids

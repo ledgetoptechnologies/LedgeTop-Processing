@@ -12,6 +12,7 @@ from processing.viewer_acceptance_receipt import (
     SIGNATURE_DOMAIN,
     verify_viewer_acceptance_receipt,
 )
+from tests.viewer_receipt_signer import SyntheticViewerSigner
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +86,29 @@ class ViewerAcceptanceReceiptTests(unittest.TestCase):
             serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode('ascii')}}
         with self.assertRaisesRegex(ViewerReceiptRejected,'expected_result_manifest_digest_mismatch'):
             self.verify(receipt,trusted=trusted,expected=expected)
+
+    def test_signed_zero_byte_report_requires_integer_size(self):
+        signer=SyntheticViewerSigner()
+        acceptance={**self.vector['expected'],'acceptedObjectIds':['result-2']}
+        receipt=signer.receipt(acceptance,self.vector['resultManifest'])
+        self.verify(receipt,trusted=signer.trusted_keys,object_ids=['result-2'])
+        for mutation in ('boolean', 'negative', 'extra'):
+            with self.subTest(mutation=mutation):
+                bad=copy.deepcopy(receipt)
+                if mutation=='boolean':bad['objects'][0]['byteSize']=False
+                elif mutation=='negative':bad['objects'][0]['byteSize']=-1
+                else:bad['objects'][0]['unexpected']='extra'
+                body={key:value for key,value in bad.items() if key!='signature'}
+                signature=signer._key.sign(SIGNATURE_DOMAIN+reference_protocol.canonical_json(body))
+                signer._key.public_key().verify(signature,SIGNATURE_DOMAIN+reference_protocol.canonical_json(body))
+                bad['signature']=base64.urlsafe_b64encode(signature).decode().rstrip('=')
+                with self.assertRaisesRegex(ViewerReceiptRejected,'invalid_receipt_objects'):
+                    self.verify(bad,trusted=signer.trusted_keys,object_ids=['result-2'])
+
+    def test_expected_boolean_generation_is_not_equal_to_integer(self):
+        expected=copy.deepcopy(self.vector['expected']);expected['generation']=True
+        with self.assertRaisesRegex(ViewerReceiptRejected,'invalid_expected_binding'):
+            self.verify(expected=expected)
 
 
 if __name__ == "__main__":
