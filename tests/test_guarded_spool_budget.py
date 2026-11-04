@@ -85,6 +85,39 @@ os._exit(37)
             os.close(root_fd)
         self.assertEqual(self.budget.inspect()['reservations'], [])
 
+    def test_discard_release_refuses_foreign_or_replaced_directory(self):
+        name = self.name('a'); self.budget.reserve(name, 3)
+        (self.root / name).write_bytes(b'abc')
+        self.budget.transition(name, 'receiving', 'discardable')
+        with tempfile.TemporaryDirectory() as foreign:
+            fd = os.open(foreign, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaises(SpoolBudgetError):
+                    self.budget.release_discarded(name, fd)
+            finally:
+                os.close(fd)
+        self.assertEqual(self.budget.inspect()['reservations'][0]['bytes'], 3)
+        self.assertEqual((self.root / name).read_bytes(), b'abc')
+
+        fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        moved = self.root.with_name(self.root.name + '-moved')
+        try:
+            self.root.rename(moved)
+            self.root.mkdir()
+            with self.assertRaises(SpoolBudgetError):
+                self.budget.release_discarded(name, fd)
+            replacement_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                with self.assertRaises(SpoolBudgetError):
+                    self.budget.release_discarded(name, replacement_fd)
+            finally:
+                os.close(replacement_fd)
+        finally:
+            os.close(fd)
+            self.root.rmdir()
+            moved.rename(self.root)
+        self.assertEqual(self.budget.inspect()['reservations'][0]['bytes'], 3)
+
     def test_crash_after_discard_unlink_keeps_charge_until_explicit_reconciliation(self):
         name = self.name('e')
         script = '''

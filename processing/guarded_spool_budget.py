@@ -20,6 +20,10 @@ class GuardedSpoolBudget:
         if os.name == 'nt' or type(cap) is not int or cap < 1 or type(floor) is not int or floor < 0:
             raise SpoolBudgetError('invalid spool configuration')
         self.root, self.cap, self.floor = Path(root), cap, floor
+        root_info = os.stat(self.root, follow_symlinks=False)
+        if not stat.S_ISDIR(root_info.st_mode):
+            raise SpoolBudgetError('invalid spool directory')
+        self._root_identity = (root_info.st_dev, root_info.st_ino)
         self.path = self.root / '.guarded-spool.sqlite3'
         flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
         fd = os.open(self.path, flags, 0o600)
@@ -45,7 +49,11 @@ class GuardedSpoolBudget:
                 raise SpoolBudgetError('spool policy differs; explicit reconciliation required')
             db.commit()
         directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try: os.fsync(directory)
+        try:
+            observed = os.fstat(directory)
+            if (observed.st_dev, observed.st_ino) != self._root_identity:
+                raise SpoolBudgetError('spool directory identity differs')
+            os.fsync(directory)
         finally: os.close(directory)
 
     def _connect(self):
@@ -125,15 +133,28 @@ class GuardedSpoolBudget:
 
     def release_discarded(self, name, root_fd):
         if not self._valid_name(name): raise SpoolBudgetError('invalid spool name')
+        def check_root():
+            try:
+                opened = os.fstat(root_fd)
+                current = os.stat(self.root, follow_symlinks=False)
+            except (OSError, ValueError, TypeError):
+                raise SpoolBudgetError('spool directory unavailable') from None
+            if (not stat.S_ISDIR(opened.st_mode) or not stat.S_ISDIR(current.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+                    or (opened.st_dev, opened.st_ino) != self._root_identity):
+                raise SpoolBudgetError('spool directory identity differs')
+        check_root()
         with closing(self._connect()) as db:
             db.execute('BEGIN IMMEDIATE')
             self._rows(db)
+            check_root()
             try:
                 os.stat(name, dir_fd=root_fd, follow_symlinks=False)
             except FileNotFoundError:
                 pass
             else:
                 raise SpoolBudgetError('spool file still exists')
+            check_root()
             result = db.execute("DELETE FROM spool_reservations WHERE name=? AND stage='discardable'", (name,))
             if result.rowcount != 1: raise SpoolBudgetError('spool reservation is not discardable')
             db.execute('DELETE FROM spool_upload_identity WHERE name=?', (name,))
