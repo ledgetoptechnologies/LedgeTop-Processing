@@ -17,6 +17,12 @@ def preflight_existing(path):
     from .reference_store import ReferenceStore
     path=Path(path)
     try:
+        # Candidate marker parsing must run with the exact canonicalization
+        # dependency before Queue can perform any persisted recovery writes.
+        import rfc8785
+        from importlib.metadata import version
+        if version('rfc8785') != '0.1.4':
+            raise ValueError('pinned JCS dependency unavailable')
         _require_safe_idle_database_file(path)
         with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)) as db:
             db.row_factory=sqlite3.Row

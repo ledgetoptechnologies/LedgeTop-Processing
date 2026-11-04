@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 from processing import reference_protocol as p
 from processing.admission_family_candidate import initialize_empty
@@ -52,6 +53,35 @@ class EarlyFamilyPreflight(unittest.TestCase):
     def test_malformed_marker_holds_before_queue_recovery(self):
         db=sqlite3.connect(self.path);db.execute("UPDATE reference_admission_family_candidate SET request_digest=?",('b'*64,));db.commit();db.close()
         self.reject_unchanged()
+
+    def test_missing_and_wrong_jcs_version_preserve_database(self):
+        with patch.dict(sys.modules, {'rfc8785': None}):
+            self.reject_unchanged()
+        with patch('importlib.metadata.version',return_value='0.1.3'):
+            self.reject_unchanged()
+
+    @unittest.skipIf(__import__('os').name == 'nt','Windows symlinks need extra privileges')
+    def test_symlinked_lock_is_refused(self):
+        lock=Path(self.tmp.name)/'coordinator.lock'
+        prior=lock.with_name('prior.lock');lock.rename(prior);lock.symlink_to(prior)
+        before=(self.path.read_bytes(),self.path.stat().st_mode,self.state())
+        with self.assertRaisesRegex(RuntimeError,'existing_lease_required'):
+            Queue(self.tmp.name,family_preflight_candidate=True)
+        self.assertEqual(before,(self.path.read_bytes(),self.path.stat().st_mode,self.state()))
+
+    @unittest.skipIf(__import__('os').name == 'nt','Windows prevents replacement of an open lock')
+    def test_lock_replacement_during_preflight_is_refused(self):
+        import os
+        lock=Path(self.tmp.name)/'coordinator.lock'
+        original=lock.with_name('prior-coordinator.lock')
+        before=(self.path.read_bytes(),self.path.stat().st_mode,self.state())
+        def replace_lock(_):
+            os.rename(lock,original)
+            lock.write_bytes(b'foreign')
+        with patch('processing.admission_family_queue_preflight_candidate.preflight_existing',side_effect=replace_lock):
+            with self.assertRaisesRegex(RuntimeError,'lease_identity_changed'):
+                Queue(self.tmp.name,family_preflight_candidate=True)
+        self.assertEqual(before,(self.path.read_bytes(),self.path.stat().st_mode,self.state()))
 
     def test_existing_owner_lease_blocks_second_queue(self):
         first=Queue(self.tmp.name,family_preflight_candidate=True)

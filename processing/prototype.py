@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+import stat
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -142,7 +143,23 @@ class Queue(Maintenance):
                 raise RuntimeError('candidate_preflight_existing_lease_required')
         else:
             root.mkdir(parents=True, exist_ok=True)
-        self._lock = (root / "coordinator.lock").open("a+b")
+        if family_preflight_candidate:
+            flags = os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0)
+            try:
+                self._lock = os.fdopen(os.open(lock_path, flags), 'r+b')
+                def verify_candidate_lock():
+                    fd, path = os.fstat(self._lock.fileno()), lock_path.lstat()
+                    if (not stat.S_ISREG(fd.st_mode) or not stat.S_ISREG(path.st_mode)
+                            or stat.S_ISLNK(path.st_mode) or fd.st_nlink != 1 or path.st_nlink != 1
+                            or (fd.st_dev, fd.st_ino) != (path.st_dev, path.st_ino)
+                            or (os.name != 'nt' and (fd.st_uid != os.geteuid() or fd.st_mode & 0o022))):
+                        raise RuntimeError('candidate_preflight_lease_identity_changed')
+                verify_candidate_lock()
+            except BaseException:
+                if hasattr(self, '_lock'): self._lock.close()
+                raise
+        else:
+            self._lock = (root / "coordinator.lock").open("a+b")
         self._lock.seek(0)
         if os.name == "nt":
             import msvcrt
@@ -168,8 +185,10 @@ class Queue(Maintenance):
         self.path = root / "jobs.sqlite3"
         if family_preflight_candidate:
             try:
+                verify_candidate_lock()
                 from .admission_family_queue_preflight_candidate import preflight_existing
                 preflight_existing(self.path)
+                verify_candidate_lock()
             except BaseException:
                 self._lock.close()
                 raise
