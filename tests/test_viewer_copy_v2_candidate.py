@@ -67,6 +67,28 @@ class ViewerCopyV2CandidateTests(unittest.TestCase):
         del self.r['unexpected'];self.rebind();self.r['signature']+='='
         with self.assertRaises(c.CandidateRejected):self.verify()
 
+    def test_duplicate_outer_and_nested_acceptance_keys_rejected(self):
+        raw=p.canonical_json({'acceptance':self.a,'viewerReceipt':self.r})
+        outer=raw.replace(b'{"acceptance":',b'{"acceptance":{},"acceptance":',1)
+        nested=raw.replace(b'"acceptedAt":',b'"acceptedAt":"duplicate","acceptedAt":',1)
+        self.assertNotEqual(outer,raw);self.assertNotEqual(nested,raw)
+        for candidate in (outer,nested):
+            with self.assertRaises(c.CandidateRejected):
+                c._verify_v2_for_fixtures(candidate,expected=self.expected,result_manifest=self.manifest,trusted_keys=self.pins)
+
+    def test_separately_filtered_registries_cannot_detect_global_key_reuse(self):
+        # Each filtered view looks locally valid; a complete registry reveals reuse.
+        self.verify()
+        other=deepcopy(self.pins);key=self.r['keyId'];other_key='other-key'
+        other[other_key]=other.pop(key);other[other_key]['viewerPrincipalId']='other'
+        self.r['keyId']=other_key;self.r['viewerPrincipalId']='other'
+        self.expected['viewerPrincipalId']='other';self.rebind()
+        c._verify_v2_for_fixtures(p.canonical_json({'acceptance':self.a,'viewerReceipt':self.r}),
+            expected=self.expected,result_manifest=self.manifest,trusted_keys=other)
+        with self.assertRaises(c.CandidateRejected):
+            c._verify_v2_for_fixtures(p.canonical_json({'acceptance':self.a,'viewerReceipt':self.r}),
+                expected=self.expected,result_manifest=self.manifest,trusted_keys={**self.pins,**other})
+
     def test_wrong_key_and_mismatched_result_rejected(self):
         other=Ed25519PrivateKey.from_private_bytes(bytes(range(1,33))).public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode()
         self.pins[self.r['keyId']]['publicKeyPem']=other
