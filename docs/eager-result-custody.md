@@ -87,6 +87,11 @@ verified sidecars with `checked: false` require inspection; they are not silentl
 upgraded. Rehashing can take time for large archives; it runs outside the global
 service and database locks. Removal holds the task's download lock and rechecks
 the record, receipt and pinned file identity before committing.
+This assumes one coordinator controls the task directory on trusted local
+storage. The task lock is process-local, not a distributed lock; multiple
+coordinators or untrusted writers with filesystem access are not supported.
+File identity and timestamps detect ordinary concurrent modifications, not an
+adversary able to manipulate storage metadata or modify data after the check.
 
 ## What a verified receipt means
 

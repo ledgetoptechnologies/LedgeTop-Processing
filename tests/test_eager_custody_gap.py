@@ -1325,6 +1325,49 @@ class EagerCustody(unittest.TestCase):
             with self.assertRaises(Conflict):
                 self.service.remove(identifier)
 
+    def test_remove_refuses_receipt_swap_after_hash(self):
+        identifier = self.finished()
+        receipt = self.directory(identifier) / 'all.zip.receipt'
+        original = self.service.store.remove
+        def change_then_remove(*args, **kwargs):
+            value = json.loads(receipt.read_text())
+            value['sha256'] = '0' * 64
+            receipt.write_text(json.dumps(value))
+            return original(*args, **kwargs)
+        with patch.object(self.service.store, 'remove', side_effect=change_then_remove):
+            with self.assertRaises(Conflict):
+                self.service.remove(identifier)
+
+    def test_remove_refuses_inode_replacement_after_hash(self):
+        identifier = self.finished()
+        archive = self.directory(identifier) / 'all.zip'
+        original = self.service.store.remove
+        def change_then_remove(*args, **kwargs):
+            replacement = archive.with_name('replacement.zip')
+            replacement.write_bytes(archive.read_bytes())
+            os.replace(replacement, archive)
+            return original(*args, **kwargs)
+        with patch.object(self.service.store, 'remove', side_effect=change_then_remove):
+            # Windows may refuse replacing an open archive. POSIX must detect
+            # a successful replacement through the pinned file identity.
+            with self.assertRaises((Conflict, PermissionError) if os.name == 'nt' else Conflict):
+                self.service.remove(identifier)
+
+    def test_remove_refuses_same_size_write_after_hash(self):
+        identifier = self.finished()
+        archive = self.directory(identifier) / 'all.zip'
+        original = self.service.store.remove
+        def change_then_remove(*args, **kwargs):
+            data = archive.read_bytes()
+            with archive.open('r+b') as stream:
+                stream.write(bytes([data[0] ^ 1]))
+                stream.flush()
+                os.fsync(stream.fileno())
+            return original(*args, **kwargs)
+        with patch.object(self.service.store, 'remove', side_effect=change_then_remove):
+            with self.assertRaises(Conflict):
+                self.service.remove(identifier)
+
     def test_unavailable_custody_blocks_remove_across_restart(self):
         identifier = self.finished(wait=False)
         task = self.fixture.task(identifier)
