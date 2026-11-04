@@ -217,6 +217,18 @@ class ViewerServiceTests(unittest.TestCase):
             capabilities = self.service.capabilities()
         self.assertEqual(capabilities['maxParallelTasks'], 2)
 
+    def test_provider_queue_count_includes_queued_running_and_held_jobs(self):
+        identifier = self.submit()
+        queued = self.service.capabilities()
+        self.assertEqual(queued['taskQueueCount'], 1)
+        self.service.tick()
+        running = self.service.capabilities()
+        self.assertEqual(running['taskQueueCount'], 1)
+        job_id = self.task(identifier)['job_id']
+        self.queue.operator(job_id, 'hold', {'note': 'synthetic uncertain worker state'})
+        held = self.service.capabilities()
+        self.assertEqual(held['taskQueueCount'], 1)
+
     def test_over_cluster_photo_ceiling_uses_main_and_never_cluster(self):
         # A lowered synthetic threshold exercises the same boundary without
         # fabricating 1,001 files on disk; the policy's 1,000 boundary is separate.

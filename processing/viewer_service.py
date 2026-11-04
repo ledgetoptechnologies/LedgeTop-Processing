@@ -1,7 +1,7 @@
-"""Native Viewer facade service and cooperative, single-slot engine dispatcher.
+"""Native Viewer facade service and cooperative per-node engine dispatcher.
 
 Only fixed configured engines are contacted. Mutation intent is durable before
-HTTP; uncertain mutations hold the shared slot instead of replaying a job.
+HTTP; uncertain mutations hold that node's shared slot instead of replaying.
 Completed engine tasks and downloaded archives remain until operator cleanup.
 """
 
@@ -133,8 +133,8 @@ class ViewerService:
         # This is our own 2.x-compatible facade, not an official ClusterODM build.
         self.options()
         jobs = self.queue.list()
-        # Each configured physical node has one serialized engine slot. The
-        # coordinator may therefore execute independently on multiple nodes.
+        # NodeODM defines this as maximum configured concurrency; it is a
+        # capacity limit, not an instantaneous health or free-slot count.
         parallel = sum(node in self.engines for node in self.queue.node_ids)
         return {'version': '2.4.0', 'engine': 'ledgetop-processing', 'engineVersion': '0.2.0',
                 'maxImages': None, 'maxParallelTasks': parallel, 'coordinator': True,
