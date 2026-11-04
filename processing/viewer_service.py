@@ -889,11 +889,7 @@ class ViewerService:
             raise _DispatchInterrupted('dispatch_interrupted_for_shutdown')
 
     def _hold(self, task, reason):
-        job = self.queue.get(task['job_id'])
-        if job and (job['status'] == 'running' or
-                    (job['status'] == 'held' and job['heldReason'] == 'coordinator_restart')):
-            self.queue.operator(task['job_id'], 'hold', {'note': reason})
-        self.store.update(task['uuid'], stage='held', phase='held', error=reason)
+        self.store.hold(task['uuid'], reason)
 
     def _poll(self, task):
         identifier = task['uuid']

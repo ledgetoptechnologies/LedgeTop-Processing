@@ -76,7 +76,7 @@ def task_fenced(method):
         # A control request can hold the scheduler's service lock. In the
         # isolated parallel mode it must not wait for a slow upload while
         # holding that lock; callers get a retryable conflict instead.
-        if self.queue.parallel_viewer_uploads and method.__name__ == 'update':
+        if self.queue.parallel_viewer_uploads and method.__name__ in ('update', 'hold'):
             # Broker state, never input: one store-locked transaction. A same-
             # task request must not fail the owner's write into a false hold.
             return method(self, identifier, *args, **kwargs)
@@ -737,26 +737,44 @@ class TaskStore:
             db.execute("UPDATE viewer_tasks SET stage=?,phase='complete',progress=?,updated_at=CURRENT_TIMESTAMP WHERE uuid=?",
                 (status,100 if status=='succeeded' else row['progress'],row['uuid']))
 
+    @staticmethod
+    def _hold_in_transaction(db, job, identifier, note):
+        """Write both halves of a hold, so no reader sees a held job with a live task."""
+        if job is not None and (job['status'] == 'running' or
+                                (job['status'] == 'held' and job['held_reason'] == 'coordinator_restart')):
+            result = json.dumps({'environment': job['environment'], 'operatorAction': 'hold',
+                                 'note': note, 'workerStopped': False})
+            db.execute("UPDATE jobs SET status='held',result=?,held_reason='operator',updated_at=CURRENT_TIMESTAMP WHERE id=?", (result, job['id']))
+        db.execute("UPDATE viewer_tasks SET stage='held',phase='held',error=?,updated_at=CURRENT_TIMESTAMP WHERE uuid=?", (note, identifier))
+
+    @task_fenced
+    def hold(self, identifier, reason):
+        """Hold a task and, while it still owns the slot, its job in one transaction."""
+        if not isinstance(reason, str) or not ERROR.fullmatch(reason):
+            raise ValueError('error must be a sanitized reason code')
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, identifier)
+            job = db.execute('SELECT id,status,environment,held_reason FROM jobs WHERE id=?', (row['job_id'],)).fetchone()
+            self._hold_in_transaction(db, job, identifier, reason)
+
     def hold_reconciliation_error(self, job_id):
         """Hold an unambiguous Viewer job and its task in one transaction."""
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             rows = db.execute('SELECT uuid FROM viewer_tasks WHERE removed=0 AND job_id=? LIMIT 2', (job_id,)).fetchall()
-            job = db.execute('SELECT status,profile,environment,held_reason FROM jobs WHERE id=?', (job_id,)).fetchone()
+            job = db.execute('SELECT id,status,profile,environment,held_reason FROM jobs WHERE id=?', (job_id,)).fetchone()
             if len(rows) != 1 or job is None or job['profile'] != VIEWER_PROFILE:
                 raise Conflict('reconciliation hold identity unavailable')
             if job['status'] != 'running' and not (job['status'] == 'held' and job['held_reason'] == 'coordinator_restart'):
                 raise Conflict('reconciliation hold state changed')
-            result = json.dumps({'environment': job['environment'], 'operatorAction': 'hold',
-                                 'note': 'reconciliation_error', 'workerStopped': False})
-            db.execute("UPDATE jobs SET status='held',result=?,held_reason='operator',updated_at=CURRENT_TIMESTAMP WHERE id=?", (result, job_id))
-            db.execute("UPDATE viewer_tasks SET stage='held',phase='held',error='reconciliation_error',updated_at=CURRENT_TIMESTAMP WHERE uuid=?", (rows[0]['uuid'],))
+            self._hold_in_transaction(db, job, rows[0]['uuid'], 'reconciliation_error')
 
     def settle_operator_resolution(self, task):
         """Finish a hold the operator resolved before the Viewer row recorded it.
 
-        An operator hold of a running job, or a crash between the queue hold and
-        the Viewer update, leaves the row in an engine phase. Record the same
+        An operator hold of a running job, or a crash inside an earlier
+        two-transaction hold, leaves the row in an engine phase. Record the same
         held outcome the normal hold path writes; no queue state or bytes change.
         """
         with self._lock, self.queue._db() as db:

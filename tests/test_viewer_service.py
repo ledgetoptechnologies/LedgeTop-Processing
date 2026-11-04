@@ -6,6 +6,7 @@ Viewer output ingestion. No network, Docker, real datasets or host writes.
 
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import subprocess
 import sys
 import io
@@ -14,6 +15,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+import sqlite3
 import tempfile
 import threading
 from datetime import datetime, timezone
@@ -544,6 +546,73 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.task(second)['node_id'], 'main')
         self.assertEqual(self.task(second)['phase'], 'processing')
         self.assertEqual(len([x for x in self.engines['cluster'].calls if x[0] == 'upload']), 1)
+
+    def hold_state(self, identifier):
+        """Read queue and task halves as a separate connection, in one snapshot."""
+        reader = sqlite3.connect(self.queue.path)
+        try:
+            return reader.execute("""SELECT j.status,t.phase FROM viewer_tasks t JOIN jobs j ON j.id=t.job_id
+                                     WHERE t.uuid=?""", (identifier,)).fetchone()
+        finally:
+            reader.close()
+
+    def test_every_committed_hold_state_is_coherent(self):
+        """SQLite exposes only commits, so sampling each one covers every interleaving."""
+        self.queue.per_node_slots = True
+        self.service._parallel_dispatch = True
+        self.engines['cluster'].fail = 'upload'
+        identifier = self.submit()
+        states, original = [], self.queue._db
+        @contextmanager
+        def sampled():
+            with original() as db:
+                yield db
+            if threading.current_thread().name == 'viewer-node-transfer':
+                states.append(self.hold_state(identifier))
+        with patch.object(self.queue, '_db', sampled):
+            self.service.tick()
+            self.service.wait_for_transfers()
+        self.assertEqual(states[-1], ('held', 'held'))
+        self.assertEqual([state for state in states if (state[0] == 'held') != (state[1] == 'held')], [])
+
+    def test_observer_cannot_read_a_hold_until_both_halves_commit(self):
+        self.queue.per_node_slots = True
+        self.service._parallel_dispatch = True
+        self.engines['cluster'].fail = 'upload'
+        identifier = self.submit()
+        parked, resume, seen = threading.Event(), threading.Event(), []
+        store = self.service.store
+        original = store._hold_in_transaction
+        def park(*args):
+            original(*args)  # Both rows written, not committed.
+            parked.set()
+            self.assertTrue(resume.wait(10))
+        with patch.object(store, '_hold_in_transaction', side_effect=park):
+            self.service.tick()
+            self.assertTrue(parked.wait(10))
+            self.assertEqual(self.hold_state(identifier), ('running', 'upload_pending'))
+            observer = threading.Thread(target=lambda: seen.append(self.task(identifier)), daemon=True)
+            observer.start()
+            observer.join(0.1)
+            self.assertEqual(seen, [])  # In-process readers wait for the commit.
+            resume.set()
+            observer.join(10)
+            self.service.wait_for_transfers()
+        self.assertEqual((seen[0]['job']['status'], seen[0]['phase'], seen[0]['error']),
+                         ('held', 'held', 'engine_submission_uncertain'))
+
+    def test_hold_keeps_a_settled_job_and_rejects_unsafe_reasons_before_writing(self):
+        identifier = self.submit()
+        self.service.tick()
+        task = self.task(identifier)
+        with self.assertRaises(ValueError):
+            self.service.store.hold(identifier, 'not a reason code')
+        self.assertEqual(self.hold_state(identifier), ('running', 'processing'))
+        self.queue.operator(task['job_id'], 'hold', {'note': 'inspect'})
+        self.queue.operator(task['job_id'], 'resolve', {'note': 'synthetic', 'workerStopped': True})
+        self.service.store.hold(identifier, 'late_observation')
+        self.assertEqual(self.hold_state(identifier), ('failed', 'held'))
+        self.assertEqual(self.task(identifier)['job']['result']['operatorAction'], 'resolve')
 
     def test_shutdown_drain_keeps_sender_owned_until_it_exits(self):
         self.queue.per_node_slots = True
@@ -1658,14 +1727,8 @@ else:
     def test_interrupted_hold_resolved_by_operator_recovers_after_restart(self):
         first = self.submit(); self.service.tick()
         self.finish(first, 50)
-        update = self.service.store.update
-        def crash(identifier, **fields):
-            if fields.get('phase') == 'held':
-                raise OSError('synthetic crash after queue hold')
-            return update(identifier, **fields)
-        self.service.store.update = crash
-        with self.assertRaises(OSError):
-            self.service.tick()
+        # The split an earlier, two-transaction hold could leave on disk.
+        self.queue.operator(self.task(first)['job_id'], 'hold', {'note': 'synthetic split hold'})
         task = self.task(first)
         self.assertEqual((task['phase'], task['job']['status']), ('processing', 'held'))
         self.service.close(); self.queue.close(); self.make_queue_service()
@@ -2066,16 +2129,16 @@ else:
         self.assertIsNone(self.task(next_id)['node_id'])
         self.assertEqual(self.fleet.max_active, 1)
 
-    def test_cancel_hold_survives_crash_before_task_metadata_update(self):
+    def test_cancel_hold_crash_keeps_slot_and_restart_holds(self):
         identifier = self.submit()
         next_id = self.submit()
         self.service.tick()
         self.service.cancel(identifier)
         self.finish(identifier, 50)
-        with patch.object(self.service.store, 'update', side_effect=OSError('synthetic crash')):
+        with patch.object(self.service.store, '_hold_in_transaction', side_effect=OSError('synthetic crash')):
             with self.assertRaises(OSError):
                 self.service.tick()
-        self.assertEqual(self.task(identifier)['job']['status'], 'held')
+        self.assertEqual(self.hold_state(identifier), ('running', 'cancel_pending'))  # Neither half landed.
         self.assertIsNone(self.task(next_id)['node_id'])
         self.service.close()
         self.queue.close()
