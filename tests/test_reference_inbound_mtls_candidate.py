@@ -1,9 +1,12 @@
+import base64
 import http.client
+import os
 import shutil
 import ssl
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from processing.config import Config
@@ -61,6 +64,7 @@ class InboundMTLSTests(unittest.TestCase):
         self.assertEqual(self.request(runtime,token='wrong-token-xxxxxxxxxxxxxxxxxxxx'),401)
 
 
+@unittest.skipUnless(shutil.which('openssl'),'synthetic local certificate tool required')
 class InboundConfigurationTests(unittest.TestCase):
     def test_explicit_v6_and_default_config_validation(self):
         # Reuse the existing config fixture without its runtime or servers.
@@ -75,11 +79,50 @@ class InboundConfigurationTests(unittest.TestCase):
         fixture.value['inboundClientCA']=fixture.value['listener']['clientCA']
         fixture.write_config()
         with self.assertRaises(RuntimeConfigurationError):fixture.settings()
-        separate=fixture.root/'inbound.pem';separate.write_text('synthetic distinct fixture')
+        for name in ('inbound','outbound'):
+            subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
+                '-subj','/CN='+name,'-keyout',str(fixture.root/(name+'.key')),
+                '-out',str(fixture.root/(name+'.pem'))],check=True,capture_output=True,timeout=15)
+        separate=fixture.root/'inbound.pem'
+        outbound=fixture.root/'outbound.pem'
+        fixture.value['listener']['clientCA']=str(outbound)
+        duplicate=fixture.root/'duplicate.pem';duplicate.write_bytes(outbound.read_bytes())
+        fixture.value['inboundClientCA']=str(duplicate);fixture.write_config()
+        with self.assertRaises(RuntimeConfigurationError):fixture.settings()
+        # Different certificates with the same CA public key still overlap.
+        same_key=fixture.root/'same-key.pem'
+        subprocess.run(['openssl','req','-x509','-key',str(fixture.root/'outbound.key'),'-days','1',
+            '-subj','/CN=other-certificate','-out',str(same_key)],check=True,capture_output=True,timeout=15)
+        fixture.value['inboundClientCA']=str(same_key);fixture.write_config()
+        with self.assertRaises(RuntimeConfigurationError):fixture.settings()
         fixture.value['inboundClientCA']=str(separate);fixture.write_config()
         self.assertEqual(fixture.settings().inbound_client_ca,str(separate))
+        # Version 6 may retain the entire v5 feature set and recovery binding.
+        from tests.viewer_receipt_signer import SyntheticViewerSigner
+        signer=SyntheticViewerSigner()
+        secret=fixture.root/'viewer-secret';secret.write_text('synthetic-viewer-service-key-material')
+        if os.name!='nt':secret.chmod(0o600)
+        fixture.value=fixture.recovery_config();fixture.value.update(schemaVersion=6,
+            inboundClientCA=str(separate),viewerReceiptKeys=signer.trusted_keys,
+            viewerAcceptance={'staging':{'origin':'https://viewer.example','keyId':'viewer-service-v1','secretFile':str(secret)}},
+            stagedAckPrincipals=[{'environment':'staging','principalId':'viewer-a','bearer':base64.urlsafe_b64encode(b'z'*32).decode().rstrip('=')}])
+        fixture.write_config();loaded=fixture.settings()
+        self.assertIsNotNone(loaded.recovery_bindings);self.assertTrue(loaded.viewer_receipt_keys)
+        self.assertTrue(loaded.viewer_acceptance_targets);self.assertTrue(loaded.staged_ack_bearers)
         fixture.value['schemaVersion']=1;fixture.write_config()
         with self.assertRaises(RuntimeConfigurationError):fixture.settings()
+        from processing.reference_runtime import _read_ca_bundle
+        if os.name!='nt':
+            link=fixture.root/'ca-link.pem';link.symlink_to(separate)
+            with self.assertRaises(RuntimeConfigurationError):_read_ca_bundle(str(link))
+        # Replace after lstat but before open: fd/path identity mismatch holds.
+        replacement=fixture.root/'replacement.pem';replacement.write_bytes(outbound.read_bytes())
+        original_open=os.open
+        def swap(path,flags,*args,**kwargs):
+            if str(path)==str(separate):os.replace(replacement,separate)
+            return original_open(path,flags,*args,**kwargs)
+        with patch('processing.reference_runtime.os.open',side_effect=swap):
+            with self.assertRaises(RuntimeConfigurationError):_read_ca_bundle(str(separate))
 
 
 if __name__=='__main__':unittest.main()

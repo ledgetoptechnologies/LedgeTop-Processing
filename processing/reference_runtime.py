@@ -64,6 +64,46 @@ def _file(path, *, private):
     return candidate, info
 
 
+def _public_key_ids(certificates):
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    result = set()
+    for raw in certificates:
+        cert = x509.load_der_x509_certificate(raw)
+        public = cert.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+        digest = hashes.Hash(hashes.SHA256()); digest.update(public); result.add(digest.finalize())
+    if not result:
+        raise RuntimeConfigurationError('CA bundle contains no certificates')
+    return result
+
+
+def _read_ca_bundle(path):
+    """Read a bounded, inode-checked snapshot used directly by OpenSSL."""
+    candidate, initial = _file(path, private=False)
+    descriptor = os.open(candidate, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        before = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino) != (initial.st_dev, initial.st_ino):
+            raise RuntimeConfigurationError('CA bundle identity changed')
+        with os.fdopen(descriptor, 'rb', closefd=False) as source:
+            raw = source.read(1024 * 1024 + 1)
+        after = os.fstat(descriptor)
+        if ((before.st_size,before.st_mtime_ns) != (after.st_size,after.st_mtime_ns)
+                or len(raw) > 1024 * 1024):
+            raise RuntimeConfigurationError('CA bundle changed or too large')
+    finally:
+        os.close(descriptor)
+    try:
+        pem = raw.decode('ascii')
+        pattern = r'-----BEGIN CERTIFICATE-----\s*[A-Za-z0-9+/=\s]+?-----END CERTIFICATE-----'
+        blocks = re.findall(pattern, pem)
+        if not blocks or re.sub(pattern, '', pem).strip(): raise ValueError()
+        ders = [ssl.PEM_cert_to_DER_cert(block) for block in blocks]
+        return pem, _public_key_ids(ders)
+    except (ValueError, UnicodeError):
+        raise RuntimeConfigurationError('invalid CA bundle') from None
+
+
 def load_reference_settings(path, config):
     """Read and validate the explicit opt-in, before opening the shared Queue."""
     try:
@@ -84,8 +124,11 @@ def load_reference_settings(path, config):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         version = value["schemaVersion"]
         fields = {"schemaVersion", "listener", "viewerBearers", "workers", "streamBudget"}
-        staged_enabled = version == 5 or (version == 3 and "stagedAckPrincipals" in value)
-        receipts_enabled = version in (4, 5) or (version == 3 and not staged_enabled)
+        staged_enabled = version == 5 or (version in (3, 6) and "stagedAckPrincipals" in value)
+        receipts_enabled = version in (4, 5) or (version == 3 and not staged_enabled) or (version == 6 and "viewerReceiptKeys" in value)
+        acceptance_enabled = version in (4, 5) or (version == 6 and "viewerAcceptance" in value)
+        if version == 6 and acceptance_enabled and not receipts_enabled:
+            raise RuntimeConfigurationError('Viewer acceptance requires receipt keys')
         required = fields | ({"recoveryBindings"} if version == 2 else set())
         if version == 6:
             required.add('inboundClientCA')
@@ -93,9 +136,9 @@ def load_reference_settings(path, config):
             required.add("stagedAckPrincipals")
         if receipts_enabled:
             required.add("viewerReceiptKeys")
-        if version in (4, 5):
+        if acceptance_enabled:
             required.add("viewerAcceptance")
-        allowed = required | ({"recoveryBindings"} if version in (3, 4, 5) else set())
+        allowed = required | ({"recoveryBindings"} if version in (3, 4, 5, 6) else set())
         if not required <= set(value) or set(value) - allowed:
             raise RuntimeConfigurationError("runtime configuration fields differ")
         listener = value["listener"]
@@ -108,10 +151,11 @@ def load_reference_settings(path, config):
             _file(listener[field], private=field == "privateKey")
         inbound_client_ca = None
         if version == 6:
-            inbound_path, inbound_stat = _file(value['inboundClientCA'], private=False)
-            _, outbound_stat = _file(listener['clientCA'], private=False)
-            if (inbound_stat.st_dev, inbound_stat.st_ino) == (outbound_stat.st_dev, outbound_stat.st_ino):
-                raise RuntimeConfigurationError('inbound and outbound trust files must be distinct')
+            inbound_path, _ = _file(value['inboundClientCA'], private=False)
+            _, inbound_anchors = _read_ca_bundle(str(inbound_path))
+            _, outbound_anchors = _read_ca_bundle(listener['clientCA'])
+            if inbound_anchors & outbound_anchors:
+                raise RuntimeConfigurationError('inbound and outbound trust anchors overlap')
             inbound_client_ca = str(inbound_path)
         inventory = getattr(config, 'node_inventory', ())
         if (not config.prototype_state_dir or
@@ -192,7 +236,7 @@ def load_reference_settings(path, config):
             from .viewer_acceptance_receipt import validate_trusted_viewer_receipt_keys
             viewer_keys = validate_trusted_viewer_receipt_keys(value["viewerReceiptKeys"])
         viewer_targets = {}
-        if value["schemaVersion"] in (4, 5):
+        if acceptance_enabled:
             configured = value["viewerAcceptance"]
             if (type(configured) is not dict or not configured
                     or not set(configured) <= {"production", "staging"}):
@@ -338,13 +382,21 @@ class ReferenceRuntime:
             server_context.minimum_version = ssl.TLSVersion.TLSv1_2
             server_context.load_cert_chain(settings.listener["certificate"], settings.listener["privateKey"])
             if settings.inbound_client_ca is not None:
-                inbound_path, inbound_stat = _file(settings.inbound_client_ca, private=False)
-                _, outbound_stat = _file(settings.listener['clientCA'], private=False)
-                if (inbound_stat.st_dev, inbound_stat.st_ino) == (outbound_stat.st_dev, outbound_stat.st_ino):
-                    raise RuntimeConfigurationError('inbound and outbound trust files must be distinct')
-                server_context.load_verify_locations(cafile=str(inbound_path))
+                inbound_pem, inbound_anchors = _read_ca_bundle(settings.inbound_client_ca)
+                outbound_pem, outbound_anchors = _read_ca_bundle(settings.listener['clientCA'])
+                if inbound_anchors & outbound_anchors:
+                    raise RuntimeConfigurationError('inbound and outbound trust anchors overlap')
+                worker_context = ssl.create_default_context()
+                worker_context.check_hostname = True
+                worker_context.verify_mode = ssl.CERT_REQUIRED
+                worker_context.minimum_version = max(worker_context.minimum_version, ssl.TLSVersion.TLSv1_2)
+                worker_context.load_verify_locations(cadata=outbound_pem)
+                if inbound_anchors & _public_key_ids(worker_context.get_ca_certs(binary_form=True)):
+                    raise RuntimeConfigurationError('inbound and outbound trust anchors overlap')
+                server_context.load_verify_locations(cadata=inbound_pem)
                 server_context.verify_mode = ssl.CERT_REQUIRED
-            worker_context = verified_client_context(settings.listener["clientCA"])
+            else:
+                worker_context = verified_client_context(settings.listener["clientCA"])
             self._server_context = server_context
             inventory = getattr(config, 'node_inventory', ())
             readiness_cache = None
