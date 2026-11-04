@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .viewer_limits import EAGER_CUSTODY_MAX_BYTES, EAGER_CUSTODY_RESERVE_BYTES
+
 ADMISSION_DRAIN_QUALIFIED = False
 
 
@@ -43,6 +45,9 @@ class Config:
     viewer_node_lost_hold: bool = False
     viewer_log_retention: bool = False
     viewer_lost_result_adopt: bool = False
+    viewer_eager_result_custody: bool = False
+    viewer_eager_custody_reserve_bytes: int = EAGER_CUSTODY_RESERVE_BYTES
+    viewer_eager_custody_max_bytes: int = EAGER_CUSTODY_MAX_BYTES
 
 
 def parse_node_inventory(raw, environment):
@@ -192,6 +197,9 @@ def from_environment() -> Config:
         raise ValueError('PROCESSING_VIEWER_LOST_RESULT_ADOPT must be 0 or 1')
     if lost_result_adopt == '1' and node_lost_hold != '1':
         raise ValueError('PROCESSING_VIEWER_LOST_RESULT_ADOPT requires PROCESSING_VIEWER_NODE_LOST_HOLD')
+    eager_result_custody = os.environ.get('PROCESSING_VIEWER_EAGER_RESULT_CUSTODY', '0')
+    if eager_result_custody not in ('0', '1'):
+        raise ValueError('PROCESSING_VIEWER_EAGER_RESULT_CUSTODY must be 0 or 1')
     if inventory and (per_node_slots != '1' or os.environ.get('PROCESSING_REFERENCE_CONFIG')):
         raise ValueError('inventory requires per-node slots and no reference runtime')
     lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
@@ -257,4 +265,9 @@ def from_environment() -> Config:
         viewer_node_lost_hold=node_lost_hold == '1',
         viewer_log_retention=log_retention == '1',
         viewer_lost_result_adopt=lost_result_adopt == '1',
+        viewer_eager_result_custody=eager_result_custody == '1',
+        viewer_eager_custody_reserve_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_EAGER_CUSTODY_RESERVE_BYTES', str(EAGER_CUSTODY_RESERVE_BYTES)),
+                                                         'PROCESSING_VIEWER_EAGER_CUSTODY_RESERVE_BYTES', 2 ** 53 - 1),
+        viewer_eager_custody_max_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_EAGER_CUSTODY_MAX_BYTES', str(EAGER_CUSTODY_MAX_BYTES)),
+                                                     'PROCESSING_VIEWER_EAGER_CUSTODY_MAX_BYTES', 2 ** 53 - 1),
     )

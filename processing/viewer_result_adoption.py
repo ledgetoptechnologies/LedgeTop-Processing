@@ -21,6 +21,9 @@ ADOPTION_STATES = ('bound', 'observed', 'verified', 'refused')
 IDENTITY_MISMATCH = 'engine_identity_mismatch'
 RESULT_CHANGED = 'engine_result_changed'
 _BOUND_FIELDS = ('dateCreated', 'imagesCount', 'options')
+CUSTODY_NAME = '.ledgetop-custody.json'
+CUSTODY_VERSION = 1
+CUSTODY_STATES = ('pending', 'verified', 'deferred', 'unavailable')
 
 
 def new_adoption(identity):
@@ -37,6 +40,24 @@ def valid_adoption(record, identity):
             and (record['result'] is None or type(record['result']) is dict)
             and (record['archive'] is None or type(record['archive']) is dict)
             and (record['adoption'] is None or type(record['adoption']) is dict))
+
+
+def new_custody(identity, info):
+    """Eager custody of a normal success. No operator decides anything here, so
+    this is not an adoption record: ``result`` is what the engine reported at code
+    40, and a transfer publishes only while the engine still reports exactly that.
+    """
+    return {'version': CUSTODY_VERSION, 'identity': identity, 'state': 'pending', 'reason': None,
+            'result': engine_evidence(info), 'archive': None}
+
+
+def valid_custody(record, identity):
+    return (type(record) is dict and set(record) == {'version', 'identity', 'state', 'reason', 'result', 'archive'}
+            and record['version'] == CUSTODY_VERSION and record['identity'] == identity
+            and record['state'] in CUSTODY_STATES
+            and (record['reason'] is None or type(record['reason']) is str)
+            and type(record['result']) is dict
+            and (record['archive'] is None or type(record['archive']) is dict))
 
 
 def _options_digest(options):

@@ -18,6 +18,8 @@ class AdmissionDrain:
         self._lock = threading.RLock()
         self._transition_lock = threading.Lock()
         self._closing = threading.Event()
+        self._background = 0
+        self._background_idle = threading.Condition()
         with queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             existing = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='coordinator_admission'").fetchone()
@@ -49,6 +51,28 @@ class AdmissionDrain:
                 if self._closed(db): raise AdmissionClosed()
             yield
 
+    @contextmanager
+    def background(self):
+        """Writes nothing admitted must wait for, and a close waits out.
+
+        ``admit`` serializes its holders, which a transfer of many minutes must
+        not do to uploads. This holder is only counted: closing announces itself
+        on the yielded event, the holder stops at its next safe point, and the
+        durable close, and so any census after it, follows once the count is zero.
+        Never taken with ``_lock``, which a long admitted request may hold.
+        """
+        with self._background_idle:
+            if self._closing.is_set(): raise AdmissionClosed()
+            with self.queue._db() as db:
+                if self._closed(db): raise AdmissionClosed()
+            self._background += 1
+        try:
+            yield self._closing
+        finally:
+            with self._background_idle:
+                self._background -= 1
+                self._background_idle.notify_all()
+
     def set_closed(self, value, *, request_id, expected_generation, expected_closed, expected_authority):
         if expected_authority != self.queue.authority_id:
             raise Conflict('admission authority changed')
@@ -63,6 +87,9 @@ class AdmissionDrain:
         with self._transition_lock:
             if value:self._closing.set()
             try:
+                if value:
+                    with self._background_idle:
+                        while self._background: self._background_idle.wait()
                 return self._persist_transition(value,request_id,expected_generation,expected_closed)
             finally:
                 if value:self._closing.clear()

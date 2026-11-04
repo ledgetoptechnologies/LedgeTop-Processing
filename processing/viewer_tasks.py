@@ -23,7 +23,7 @@ from functools import wraps
 
 from .maintenance import Conflict
 from .viewer_output_log import OUTPUT_LOG_MAX_FILE_BYTES, OUTPUT_LOG_NAME, upgrade_output_log, valid_output_log
-from .viewer_result_adoption import ADOPTION_MAX_FILE_BYTES, ADOPTION_NAME, valid_adoption
+from .viewer_result_adoption import ADOPTION_MAX_FILE_BYTES, ADOPTION_NAME, CUSTODY_NAME, valid_adoption, valid_custody
 
 
 class OptionEvidenceConflict(Conflict):
@@ -978,6 +978,22 @@ class TaskStore:
     @staticmethod
     def save_adoption(task, record):
         TaskStore._replace_task_file(task, ADOPTION_NAME, record, 'result adoption')
+
+    @staticmethod
+    def custody(task):
+        """Load a task's eager custody record, or None if it never had one."""
+        record = TaskStore._read_task_file(task, CUSTODY_NAME, ADOPTION_MAX_FILE_BYTES, 'result custody')
+        if record is None:
+            return None
+        identity = {'task': task['uuid'], 'generation': task['generation'], 'job': task['job_id'],
+                    'node': task['node_id'], 'engine': task['engine_uuid']}
+        if not valid_custody(record, identity):
+            raise Conflict('result custody requires inspection')
+        return record
+
+    @staticmethod
+    def save_custody(task, record):
+        TaskStore._replace_task_file(task, CUSTODY_NAME, record, 'result custody')
 
     @staticmethod
     def _read_task_file(task, name, limit, label):

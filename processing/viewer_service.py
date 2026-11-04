@@ -14,6 +14,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import threading
 import time
@@ -25,6 +26,7 @@ import zipfile
 import zlib
 from urllib.parse import urlsplit
 
+from .admission_drain import AdmissionClosed
 from .maintenance import Conflict
 from .odx_smoke_worker import Client, SmokeError
 from .options import catalog, discover_node, _NoRedirect
@@ -32,9 +34,9 @@ from .policy import plan
 from .prototype import VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
-from .viewer_limits import MAX_UPLOAD_BYTES
-from .viewer_result_adoption import (RESULT_CHANGED, bound_evidence, engine_evidence, identity_refusal,
-                                     new_adoption)
+from .viewer_limits import EAGER_CUSTODY_MAX_BYTES, EAGER_CUSTODY_RESERVE_BYTES, MAX_UPLOAD_BYTES
+from .viewer_result_adoption import (CUSTODY_NAME, RESULT_CHANGED, bound_evidence, engine_evidence, identity_refusal,
+                                     new_adoption, new_custody)
 from .viewer_output_log import (OUTPUT_ANCHOR_BYTES, OUTPUT_TAIL_LINES, append_output_tail, archived_output_lines,
                                 consume_output, mark_output, mark_unverifiable, matches_anchor, new_output_log,
                                 output_digest, restart_output, skip_oversized_line)
@@ -65,6 +67,16 @@ OUTPUT_RETRY_SCAN_JOBS = 64
 # the task up after 48 hours, so the wait stays short of that.
 RESULT_FETCH_RETRY_SECONDS = 60
 RESULT_FETCH_RETRY_MAX_SECONDS = 3600
+# Eager custody of normal successes: one transfer at a time beside the jobs still
+# running; waits for disk or an open gate do not count as failures. Only tasks
+# with a custody record resume, from this many latest successes, so the flag
+# never backfills tasks that finished before it.
+EAGER_FETCH_CONCURRENCY = 1
+EAGER_RESUME_SCAN_JOBS = 256
+EAGER_DEFERRED_RETRY_SECONDS = 300
+# ops/update_reference_coordinator.py refuses any larger file under viewer-tasks/.
+# Viewer can still fetch a larger result itself; custody must not add one unasked.
+CENSUS_RETAINED_FILE_BYTES = 20 * 1024 ** 3
 
 
 class EngineUnavailable(OSError):
@@ -111,12 +123,21 @@ def _leading_lines(raw):
         return lines
 
 
-def _check_archive_members(path):
-    """Read every member: an adopted result has no other source to compare with."""
+def _check_archive_members(path, stop=None):
+    """Read every member: an adopted result has no other source to compare with.
+
+    ``stop`` may refuse between reads, as this can take minutes on a large result.
+    """
     try:
         with zipfile.ZipFile(path) as archive:
-            if archive.testzip() is not None:
-                raise ValueError()
+            if stop is None:
+                if archive.testzip() is not None:
+                    raise ValueError()
+                return
+            for member in archive.infolist():
+                with archive.open(member) as stream:
+                    while stream.read(1024 ** 2):
+                        stop()
     except (zipfile.BadZipFile, OSError, ValueError, EOFError, RuntimeError, NotImplementedError, zlib.error):
         raise EngineUnavailable('archive_transfer_incomplete') from None
 
@@ -129,6 +150,18 @@ def _reports_missing(value):
 
 class _DispatchInterrupted(Exception):
     """A cooperative stop at a boundary, with all partial work retained."""
+
+
+class _CustodyPaused(Exception):
+    """A drain or shutdown asked an eager fetch to stop; not a failed fetch."""
+
+
+class _CustodyDeferred(Exception):
+    """An eager fetch may not take the space it needs now; args[0] is a fixed code."""
+
+
+class _CustodyRefused(Exception):
+    """An eager fetch must not be tried again; args[0] is a fixed code."""
 
 
 class _PinnedLoopbackClient(Client):
@@ -334,6 +367,17 @@ class ViewerService:
         self._adopt_due = {}
         self._adopt_bound = set()
         self._downloads = {}
+        # Prototype only, absent leaves a normal result on the engine until the
+        # Viewer's first download. As above, only the file is the record.
+        self._eager_custody = getattr(config, 'viewer_eager_result_custody', False) is True
+        self._eager_reserve = getattr(config, 'viewer_eager_custody_reserve_bytes', EAGER_CUSTODY_RESERVE_BYTES)
+        self._eager_max_bytes = getattr(config, 'viewer_eager_custody_max_bytes', EAGER_CUSTODY_MAX_BYTES)
+        self._eager_threads = {}
+        self._eager_due = {}
+        self._eager_failures = {}
+        self._eager_missing = {}
+        self._eager_notes = {}
+        self._eager_scanned = False
         # Prototype only: absent configuration keeps the deployed synchronous
         # path. A node's in-flight transfer remains in its durable queue slot.
         self._parallel_dispatch = getattr(config, 'viewer_parallel_dispatch', False) is True
@@ -577,6 +621,9 @@ class ViewerService:
         elif identifier in self._lost:
             # Below the hold threshold: the last status is no longer current.
             info['ledgetopEngineStatus'] = 'unknown'
+        custody = self._eager_status(task)
+        if custody is not None:
+            info['ledgetopResultCustody'] = custody
         return info
 
     def reserve(self, identifier, environment, capability):
@@ -870,11 +917,12 @@ class ViewerService:
             self._require_downloadable(task)
             return self._archive_stream(task)
 
-    def _archive_stream(self, task, before_publish=None):
+    def _archive_stream(self, task, before_publish=None, guard=None):
         """Open the verified archive, copying it from the engine if needed.
 
         The caller holds the task's download lock. ``before_publish`` may refuse
-        complete bytes before a receipt makes them the task's result.
+        complete bytes before a receipt makes them the task's result, and
+        ``guard(total, declared)`` may refuse before any byte and between chunks.
         """
         identifier = task['uuid']
         path = Path(task['archive_path']) if task['archive_path'] else Path(task['directory']) / 'all.zip'
@@ -951,6 +999,9 @@ class ViewerService:
                 declared = response.headers.get('Content-Length')
                 if declared is not None and (not declared.isdigit() or int(declared) > self.config.viewer_max_archive_bytes):
                     raise Conflict('archive exceeds configured disk allowance')
+                expected = None if declared is None else int(declared)
+                if guard is not None:
+                    guard(0, expected)
                 with partial.open('xb') as output:
                     os.chmod(partial, 0o600)
                     while chunk := response.read(1024 ** 2):
@@ -959,6 +1010,8 @@ class ViewerService:
                             raise Conflict('archive exceeds configured disk allowance')
                         if before_publish is not None and self._stop.is_set():
                             raise EngineUnavailable('archive_transfer_interrupted')
+                        if guard is not None:
+                            guard(total, expected)
                         digest.update(chunk)
                         output.write(chunk)
                     if declared is not None and total != int(declared):
@@ -1317,6 +1370,263 @@ class ViewerService:
                 if self._log_retention:
                     self._output_from_archive(task, stream)
 
+    def _bind_eager_result(self, task, info):
+        """Record the code 40 before the job commits, so a crash cannot lose it.
+
+        A failure here never touches the job; the fetch records it from a read.
+        """
+        if not self._eager_custody:
+            return
+        try:
+            if self.store.custody(task) is None:
+                self.store.save_custody(task, new_custody(self._adoption_identity(task), info))
+        except Exception:
+            logging.getLogger(__name__).error('Viewer result custody could not be recorded')
+
+    def _eager_status(self, task):
+        """Fixed codes; none of this changes the job or what Viewer may download."""
+        if not self._eager_custody or not task['job'] or task['job']['status'] != 'succeeded':
+            return None
+        try:
+            record = self.store.custody(task)
+        except Conflict:
+            return {'state': 'unavailable', 'reason': 'custody_record_invalid'}
+        if task['uuid'] in self._eager_threads:
+            return {'state': 'fetching'}
+        if record is None:
+            return None
+        custody = {'state': record['state']}
+        reason = record['reason'] or (self._eager_notes.get(task['uuid']) if record['state'] == 'pending' else None)
+        if reason is not None:
+            custody['reason'] = reason
+        return custody
+
+    def _advance_eager_custody(self, jobs):
+        """Start due fetches. Never raises: custody is not a scheduler concern."""
+        if not self._eager_custody:
+            return
+        try:
+            if not self._eager_scanned:
+                self._eager_scanned = True
+                ended = [job for job in jobs if job['profile'] == VIEWER_PROFILE and job['status'] == 'succeeded']
+                for job in ended[-EAGER_RESUME_SCAN_JOBS:]:
+                    try:
+                        task = self.store.task_for_job(job['id'])
+                        record = self.store.custody(task) if task['engine_uuid'] else None
+                    except Exception:
+                        continue  # Reported on info; a scan never stops the scheduler.
+                    if record is not None and record['state'] in ('pending', 'deferred'):
+                        self._eager_due.setdefault(task['uuid'], 0)
+            now = time.monotonic()
+            for identifier, due in list(self._eager_due.items()):
+                if len(self._eager_threads) >= EAGER_FETCH_CONCURRENCY:
+                    return
+                if now >= due and identifier not in self._eager_threads:
+                    self._start_eager_fetch(identifier, now)
+        except Exception:
+            logging.getLogger(__name__).error('Viewer result custody could not be advanced')
+
+    def _start_eager_fetch(self, identifier, now):
+        try:
+            task = self.store.task(identifier)
+        except (Conflict, KeyError):
+            self._forget_eager(identifier)  # Removed since.
+            return
+        note = None
+        if task['environment'] == 'production' and getattr(self.config, 'viewer_production_held', False) is True:
+            note = 'production_held'
+        elif not self._guard_ready(task['node_id']):
+            note = 'guard_unavailable'
+        if note is not None:
+            self._eager_notes[identifier] = note
+            self._eager_due[identifier] = now + RESULT_FETCH_RETRY_SECONDS
+            return
+        thread = threading.Thread(target=self._fetch_eager_result, args=(identifier,),
+                                  name='viewer-result-custody', daemon=True)
+        self._eager_threads[identifier] = thread
+        try:
+            thread.start()
+        except BaseException:
+            self._eager_threads.pop(identifier, None)
+            raise
+
+    def _forget_eager(self, identifier):
+        for schedule in (self._eager_due, self._eager_failures, self._eager_missing, self._eager_notes):
+            schedule.pop(identifier, None)
+
+    def _fetch_eager_result(self, identifier):
+        """Thread entry: changes only bytes and the sidecar, never the job.
+
+        The gate counts this rather than lending it the admission lock, which
+        ``admit`` holders take in turn: uploads go on beside a long transfer, a
+        close stops it at the next chunk, and no census starts until it has left.
+        """
+        try:
+            gate = getattr(self.queue, 'admission_drain', None)
+            with gate.background() if gate is not None else nullcontext() as closing:
+                delay = self._take_eager_custody(identifier, closing)
+            if delay is None:
+                self._forget_eager(identifier)
+            else:
+                self._eager_due[identifier] = time.monotonic() + delay
+        except AdmissionClosed:
+            self._eager_notes[identifier] = 'admission_closed'
+            self._eager_due[identifier] = time.monotonic() + RESULT_FETCH_RETRY_SECONDS
+        except Exception:
+            # No traceback: a chained engine error may name a credentialed route.
+            failures = self._eager_failures.get(identifier, 0) + 1
+            self._eager_failures[identifier] = failures
+            self._eager_notes[identifier] = 'archive_fetch_failed'
+            self._eager_due[identifier] = time.monotonic() + min(
+                RESULT_FETCH_RETRY_MAX_SECONDS, RESULT_FETCH_RETRY_SECONDS * 2 ** min(failures, 6))
+            logging.getLogger(__name__).error('Viewer result custody fetch failed; it will be retried')
+        finally:
+            with self._lock:
+                self._eager_threads.pop(identifier, None)
+
+    def _record_eager_result(self, task):
+        """Recording failed at completion, so this read is the code 40."""
+        info = self._read_status(task)
+        if info['status']['code'] != 40:
+            raise _CustodyRefused(RESULT_CHANGED)
+        record = new_custody(self._adoption_identity(task), info)
+        self.store.save_custody(task, record)
+        return record
+
+    def _eager_result(self, task, record):
+        info = self._read_status(task)
+        if info['status']['code'] != 40 or engine_evidence(info) != record['result']:
+            raise _CustodyRefused(RESULT_CHANGED)
+
+    def _eager_custody_bytes(self):
+        """Measure the disk, as a remembered sum would drift. Outside any lock."""
+        total = 0
+        with os.scandir(self.store.root) as entries:
+            for entry in entries:
+                try:
+                    os.lstat(os.path.join(entry.path, CUSTODY_NAME))
+                    total += os.lstat(os.path.join(entry.path, 'all.zip')).st_size
+                except OSError:
+                    pass
+        return total
+
+    def _eager_guard(self, closing):
+        """Refuse before any write that a drain, the budget or the disk forbids."""
+        used = self._eager_custody_bytes()
+
+        def stop():
+            if self._stop.is_set() or (closing is not None and closing.is_set()):
+                raise _CustodyPaused()
+
+        def guard(total, declared, reclaimable=0):
+            stop()
+            expected = max(total, declared or 0)
+            if expected > CENSUS_RETAINED_FILE_BYTES:
+                raise _CustodyRefused('archive_exceeds_census_limit')
+            if used + max(expected, 1) > self._eager_max_bytes:
+                raise _CustodyDeferred('custody_budget_exceeded')
+            if shutil.disk_usage(self.store.root).free + reclaimable < self._eager_reserve + expected - total:
+                raise _CustodyDeferred('insufficient_scratch')
+
+        return stop, guard
+
+    def _transfer_eager_result(self, task, record, closing):
+        """Fetch through the verified path and record what it retained.
+
+        The caller holds the task's download lock, so Viewer waits for these bytes
+        rather than asking the engine again, and finds them through the same path.
+        """
+        path = Path(task['directory']) / 'all.zip'
+        partial, receipt_path = path.with_suffix('.zip.partial'), path.with_suffix('.zip.receipt')
+        complete = task['archive_path'] or receipt_path.exists() or receipt_path.is_symlink()
+        before_publish = guard = None
+        started = False
+        if not complete:
+            stop, check = self._eager_guard(closing)
+            try:
+                stale = partial.lstat().st_size
+            except FileNotFoundError:
+                stale = 0
+            check(0, None, stale)
+            if record['state'] != 'pending':
+                record = {**record, 'state': 'pending', 'reason': None}
+                self.store.save_custody(task, record)
+            self._eager_result(task, record)
+
+            def guard(total, declared):
+                nonlocal started
+                started = True  # Past the checks of what an earlier run left.
+                check(total, declared)
+
+            def before_publish(partial):
+                # The same finished run on both sides of the transfer.
+                _check_archive_members(partial, stop)
+                self._eager_result(task, record)
+
+        try:
+            stream, _ = self._archive_stream(task, before_publish, guard)
+        except BaseException:
+            # A retry may be hours away and this space is what it will need. With
+            # a receipt these may be the verified bytes, which stay.
+            if started and not (receipt_path.exists() or receipt_path.is_symlink()):
+                partial.unlink(missing_ok=True)
+            raise
+        with stream:
+            receipt = self._archive_receipt(task, receipt_path)
+            self.store.save_custody(task, {**record, 'state': 'verified', 'reason': None,
+                'archive': {'bytes': receipt['bytes'], 'sha256': receipt['sha256']}})
+            if self._log_retention:
+                try:
+                    self._output_from_archive(task, stream)
+                except Exception:
+                    logging.getLogger(__name__).error('Viewer archive console could not be read')
+
+    def _take_eager_custody(self, identifier, closing):
+        """Seconds until the next attempt, or None if none is needed."""
+        with self._lock:
+            lock = self._downloads.setdefault(identifier, threading.Lock())
+        with lock:
+            try:
+                task = self.store.task(identifier)
+                if not task['job'] or task['job']['status'] != 'succeeded' or task['phase'] != 'complete':
+                    return None
+                record = self.store.custody(task)
+            except (Conflict, KeyError):
+                return None  # Removed since, or info reports the record as invalid.
+            if record is not None and record['state'] in ('verified', 'unavailable'):
+                return None
+            try:
+                record = record or self._record_eager_result(task)
+                self._transfer_eager_result(task, record, closing)
+                return None
+            except _CustodyPaused:
+                self._eager_notes[identifier] = 'admission_closed'
+                return RESULT_FETCH_RETRY_SECONDS
+            except _CustodyDeferred as deferred:
+                self.store.save_custody(task, {**record, 'state': 'deferred', 'reason': deferred.args[0]})
+                logging.getLogger(__name__).warning('Viewer result custody deferred: %s', deferred.args[0])
+                return EAGER_DEFERRED_RETRY_SECONDS
+            except _CustodyRefused as refused:
+                self._close_eager(task, record, refused.args[0])
+                return None
+            except EngineTaskMissing:
+                missing = self._eager_missing.get(identifier, 0) + 1
+                self._eager_missing[identifier] = missing
+                if missing >= ENGINE_MISSING_POLLS:
+                    self._close_eager(task, record, 'engine_task_missing')
+                    return None
+                raise
+            except Conflict:
+                # Files a person must read. Nothing here will settle them.
+                self._close_eager(task, record, 'archive_requires_inspection')
+                return None
+
+    def _close_eager(self, task, record, reason):
+        """No further attempts. Viewer's own download stays exactly as it was."""
+        record = record or new_custody(self._adoption_identity(task), {})
+        self.store.save_custody(task, {**record, 'state': 'unavailable', 'reason': reason})
+        logging.getLogger(__name__).error('Viewer result custody unavailable: %s', reason)
+
     def _adoptable_result(self, job_id):
         task = self.store.task_for_job(job_id)
         record = self.store.adoption(task)
@@ -1611,7 +1921,11 @@ class ViewerService:
         status = 'succeeded' if code == 40 else 'failed'
         result = {'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
                   'environment': task['environment'], 'cancelled': code == 50}
+        if code == 40:
+            self._bind_eager_result(task, info)
         self.store.complete_engine_task(task, status, result)
+        if code == 40 and self._eager_custody:
+            self._eager_due.setdefault(identifier, 0)
 
     def tick(self):
         """One bounded scheduler turn; public for deterministic synthetic tests."""
@@ -1680,6 +1994,7 @@ class ViewerService:
                         except Exception as hold_error:
                             reconciliation_errors.append(hold_error)
             self._retry_output_snapshots(jobs)
+            self._advance_eager_custody(jobs)
             if reconciliation_errors:
                 raise Conflict('Viewer reconciliation requires inspection') from reconciliation_errors[0]
             jobs = self.queue.list()
@@ -1861,7 +2176,7 @@ class ViewerService:
                 raise RuntimeError('Viewer scheduler did not stop; retain queue ownership')
         with self._lock:
             transfers = [thread for _, thread in self._dispatch_threads.values()]
-            fetches = list(self._adopt_threads.values())
+            fetches = list(self._adopt_threads.values()) + list(self._eager_threads.values())
         for thread in transfers + fetches:
             thread.join(timeout=10)
         if any(thread.is_alive() for thread in transfers):
