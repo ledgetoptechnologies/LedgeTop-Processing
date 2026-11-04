@@ -1,12 +1,15 @@
 import hashlib
+import copy
 import io
 import json
 import os
+import pickle
 from pathlib import Path
 import sqlite3
 import tempfile
 import threading
 import unittest
+from dataclasses import asdict, replace
 from contextlib import closing
 from unittest.mock import patch
 
@@ -70,6 +73,28 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
     def test_grant_must_expire_before_it_is_already_stale(self):
         with self.assertRaisesRegex(TransferError, "source grant expired"):
             self.grant(expiresAt="1970-01-01T00:01:40Z")
+
+    def test_grant_object_index_is_immutable_and_preserves_closure(self):
+        grant = self.grant()
+        self.assertEqual(grant.object_for(self.obj.id), self.obj)
+        self.assertIsNone(grant.object_for('not-in-grant'))
+        with self.assertRaises(TypeError):
+            grant._object_index[self.obj.id] = SourceObject('other', 0, '0' * 64)
+        with self.assertRaises(TransferError):
+            replace(grant, objects=(self.obj, self.obj))
+        with self.assertRaises(TransferError):
+            self.make_client().download_object(grant=grant, object_id='not-in-grant',
+                                               destination=self.root / 'unknown.bin')
+        self.assertEqual(self.calls, [])
+        self.assertEqual(set(asdict(grant)), {
+            'identity', 'expires', 'objects', 'chunk_bytes', 'request_budget',
+            'byte_budget', 'attempt_budget', 'token'})
+        self.assertEqual(asdict(grant)['objects'][0]['id'], self.obj.id)
+        for restored in (copy.deepcopy(grant), pickle.loads(pickle.dumps(grant))):
+            self.assertEqual(restored, grant)
+            self.assertEqual(restored.object_for(self.obj.id), self.obj)
+            with self.assertRaises(TypeError):
+                restored._object_index[self.obj.id] = self.obj
 
     def make_client(self, opener=None):
         return SourceRangeClient("https://broker.example", self.root / "progress.sqlite",
