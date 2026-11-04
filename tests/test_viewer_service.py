@@ -19,6 +19,8 @@ import sqlite3
 import tempfile
 import threading
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -28,7 +30,8 @@ import zipfile
 from processing.maintenance import Conflict
 from processing.odx_smoke_worker import SmokeError
 from processing.prototype import PROFILE, VIEWER_PROFILE, Queue
-from processing.viewer_service import EngineUnavailable, ViewerService
+from processing.viewer_service import (ENGINE_LOST_SECONDS, ENGINE_MISSING_POLLS, EngineTaskMissing,
+                                       EngineUnavailable, NODE_LOST_POLLS, NativeEngine, ViewerService)
 from tests.reference_activation_fixture import activated_prepared_v3_job
 
 
@@ -131,7 +134,7 @@ class FakeEngine:
         if task is None:
             if missing:
                 return None
-            raise EngineUnavailable('synthetic_task_not_found')
+            raise EngineTaskMissing('synthetic_task_not_found')
         if kind == 'info':
             return {'uuid': identifier, 'status': dict(task['status']), 'progress': task['progress']}
         if kind == 'output':
@@ -2651,6 +2654,179 @@ with patch('processing.viewer_service.os.link',side_effect=interrupted):
         self.engines[task['node_id']].output_unavailable = True
         self.service.store.update(identifier, output_lines=['retained output'])
         self.assertEqual(self.service.output(identifier, 0), ['retained output'])
+
+    def running(self):
+        self.service._node_lost_hold = True
+        identifier = self.submit()
+        self.service.tick()
+        self.polls(1)
+        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        return identifier
+
+    def polls(self, count):
+        for _ in range(count):
+            self.service._backoff.clear()
+            self.service.tick()
+
+    def assert_held_intact(self, identifier, before, reason):
+        held = self.task(identifier)
+        self.assertEqual((held['job']['status'], held['job']['heldReason'], held['stage'], held['phase'], held['error']),
+                         ('held', 'operator', 'held', 'held', reason))
+        self.assertEqual(held['job']['result']['note'], reason)
+        self.assertEqual(held['job']['nodeId'], before['node_id'])
+        for field in ('node_id', 'engine_uuid', 'claim_token', 'job_id', 'files', 'progress'):
+            self.assertEqual(held[field], before[field])
+        info = self.service.info(identifier)
+        self.assertEqual((info['status'], info['ledgetopHeld'], info['ledgetopHoldReason'], info['ledgetopNodeId']),
+                         ({'code': 10}, True, reason, before['node_id']))
+        self.assertNotIn('ledgetopEngineStatus', info)
+        # No cancel, delete, restart or second submission reached either node.
+        mutations = [call for engine in self.engines.values() for call in engine.calls if call[0] != 'read']
+        self.assertEqual(mutations.count(('commit', before['engine_uuid'])), 1)
+        self.assertEqual(mutations.count(('initialize', before['engine_uuid'])), 1)
+        self.assertFalse([call for call in mutations if call[0] not in ('initialize', 'upload', 'commit')])
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_network_failures_hold_node_lost_only_at_the_threshold(self):
+        identifier = self.running()
+        before = self.task(identifier)
+        engine = self.engine_for(identifier)
+        engine.read_unavailable = True
+        self.polls(NODE_LOST_POLLS - 1)
+        self.assertEqual(self.task(identifier)['job']['status'], 'running')
+        info = self.service.info(identifier)
+        self.assertEqual((info['status'], info['ledgetopEngineStatus']), ({'code': 20}, 'unknown'))
+        self.polls(1)
+        self.assert_held_intact(identifier, before, 'node_lost')
+        self.assertIn(before['engine_uuid'], engine.tasks)
+
+    def test_not_found_holds_engine_task_missing_and_keeps_the_slot(self):
+        identifier = self.running()
+        before = self.task(identifier)
+        del self.engine_for(identifier).tasks[before['engine_uuid']]
+        self.polls(ENGINE_MISSING_POLLS - 1)
+        self.assertEqual(self.task(identifier)['job']['status'], 'running')
+        self.polls(1)
+        self.assert_held_intact(identifier, before, 'engine_task_missing')
+        waiting = self.submit()
+        self.polls(3)
+        self.assertEqual(self.task(waiting)['job']['status'], 'queued')
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_native_read_separates_not_found_from_other_failures(self):
+        replies = {'/task/ok/info': (200, {'uuid': 'ok'}), '/task/gone200/info': (200, {'error': 'abc not found'}),
+                   '/task/gone404/info': (404, {'error': 'abc not found'}), '/task/route/info': (404, {'detail': 'no route'}),
+                   '/task/denied/info': (200, {'error': 'Invalid authentication token'}),
+                   '/task/broken/info': (500, {'error': 'abc not found'})}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                code, value = replies[self.path]
+                body = json.dumps(value).encode()
+                self.send_response(code)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        client = NativeEngine('http://127.0.0.1:' + str(server.server_port))
+        try:
+            self.assertEqual(client.read('/task/ok/info'), {'uuid': 'ok'})
+            for route in ('gone200', 'gone404'):
+                with self.subTest(route=route), self.assertRaises(EngineTaskMissing):
+                    client.read('/task/' + route + '/info')
+            for route in ('route', 'denied', 'broken'):
+                with self.subTest(route=route), self.assertRaises(EngineUnavailable) as raised:
+                    client.read('/task/' + route + '/info')
+                self.assertNotIsInstance(raised.exception, EngineTaskMissing)
+            self.assertIsNone(client.read('/task/gone404/info', missing=True))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_a_good_poll_resets_the_failure_count(self):
+        identifier = self.running()
+        engine = self.engine_for(identifier)
+        for _ in range(3):
+            engine.read_unavailable = True
+            self.polls(NODE_LOST_POLLS - 1)
+            engine.read_unavailable = False
+            self.polls(1)
+            self.assertNotIn('ledgetopEngineStatus', self.service.info(identifier))
+        self.assertEqual(self.task(identifier)['job']['status'], 'running')
+
+    def test_alternating_failures_hold_after_the_elapsed_bound(self):
+        identifier = self.running()
+        engine = self.engine_for(identifier)
+        engine.read_unavailable = True
+        self.polls(1)
+        self.service._lost[identifier] = ('engine_task_missing', 1, time.monotonic() - ENGINE_LOST_SECONDS)
+        self.polls(1)
+        self.assertEqual(self.task(identifier)['error'], 'node_lost')
+
+    def test_recovered_task_is_reported_to_the_operator_and_stays_held(self):
+        identifier = self.running()
+        before = self.task(identifier)
+        engine = self.engine_for(identifier)
+        engine.read_unavailable = True
+        self.polls(NODE_LOST_POLLS)
+        self.polls(1)
+        self.assertEqual(self.service.info(identifier)['ledgetopEngineObservation'], {'state': 'unreachable'})
+        engine.read_unavailable = False
+        self.finish(identifier)
+        self.service._held_observations.clear()
+        self.polls(1)
+        info = self.service.info(identifier)
+        self.assertEqual(info['ledgetopEngineObservation'], {'state': 'task_present', 'code': 40})
+        self.assert_held_intact(identifier, before, 'node_lost')
+        reads = len(engine.calls)
+        self.polls(3)
+        self.assertEqual(len(engine.calls), reads)  # Observation is rate limited.
+        del engine.tasks[before['engine_uuid']]
+        self.service._held_observations.clear()
+        self.polls(1)
+        self.assertEqual(self.service.info(identifier)['ledgetopEngineObservation'], {'state': 'task_missing'})
+        resolved = self.queue.operator(before['job_id'], 'resolve', {'note': 'synthetic', 'workerStopped': True})
+        self.assertEqual(resolved['status'], 'failed')
+        self.polls(1)
+        self.assertEqual(self.service.info(identifier)['status'], {'code': 30, 'errorMessage': 'node_lost'})
+
+    def test_coordinator_restart_keeps_a_lost_hold(self):
+        identifier = self.running()
+        before = self.task(identifier)
+        engine = self.engine_for(identifier)
+        engine.read_unavailable = True
+        self.polls(NODE_LOST_POLLS)
+        self.service.close()
+        self.queue.close()
+        engine.read_unavailable = False
+        self.config.viewer_node_lost_hold = True
+        self.make_queue_service()
+        self.polls(2)
+        self.assert_held_intact(identifier, before, 'node_lost')
+        self.assertEqual(self.service.info(identifier)['ledgetopEngineObservation'], {'state': 'task_present', 'code': 20})
+
+    def test_node_lost_hold_off_keeps_polling_a_silent_node(self):
+        identifier = self.submit()
+        self.service.tick()
+        self.polls(1)
+        engine = self.engine_for(identifier)
+        engine.read_unavailable = True
+        self.polls(NODE_LOST_POLLS * 3)
+        self.assertEqual(self.task(identifier)['job']['status'], 'running')
+        self.assertEqual(self.task(identifier)['stage'], 'running')
+        info = self.service.info(identifier)
+        self.assertEqual(info['status'], {'code': 20})
+        self.assertFalse({'ledgetopHeld', 'ledgetopEngineStatus', 'ledgetopHoldReason'} & set(info))
+        engine.read_unavailable = False
+        self.finish(identifier)
+        self.polls(1)
+        self.assertEqual(self.task(identifier)['job']['status'], 'succeeded')
 
 
 if __name__ == '__main__':

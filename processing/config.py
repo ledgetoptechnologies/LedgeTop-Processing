@@ -40,6 +40,7 @@ class Config:
     per_node_slots: bool = False
     node_inventory: tuple = field(default=(), repr=False)
     viewer_parallel_dispatch: bool = False
+    viewer_node_lost_hold: bool = False
 
 
 def parse_node_inventory(raw, environment):
@@ -178,6 +179,9 @@ def from_environment() -> Config:
         raise ValueError('parallel Viewer dispatch requires per-node slots')
     if parallel_dispatch == '1' and os.environ.get('PROCESSING_REFERENCE_CONFIG'):
         raise ValueError('parallel Viewer dispatch is not qualified with the reference runtime')
+    node_lost_hold = os.environ.get('PROCESSING_VIEWER_NODE_LOST_HOLD', '0')
+    if node_lost_hold not in ('0', '1'):
+        raise ValueError('PROCESSING_VIEWER_NODE_LOST_HOLD must be 0 or 1')
     if inventory and (per_node_slots != '1' or os.environ.get('PROCESSING_REFERENCE_CONFIG')):
         raise ValueError('inventory requires per-node slots and no reference runtime')
     lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
@@ -240,4 +244,5 @@ def from_environment() -> Config:
         per_node_slots=per_node_slots == '1',
         node_inventory=inventory,
         viewer_parallel_dispatch=parallel_dispatch == '1',
+        viewer_node_lost_hold=node_lost_hold == '1',
     )

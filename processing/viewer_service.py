@@ -34,10 +34,29 @@ from .viewer_limits import MAX_UPLOAD_BYTES
 
 # A silent node holds overflow this long, matching the readiness cache TTL.
 UNANSWERED_NODE_SECONDS = 30
+# With the poll backoff these hold a silent node after about five minutes and a
+# node answering that the task is gone after about thirty seconds. The elapsed
+# bound catches failures that alternate between the two. Any good poll resets.
+NODE_LOST_POLLS = 10
+ENGINE_MISSING_POLLS = 5
+ENGINE_LOST_SECONDS = 900
+ENGINE_LOST_REASONS = ('node_lost', 'engine_task_missing')
+# A held task's engine is only read, at this interval, to tell the operator.
+HELD_OBSERVATION_SECONDS = 60
 
 
 class EngineUnavailable(OSError):
     pass
+
+
+class EngineTaskMissing(EngineUnavailable):
+    """The engine answered, and the answer is that it has no such task."""
+
+
+def _reports_missing(value):
+    # NodeODX reports an unknown task as a JSON error, often with a 200 status.
+    return (isinstance(value, dict) and isinstance(value.get('error'), str)
+            and value['error'].rstrip().lower().endswith('not found'))
 
 
 class _DispatchInterrupted(Exception):
@@ -113,14 +132,24 @@ class NativeEngine:
                 if len(raw) > limit:
                     raise ValueError()
                 value = json.loads(raw)
+                if _reports_missing(value):
+                    raise EngineTaskMissing('engine_task_missing')
                 if isinstance(value, dict) and 'error' in value:
                     raise ValueError()
                 return value
+        except EngineTaskMissing:
+            raise
         except HTTPError as error:
             code = error.code
+            try:
+                body = json.loads(error.read(65536)) if code == 404 and not missing else None
+            except (OSError, ValueError, http.client.HTTPException):
+                body = None
             error.close()
             if missing and code == 404:
                 return None
+            if _reports_missing(body):
+                raise EngineTaskMissing('engine_task_missing') from None
             raise EngineUnavailable('engine_read_unavailable') from None
         except (OSError, ValueError, http.client.HTTPException):
             raise EngineUnavailable('engine_read_unavailable') from None
@@ -205,6 +234,12 @@ class ViewerService:
         self._stop = threading.Event()
         self._thread = None
         self._backoff = {}
+        # Prototype only, absent keeps polling forever: a hold stops the job's
+        # progress and needs an operator, so a transient outage must not cause
+        # one on the deployed path. Both maps are observations, not authority.
+        self._node_lost_hold = getattr(config, 'viewer_node_lost_hold', False) is True
+        self._lost = {}
+        self._held_observations = {}
         self._downloads = {}
         # Prototype only: absent configuration keeps the deployed synchronous
         # path. A node's in-flight transfer remains in its durable queue slot.
@@ -434,6 +469,15 @@ class ViewerService:
         if task['node_id']:
             # The ID is configured locally, not an endpoint or credential.
             info['ledgetopNodeId'] = task['node_id']
+        if info.get('ledgetopHeld') and task['error'] in ENGINE_LOST_REASONS:
+            # Fixed codes only. The hold stands whatever a later read observed.
+            info['ledgetopHoldReason'] = task['error']
+            seen = self._held_observations.get(identifier)
+            if seen is not None:
+                info['ledgetopEngineObservation'] = seen['observation']
+        elif identifier in self._lost:
+            # Below the hold threshold: the last status is no longer current.
+            info['ledgetopEngineStatus'] = 'unknown'
         return info
 
     def reserve(self, identifier, environment, capability):
@@ -892,6 +936,58 @@ class ViewerService:
     def _hold(self, task, reason):
         self.store.hold(task['uuid'], reason)
 
+    def _read_status(self, task):
+        info = self._task_engine(task).read('/task/' + task['engine_uuid'] + '/info')
+        if (not isinstance(info, dict) or info.get('uuid') != task['engine_uuid']
+                or not isinstance(info.get('status'), dict)
+                or type(info['status'].get('code')) is not int
+                or info['status']['code'] not in (10, 20, 30, 40, 50)):
+            raise EngineUnavailable('engine_status_unavailable')
+        return info
+
+    def _note_failed_poll(self, task, error, now):
+        """Hold after bounded failures; the job keeps its slot, node and bytes.
+
+        Never requeue: the node may still be running this task, and NodeODX
+        requeues running tasks after a restart, so a moved job could run twice.
+        """
+        identifier = task['uuid']
+        missing = isinstance(error, EngineTaskMissing)
+        reason = 'engine_task_missing' if missing else 'node_lost'
+        previous, count, since = self._lost.get(identifier, (reason, 0, now))
+        count = count + 1 if previous == reason else 1
+        self._lost[identifier] = (reason, count, since)
+        if count >= (ENGINE_MISSING_POLLS if missing else NODE_LOST_POLLS) or now - since >= ENGINE_LOST_SECONDS:
+            self._hold(task, reason)
+            self._lost.pop(identifier, None)
+            self._backoff.pop(identifier, None)
+
+    def _observe_lost(self, job):
+        """Tell the operator whether a lost task is back; never change the hold.
+
+        Only an operator decides what an old task on a recovered node means.
+        """
+        note = job['result'].get('note') if isinstance(job['result'], dict) else None
+        if not self._node_lost_hold or note not in ENGINE_LOST_REASONS:
+            return
+        now = time.monotonic()
+        try:
+            task = self.store.task_for_job(job['id'])
+            seen = self._held_observations.get(task['uuid'])
+            if seen is not None and now < seen['due']:
+                return
+            try:
+                info = self._read_status(task)
+                observation = {'state': 'task_present', 'code': info['status']['code']}
+            except EngineTaskMissing:
+                observation = {'state': 'task_missing'}
+            except EngineUnavailable:
+                observation = {'state': 'unreachable'}
+            self._held_observations[task['uuid']] = {'due': now + HELD_OBSERVATION_SECONDS,
+                                                     'observation': observation}
+        except Exception:
+            logging.getLogger(__name__).exception('held engine observation failed')
+
     def _poll(self, task):
         identifier = task['uuid']
         now = time.monotonic()
@@ -899,17 +995,15 @@ class ViewerService:
         if now < due:
             return
         try:
-            info = self._task_engine(task).read('/task/' + task['engine_uuid'] + '/info')
-            if (not isinstance(info, dict) or info.get('uuid') != task['engine_uuid']
-                    or not isinstance(info.get('status'), dict)
-                    or type(info['status'].get('code')) is not int
-                    or info['status']['code'] not in (10, 20, 30, 40, 50)):
-                raise EngineUnavailable('engine_status_unavailable')
-        except EngineUnavailable:
+            info = self._read_status(task)
+        except EngineUnavailable as error:
             failures += 1
             self._backoff[identifier] = (now + min(60, 2 ** min(failures, 6)), failures)
+            if self._node_lost_hold:
+                self._note_failed_poll(task, error, now)
             return
         self._backoff.pop(identifier, None)
+        self._lost.pop(identifier, None)
         code = info['status']['code']
         if code in (10, 20):
             # Queued10 may mean a delayed accepted commit or an uncommitted
@@ -982,6 +1076,7 @@ class ViewerService:
                 if job['profile'] != VIEWER_PROFILE or job['status'] not in ('running', 'held'):
                     continue
                 if job['status'] == 'held' and job['heldReason'] != 'coordinator_restart':
+                    self._observe_lost(job)
                     continue
                 try:
                     task = self.store.task_for_job(job['id'])
