@@ -51,3 +51,9 @@ without qualifying those.
 The revised three-module synthetic regression ran 193 tests on Linux with
 one skipped, using fake engines and pinned test dependencies. It does not
 establish real HTTP upload behavior, global capacity, or cross-process fencing.
+
+An additional owned-child test uses a real loopback HTTP listener and partial
+multipart request: shutdown retains Queue authority until the client half-closes,
+then exits and leaves no committed partial input. Node readiness is stubbed.
+It does not establish a hard shutdown deadline, abrupt process/power loss, a
+real engine, or production network and filesystem behavior.
