@@ -83,7 +83,7 @@ class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
                  treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
                  require_idle_existing=False, per_node_slots=False, node_capabilities=None,
-                 parallel_viewer_uploads=False, node_photo_limits=None):
+                 parallel_viewer_uploads=False, node_photo_limits=None, family_preflight_candidate=False):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or ('cluster' not in node_ids and not per_node_slots)):
@@ -132,8 +132,16 @@ class Queue(Maintenance):
             self.allowed_profiles.add(VIEWER_PROFILE)
         if reference_enabled:
             self.allowed_profiles.add(REFERENCE_PROFILE)
+        if type(family_preflight_candidate) is not bool:
+            raise ValueError('explicit family preflight candidate flag required')
         root = Path(directory)
-        root.mkdir(parents=True, exist_ok=True)
+        if family_preflight_candidate:
+            lock_path = root / 'coordinator.lock'
+            if (not root.is_dir() or root.is_symlink() or lock_path.is_symlink()
+                    or not lock_path.is_file() or (os.name == 'nt' and lock_path.stat().st_size < 1)):
+                raise RuntimeError('candidate_preflight_existing_lease_required')
+        else:
+            root.mkdir(parents=True, exist_ok=True)
         self._lock = (root / "coordinator.lock").open("a+b")
         self._lock.seek(0)
         if os.name == "nt":
@@ -158,6 +166,13 @@ class Queue(Maintenance):
         # Optional recovery persists this epoch with its restart overlay.
         self.startup_id = str(uuid.uuid4())
         self.path = root / "jobs.sqlite3"
+        if family_preflight_candidate:
+            try:
+                from .admission_family_queue_preflight_candidate import preflight_existing
+                preflight_existing(self.path)
+            except BaseException:
+                self._lock.close()
+                raise
         if require_idle_existing:
             try:
                 _require_idle_state(self.path)
