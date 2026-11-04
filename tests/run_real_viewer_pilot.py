@@ -136,7 +136,22 @@ def launch(a):
         raise RuntimeError('monitor_interrupted_preserve_all') from None
     finally: token=None
     if result.returncode:raise RuntimeError('pilot_failed_preserve_all')
-    if not (data/'pilot-complete.json').is_file():raise RuntimeError('receipt_missing_preserve_all')
+    # The container's exit status alone is not proof of a successful result.
+    # Require the worker's exclusive pre-submit receipt and completion proof to
+    # identify the same owned attempt. The worker verified content hashes.
+    try:
+        receipt_path=data/'pilot-receipt.json'; complete_path=data/'pilot-complete.json'
+        if any(p.is_symlink() or not p.is_file() for p in (receipt_path,complete_path)): raise ValueError()
+        receipt=json.loads(receipt_path.read_text(encoding='utf-8')); complete=json.loads(complete_path.read_text(encoding='utf-8'))
+        if (receipt.get('owner')!=prepared['owner'] or complete.get('owner')!=prepared['owner']
+            or not receipt.get('attemptId') or receipt['attemptId']!=complete.get('attemptId')
+            or not receipt.get('providerTaskId') or receipt['providerTaskId']!=complete.get('providerTaskId')
+            or type(complete.get('files')) is not int or complete['files']<1
+            or any(not isinstance(complete.get(k),str) or len(complete[k])!=64
+                   or any(c not in '0123456789abcdef' for c in complete[k])
+                   for k in ('archiveManifestSha256','tilesSha256'))): raise ValueError()
+    except (OSError,ValueError,TypeError,KeyError,json.JSONDecodeError):
+        raise RuntimeError('receipt_missing_or_mismatch_preserve_all') from None
     print(json.dumps({'status':'ready_for_review','ownedPilot':str(data),'containerName':name}))
 
 

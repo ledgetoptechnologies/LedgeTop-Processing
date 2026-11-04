@@ -36,7 +36,10 @@ class LauncherTests(unittest.TestCase):
                 return SimpleNamespace(stdout='c'*64,returncode=0)
             if cmd[:2]==['docker','start']:
                 if failure:raise subprocess.TimeoutExpired(cmd,1)
-                (state['data']/'pilot-complete.json').write_text('{}')
+                receipt={'owner':'b'*32,'attemptId':'attempt','providerTaskId':'provider'}
+                complete={**receipt,'files':6,'archiveManifestSha256':'d'*64,'tilesSha256':'e'*64}
+                (state['data']/'pilot-receipt.json').write_text(json.dumps(receipt))
+                (state['data']/'pilot-complete.json').write_text(json.dumps(complete))
                 return SimpleNamespace(returncode=0)
             raise AssertionError(cmd)
         def output(cmd,**kw):
