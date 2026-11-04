@@ -103,7 +103,19 @@ async function main() {
       const completed=processing.getAttempt(attempt.id);
       if(completed.status!=='ready_for_review') console.error('derivative diagnostic',JSON.stringify(processing.listDerivativeJobs(10)));
       assert.equal(completed.status,'ready_for_review');
-      assert.ok(repo.getModelVersion(completed.resultModelId,completed.resultModelVersionId));
+      const publishedCandidate=repo.getModelVersion(completed.resultModelId,completed.resultModelVersionId);
+      assert.ok(publishedCandidate && publishedCandidate.activeVersion);
+      const tile=publishedCandidate.activeVersion.assets.find(asset=>asset.kind==='tiles');
+      assert.ok(tile && tile.sha256 && tile.manifestSha256);
+      const tilePath=storage.resolve('models',tile.relativePath,{mustExist:true});
+      assert.equal(crypto.createHash('sha256').update(fs.readFileSync(tilePath)).digest('hex'),tile.sha256);
+      const reopened=openDatabase(path.join(dataRoot,'viewer.sqlite'));
+      try {
+        const reread=new ProcessingRepository(reopened).getAttempt(attempt.id);
+        assert.equal(reread.status,'ready_for_review');
+        assert.equal(reread.resultModelVersionId,completed.resultModelVersionId);
+        assert.ok(new ViewerRepository(reopened).getModelVersion(completed.resultModelId,completed.resultModelVersionId));
+      } finally { reopened.close(); }
       console.log(JSON.stringify({event:'ingested',uuid:attempt.providerTaskId,receipt,attemptStatus:completed.status,modelId:completed.resultModelId,versionId:completed.resultModelVersionId}));
       return;
     }

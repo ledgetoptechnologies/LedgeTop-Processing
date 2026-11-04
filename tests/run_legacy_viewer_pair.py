@@ -1,5 +1,6 @@
 """Run an isolated, disposable paired fixture; never point this at live services."""
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -48,6 +49,11 @@ def main():
     check_source(args.viewer, VIEWER)
     if not args.npm_cache.is_absolute() or not args.npm_cache.is_dir():
         raise ValueError('npm cache must be an existing absolute directory')
+    expected={'Obj2Tiles':'3577688939806dabdf1f4620cc05debe6e178180a99bf0308f4b8483b8a36725',
+              'libktx.so':'0792dd32ce7d2a101d614a3d1dc1f2b4297869d9cab5d7f0bb4fee304c4c9bcc',
+              'build-info.json':'2c8e7e4184ccff6d5e08290ba70645c353a5d1f18b53ec7b14f1a52a8e4e8f2d'}
+    if not args.converter.is_absolute() or any(hashlib.sha256((args.converter/n).read_bytes()).hexdigest()!=v for n,v in expected.items()):
+        raise ValueError('converter fixture digest mismatch')
     owner = uuid.uuid4().hex
     name = 'ltds-legacy-pair-' + owner
     command = ['docker', 'create', '--name', name, '--label', 'ltds.fixture.owner=' + owner,
