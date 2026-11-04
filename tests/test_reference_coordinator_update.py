@@ -848,6 +848,21 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
         self.assertEqual([call[0] for call in self.transport.calls],['stop'])
         self.assertFalse((self.operation/'copied-volume').exists())
 
+    def test_actual_late_admission_survives_failed_handover_without_replacement(self):
+        submitted=[]
+        def late(action):
+            if action=='stop':
+                submitted.append(self.api.json('POST','/v1/prototype/jobs',dict(
+                    requestId='late-admission-fixture',environment='staging',profile='treedar-synthetic-v1')))
+        self.transport.hook=late
+        with self.assertRaises(AssertionError):self.activate()
+        self.assertEqual(len(submitted),1)
+        jobs=[job for job in self.queue.list() if job['requestId']=='late-admission-fixture']
+        self.assertEqual(len(jobs),1);self.assertEqual(jobs[0]['status'],'queued')
+        self.assertEqual([call[0] for call in self.transport.calls],['stop'])
+        self.assertFalse((self.operation/'copied-volume').exists())
+        self.assertEqual(self.state['phase'],'needs_inspection')
+
     def fail_after_start(self):
         self.transport.loss='start'
         with self.assertRaises(OSError):self.activate()
