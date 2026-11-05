@@ -14,6 +14,15 @@ The Ops #430 `50ddd6e8` HTTPS/Python source-range pairing was rerun against
 this identity follow-up (`572cf56`, documentation head `08e4e9d`): 20/20
 passed with no skips. The earlier 20/20 result below applied to code `c7aa1ce`.
 
+Local image `ledgetop-processing:integration-8422a47` was built from repository
+head `8422a47` (code `572cf56`) with the pinned Dockerfile/dependencies. Image
+configuration ID is
+`sha256:34f984e8d4463cc442c6dedf8739ce5cf6e4a24569a9e06329425ee85ee7f39f`.
+A bounded container with no external network and a read-only root filesystem
+started the app and returned HTTP 200 from `/healthz` as UID 10001; cryptography
+50.0.2 loaded. The child process and container exited. This checks basic image
+startup only, not configured reference dispatch or a deployed PC worker.
+
 ## Integrated source
 
 Code commit `c7aa1ce66e91b3b3c985ed3d5789d7527f21402f` combines:
