@@ -191,6 +191,26 @@ class ReferenceSourceIntakeMethods:
                 handle.close()
             raise
 
+    def _registered_source_check(self, *, job_id, generation, object_id, authorize, check):
+        """Pin one synchronous NAS check that owns its descriptor from open to close.
+
+        Nothing escapes the call, so the pin covers the whole check and the claim
+        is reauthorized once it returns. An unknown close keeps the pin.
+        """
+        from .source_spool import SourceSpoolCloseUncertain
+        handle = self.source_readers().reserve(job_id, generation, object_id, authorize=authorize, quota=self._quota)
+        try:
+            result = check()
+            handle.check_authority(authorize=authorize)
+            return result
+        except BaseException as error:
+            if isinstance(error, SourceSpoolCloseUncertain):
+                handle.uncertain = True
+            raise
+        finally:
+            if not handle.uncertain:
+                handle.close()
+
     def _source_range_metadata_bytes(self, db):
         """Account every persisted source-range journal field in the queue quota."""
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -1436,8 +1456,13 @@ class ReferenceSourceIntakeMethods:
                     finally:
                         handle.close()
                 else:
-                    actual = source_spool.verify_object(job_id=job_id, generation=row['generation'],
-                        object_id=obj['id'], byte_size=obj['byteSize'], sha256=obj['sha256'])
+                    # verify_object keeps its full hash and stability check; the
+                    # pin gives that descriptor the same custody as a reader.
+                    actual = self._registered_source_check(job_id=job_id, generation=row['generation'],
+                        object_id=obj['id'], authorize=still_owned,
+                        check=lambda obj=obj: source_spool.verify_object(job_id=job_id,
+                            generation=row['generation'], object_id=obj['id'], byte_size=obj['byteSize'],
+                            sha256=obj['sha256']))
                 if _json(actual) != _json(receipt):
                     raise Conflict('pipeline source object is no longer retained')
         except (KeyError, TypeError, ValueError):
