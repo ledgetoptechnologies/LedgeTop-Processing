@@ -15,9 +15,9 @@ not be added together or described as a complete suite.
 | Requirement | Current evidence | Remaining acceptance |
 | --- | --- | --- |
 | Production/staging queue and ordered per-node routing | Actual Viewer/Python synthetic pairings; 332-test integrated selection | Installed source intake and concurrent two-node jobs |
-| Private per-node engine boundary and dynamic flags | Execution already uses the worker's configured loopback engine; new authenticated catalog relay candidate under review | Qualify and install worker relay, route coordinator discovery through it, and verify native engine submission cannot bypass the worker boundary |
+| Private per-node engine boundary and dynamic flags | Authenticated worker relay and coordinator discovery integrated; 96/96 frozen-source Linux catalog/runtime/factory checks passed at `18750d4` | Install workers and qualify relay on both PCs; verify native engine submission cannot bypass the worker boundary |
 | Durable result return and selective cleanup | Signed ready proof, real Viewer process death/recovery, synthetic 24-hour timer and preserved raw GCP/originals | Installed credentials, NAS durability and actual return to Viewer |
-| Coordinator/worker maintenance | Independently generated startup policy, crash-safe cutover journal and 121-test combined qualification | Concrete cutover transport, real worker update/drain/resume |
+| Coordinator/worker maintenance | Concrete driver/bundle/transport integrated; 118/118 frozen-source Linux checks, including delayed start and accepted-resume recovery | Full actual Docker forward/declared rollback, first worker enrollment and installed update/drain/resume |
 | Long transfer after coordinator outage | Reviewed renewal and initial-mint reader registration integrated; 148/148 combined Linux mint/renewal/readers/custody/probe checks passed in 43.760 s at `ee9b479` | Actual coordinator-restart fetching/processing recovery and per-receipt operator-resolution delivery remain open |
 | Viewer GCP workflow | Viewer `ddb2e8cb`, explicit height choice and v3 provenance; 27/27 focused tests; installed GCPFile conversion; whole/range result return and corrected signed 24-hour cleanup qualification passed | NAVD88 geoid support, unrelated workspace type diagnostics, installed paired deployment and rendered acceptance |
 | TreeDar and Gaussian splats | Genuine-LiDAR validation/scaffolding | Typed usable TreeDar output registration and real processing; Gaussian remains disabled |
@@ -48,6 +48,15 @@ qualification passed twelve checks, including cold private readback and a
 selections, not a summed full-suite claim. The local image predates subsequent
 renewal work and remains unpublished. Installed PID1-holder/worker/NAS acceptance
 and the complete cutover driver are still required.
+
+That image/driver checkpoint is superseded by `18750d4`: private catalog and
+concrete driver/bundle/boundary are now integrated. Frozen-source selections
+passed 96 and 118 tests separately, and a new local image passed the actual
+12-check Docker transport qualifier. See
+`evidence/integrated-private-worker-cutover-20261105.md`. Full actual phase
+composition and installed acceptance remain required. Fresh read-only host
+inventory confirms no reference worker unit/config is installed on either PC;
+the older writable `e11231a` preparations are not active or readiness-qualified.
 
 The installed NodeODX accepts the corrected compound GCP CRS, but accepted
 syntax does not establish the desired geoid transformation. The offline
