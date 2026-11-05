@@ -40,6 +40,7 @@ from .treedar_engine import TreeDarHeld
 
 
 PREFIX = '/ltds/worker/v1'
+SOURCE_RECOVERY_ATTEMPTS = 8
 
 
 class DriverHeld(ValueError):
@@ -896,6 +897,9 @@ class ReferenceDriver:
         if status != 200:
             return None
         validate_claim_fields(state)
+        return state if self._claim_bound(job_id, claim, state) else None
+
+    def _claim_bound(self, job_id, claim, state):
         with self._db() as db:
             request_id = db.execute('SELECT claim_request FROM driver_jobs WHERE job=?', (job_id,)).fetchone()[0]
         expected = dict(authorityId=self.worker.authority_id, jobId=job_id, generation=claim['generation'],
@@ -903,7 +907,7 @@ class ReferenceDriver:
             workerInstanceId=self.worker_instance_id, claimRequestId=request_id,
             claimTokenSha256=hashlib.sha256(claim['claimToken'].encode()).hexdigest(),
             manifestSha256=claim['manifestSha256'], pipelineDigest=claim['pipelineDigest'])
-        return None if any(state[key] != value for key, value in expected.items()) else state
+        return all(state[key] == value for key, value in expected.items())
 
     def _fetch_refusal(self, job_id, stage, data, source_range_v2):
         """Stop before a source attempt is charged if no GET would be admitted.
@@ -923,11 +927,136 @@ class ReferenceDriver:
             raise DriverHeld('source_fetch_not_admitted') from None
         if state is None:
             raise DriverHeld('source_fetch_not_admitted')
-        if state['status'] == 'running' and state['executionPhase'] == 'fetching':
-            return None
         if state['status'] in ('failed', 'cancelled'):
             return self._unstarted(job_id, stage, data, 'source_fetch_ended')
+        if source_range_v2 and self._restart_recoverable(state, data):
+            self._recover_source_fetch(job_id, stage, data)
+            state = self._claim_state(job_id, data['claim'])
+            if state is None:
+                raise DriverHeld('source_fetch_not_admitted')
+        if state['status'] == 'running' and state['executionPhase'] == 'fetching':
+            return None
         raise DriverHeld('source_fetch_held')
+
+    @staticmethod
+    def _restart_recoverable(state, data):
+        """A restart hold on a fetch, or an unresolved intent from an earlier one."""
+        return state['executionPhase'] == 'fetching' and (
+            (state['status'], state['heldReason']) == ('held', 'coordinator_restart')
+            or (data.get('sourceRecovery') or {}).get('pending') is not None)
+
+    def _source_recovery_journal(self, data):
+        from .reference_recovery import ClaimRecoveryService
+        journal = data.get('sourceRecovery', {'attempts': 0, 'pending': None})
+        if (type(journal) is not dict or set(journal) != {'attempts', 'pending'} or type(journal['attempts']) is not int
+                or not 0 <= journal['attempts'] <= SOURCE_RECOVERY_ATTEMPTS):
+            raise DriverHeld('source_recovery_journal_invalid')
+        pending = journal['pending']
+        if pending is not None:
+            try:
+                if type(pending) is not dict or set(pending) != {'request', 'evidence'}:
+                    raise ValueError()
+                ClaimRecoveryService._source_request(pending['request'])
+                if pending['request']['workerEvidenceSha256'] != p.digest(pending['evidence']):
+                    raise ValueError()
+            except (ValueError, TypeError, KeyError):
+                raise DriverHeld('source_recovery_journal_invalid') from None
+        return journal
+
+    def _source_recovery_state(self, job_id, claim, data):
+        from .reference_recovery import SOURCE_STATE_PROTOCOL
+        status, state = self._request('GET', '/jobs/' + job_id + '/recovery-state', claim_token=claim['claimToken'])
+        if status != 200:
+            raise DriverHeld('source_recovery_state_unavailable')
+        try:
+            p._closed(state, ('schemaVersion', 'protocol', 'authorityId', 'coordinatorEpoch', 'claim', 'physicalBinding',
+                'reservation', 'node', 'eligible', 'sourceTransfer'), 'source recovery state')
+            validate_claim_fields(state['claim'])
+            p._uuid(state['coordinatorEpoch'], 'recovery epoch')
+            p._integer(state['node']['revision'], 'node revision', allow_zero=True)
+            expected = dict(reservationId=data['reservation']['reservationId'],
+                transferRequestSha256=p.digest(data['reservation']),
+                inputBytes=claim['submission']['manifest']['totalBytes'])
+            if (state['schemaVersion'] != 2 or state['protocol'] != SOURCE_STATE_PROTOCOL
+                    or state['authorityId'] != self.worker.authority_id or type(state['eligible']) is not bool
+                    or state['reservation'] != expected or not self._claim_bound(job_id, claim, state['claim'])
+                    or state['eligible'] and type(state['sourceTransfer']) is not dict):
+                raise ValueError()
+        except (ValueError, TypeError, KeyError):
+            raise DriverHeld('source_recovery_state_changed') from None
+        return state
+
+    def _recover_source_fetch(self, job_id, stage, data):
+        """Ask the coordinator to lift a restart hold; the answer grants nothing.
+
+        The intent is saved before its POST and retried exactly, so an outage or
+        lost reply spends no attempt. The caller still needs fresh running state,
+        and every range is checked again. A hold that stays keeps everything.
+        """
+        from .reference_recovery import ClaimRecoveryService
+        from .source_range_transfer import validate_source_grant
+        claim = data['claim']
+        suffix = '/jobs/' + job_id + '/recover'
+        token = claim['claimToken']
+        journal = self._source_recovery_journal(data)
+        state = self._source_recovery_state(job_id, claim, data)
+        running = state['claim']['status'] == 'running' and state['claim']['heldReason'] is None
+
+        def settle(request):
+            status, receipt = self._request('POST', suffix, request, claim_token=token)
+            if status == 200 and receipt != ClaimRecoveryService._make_receipt(request):
+                raise DriverHeld('source_recovery_receipt_changed')
+            if status == 200 or running:
+                journal['pending'] = None
+                data['sourceRecovery'] = journal
+                self._save(job_id, stage, data)
+                return True
+            return False
+
+        pending = journal['pending']
+        if pending is not None:
+            request = pending['request']
+            current = (request['coordinatorEpoch'], request['expectedNodeRevision'], request['sourceClosureSha256']) == (
+                state['coordinatorEpoch'], state['node']['revision'], (state['sourceTransfer'] or {}).get('closureSha256'))
+            if running or current:
+                if settle(request):
+                    return
+                if not state['eligible']:
+                    raise DriverHeld('source_recovery_ineligible')
+                raise DriverWait('source_recovery_refused')
+            if not state['eligible']:
+                raise DriverHeld('source_recovery_ineligible')
+            # The epoch, node or closure moved on, so that request can never commit.
+            journal['pending'] = None
+        if running:
+            return
+        if not state['eligible']:
+            raise DriverHeld('source_recovery_ineligible')
+        if journal['attempts'] >= SOURCE_RECOVERY_ATTEMPTS:
+            raise DriverHeld('source_recovery_attempts_exhausted')
+        checked = validate_source_grant(data['grant'], job=claim, clock=self.clock,
+                                        allow_expired=True, past_reservation=True)
+        ranges, committed = self.source_range_client.committed_progress(checked.identity)
+        sequence = data.get('sourceRenewalSequence', 0)
+        grant_sha = p.digest(data['grant'])
+        evidence = dict(schemaVersion=1, reservationId=data['reservation']['reservationId'], transferFenced=True,
+            grantSha256=grant_sha, renewalSequence=sequence, committedRanges=ranges, committedBytes=committed,
+            inputObjects=len(data.get('inputPaths', {})))
+        binding = {key: state['claim'][key] for key in ('jobId', 'generation', 'environment', 'nodeId', 'workerId',
+            'workerInstanceId', 'authorityId', 'claimRequestId', 'claimTokenSha256', 'manifestSha256', 'pipelineDigest')}
+        binding.update(reservationId=state['reservation']['reservationId'], inputBytes=state['reservation']['inputBytes'])
+        request = dict(schemaVersion=2, requestId=str(uuid4()), coordinatorEpoch=state['coordinatorEpoch'],
+            expectedNodeRevision=state['node']['revision'], claimBinding=binding,
+            transferRequestSha256=state['reservation']['transferRequestSha256'],
+            sourceClosureSha256=state['sourceTransfer']['closureSha256'], grantSha256=grant_sha,
+            renewalSequence=sequence, committedRanges=ranges, committedBytes=committed,
+            workerEvidenceSha256=p.digest(evidence))
+        ClaimRecoveryService._source_request(request)
+        journal.update(attempts=journal['attempts'] + 1, pending=dict(request=request, evidence=evidence))
+        data['sourceRecovery'] = journal
+        self._save(job_id, stage, data)
+        if not settle(request):
+            raise DriverWait('source_recovery_refused')
 
     def _unstarted(self, job_id, stage, data, reason):
         """A claim that can no longer start ends only on the coordinator's word.
@@ -1148,6 +1277,12 @@ class ReferenceDriver:
             phase = 'fetching' if stage == 'fetching_pending' else 'processing'
             status, public = self._request('POST', suffix + '/phase', {'claimToken': token, 'phase': phase})
             if status == 409:
+                # Every object arrived but the coordinator is still in fetching:
+                # the same hold, with no GET left to make.
+                if stage == 'processing_pending' and (claim.get('transferRequest') or {}).get('protocol') == 'source-range-v2':
+                    state = self._claim_state(job_id, claim)
+                    if state is not None and self._restart_recoverable(state, data):
+                        self._recover_source_fetch(job_id, stage, data)
                 return {'state': stage, 'jobId': job_id}
             claim.update(public)
             self._save(job_id, 'fetching' if phase == 'fetching' else 'execution_pending', data)
