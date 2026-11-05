@@ -26,6 +26,7 @@ from . import reference_protocol as p
 from .reference_engine_worker import WorkerHeld
 from .reference_sender import ReferenceSender
 from .reference_transfer import BrokerClient, _now, validate_grant
+from .scratch_policy import LeaseLapsed
 from .viewer_service import NativeEngine
 from .node_gate import NodeGate
 from .reference_failure import FailureOutbox, make_failure
@@ -317,6 +318,10 @@ class ReferenceDriver:
             db.close()
 
     def _save(self, job_id, stage, data):
+        if stage == 'completed' and 'reservation' in data:
+            # Nothing can write for a completed row, and only this row could ever
+            # end its fence, so however it ended a never-started reservation ends too.
+            self.ledger.settle_unstarted(data['reservation']['reservationId'], transfer_ended=True)
         with self._db() as db:
             db.execute('UPDATE driver_jobs SET stage=?,data=? WHERE job=?',
                        (stage, p.canonical_json(data).decode(), job_id))
@@ -860,6 +865,48 @@ class ReferenceDriver:
                     sha256=item['sha'], byte_size=item['bytes'], relative_path=item['path'])
         return observed
 
+    def _unstarted(self, job_id, request_id, stage, data, reason):
+        """A claim that can no longer start ends only on the coordinator's word.
+
+        The step lock proves no transfer is running, and a reserved ledger row
+        proves no engine was told, so the job is the one doubt left. This request's
+        exact replay settles it; until then the row stays held under its named
+        reason and a fence keeps its capacity. An operator ends the job, then this
+        ends the row. A gate left by a crash stays the operator's physical step.
+        """
+        try:
+            _, reply = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
+        except (DriverHeld, DriverWait):
+            reply = None  # No word is not a word: the named hold outlives an outage.
+        if reply is None or reply.get('jobId') != job_id or reply.get('status') not in ('failed', 'cancelled'):
+            if data.get('unstartedHold') != reason:
+                data['unstartedHold'] = reason
+                self._save(job_id, stage, data)
+            raise DriverHeld(reason)
+        if self.ledger.settle_unstarted(data['reservation']['reservationId'], transfer_ended=True) not in (None, 'expired', 'terminal'):
+            raise DriverHeld('engine_reconciliation_required')
+        data['unstartedOutcome'] = dict(reason=reason, stage=stage, terminalStatus=reply['status'])
+        self._save(job_id, 'completed', data)
+        return {'state': 'unstarted_terminal', 'jobId': job_id, 'reason': reason}
+
+    def reconcile_unstarted(self, job_id):
+        """Operator entry: end one never-started claim row once its job has ended."""
+        if not self._lock.acquire(blocking=False):
+            return {'state': 'busy'}
+        try:
+            with self._db() as db:
+                row = db.execute('SELECT * FROM driver_jobs WHERE job=?', (job_id,)).fetchone()
+            data = json.loads(row['data']) if row is not None else {}
+            if 'reservation' not in data or row['stage'] == 'completed':
+                raise DriverHeld('unstarted_reconciliation_unavailable')
+            return self._unstarted(job_id, row['claim_request'], row['stage'], data, 'unstarted_claim_requires_reconciliation')
+        except DriverHeld as error:
+            return {'state': 'held', 'reason': str(error)}
+        except DriverWait as error:
+            return {'state': 'retry_wait', 'reason': str(error)}
+        finally:
+            self._lock.release()
+
     def _seal_failure(self, job_id, data, code):
         claim = data['claim']
         failure = make_failure(job_id=job_id, generation=claim['generation'], environment=claim['environment'],
@@ -1043,6 +1090,10 @@ class ReferenceDriver:
             reservation = data['reservation']['reservationId']
             directory = self.ledger.prepare_job_directory(reservation)
             paths = dict(data.get('inputPaths', {}))
+            try:
+                self.ledger.begin_transfer(reservation)
+            except LeaseLapsed:
+                return self._unstarted(job_id, request_id, stage, data, 'reservation_expired')
             for obj in claim['submission']['manifest']['objects']:
                 if obj['id'] in paths:
                     continue
@@ -1072,7 +1123,7 @@ class ReferenceDriver:
                     else:
                         attempts = data.setdefault('fetchAttempts', {}).get(obj['id'], 0)
                         if attempts >= 3:
-                            raise DriverHeld('worker_fetch_attempt_budget_exhausted')
+                            return self._unstarted(job_id, request_id, stage, data, 'worker_fetch_attempt_budget_exhausted')
                         data['fetchAttempts'][obj['id']] = attempts + 1
                         self._save(job_id, stage, data)
                         self.broker.download_object(grant, obj['id'], target)
@@ -1102,9 +1153,13 @@ class ReferenceDriver:
             except (WorkerHeld, TreeDarHeld):
                 pass
             if not exists:
+                try:
+                    self.ledger.claim_engine_lease(data['reservation']['reservationId'])
+                except LeaseLapsed:
+                    return self._unstarted(job_id, request_id, stage, data, 'reservation_expired')
                 status, fresh = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
                 if status == 409 or fresh['status'] != 'running':
-                    raise DriverHeld('unstarted_claim_requires_reconciliation')
+                    return self._unstarted(job_id, request_id, stage, data, 'unstarted_claim_requires_reconciliation')
                 self._refresh_options()
                 self._bind_claim(fresh, data)
                 data['claim'] = fresh

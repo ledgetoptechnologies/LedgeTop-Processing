@@ -160,6 +160,11 @@ class ParentGuardTests(unittest.TestCase):
         with closing(sqlite3.connect(self.host.ledger.path)) as db,db:db.execute('UPDATE reservations SET expires=0')
         self.held()
 
+    def test_fence_keeps_the_parent_executable_past_its_deadline(self):
+        past=lambda:datetime.now(timezone.utc).timestamp()+10**6
+        real=self.host.ledger.clock;self.host.ledger.clock=past;self.held();self.host.ledger.clock=real
+        self.host.ledger.begin_transfer('parent-reservation');self.host.ledger.clock=past;self.check();self.check(False)
+
     def test_live_physical_binding_and_completion_are_not_configuration_authority(self):
         path=self.host.root/'gate'/'gate.json';original=path.read_text()
         for key,value in [('generation',2),('authorityId','00000000-0000-4000-8000-000000000000'),('nodeId','cluster')]:

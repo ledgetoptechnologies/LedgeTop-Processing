@@ -301,6 +301,8 @@ class TreeDarEngine:
                     return old['phase']
                 if reserved['state'] != 'reserved':
                     raise TreeDarHeld('fresh_scratch_reservation_required')
+                # Nothing below may commit for a lease that set_engine_state would refuse.
+                self.ledger.claim_engine_lease(reservation_id)
                 self._host()
                 # Input hashing and Docker/source probes can outlive the NAS
                 # grant's freshness. Revalidate the frozen exact receipt at the
