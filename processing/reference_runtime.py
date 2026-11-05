@@ -343,6 +343,10 @@ class _DynamicAPI:
             environment = self.control.viewer._authenticate(headers)
             if environment is None:
                 return Response(401, {"error": "unauthorized"})
+            if method == 'POST' and path == SOURCE_PREFIX + '/jobs':
+                replay = self.control.viewer._source_replay_response(body, environment)
+                if replay is not None:
+                    return replay
             try:
                 snapshot = _available_discovery_snapshot(self.discover())
                 capability, options, allowed = discovered_policy(snapshot, self.config)

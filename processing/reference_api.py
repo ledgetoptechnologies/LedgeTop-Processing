@@ -112,6 +112,24 @@ class ReferenceAPI:
             return None
         return job
 
+    def _source_replay_response(self, body, environment):
+        if (self.source_spool is None or self.source_attestation_keys is None
+                or not self.authority_id):
+            return None
+        try:
+            from .reference_limits import V2_SOURCE_INTAKE_BYTES
+            from .reference_source_replay import replay_source_intake
+            payload = protocol.decode_submission(body, max_bytes=V2_SOURCE_INTAKE_BYTES)
+            job = replay_source_intake(self.store, payload, environment=environment,
+                authority_id=self.authority_id, trusted_source_keys=self.source_attestation_keys)
+            return Response(200, job) if job is not None else None
+        except (protocol.ProtocolError, ValueError, TypeError, KeyError):
+            return self._error(400, 'invalid_request')
+        except Conflict:
+            return self._error(409, 'reference_conflict')
+        except Exception:
+            return self._error(500, 'internal_error')
+
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
         """Return JSON-ready metadata, with no forwarding-header assumptions.
 
@@ -151,6 +169,9 @@ class ReferenceAPI:
                 if (self.source_spool is None or self.source_attestation_keys is None
                         or not self.authority_id):
                     return self._error(503, "source_intake_unavailable")
+                replay = self._source_replay_response(body, environment)
+                if replay is not None:
+                    return replay
                 from .reference_source_intake import validate_source_intake
                 from .reference_limits import V2_SOURCE_INTAKE_BYTES
                 validated=validate_source_intake(protocol.decode_submission(
