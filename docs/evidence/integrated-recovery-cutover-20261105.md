@@ -40,6 +40,36 @@ a fresh operation; production effect deadlines have not been widened.
 
 The subsequent actual config-stage qualification held before writer start on
 `reviewed_config_writer_changed`. Its stopped exact controller/artifact volume
-remain preserved for diagnosis. Synthetic lifecycle tests did not establish
-actual Docker serialization compatibility. Full forward/declared rollback and
-first installed worker activation remain required.
+were preserved for diagnosis, then removed after exact stopped-state, ownership,
+no-mount-user and synthetic-only-content verification. The cause was insertion
+order in `repr(settings)` versus the canonically serialized receipt. Fix
+`05b0d90` canonicalizes writer inputs without weakening exact byte comparison.
+The corrected actual qualifier passed **3/3 checkpoints**, including one create,
+one start and one remove despite injected lost confirmations, cold private
+readback and unchanged old-config bytes/metadata. Its new controller and volume
+were removed and absence verified. This validates local Docker configuration
+preparation, not installed host enrollment or runtime activation.
+
+A separate subsequent full-forward operation
+`54103935-f4bf-4b40-b078-84f90d4064b5` held after **59.159 seconds** on the
+unchanged full-inventory churn fence during backup verification. Its 900-second
+outer budget did not expire. It completed five phases, and started neither
+bootstrap nor final candidate. Bounded events showed an external unlabeled
+container creation in the relevant interval before owned cleanup, but before/
+after ID sets were not persisted, so exact attribution is not claimed. No
+unowned container was touched. Full forward/declared rollback remains unqualified.
+
+## First-worker installation integration
+
+Root `f1a235f36e04ba3d8d0c8ce8ad1baf7a4c52783f` includes the reviewed first-worker
+installer and actual per-host dependency artifact receipts. Frozen archive SHA256:
+`a10c0b63543df3781f635b01cfb6aec07257991688bb97f00ae6566b16df4c5d`.
+The seven-module non-root Linux selection passed **80 tests**, with **17
+root-only installer tests skipped**, in 4.814 seconds. A separate explicit
+UID-0 Linux run then passed all **17/17 installer tests in 0.833 seconds**.
+Do not describe the first run as 97 passing tests or add these to other suites.
+Both runners exited and were removed. New private source/dependency artifacts
+exist on both PCs; no worker service has been installed or started. Actual
+private config/TLS, host/Gate pins and guarded activation remain required. Main
+PC administrative execution remains an operator step once the exact reviewed
+manifest is ready; broad sudo or permission changes are unnecessary.
