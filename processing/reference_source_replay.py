@@ -38,12 +38,12 @@ def replay_source_intake(store, payload, *, environment, authority_id,
                'unsupported source intake version')
     p._uuid(payload['submissionId'], 'submission ID')
     p._environment(environment)
-    p._require(authority_id == store.queue.authority_id, 'source authority changed')
     with store.queue._db() as db:
         saved = db.execute(_LOOKUP, (payload['submissionId'],)).fetchone()
         if saved is None:
             return None
         saved = dict(saved)
+    p._require(authority_id == store.queue.authority_id, 'source authority changed')
     if (saved['environment'] != environment or saved['queue_environment'] != environment
             or not saved['source_request_digest']
             or p.digest(payload) != saved['source_request_digest']):
