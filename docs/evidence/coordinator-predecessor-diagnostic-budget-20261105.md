@@ -82,3 +82,33 @@ Connection-only hygiene followup (`query_only=ON`, `temp_store=MEMORY`): four
 targeted Linux cases passed, no skips, in 0.317 seconds (serialized stdin probe,
 full stable/read-only census, huge-cell preflight on both paths, diagnostic
 no-bulk-read). The task container was removed and filtered inventory empty.
+
+
+## Closed legacy direct-plan compatibility
+
+The first actual metadata-only diagnostic safely held on `current_node_plan_not_closed`.
+Read-only aggregate inspection showed both nodes active with NULL result/update/
+finish/after-job fields and residual plans absent from all 16 owned receipts.
+Frozen693 also supports direct `schedule_node` followed by `cancel_node`: cancel
+only updates active state and revision, retaining plan/date/target metadata and
+creating no owned receipt. The prior owned-only census assumption was too strict.
+
+The census now classifies that narrow shape separately as `directClosedMetadata`.
+It requires active state, canonical plan UUID, canonical UTC dates in order,
+immutable target image, NULL after-job/result/update/finish fields, and enough
+revision distance after every retained owned receipt for the intervening direct
+schedule/cancel pair (at least latest-owned-revision + 3, or 2 with no history).
+It preserves all node and receipt bytes in the keyed row hashes. It neither
+creates receipts nor adopts the direct plan as owned authority, and cannot use
+this classification to authorize execution, maintenance or cache deletion.
+Pending states, unknown metadata shapes, missing dates, bad ordering and
+insufficient revision distance remain held.
+
+37/37 Linux tests passed, no skips, in 1.316 seconds. The new fixture invokes the
+actual `Maintenance.cancel_node` method, whose body is unchanged from frozen693,
+against the synthetic exact predecessor schema. The initial test adapter omitted
+the inherited `Queue.slug` helper; that test-only fixture omission was corrected
+before the passing run. Pending-state/hash/result/after-job/date/revision negatives
+remain closed. Task containers were auto-removed; filtered inventory empty.
+The actual installed state was not changed by either the diagnostic or these
+synthetic tests. An actual diagnostic retry remains a separate parent-owned step.

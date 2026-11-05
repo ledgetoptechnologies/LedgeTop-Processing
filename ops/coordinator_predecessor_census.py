@@ -193,6 +193,7 @@ def _maintenance_history(nodes, schedules, authority_id, jobs):
     node_by_id = {node['id']: node for node in nodes}
     receipts_by_node = {identifier: [] for identifier in node_by_id}
     requests, plans, revisions = set(), set(), set()
+    summary = dict(noPlan=0,ownedClosedPlans=0,directClosedMetadata=0,retainedOwnedReceipts=len(schedules))
     request_fields = {'schemaVersion','requestId','authorityId','expectedRevision',
                       'drainAt','notBefore','afterJobId','targetImage'}
     receipt_fields = request_fields | {'nodeId','requestSha256','revision','planId','state','receiptSha256'}
@@ -243,10 +244,26 @@ def _maintenance_history(nodes, schedules, authority_id, jobs):
             _require(not history and all(node[field] is None for field in
                      ('drain_at','not_before','after_job_id','target_image','result','update_hash','finish_status')),
                      'unbound_node_maintenance_history')
+            summary['noPlan'] += 1
             continue
         _uuid(node['plan_id'])
+        if node['plan_id'] not in plans:
+            # Legacy schedule_node/cancel_node had no owned receipt. Preserve
+            # this exact closed metadata shape without adopting its authority.
+            minimum = history[-1]['revision']+3 if history else 2
+            _require(node['revision'] >= minimum and node['after_job_id'] is None and
+                     node['result'] is None and node['update_hash'] is None and node['finish_status'] is None and
+                     type(node['target_image']) is str and re.fullmatch(r'sha256:[0-9a-f]{64}',node['target_image']) and
+                     type(node['drain_at']) is str and type(node['not_before']) is str,
+                     'unbound_direct_closed_plan_metadata')
+            drain, drain_text = stamp(node['drain_at']); earliest, earliest_text = stamp(node['not_before'])
+            _require(earliest >= drain and drain_text == node['drain_at'] and earliest_text == node['not_before'],
+                     'unbound_direct_closed_plan_metadata')
+            summary['directClosedMetadata'] += 1
+            continue
         _require(history and history[-1]['planId'] == node['plan_id'] and
                  node['revision'] > history[-1]['revision'], 'current_node_plan_not_closed')
+        summary['ownedClosedPlans'] += 1
         last = history[-1]
         _require(all(node[column] == last[field] for column, field in
                  (('drain_at','drainAt'),('not_before','notBefore'),('after_job_id','afterJobId'),('target_image','targetImage'))),
@@ -263,6 +280,7 @@ def _maintenance_history(nodes, schedules, authority_id, jobs):
                          result['operatorAction'] == 'resume' and result['workerStopped'] is True and result['healthy'] is True and
                          type(result['note']) is str and 0 < len(result['note']) <= 256 and result['note'].strip(),
                          'node_resume_completion_invalid')
+    return summary
 
 
 def _census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
@@ -360,7 +378,7 @@ def _census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
                  'enrolled_predecessor_authority_changed')
         _require({r['id'] for r in rows['nodes']} == set(node_ids), 'predecessor_nodes_changed')
         jobs = {r['id']: r for r in rows['jobs']}
-        _maintenance_history(rows['nodes'], rows['owned_maintenance_schedules'], authority_id, jobs)
+        maintenance_history = _maintenance_history(rows['nodes'], rows['owned_maintenance_schedules'], authority_id, jobs)
         _require(not rows['viewer_reservations'] and
                  not any(values for name, values in rows.items() if name.startswith('reference_')),
                  'unsettled_predecessor_execution')
@@ -492,6 +510,7 @@ def _census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
                     retainedFilesValidated=not metadata_only, directFileBytesRead=budget.used,
                     sourceCommit=SOURCE, authorityId=authority_id,
                     schemaSha256=hashlib.sha256(_canonical(schema)).hexdigest(), tables=tables, files=files,
+                    nodeMaintenanceHistory=maintenance_history,
                     metadataBytes=logical_bytes, artifactBytes=total_artifact, sqliteBytes=initial.st_size,
                     sqlitePhysicalBound=sqlite_bound, sqliteCoarsePhysicalBound=coarse_physical_bound,
                     archiveReceipts=len(archive_checks),

@@ -197,7 +197,59 @@ class ClosedPredecessorCensusTests(unittest.TestCase):
 
     def test_unbound_foreign_residual_plan_refused(self):
         self.mutate("UPDATE nodes SET plan_id=?,revision=2,target_image=? WHERE id='main'",(str(uuid.uuid4()),'sha256:'+'a'*64))
-        with self.assertRaisesRegex(c.CensusRefused,'current_node_plan_not_closed'): self.census()
+        with self.assertRaisesRegex(c.CensusRefused,'unbound_direct_closed_plan_metadata'): self.census()
+
+    def add_closed_direct_plans(self):
+        from datetime import datetime,timezone
+        from processing.maintenance import Maintenance
+        from processing.prototype import Queue
+        self.add_closed_maintenance_history()
+        adapter=object.__new__(Maintenance)
+        adapter.node_ids=('cluster','main')
+        adapter._db=self.db
+        adapter._clock=lambda:datetime(2026,11,2,tzinfo=timezone.utc)
+        adapter.fields=Queue.fields
+        adapter.slug=Queue.slug
+        adapter._node_public=lambda row:dict(row)
+        for node in adapter.node_ids:
+            plan=str(uuid.uuid4())
+            self.mutate("UPDATE nodes SET state='draining',revision=revision+1,plan_id=?,target_image=?,result=NULL,update_hash=NULL,finish_status=NULL WHERE id=?",
+                        (plan,'sha256:'+'e'*64,node))
+            with self.db() as db: revision=db.execute('SELECT revision FROM nodes WHERE id=?',(node,)).fetchone()[0]
+            # The actual method's body is unchanged from frozen693: it CAS-checks
+            # then only UPDATEs state=active,revision=revision+1; no receipt.
+            adapter.cancel_node(node,dict(expectedRevision=revision,planId=plan))
+
+    def test_actual_cancel_retains_unowned_direct_closed_metadata_without_adoption(self):
+        self.add_closed_direct_plans()
+        before=self.census()
+        self.assertEqual(before['nodeMaintenanceHistory'],dict(noPlan=0,ownedClosedPlans=0,
+                         directClosedMetadata=2,retainedOwnedReceipts=16))
+        self.assertEqual(before,self.census())
+        self.assertEqual(before['tables']['owned_maintenance_schedules']['count'],16)
+        result=self.probe()
+        self.assertEqual(result['nodeMaintenanceHistory']['directClosedMetadata'],2)
+        self.assertFalse(result['retainedFilesValidated'])
+
+    def test_direct_metadata_cannot_hide_pending_or_incomplete_update(self):
+        self.add_closed_direct_plans()
+        mutations=[("state='draining'",'foreign_node_maintenance_pending'),
+                   ("update_hash='"+'a'*64+"'",'unbound_direct_closed_plan_metadata'),
+                   ("result='{}'",'unbound_direct_closed_plan_metadata'),
+                   ("after_job_id='"+str(uuid.uuid4())+"'",'unbound_direct_closed_plan_metadata'),
+                   ("not_before='2020-01-01T00:00:00Z'",'unbound_direct_closed_plan_metadata')]
+        with self.db() as db: original=dict(db.execute("SELECT * FROM nodes WHERE id='main'").fetchone())
+        for clause,reason in mutations:
+            with self.subTest(clause=clause):
+                self.mutate("UPDATE nodes SET "+clause+" WHERE id='main'")
+                with self.assertRaisesRegex(c.CensusRefused,reason):self.census()
+                keys=[key for key in original if key!='id']
+                self.mutate('UPDATE nodes SET '+','.join(key+'=?' for key in keys)+" WHERE id='main'",tuple(original[key] for key in keys))
+
+    def test_direct_closed_revision_requires_room_after_retained_owned_history(self):
+        self.add_closed_direct_plans()
+        self.mutate("UPDATE nodes SET revision=revision-1 WHERE id='main'")
+        with self.assertRaisesRegex(c.CensusRefused,'unbound_direct_closed_plan_metadata'): self.census()
 
     def probe(self, **kwargs):
         args=dict(key=self.key,authority_id=self.authority,node_ids=('cluster','main'),uid=os.geteuid(),
