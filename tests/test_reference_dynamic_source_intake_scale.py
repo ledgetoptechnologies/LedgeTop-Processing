@@ -471,7 +471,9 @@ class DynamicSourceIntakeScaleTests(unittest.TestCase):
                     "serverPeakRssBytes": peak, "serverCurrentRssBytes": metrics["serverCurrentRssBytes"],
                     "activeNodeRamLimitBytes": ACTIVE_NODE_RAM_LIMIT_BYTES,
                     "estimatedMarginAgainstNodeLimitBytes": margin,
-                    "qualificationCaveat": "server-only RSS in a 1 GiB test container; no 256 MiB cgroup OOM test",
+                    "containerMemoryLimitBytes": (int(metrics["cgroup"]["memoryMax"])
+                        if str(metrics["cgroup"]["memoryMax"]).isdigit() else None),
+                    "qualificationCaveat": "server-only RSS; use the separate external-producer cgroup profile for a 256 MiB OOM qualification",
                     "syntheticCapacityBytes": SYNTHETIC_AVAILABLE_BYTES,
                     "physicalMountProbe": "disabled for temporary test spool; no NAS access",
                     "queueState": "queued/source_receiving; not claimable or processing"}, sort_keys=True),

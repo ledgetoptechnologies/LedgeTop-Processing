@@ -4,6 +4,25 @@ This record describes the review branch
 `codex/viewer-accepted-copy-integration-candidate-20261103`. It is not a deployment
 approval. Runtime acceptance remains incomplete.
 
+## Combined regression after intake fixes
+
+Processing `be412f366d53368208ccc5f6df65d207d2ee982a` with frozen Viewer
+`2317d40029f5b0dbbb002cd319c8f25d321a1bfb` passed **310/310 selected Linux
+tests, no skips**, in 101.077 seconds. This combines the earlier 18-module
+conversion/publication suite with HTTP and dynamic source-intake scale coverage
+on one integrated revision. The run used one CPU/2 GiB, read-only sources and
+dependencies, no external networking and an owned temporary disk volume. Its
+container exited and its labeled volume was removed; the shared builder was
+preserved. One Linux fork-ownership test emitted Python's multithreaded-fork
+deprecation warning; the test completed successfully.
+
+This run deliberately uses the earlier **synthetic-only** ImageSharp 3.1.12
+converter identified below. It does not qualify the separate patched Viewer
+candidate's actual licensed converter binary, installed nodes/NAS, real
+photogrammetry or rendered browser results. The patched candidate's focused
+48-test and 35-test records below are separate evidence, not a claim that this
+combined run used that candidate.
+
 ## Large source submission admission checkpoint
 
 Processing `187f542` integrates the V2-only 16 MiB runtime decoder and a single
