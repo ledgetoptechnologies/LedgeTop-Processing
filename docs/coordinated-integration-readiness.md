@@ -37,15 +37,28 @@ limit. Ordinary NodeODM/ClusterODM limits remain. The actual two-submission
 pairing is still being qualified; provider create/health/enable/refresh alone
 does not prove that the coordinator receives both queued tasks.
 
-The fresh-submit test exposed a separate P0 Viewer client defect: fresh
+The fresh-submit test exposed a separate P0 Viewer client defect at `6a1e729`: fresh
 `createOrReplay` returned the persisted outbox row, while accepted replay
 returned its remote binding. The submit worker expects the binding before
 source upload. A successful metadata POST and `queued_upstream` status can
 therefore coexist with zero source object receipts. The Viewer owner is fixing
 the client return boundary without changing the outbox transaction contract.
-Acceptance must require actual source PUT/completion and persisted receipts for
-both submissions. The earlier 205-test roundtrip exercised accepted-intent
+Viewer `2e8b03f73cd7afcb0a61bb276a798bc75aa6c23` corrects that boundary. The actual
+HTTPS pairing test at `d572c4a` passed with no skips against the `f5e2737`
+runtime: two real Viewer `processOne` submissions each sent a nonempty source
+object, completed intake and persisted completion/object receipts, leaving both
+jobs queued. The exact-lock dependency SHA-256 is
+`a0eaead118642843905756fcfe3f53b5336b5a437e22a2f80677d6f06087fb12`.
+This test is integrated as `d457e04`; a combined rerun with the shared-policy
+runtime remains pending. The earlier 205-test roundtrip exercised accepted-intent
 resume; it did not qualify this fresh initial-producer path.
+
+The broader Viewer focused run at `2e8b03f` reported 31/34 passing tests, no
+skips. Three stale expectations are being corrected at test-only `c19b9fec`:
+catalog defaults can be false while submitted tasks require output formats true;
+ambiguous legacy uploads/commits must retain files and hold, rather than blindly
+retrying or deleting a provider task. That candidate still requires execution.
+The compressed trailing-bytes parser regression passed on the updated lock.
 
 Additional work remains active: qualify the fresh producer fix with the actual
 two-submission path; exercise actual Viewer archive ingestion and required
