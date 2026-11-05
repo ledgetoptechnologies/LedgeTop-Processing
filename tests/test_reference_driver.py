@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from unittest.mock import patch
 import uuid
@@ -516,6 +517,31 @@ class ReferenceDriverTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM executions').fetchone()[0], 0)
         self.assertNotIn(('initialize', job['jobId']), self.transport.calls)
 
+    def assert_physically_retained(self, job, kept, result, reason):
+        self.assertEqual({key: result[key] for key in ('state', 'jobId', 'terminalStatus', 'reconciliation')},
+            {'state': 'held', 'jobId': job['jobId'], 'terminalStatus': self.store.get(job['jobId'], private=True)['status'],
+             'reconciliation': 'physical_reservation_retained'})
+        stage, data = self.data(job)
+        self.assertNotEqual(stage, 'completed')
+        # A published worker hold reaches the same hold through its operator path.
+        if 'holdReport' not in result:
+            self.assertEqual((result['reason'], data['unstartedHold']), (reason, 'physical_reservation_retained'))
+        self.assertNotIn('unstartedOutcome', data)
+        self.assertEqual(self.lease(job), kept)
+        self.assertGreater(kept['remaining'], 0)
+
+    def resolve_gate(self):
+        with NodeGate('engine') as gate:
+            state = gate.snapshot()
+            gate.resolve(state['reservation']['receiptId'], state['generation'], old_worker_stopped=True,
+                coordinator_resolved=True, note='synthetic')
+
+    def reserve_gate(self):
+        with NodeGate('engine') as gate:
+            receipt = uuid.uuid4().hex
+            gate.reserve(self.worker.node_id, self.worker.origin, self.worker.authority_id, self.worker.gate_generation, receipt)
+        return receipt
+
     def test_crash_after_prepared_keeps_capacity_then_ends_on_the_coordinator_word(self):
         job = self.submit()
         self.advance(job, 'execution_pending')
@@ -532,10 +558,49 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(self.driver.reconcile_unstarted(job['jobId'])['state'], 'held')
         self.assertEqual(self.lease(job), kept)
         self.end_job(job)
-        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
-        self.assertNotIn(('initialize', job['jobId']), self.transport.calls)
+        for _ in range(2):
+            self.assert_physically_retained(job, kept, self.driver.reconcile_unstarted(job['jobId']),
+                'unstarted_claim_requires_reconciliation')
         with NodeGate('engine') as gate:
             self.assertEqual(gate.snapshot()['reservation']['job']['id'], job['jobId'])
+        self.resolve_gate()
+        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+        self.assertNotIn(('initialize', job['jobId']), self.transport.calls)
+
+    def test_step_keeps_a_physical_hold_past_the_terminal_word(self):
+        job = self.submit(contents=(b'never-arrives',))
+        self.advance(job, 'fetching')
+        with patch.object(self.broker, 'download_object', side_effect=OSError('synthetic')):
+            for _ in range(3):
+                self.assertEqual(self.driver.step()['state'], 'retry_wait')
+            self.assertEqual(self.driver.step()['reason'], 'worker_fetch_attempt_budget_exhausted')
+            kept = self.lease(job)
+            self.reserve_gate()  # Unbound: a crash between reserve and bind may be this job's.
+            self.end_job(job)
+            self.assert_physically_retained(job, kept, self.driver.step(), 'worker_fetch_attempt_budget_exhausted')
+            self.resolve_gate()
+            self.assert_unstarted_terminal(job, 'worker_fetch_attempt_budget_exhausted', self.driver.step())
+
+    def test_gate_naming_another_job_retains_nothing_here(self):
+        job = self.submit()
+        self.advance(job, 'processing_pending')
+        self.end_job(job)
+        receipt = self.reserve_gate()
+        with NodeGate('engine') as gate:
+            gate.bind(receipt, dict(id=str(uuid.uuid4()), workerId=self.worker.worker_id, nodeId=self.worker.node_id,
+                authorityId=self.worker.authority_id))
+        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+
+    def test_treedar_controller_intent_is_a_physical_hold(self):
+        job = self.submit()
+        self.advance(job, 'processing_pending')
+        self.end_job(job)
+        kept = self.lease(job)
+        controller = types.SimpleNamespace(_row=lambda _job: {})
+        router = types.SimpleNamespace(treedar_worker=types.SimpleNamespace(controller=controller))
+        with patch.object(self.driver, 'execution_router', router):
+            self.assert_physically_retained(job, kept, self.driver.reconcile_unstarted(job['jobId']),
+                'unstarted_claim_requires_reconciliation')
 
     def test_fetch_budget_exhaustion_keeps_fence_until_job_ends_then_frees_the_node(self):
         job = self.submit(contents=(b'never-arrives',))
@@ -575,6 +640,78 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(self.driver.reconcile_unstarted('unknown'), {'state': 'held', 'reason': 'unstarted_reconciliation_unavailable'})
         with self.driver._lock:
             self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'busy'})
+
+    def assert_word_settles_nothing(self, job, word):
+        # Served on both routes so no settlement path can dodge the bad body.
+        real = self.driver._request
+        def request(method, suffix, payload=None, *, claim_token=None):
+            if suffix == '/claim' or suffix.endswith('/claim-state'):
+                return 200, word
+            return real(method, suffix, payload, claim_token=claim_token)
+        before = self.data(job), self.lease(job)
+        with patch.object(self.driver, '_request', side_effect=request):
+            self.assertEqual(self.driver.reconcile_unstarted(job['jobId']),
+                {'state': 'held', 'reason': 'unstarted_claim_requires_reconciliation'})
+        stage, data = self.data(job)
+        self.assertEqual(stage, before[0][0])
+        self.assertNotIn('unstartedOutcome', data)
+        self.assertEqual(self.lease(job), before[1])
+        self.assertGreater(self.lease(job)['remaining'], 0)
+
+    def ended_claim_state(self, job):
+        self.advance(job, 'processing_pending')
+        self.end_job(job)
+        token = self.data(job)[1]['claim']['claimToken']
+        return self.driver._request('GET', '/jobs/' + job['jobId'] + '/claim-state', claim_token=token)[1]
+
+    def test_malformed_terminal_body_settles_nothing(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        for word in ({'jobId': job['jobId'], 'status': 'cancelled'}, {'jobId': job['jobId'], 'status': 'failed'},
+                {'jobId': job['jobId'], 'status': 'cancelled', 'claimState': 'ended'},
+                dict(state, unknown=True), {key: value for key, value in state.items() if key != 'generation'}):
+            with self.subTest(word=sorted(word)):
+                self.assert_word_settles_nothing(job, word)
+
+    def test_cross_generation_terminal_word_settles_nothing(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        self.assert_word_settles_nothing(job, dict(state, generation=state['generation'] + 1))
+
+    def test_claim_shaped_terminal_word_with_any_wrong_binding_settles_nothing(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        self.assertIn(state['status'], ('failed', 'cancelled'))
+        for key, wrong in (('authorityId', '00000000-0000-4000-8000-000000000000'), ('jobId', 'other-job'),
+                ('environment', 'production' if state['environment'] == 'staging' else 'staging'),
+                ('nodeId', 'other-node'), ('workerId', 'other-worker'), ('workerInstanceId', 'other-instance'),
+                ('claimRequestId', 'driver-other'), ('claimTokenSha256', 'f' * 64),
+                ('manifestSha256', 'f' * 64), ('pipelineDigest', 'f' * 64)):
+            with self.subTest(key=key):
+                self.assertNotEqual(state[key], wrong)
+                self.assert_word_settles_nothing(job, dict(state, **{key: wrong}))
+
+    def test_exact_word_for_a_live_or_succeeded_job_settles_nothing(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        for status in ('running', 'held', 'succeeded'):
+            with self.subTest(status=status):
+                self.assert_word_settles_nothing(job, dict(state, status=status))
+
+    def test_the_exact_word_still_settles_after_every_refusal(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        self.assert_word_settles_nothing(job, dict(state, generation=state['generation'] + 1))
+        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+
+    def test_row_without_its_claim_cannot_be_reconciled(self):
+        job = self.submit()
+        self.advance(job, 'fetching')
+        stage, data = self.data(job)
+        del data['claim']
+        with self.driver._db() as db:
+            db.execute('UPDATE driver_jobs SET stage=?,data=? WHERE job=?', ('claim_pending', json.dumps(data), job['jobId']))
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'held', 'reason': 'unstarted_reconciliation_unavailable'})
 
     def test_outage_during_the_coordinator_check_keeps_the_named_hold(self):
         job = self.submit()

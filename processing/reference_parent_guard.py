@@ -25,6 +25,7 @@ from urllib.request import HTTPRedirectHandler,HTTPSHandler,ProxyHandler,Request
 from . import reference_protocol as p
 from .reference_source_intake_canonical import pipeline_digest_for_job
 from .node_gate import NodeGate
+from .scratch_policy import lease_lapsed
 from .reference_pipeline import PipelineJournal,PipelineOperationLease
 from .reference_sender import decode_receipt
 from .scratch_policy import ScratchLedger
@@ -325,7 +326,7 @@ class ProductionParentGuard:
                 or mutation and row['state']=='uncertain' or recovering and row['state']=='reserved'):raise ParentGuardHeld('parent_reservation_not_executable')
         now=self.ledger.clock();prior=float(metadata['clock'])
         if any(type(v) not in (int,float) or not math.isfinite(v) or v<0 for v in (now,prior,row['expires'])):raise ParentGuardHeld('parent_reservation_clock_unavailable')
-        if row['state']=='reserved' and row['expires']<=max(now,prior):raise ParentGuardHeld('parent_reservation_expired')
+        if lease_lapsed(row,max(now,prior)):raise ParentGuardHeld('parent_reservation_expired')
 
     @staticmethod
     def _fence(gate,parent):

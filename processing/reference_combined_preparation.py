@@ -15,6 +15,7 @@ import sqlite3
 
 from . import reference_protocol as p
 from .node_gate import NodeGate
+from .scratch_policy import lease_lapsed
 from .reference_pipeline import PipelinePolicy,PipelineJournal
 from .reference_parent_guard import ClaimStatePolicy,ClaimStateClient,WorkerCredential,DriverClaimTokens,ProductionParentGuard,_private,_readonly_sqlite,_private_json,exact,tls_trust_sha256
 from .reference_worker_recovery import RecoveryPolicy,OriginalClaimRecovery
@@ -160,7 +161,7 @@ class CombinedParentPreparation:
         if not reserved:raise CombinedPreparationHeld('original_parent_reservation_required')
         settings=_private_json(reserved['settings'])
         if ((reserved['job'],reserved['generation'],reserved['environment'],settings['manifest_sha256'],settings['input_bytes'],settings['output_budget'])!=(parent['jobId'],parent['generation'],parent['environment'],parent['manifestSha256'],parent['inputBytes'],parent['outputBudget'])
-                or reserved['state']!='reserved' or reserved['allocated']<parent['inputBytes'] or reserved['expires']<=self.driver.clock()):raise CombinedPreparationHeld('unstarted_full_original_reservation_required')
+                or reserved['state']!='reserved' or reserved['allocated']<parent['inputBytes'] or lease_lapsed(reserved,self.driver.clock())):raise CombinedPreparationHeld('unstarted_full_original_reservation_required')
 
     def _table(self,db,*,create=False):
         row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='combined_parent_preparations'").fetchone()

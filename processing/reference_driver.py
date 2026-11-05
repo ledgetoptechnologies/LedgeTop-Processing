@@ -25,6 +25,7 @@ from uuid import uuid4
 from . import reference_protocol as p
 from .reference_engine_worker import WorkerHeld
 from .reference_sender import ReferenceSender
+from .reference_parent_guard import validate_claim_fields
 from .reference_transfer import BrokerClient, _now, validate_grant
 from .scratch_policy import LeaseLapsed
 from .viewer_service import NativeEngine
@@ -865,27 +866,72 @@ class ReferenceDriver:
                     sha256=item['sha'], byte_size=item['bytes'], relative_path=item['path'])
         return observed
 
-    def _unstarted(self, job_id, request_id, stage, data, reason):
+    def _physically_live(self, job_id):
+        """Whether this job may still own the node; only the gate can say it does not."""
+        tree = getattr(self.execution_router, 'treedar_worker', None)
+        if tree is not None:
+            try:
+                tree.controller._row(job_id)
+                return True
+            except (WorkerHeld, TreeDarHeld):
+                pass
+        with NodeGate(self.worker.engine_id) as gate:
+            reservation = gate.snapshot()['reservation']
+        # An unbound reservation may be this job's crash between reserve and bind.
+        return reservation is not None and (reservation['job'] is None or reservation['job']['id'] == job_id)
+
+    def _terminal_status(self, job_id, data):
+        """Exact authenticated terminal word for this claim, else None (keep trying)."""
+        claim = data['claim']
+        try:
+            status, state = self._request('GET', '/jobs/' + job_id + '/claim-state', claim_token=claim['claimToken'])
+            if status != 200:
+                return None
+            validate_claim_fields(state)
+        except (DriverHeld, DriverWait, ValueError):
+            return None
+        with self._db() as db:
+            request_id = db.execute('SELECT claim_request FROM driver_jobs WHERE job=?', (job_id,)).fetchone()[0]
+        expected = dict(authorityId=self.worker.authority_id, jobId=job_id, generation=claim['generation'],
+            environment=claim['environment'], nodeId=self.node_id, workerId=self.worker_id,
+            workerInstanceId=self.worker_instance_id, claimRequestId=request_id,
+            claimTokenSha256=hashlib.sha256(claim['claimToken'].encode()).hexdigest(),
+            manifestSha256=claim['manifestSha256'], pipelineDigest=claim['pipelineDigest'])
+        if any(state[key] != value for key, value in expected.items()):
+            return None
+        return state['status'] if state['status'] in ('failed', 'cancelled') else None
+
+    def _unstarted(self, job_id, stage, data, reason):
         """A claim that can no longer start ends only on the coordinator's word.
 
         The step lock proves no transfer is running, and a reserved ledger row
-        proves no engine was told, so the job is the one doubt left. This request's
-        exact replay settles it; until then the row stays held under its named
-        reason and a fence keeps its capacity. An operator ends the job, then this
-        ends the row. A gate left by a crash stays the operator's physical step.
+        proves no engine was told, so the job is the one doubt left. Only the exact
+        terminal word for this claim settles it; until then, outage included, the
+        row stays held under its named reason and a fence keeps its capacity. An
+        operator ends the job, then this ends the row, unless a crash left a live
+        physical intent: gate.resolve is the operator's step, so until it happens
+        the row, its capacity and the reported hold all stay. A started engine is
+        not this path's to judge and keeps its own reconciliation.
         """
-        try:
-            _, reply = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
-        except (DriverHeld, DriverWait):
-            reply = None  # No word is not a word: the named hold outlives an outage.
-        if reply is None or reply.get('jobId') != job_id or reply.get('status') not in ('failed', 'cancelled'):
-            if data.get('unstartedHold') != reason:
-                data['unstartedHold'] = reason
+        reservation = data['reservation']['reservationId']
+        status = self._terminal_status(job_id, data)
+        with self.ledger._transaction() as db:
+            ledger = db.execute('SELECT state FROM reservations WHERE id=?', (reservation,)).fetchone()
+        started = ledger is not None and ledger['state'] in ('engine_started', 'uncertain')
+        retained = status is not None and not started and self._physically_live(job_id)
+        if status is None or retained:
+            named = 'physical_reservation_retained' if retained else reason
+            if data.get('unstartedHold') != named:
+                data['unstartedHold'] = named
                 self._save(job_id, stage, data)
+        if status is None:
             raise DriverHeld(reason)
-        if self.ledger.settle_unstarted(data['reservation']['reservationId'], transfer_ended=True) not in (None, 'expired', 'terminal'):
+        if retained:
+            return {'state': 'held', 'jobId': job_id, 'reason': reason, 'terminalStatus': status,
+                'reconciliation': 'physical_reservation_retained'}
+        if self.ledger.settle_unstarted(reservation, transfer_ended=True) not in (None, 'expired', 'terminal'):
             raise DriverHeld('engine_reconciliation_required')
-        data['unstartedOutcome'] = dict(reason=reason, stage=stage, terminalStatus=reply['status'])
+        data['unstartedOutcome'] = dict(reason=reason, stage=stage, terminalStatus=status)
         self._save(job_id, 'completed', data)
         return {'state': 'unstarted_terminal', 'jobId': job_id, 'reason': reason}
 
@@ -897,9 +943,9 @@ class ReferenceDriver:
             with self._db() as db:
                 row = db.execute('SELECT * FROM driver_jobs WHERE job=?', (job_id,)).fetchone()
             data = json.loads(row['data']) if row is not None else {}
-            if 'reservation' not in data or row['stage'] == 'completed':
+            if 'reservation' not in data or 'claim' not in data or row['stage'] == 'completed':
                 raise DriverHeld('unstarted_reconciliation_unavailable')
-            return self._unstarted(job_id, row['claim_request'], row['stage'], data, 'unstarted_claim_requires_reconciliation')
+            return self._unstarted(job_id, row['stage'], data, 'unstarted_claim_requires_reconciliation')
         except DriverHeld as error:
             return {'state': 'held', 'reason': str(error)}
         except DriverWait as error:
@@ -1093,7 +1139,7 @@ class ReferenceDriver:
             try:
                 self.ledger.begin_transfer(reservation)
             except LeaseLapsed:
-                return self._unstarted(job_id, request_id, stage, data, 'reservation_expired')
+                return self._unstarted(job_id, stage, data, 'reservation_expired')
             for obj in claim['submission']['manifest']['objects']:
                 if obj['id'] in paths:
                     continue
@@ -1123,7 +1169,7 @@ class ReferenceDriver:
                     else:
                         attempts = data.setdefault('fetchAttempts', {}).get(obj['id'], 0)
                         if attempts >= 3:
-                            return self._unstarted(job_id, request_id, stage, data, 'worker_fetch_attempt_budget_exhausted')
+                            return self._unstarted(job_id, stage, data, 'worker_fetch_attempt_budget_exhausted')
                         data['fetchAttempts'][obj['id']] = attempts + 1
                         self._save(job_id, stage, data)
                         self.broker.download_object(grant, obj['id'], target)
@@ -1156,10 +1202,10 @@ class ReferenceDriver:
                 try:
                     self.ledger.claim_engine_lease(data['reservation']['reservationId'])
                 except LeaseLapsed:
-                    return self._unstarted(job_id, request_id, stage, data, 'reservation_expired')
+                    return self._unstarted(job_id, stage, data, 'reservation_expired')
                 status, fresh = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
                 if status == 409 or fresh['status'] != 'running':
-                    return self._unstarted(job_id, request_id, stage, data, 'unstarted_claim_requires_reconciliation')
+                    return self._unstarted(job_id, stage, data, 'unstarted_claim_requires_reconciliation')
                 self._refresh_options()
                 self._bind_claim(fresh, data)
                 data['claim'] = fresh
