@@ -345,7 +345,7 @@ class StartedRecoveryTests(ProcessingHarness):
         with self.driver.worker._db() as db:
             receipt = db.execute('SELECT receipt FROM executions').fetchone()[0]
         with NodeGate('engine') as gate:
-            gate.prepare_completion(receipt, {'synthetic': True})
+            gate.prepare_completion(receipt, {'status': 'succeeded', 'result': {'synthetic': True}})
         self.assert_polls_on_unrecovered()
 
     def test_a_ledger_not_engine_started_is_not_started(self):
