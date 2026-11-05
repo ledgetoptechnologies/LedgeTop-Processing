@@ -105,7 +105,7 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
         self.payload["manifest"]["totalBytes"] = len(image_bytes) + len(derived_bytes)
         self.rehash()
 
-    def _make_reserved_source_job(self, directory, spool, claim_suffix, *, source_range_v2=False, reserve=True):
+    def _make_reserved_source_job(self, directory, spool, claim_suffix, *, source_range_v2=False, claim=True, reserve=True):
         worker_token = "synthetic-worker-token-012345"
         queue = Queue(directory)
         queue.allowed_profiles.add(PROFILE)
@@ -142,6 +142,8 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
         completed = control.handle("POST", f"/ltds/v2/jobs/{job['jobId']}/source/complete",
             viewer_headers, p.canonical_json(completion), protected_transport=True)
         self.assertEqual(completed.status, 201, completed.body)
+        if not claim:
+            return queue, store, control, job, None
         claim = control.handle("POST", "/ltds/worker/v1/claim", {"Authorization": "Bearer " + worker_token},
             p.canonical_json({"jobId": job["jobId"], "claimRequestId": "source-claim-" + claim_suffix}),
             protected_transport=True)
