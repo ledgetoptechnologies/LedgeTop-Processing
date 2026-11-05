@@ -497,12 +497,13 @@ class ReferenceRuntimeTests(unittest.TestCase):
     @unittest.skipUnless(os.name=='posix','Linux coordinator recovery authority')
     def test_configured_handler_finishes_recovery_factory_before_any_listener_or_dispatcher_start(self):
         queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);authority=queue.authority_id;queue.close()
-        self.value=self.recovery_config(authority);self.write_config();config=replace(self.config,reference_config_path=str(self.path))
+        self.value=self.recovery_config(authority);self.write_config();config=replace(self.config,viewer_enabled=False,reference_config_path=str(self.path))
         first,second=self.tls_patches()
         with first,second:handler=self.make_configured_handler(config)
-        self.addCleanup(handler.prototype_queue.close);self.addCleanup(handler.viewer_service.close)
+        self.addCleanup(handler.prototype_queue.close)
         runtime=handler.reference_listener
-        self.assertIsNone(runtime._server);self.assertIsNone(runtime._thread);self.assertIsNone(handler.viewer_service._thread)
+        self.assertIsNone(handler.viewer_service)
+        self.assertIsNone(runtime._server);self.assertIsNone(runtime._thread)
         self.assertIsNotNone(runtime.control.worker.recovery)
         with handler.prototype_queue._db() as db:
             startup=db.execute('SELECT * FROM reference_recovery_startup WHERE singleton=1').fetchone()
