@@ -249,11 +249,19 @@ class ReferenceSourceIntakeMethods:
             WHERE r.job_id=?''', (job_id,)).fetchone()
         return dict(state) if state else None
 
-    def _source_claim_still_owned(self, job_id, node_id, claim_custody, changed):
-        """Reader authorizer: the claim snapshotted before NAS I/O still holds."""
+    def _source_claim_still_owned(self, job_id, node_id, claim_custody, changed, *, first_grant_may_land=False):
+        """Reader authorizer: the claim snapshotted before NAS I/O still holds.
+
+        An initial mint can lose its CAS to an identical verifier. That winner's
+        grant is the one custody field allowed to appear, and only from nothing;
+        the mint's own commit then checks it binding by binding.
+        """
         def still_owned(db):
             self._source_renewal_node_ready(db, node_id)
-            if self._source_claim_custody(db, job_id) != claim_custody:
+            current = self._source_claim_custody(db, job_id)
+            if first_grant_may_land and current and claim_custody['digest'] is None:
+                current = {**current, 'digest': None}
+            if current != claim_custody:
                 raise Conflict(changed)
         return still_owned
 
@@ -1339,6 +1347,7 @@ class ReferenceSourceIntakeMethods:
         with self.queue._db() as db:
             db.execute('BEGIN')
             row, claim, snapshot = capture(db)
+            claim_custody = self._source_claim_custody(db, job_id)
             db.commit()
 
         now = checked_now()
@@ -1396,6 +1405,8 @@ class ReferenceSourceIntakeMethods:
                      if item['generation'] == row['generation']}
             if len(by_id) != len(receipt_rows) or set(by_id) != set(expected):
                 raise Conflict('accepted source receipt closure changed')
+            still_owned = self._source_claim_still_owned(job_id, claim['node_id'], claim_custody,
+                'source grant authority changed during verification', first_grant_may_land=True)
             for obj in objects:
                 stored = by_id.get(obj['id'])
                 retained = expected.get(obj['id'])
@@ -1408,19 +1419,22 @@ class ReferenceSourceIntakeMethods:
                     raise Conflict('pipeline source receipt binding changed')
                 receipt = json.loads(stored['receipt_json'])
                 if source_range_v2:
-                    reader,actual = source_spool.open_verified_object(job_id=job_id,generation=row['generation'],
-                        object_id=obj['id'],byte_size=obj['byteSize'],sha256=obj['sha256'])
+                    # Each NAS descriptor is a registered read, so freeze, release
+                    # and Queue.close wait for it and an unknown close keeps its pin.
+                    handle,actual = self._registered_source_reader(job_id=job_id, generation=row['generation'],
+                        object_id=obj['id'], authorize=still_owned,
+                        open_reader=lambda obj=obj: source_spool.open_verified_object(job_id=job_id,
+                            generation=row['generation'],object_id=obj['id'],byte_size=obj['byteSize'],
+                            sha256=obj['sha256']))
                     try:
-                        import os,stat
-                        info=os.fstat(reader.fileno())
-                        identity=(info.st_dev,info.st_ino,info.st_size,info.st_mode,info.st_nlink,
-                            info.st_uid,info.st_mtime_ns,info.st_ctime_ns)
-                        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:
+                        import stat
+                        identity=handle.file_identity
+                        if not stat.S_ISREG(identity[3]) or identity[4]!=1:
                             raise Conflict('source object inode is not privately retained')
                         verified_pins.append((obj['id'],obj['byteSize'],obj['sha256'],source_spool.mount_id,
                             str(identity[0]),str(identity[1]),identity[3],identity[4],identity[5],identity[6],identity[7]))
                     finally:
-                        reader.close()
+                        handle.close()
                 else:
                     actual = source_spool.verify_object(job_id=job_id, generation=row['generation'],
                         object_id=obj['id'], byte_size=obj['byteSize'], sha256=obj['sha256'])
