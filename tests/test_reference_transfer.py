@@ -231,6 +231,12 @@ class ReferenceTransferTests(unittest.TestCase):
                 self.client().download_object(self.grant(), "image-1", self.root / "input.jpg")
         self.assert_no_files()
 
+    def test_failed_directory_fsync_rolls_back_only_our_published_inode(self):
+        with patch("processing.reference_transfer._sync_directory", side_effect=OSError("directory sync failed")):
+            with self.assertRaises(TransferError):
+                self.client().download_object(self.grant(), "image-1", self.root / "input.jpg")
+        self.assert_no_files()
+
     def test_expiry_during_stream_aborts_publication(self):
         grant = self.grant()
         test = self

@@ -417,7 +417,7 @@ class TaskStore:
         if task['stage'] == 'cancelled' or cancelled_result:
             code = 50
         elif recovering:
-            # Retain the shared slot, but do not tell Viewer this recoverable
+            # Retain that node's shared slot, but do not tell Viewer this recoverable
             # engine execution failed before its exact UUID is reconciled.
             code = 20
         else:

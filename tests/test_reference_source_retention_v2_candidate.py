@@ -72,12 +72,14 @@ class SourceRetentionV2CandidateTests(unittest.TestCase):
             self.trusted_key['publicKeySpkiDer'],
         )
 
-    def test_historical_receipt_uses_key_validity_at_signing_time(self):
-        key = dict(self.trusted_key, notBefore=self.payload['retainedAt'],
-                   notAfter=self.payload['retainedAt'])
-        self.validate(trusted_key=key)
-        expired_now = dict(self.trusted_key, notAfter='2026-10-30T00:00:00.000Z')
-        self.validate(trusted_key=expired_now)
+    def test_trusted_key_must_be_valid_at_signing_and_verification_times(self):
+        now = '2026-11-02T12:00:00.000Z'
+        valid_at_boundary = dict(self.trusted_key, notBefore=self.payload['retainedAt'],
+                                 notAfter=now)
+        self.validate(trusted_key=valid_at_boundary)
+        expired_now = dict(self.trusted_key, notAfter='2026-11-02T11:59:59.999Z')
+        with self.assertRaises(SourceRetentionV2CandidateError):
+            self.validate(trusted_key=expired_now)
         invalid_at_signing = dict(self.trusted_key, notAfter='2026-10-27T00:00:00.000Z')
         with self.assertRaises(SourceRetentionV2CandidateError):
             self.validate(trusted_key=invalid_at_signing)

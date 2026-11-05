@@ -1,11 +1,10 @@
-"""Cross-language synthetic policy vectors; not a runtime trust boundary.
+"""Local synthetic policy vectors; not a cross-language contract or runtime trust boundary.
 
-The source vectors are shared with the Viewer draft. Passing this test proves
-only that the two test oracles agree on the abstract admission examples. It
-does not authenticate caller evidence, enable TreeDar, or qualify the worker.
+Passing proves only that this Python test oracle agrees with its abstract
+examples. It does not authenticate caller evidence, enable TreeDar, or qualify
+the worker.
 """
 import copy
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -39,22 +38,20 @@ class SharedTreeDarProjectProvenanceVectors(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         path = Path(__file__).resolve().parents[1] / "contracts/treedar-project-provenance-vectors.json"
-        raw = path.read_bytes()
-        cls.fixture = json.loads(raw)
-        cls.fixture_sha256 = hashlib.sha256(raw).hexdigest()
+        cls.fixture = json.loads(path.read_bytes())
 
-    def test_vectors_match_viewer_draft_source_revision(self):
-        self.assertEqual(self.fixture_sha256,
-                         "1b9f951a6060f3fffd4bd4515d384bbb04f208f14ae5773e597890687b083c2d")
+    def test_vectors_are_labeled_synthetic_examples(self):
+        self.assertEqual(self.fixture["purpose"],
+                         "Synthetic policy examples; no assertion proves real provenance")
 
-    def test_shared_fixture_covers_positive_and_fail_closed_cases(self):
+    def test_fixture_covers_positive_and_fail_closed_cases(self):
         self.assertEqual(self.fixture["version"], 1)
         vectors = self.fixture["vectors"]
         self.assertTrue(any(item["accept"] is True for item in vectors))
         self.assertTrue(any(item["accept"] is False for item in vectors))
         self.assertEqual(len({item["name"] for item in vectors}), len(vectors))
 
-    def test_python_policy_oracle_matches_every_shared_viewer_vector(self):
+    def test_python_policy_oracle_matches_every_synthetic_vector(self):
         for vector in self.fixture["vectors"]:
             with self.subTest(vector=vector["name"]):
                 value = copy.deepcopy(self.fixture["base"])

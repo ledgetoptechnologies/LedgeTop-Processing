@@ -40,7 +40,7 @@ class ViewerTaskStoreTests(unittest.TestCase):
         return self.store.task(identifier)
 
     def claim(self, node='cluster'):
-        return self.queue.claim({'workerId': 'viewer-broker', 'nodeId': node, 'profiles': [VIEWER_PROFILE]})
+        return self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': node, 'profiles': [VIEWER_PROFILE]})
 
     def test_initialization_is_durable_idempotent_and_settings_bound(self):
         self.initialize()

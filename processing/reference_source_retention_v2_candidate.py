@@ -255,9 +255,14 @@ def validate_source_retention_v2_candidate(
           and trusted_key.get("revoked") is False,
           "trusted key record is not bound to this receipt")
     _need(type(trusted_key.get("notBefore")) is str
-          and type(trusted_key.get("notAfter")) is str
-          and _timestamp(trusted_key["notBefore"]) <= retained_at <= _timestamp(trusted_key["notAfter"]),
+          and type(trusted_key.get("notAfter")) is str,
+          "trusted key validity window unavailable")
+    key_not_before = _timestamp(trusted_key["notBefore"])
+    key_not_after = _timestamp(trusted_key["notAfter"])
+    _need(key_not_before <= retained_at <= key_not_after,
           "receipt was not signed during key validity")
+    _need(key_not_before <= now <= key_not_after,
+          "trusted key is not currently valid")
     signature = envelope["signature"]
     _need(type(signature) is str and _B64URL.fullmatch(signature) is not None,
           "invalid Ed25519 signature encoding")

@@ -6,6 +6,19 @@ import re
 from urllib.parse import urlsplit
 
 
+@dataclass(frozen=True, repr=False)
+class ProcessingNode:
+    """Ordered private NodeODM endpoint configuration; credentials stay hidden."""
+
+    id: str
+    url: str
+    token: str = field(default="", repr=False)
+    max_input_bytes: int | None = None
+
+    def __repr__(self):
+        return f"ProcessingNode(id={self.id!r}, max_input_bytes={self.max_input_bytes!r})"
+
+
 @dataclass(frozen=True)
 class Config:
     api_token: str
@@ -29,6 +42,23 @@ class Config:
     viewer_max_input_bytes: int = 20 * 1024 ** 3
     viewer_max_archive_bytes: int = 100 * 1024 ** 3
     reference_config_path: str = field(default='', repr=False)
+    processing_nodes: tuple[ProcessingNode, ...] = field(default=(), repr=False)
+
+    @property
+    def node_endpoints(self) -> tuple[ProcessingNode, ...]:
+        if self.processing_nodes:
+            return self.processing_nodes
+        legacy = {
+            "cluster": ProcessingNode("cluster", self.local_node_url, self.local_node_token,
+                                      self.local_max_input_bytes),
+            "main": ProcessingNode("main", self.main_node_url, self.main_node_token),
+        }
+        ordered = [node_id for node_id in self.prototype_node_ids if node_id in legacy]
+        # The legacy routing-probe contract always considered the main node as
+        # fallback, even when the synthetic prototype queue was cluster-only.
+        if "main" not in ordered:
+            ordered.append("main")
+        return tuple(legacy[node_id] for node_id in ordered)
 
 
 def _node_origin(value: str) -> str:
@@ -52,15 +82,16 @@ def _positive_int(value: str, name: str, maximum: int) -> int:
     return number
 
 
+def _node_env_suffix(node_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "_", node_id).upper()
+
+
 def from_environment() -> Config:
     token = os.environ.get("PROCESSING_API_TOKEN", "")
     if len(token) < 32 or any(ord(char) < 33 or ord(char) > 126 for char in token):
         raise ValueError("PROCESSING_API_TOKEN must contain at least 32 printable characters")
     operator = os.environ.get("PROCESSING_PROTOTYPE_OPERATOR_TOKEN", "")
     observer = os.environ.get("PROCESSING_PROTOTYPE_OBSERVER_TOKEN", "")
-    node_tokens = tuple(os.environ.get(name, '') for name in ('LOCAL_NODE_TOKEN', 'MAIN_NODE_TOKEN'))
-    if any(len(value) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in value) for value in node_tokens):
-        raise ValueError('node tokens must contain at most 4096 non-space printable ASCII characters')
     if observer and (len(observer) < 32 or observer in (token, operator)
                      or any(ord(char) < 33 or ord(char) > 126 for char in observer)):
         raise ValueError("prototype observer token must be a separate printable credential of at least 32 characters")
@@ -68,6 +99,9 @@ def from_environment() -> Config:
     if (not 1 <= len(node_ids) <= 8 or 'cluster' not in node_ids or len(set(node_ids)) != len(node_ids)
             or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", node) for node in node_ids)):
         raise ValueError("PROCESSING_PROTOTYPE_NODE_IDS must list 1 to 8 unique ASCII node IDs")
+    suffixes = tuple(_node_env_suffix(node) for node in node_ids)
+    if len(set(suffixes)) != len(suffixes):
+        raise ValueError("processing node IDs must map to unique environment variable names")
     treedar_node_ids = tuple(os.environ.get("PROCESSING_TREEDAR_NODE_IDS", ",".join(node_ids)).split(","))
     if (not treedar_node_ids or len(set(treedar_node_ids)) != len(treedar_node_ids)
             or any(node not in node_ids for node in treedar_node_ids)):
@@ -82,10 +116,31 @@ def from_environment() -> Config:
         raise ValueError('PROCESSING_VIEWER_ENABLED must be 0 or 1')
     viewer_token = os.environ.get('PROCESSING_VIEWER_TOKEN', '')
     viewer_staging = os.environ.get('PROCESSING_VIEWER_STAGING_TOKEN', '')
+    local_max_input_bytes = _positive_int(os.environ.get("LOCAL_MAX_INPUT_BYTES", "21474836480"),
+                                          "LOCAL_MAX_INPUT_BYTES", 10**15)
+    node_endpoints = []
+    for node_id, suffix in zip(node_ids, suffixes):
+        legacy_url = os.environ.get("LOCAL_NODE_URL", "") if node_id == "cluster" else (
+            os.environ.get("MAIN_NODE_URL", "") if node_id == "main" else "")
+        legacy_token = os.environ.get("LOCAL_NODE_TOKEN", "") if node_id == "cluster" else (
+            os.environ.get("MAIN_NODE_TOKEN", "") if node_id == "main" else "")
+        url = os.environ.get(f"PROCESSING_NODE_{suffix}_URL", legacy_url)
+        node_token = os.environ.get(f"PROCESSING_NODE_{suffix}_TOKEN", legacy_token)
+        max_input_name = f"PROCESSING_NODE_{suffix}_MAX_INPUT_BYTES"
+        if max_input_name in os.environ:
+            max_input_bytes = _positive_int(os.environ[max_input_name], max_input_name, 10**15)
+        elif node_id == "cluster":
+            max_input_bytes = local_max_input_bytes
+        else:
+            max_input_bytes = None
+        node_endpoints.append(ProcessingNode(node_id, _node_origin(url), node_token, max_input_bytes))
+    node_tokens = tuple(node.token for node in node_endpoints)
+    if any(len(value) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in value) for value in node_tokens):
+        raise ValueError('node tokens must contain at most 4096 non-space printable ASCII characters')
     if viewer == '1':
         if (not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR') or 'main' not in node_ids
-                or not os.environ.get('LOCAL_NODE_URL') or not os.environ.get('MAIN_NODE_URL')):
-            raise ValueError('Viewer requires persistent state and both configured nodes')
+                or any(not node.url for node in node_endpoints)):
+            raise ValueError('Viewer requires persistent state and every configured processing node endpoint')
         credentials = (token, operator, observer)
         for value in (viewer_token, viewer_staging):
             if value and (len(value) < 32 or value in credentials
@@ -93,15 +148,20 @@ def from_environment() -> Config:
                 raise ValueError('Viewer credentials must be separate printable secrets')
         if not viewer_token or (viewer_staging and viewer_staging == viewer_token):
             raise ValueError('separate Viewer production credential required')
+    application_credentials = [value for value in (token, operator, observer, viewer_token,
+                                                     viewer_staging) if value]
+    if (len(application_credentials) != len(set(application_credentials))
+            or set(application_credentials).intersection(node_tokens)):
+        raise ValueError('application and processing node credentials must be distinct')
     if operator and (len(operator) < 32 or operator == token
                      or any(ord(char) < 33 or ord(char) > 126 for char in operator)):
         raise ValueError("prototype operator token must be a separate printable credential of at least 32 characters")
     return Config(
         api_token=token,
-        local_node_url=_node_origin(os.environ.get("LOCAL_NODE_URL", "")),
-        main_node_url=_node_origin(os.environ.get("MAIN_NODE_URL", "")),
+        local_node_url=next((node.url for node in node_endpoints if node.id == "cluster"), ""),
+        main_node_url=next((node.url for node in node_endpoints if node.id == "main"), ""),
         local_max_photos=_positive_int(os.environ.get("LOCAL_MAX_PHOTOS", "1000"), "LOCAL_MAX_PHOTOS", 1_000_000),
-        local_max_input_bytes=_positive_int(os.environ.get("LOCAL_MAX_INPUT_BYTES", "21474836480"), "LOCAL_MAX_INPUT_BYTES", 10**15),
+        local_max_input_bytes=local_max_input_bytes,
         bind_host=os.environ.get("PROCESSING_BIND_HOST", "127.0.0.1"),
         port=_positive_int(os.environ.get("PROCESSING_PORT", "8080"), "PROCESSING_PORT", 65535),
         prototype_state_dir=os.environ.get("PROCESSING_PROTOTYPE_STATE_DIR", ""),
@@ -116,7 +176,8 @@ def from_environment() -> Config:
         viewer_max_archive_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', str(100 * 1024 ** 3)),
                                               'PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', 10 ** 15),
         prototype_observer_token=observer,
-        local_node_token=node_tokens[0],
-        main_node_token=node_tokens[1],
+        local_node_token=next((node.token for node in node_endpoints if node.id == "cluster"), ""),
+        main_node_token=next((node.token for node in node_endpoints if node.id == "main"), ""),
         reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
+        processing_nodes=tuple(node_endpoints),
     )

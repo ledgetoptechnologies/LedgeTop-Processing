@@ -1,4 +1,4 @@
-"""Durable, single-slot queue for the isolated synthetic TreeDar prototype.
+"""Durable, per-node-slot queue for the isolated synthetic processing prototype.
 
 This is not a Viewer API or a production dataset admission path. A process lock
 prevents a second coordinator from resetting another coordinator's live claims.
@@ -208,12 +208,73 @@ class Queue(Maintenance):
             self._refresh_nodes(db)
             if self._node(db, node_id)['state'] not in ('active', 'scheduled'):
                 return None
-            if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():
+            if db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1",
+                          (node_id,)).fetchone():
                 return None
-            row = db.execute("""SELECT * FROM jobs WHERE status='queued'
-                ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
+            if (payload['workerId'] == 'viewer-dispatch' and expected_job is not None
+                    and profiles == [VIEWER_PROFILE]):
+                # The trusted in-process Viewer dispatcher may pass a queue
+                # head that is eligible for this node after earlier jobs were
+                # found to require a different, currently occupied node.
+                # Public callers are rejected in app.py; expectedJobId binds
+                # this claim to the scheduler's live admission decision.
+                row = db.execute("SELECT * FROM jobs WHERE id=? AND status='queued'",
+                                 (expected_job,)).fetchone()
+            else:
+                row = db.execute("""SELECT * FROM jobs WHERE status='queued'
+                    ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
             if not row:
                 return None
+            if (row['profile'] == VIEWER_PROFILE and payload['workerId'] == 'viewer-dispatch'
+                    and expected_job is not None):
+                scheduler = getattr(self, '_reference_scheduler', None)
+                if scheduler is not None:
+                    # Recompute the first globally ordered job eligible for
+                    # this node inside this exact IMMEDIATE claim transaction.
+                    # This includes size-aware Viewer and Reference jobs.
+                    candidate = scheduler._candidate_any_row(db, node_id)
+                    if (candidate is None or candidate['id'] != row['id']
+                            or scheduler._viewer_submission(db, row['id'], row['environment']) is None):
+                        return None
+                else:
+                    # Legacy installations without ReferenceRuntime retain
+                    # their older conservative profile-only barrier.
+                    earlier = db.execute(
+                        "SELECT profile FROM jobs WHERE status='queued' AND environment=? AND seq<? ORDER BY seq",
+                        (row['environment'], row['seq'])).fetchall()
+                    if any(item['profile'] != VIEWER_PROFILE
+                           and item['profile'] in self.node_profiles(node_id) for item in earlier):
+                        return None
+            # A staging job cannot start while production work is queued or
+            # active anywhere in the fleet. Running work is never preempted.
+            if (row['environment'] == 'staging'
+                    and db.execute("SELECT 1 FROM jobs WHERE environment='production' "
+                                   "AND status IN ('queued','running','held') LIMIT 1").fetchone()):
+                return None
+            if (row['profile'] == VIEWER_PROFILE
+                    and (payload['workerId'] != 'viewer-dispatch' or profiles != [VIEWER_PROFILE])):
+                return None
+            # Keep the configured node order meaningful when multiple nodes
+            # advertise the same profile: a later node may take the queue head
+            # only when every earlier capable node is occupied or unavailable.
+            # ViewerService has already selected the first node whose live
+            # engine limits and health admit this job. Its queue claim is bound
+            # to the exact head and node, so a profile-only earlier-node check
+            # here would incorrectly reject large jobs that only the main node
+            # can process. Generic workers still use ordered profile fallback.
+            if row['profile'] != VIEWER_PROFILE:
+                for earlier in self.node_ids:
+                    if earlier == node_id:
+                        break
+                    if row["profile"] not in self.node_profiles(earlier):
+                        continue
+                    earlier_state = self._node(db, earlier)["state"]
+                    earlier_busy = db.execute(
+                        "SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1",
+                        (earlier,)).fetchone()
+                    if (earlier_state in ("active", "scheduled")
+                            and not earlier_busy):
+                        return None
             if row['profile'] == REFERENCE_PROFILE:
                 # Reference claims also persist an idempotent private envelope
                 # and enforce input-dependent routing in ReferenceStore.claim.

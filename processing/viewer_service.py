@@ -1,7 +1,7 @@
-"""Native Viewer facade service and cooperative, single-slot engine dispatcher.
+"""Native Viewer facade service and cooperative per-node engine dispatcher.
 
 Only fixed configured engines are contacted. Mutation intent is durable before
-HTTP; uncertain mutations hold the shared slot instead of replaying a job.
+HTTP; uncertain mutations hold that node's shared slot instead of replaying.
 Completed engine tasks and downloaded archives remain until operator cleanup.
 """
 
@@ -18,9 +18,10 @@ import uuid
 import zipfile
 
 from .maintenance import Conflict
+from .config import ProcessingNode
 from .odx_smoke_worker import Client, SmokeError
 from .options import catalog, _NoRedirect
-from .policy import plan
+from .policy import plan_ordered_nodes
 from .prototype import VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
@@ -110,8 +111,14 @@ class ViewerService:
         self.queue, self.config = queue, config
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
                                        config.viewer_max_input_bytes)
-        self.engines = engines or {'cluster': NativeEngine(config.local_node_url, config.local_node_token),
-                                  'main': NativeEngine(config.main_node_url, config.main_node_token)}
+        node_configs = getattr(config, 'processing_nodes', ())
+        if not node_configs:
+            node_configs = config.node_endpoints if hasattr(config, 'node_endpoints') else (
+                ProcessingNode('cluster', config.local_node_url, config.local_node_token,
+                               config.local_max_input_bytes),
+                ProcessingNode('main', config.main_node_url, config.main_node_token))
+        self.node_configs = tuple(node_configs)
+        self.engines = engines or {node.id: NativeEngine(node.url, node.token) for node in self.node_configs}
         self.probe = probe
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -120,11 +127,14 @@ class ViewerService:
         self._downloads = {}
 
     def _catalog(self):
-        return catalog([('local', self.config.local_node_url, self.config.local_node_token),
-                        ('main', self.config.main_node_url, self.config.main_node_token)])
+        return catalog([(node.id, node.url, node.token) for node in self.node_configs])
 
     def options(self):
         current = self._catalog()
+        if 'availableOptions' in current:
+            if type(current['availableOptions']) is not list:
+                raise Conflict('engine catalog unavailable')
+            return current['availableOptions']
         if not current['ready']:
             raise Conflict('engine catalog unavailable')
         return current['commonOptions']
@@ -133,8 +143,11 @@ class ViewerService:
         # This is our own 2.x-compatible facade, not an official ClusterODM build.
         self.options()
         jobs = self.queue.list()
+        # NodeODM defines this as maximum configured concurrency; it is a
+        # capacity limit, not an instantaneous health or free-slot count.
+        parallel = sum(node in self.engines for node in self.queue.node_ids)
         return {'version': '2.4.0', 'engine': 'ledgetop-processing', 'engineVersion': '0.2.0',
-                'maxImages': None, 'maxParallelTasks': 1, 'coordinator': True,
+                'maxImages': None, 'maxParallelTasks': parallel, 'coordinator': True,
                 'taskQueueCount': sum(j['status'] in ('queued', 'running', 'held') for j in jobs)}
 
     def _check_options(self, options):
@@ -309,55 +322,101 @@ class ViewerService:
                 else:
                     self._hold(task, 'submission_interrupted')
             jobs = self.queue.list()
-            if any(j['status'] in ('running', 'held') for j in jobs):
+            # Queue.list is already FIFO by sequence; a stable partition keeps
+            # priority order without quadratic list.index work on large queues.
+            queued = [j for j in jobs if j['status'] == 'queued']
+            production_pending = any(j['environment'] == 'production'
+                                     and j['status'] in ('queued', 'running', 'held') for j in jobs)
+            # Production globally fences staging. Within the active priority
+            # tier, each free node may take the first queued job it can run;
+            # a large job waiting for main does not leave cluster idle.
+            priority_jobs = [j for j in queued if j['environment'] ==
+                             ('production' if production_pending else 'staging')]
+            candidates = [j for j in priority_jobs if j['profile'] == VIEWER_PROFILE]
+            if not candidates:
                 return
-            queued = sorted((j for j in jobs if j['status'] == 'queued'),
-                            key=lambda j: (j['environment'] != 'production', jobs.index(j)))
-            if not queued or queued[0]['profile'] != VIEWER_PROFILE:
-                return
-            task = next((t for t in tasks if t['job_id'] == queued[0]['id']), None)
-            if task is None:
-                raise Conflict('execution metadata unavailable')
             nodes = {}
-            for node, role, origin, token in (
-                    ('cluster', 'local', self.config.local_node_url, self.config.local_node_token),
-                    ('main', 'main', self.config.main_node_url, self.config.main_node_token)):
-                nodes[node] = {**self.probe(role, origin, token),
-                               'state': self.queue.get_node(node)['state']}
-            decision = plan(task['images_count'], task['input_bytes'], nodes['cluster'], nodes['main'],
-                            self.config.local_max_photos, self.config.local_max_input_bytes)
-            if decision['decision'] == 'wait':
-                self.store.update(task['uuid'], phase='waiting_node', error=decision['reason'])
+            ordered_nodes = []
+            fleet_capacities = {}
+            for node_config in self.node_configs:
+                node_id = node_config.id
+                snapshot = self.probe(node_id, node_config.url, node_config.token)
+                snapshot = {**snapshot, 'id': node_id,
+                            'state': self.queue.get_node(node_id)['state']}
+                live_max = snapshot.get('maxImages')
+                valid_max = (live_max is None or (type(live_max) is int and live_max >= 1))
+                task_count = snapshot.get('taskQueueCount')
+                valid_task_count = type(task_count) is int and task_count >= 0
+                fleet_capacities[node_id] = {
+                    'ready': (snapshot.get('ready') is True and valid_max and valid_task_count),
+                    'maxImages': live_max if valid_max else None,
+                    'maxInputBytes': node_config.max_input_bytes,
+                    'taskQueueCount': task_count if valid_task_count else 1,
+                }
+                if node_id == 'cluster':
+                    configured_max = self.config.local_max_photos
+                    snapshot['maxImages'] = min(live_max, configured_max) if type(live_max) is int else configured_max
+                if node_config.max_input_bytes is not None:
+                    snapshot['maxInputBytes'] = node_config.max_input_bytes
+                nodes[node_id] = snapshot
+                ordered_nodes.append(snapshot)
+            scheduler = getattr(self.queue, '_reference_scheduler', None)
+            if scheduler is not None:
+                try:
+                    scheduler.update_fleet_snapshot(fleet_capacities, self._catalog()['nodes'])
+                except Exception:
+                    # Shared cross-profile ordering cannot safely proceed with
+                    # stale, incomplete or mismatched live engine metadata.
+                    return
+            for queued_job in candidates:
+                task = next((t for t in tasks if t['job_id'] == queued_job['id']), None)
+                if task is None:
+                    raise Conflict('execution metadata unavailable')
+                decision = plan_ordered_nodes(task['images_count'], task['input_bytes'], ordered_nodes,
+                                              required_profile=VIEWER_PROFILE)
+                if decision['decision'] == 'wait':
+                    self.store.update(task['uuid'], phase='waiting_node', error=decision['reason'])
+                    continue
+                node_id = decision['nodeId']
+                shared_scheduler = getattr(self.queue, '_reference_scheduler', None)
+                if (shared_scheduler is None
+                        or getattr(shared_scheduler, '_node_option_validator', None) is None):
+                    # Legacy Viewer-only deployments validate against the
+                    # fleet-wide catalog. With the shared scheduler, options
+                    # are checked against this node's fresh snapshot both
+                    # during selection and inside the atomic queue claim; a
+                    # different unavailable node must not block fallback.
+                    self._check_options(task['options'])
+                job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': node_id,
+                                       'profiles': [VIEWER_PROFILE], 'expectedJobId': task['job_id']})
+                if not job:
+                    # Another scheduler turn or maintenance transition changed
+                    # queue admission; rediscover from fresh state next tick.
+                    return
+                try:
+                    self.store.update(task['uuid'], stage='running', phase='claimed', node_id=node_id,
+                                      claim_token=job['claimToken'], engine_uuid=str(uuid.uuid4()), error=None)
+                    task = self.store.task(task['uuid'])
+                    engine = self.engines[node_id]
+                    self.store.update(task['uuid'], phase='init_pending')
+                    engine.initialize(task)
+                    self.store.update(task['uuid'], phase='initialized')
+                    for item in task['files']:
+                        self.store.update(task['uuid'], phase='upload_pending')
+                        engine.upload(task['engine_uuid'], item)
+                        self.store.update(task['uuid'], phase='uploaded')
+                    self.store.update(task['uuid'], phase='commit_pending')
+                    engine.action('commit', task['engine_uuid'])
+                    self.store.update(task['uuid'], phase='processing')
+                except Exception:
+                    current = self.store.task(task['uuid'])
+                    if current['phase'] == 'commit_pending':
+                        # Exact assigned engine UUID lets us reconcile a lost commit
+                        # ACK by reads. Never send commit again under uncertainty.
+                        self.store.update(task['uuid'], error='commit_ack_uncertain')
+                    else:
+                        self._hold(current, 'engine_submission_uncertain')
                 return
-            node_id = 'cluster' if decision['decision'] == 'local' else 'main'
-            self._check_options(task['options'])
-            job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': node_id,
-                                   'profiles': [VIEWER_PROFILE], 'expectedJobId': task['job_id']})
-            if not job:
-                return
-            try:
-                self.store.update(task['uuid'], stage='running', phase='claimed', node_id=node_id,
-                                  claim_token=job['claimToken'], engine_uuid=str(uuid.uuid4()), error=None)
-                task = self.store.task(task['uuid'])
-                engine = self.engines[node_id]
-                self.store.update(task['uuid'], phase='init_pending')
-                engine.initialize(task)
-                self.store.update(task['uuid'], phase='initialized')
-                for item in task['files']:
-                    self.store.update(task['uuid'], phase='upload_pending')
-                    engine.upload(task['engine_uuid'], item)
-                    self.store.update(task['uuid'], phase='uploaded')
-                self.store.update(task['uuid'], phase='commit_pending')
-                engine.action('commit', task['engine_uuid'])
-                self.store.update(task['uuid'], phase='processing')
-            except Exception:
-                current = self.store.task(task['uuid'])
-                if current['phase'] == 'commit_pending':
-                    # Exact assigned engine UUID lets us reconcile a lost commit
-                    # ACK by reads. Never send commit again under uncertainty.
-                    self.store.update(task['uuid'], error='commit_ack_uncertain')
-                else:
-                    self._hold(current, 'engine_submission_uncertain')
 
     def start(self):
         if self._thread:

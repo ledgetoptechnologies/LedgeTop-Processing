@@ -22,10 +22,12 @@ from http.server import ThreadingHTTPServer
 from processing.app import make_handler, CoordinatorService
 from processing.reference_binary import BinaryResponse
 from processing.reference_http import create_reference_http_server
-from processing.config import Config, from_environment
+from processing.config import Config, ProcessingNode, from_environment
+from processing import reference_protocol as protocol
 from processing.prototype import Queue, REFERENCE_PROFILE, VIEWER_PROFILE
 from processing.reference_runtime import (
-    ReferenceRuntime, ReferenceSettings, RuntimeConfigurationError, discovered_policy, load_reference_settings,
+    ReferenceRuntime, ReferenceSettings, RuntimeConfigurationError, discovered_policy,
+    load_reference_settings, validate_discovered_option_values,
 )
 from processing.reference_recovery import RecoveryNodeBinding
 from tests.viewer_receipt_signer import SyntheticViewerSigner
@@ -75,15 +77,20 @@ class ReferenceRuntimeTests(unittest.TestCase):
             streamBudget=dict(maxConcurrent=1, maxObjectBytes=100*1024**3))
         self.path = self.root / "reference-private.json"
         self.write_config()
-        self.snapshot = dict(ready=True, commonOptions=[
-            dict(name="future-quality", type="int", value=3, help="Quality level"),
+        common_options = [
+            dict(name="future-quality", type="int", value=3, domain="positive int", help="Quality level"),
             dict(name="future-toggle", type="bool", value=False),
             dict(name="input-file", type="string", value=""),
             dict(name="remote-url", type="string", value=""),
             dict(name="password", type="int", value=3),
-            dict(name="safe-enum", type="string", value="high")], nodes=[
-                dict(role=role, available=True, capabilitiesSha256="a"*64,
-                     engine="odm", engineVersion="synthetic-1") for role in ("local", "main")])
+            dict(name="safe-enum", type="enum", value="high", domain=["low", "high"]),
+            dict(name="free-text", type="string", value="default text", domain="Name of project", help="A bounded note"),
+            dict(name="safe-string-choice", type="string", value="first", domain='["first", "second"]')]
+        self.snapshot = dict(ready=True, commonOptions=common_options, nodes=[
+            dict(role=role, available=True, capabilitiesSha256="a"*64,
+                     engine="odm", engineVersion="synthetic-1",
+                     options=[dict(item) for item in common_options])
+                for role in ("cluster", "main")])
 
     def write_config(self):
         self.path.write_text(json.dumps(self.value))
@@ -99,10 +106,34 @@ class ReferenceRuntimeTests(unittest.TestCase):
         return (patch("processing.reference_runtime.ssl.SSLContext.load_cert_chain"),
                 patch("processing.reference_runtime.verified_client_context", return_value=client_context))
 
-    def runtime(self, queue, **kwargs):
+    def runtime(self, queue, *, config=None, discover_capacities=None, **kwargs):
+        config = config or self.config
+        capacities = discover_capacities or (lambda: {node: dict(ready=True, maxImages=None,
+            maxInputBytes=None, taskQueueCount=0) for node in config.prototype_node_ids})
         first, second = self.tls_patches()
         with first, second:
-            return ReferenceRuntime(queue, self.config, self.settings(), discover=lambda: self.snapshot, **kwargs)
+            return ReferenceRuntime(queue, config, load_reference_settings(str(self.path), config),
+                discover=lambda: self.snapshot,
+                discover_capacities=capacities, **kwargs)
+
+    def reference_submission(self, images, option=None):
+        fixture = json.loads((Path(__file__).resolve().parents[1] /
+                              "contracts/reference-v1.contract.json").read_text())["submission"]
+        raw = copy.deepcopy(fixture)
+        raw["submissionId"] = str(uuid.uuid4())
+        original = raw["manifest"]["objects"][0]
+        raw["manifest"]["objects"] = [dict(original, id=f"image-{index + 1}",
+            name=f"image-{index + 1:04}.jpg") for index in range(images)]
+        raw["manifest"].update(objectCount=images, totalBytes=images * original["byteSize"],
+            inputCounts={"images": images, "lidarObjects": 0, "points": 0})
+        raw["manifest"]["sha256"] = protocol.manifest_sha256(raw["manifest"])
+        allowed = set()
+        if option is not None:
+            name, value = option
+            raw["pipeline"]["odm"]["options"] = {name: value}
+            allowed.add(name)
+        return protocol.validate_submission(raw, environment="staging",
+            capability_fingerprint=raw["capabilityFingerprint"], allowed_odm_options=allowed)
 
     def test_disabled_default_preserves_native_queue_without_reference_profile(self):
         handler = make_handler(self.config)
@@ -229,6 +260,168 @@ class ReferenceRuntimeTests(unittest.TestCase):
             tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertFalse(any(name.startswith('reference_recovery_') for name in tables))
 
+    def test_worker_next_uses_live_per_node_size_capacity_and_rechecks_at_claim(self):
+        config = replace(self.config, local_max_photos=1,
+            prototype_node_ids=('cluster', 'middle', 'main'),
+            treedar_node_ids=('main',), processing_nodes=(
+                ProcessingNode('cluster', self.config.local_node_url, self.config.local_node_token,
+                               self.config.local_max_input_bytes),
+                ProcessingNode('middle', 'http://127.0.0.1:19003', 'middle-engine-token'),
+                ProcessingNode('main', self.config.main_node_url, self.config.main_node_token)))
+        middle_worker = dict(bearer='reference-middle-' + 'd'*32, workerId='worker-middle',
+            instanceId='instance-middle', resultOrigin='https://middle.example',
+            resultBearer='read-middle-' + 'e'*32)
+        self.value['workers']['middle'] = middle_worker
+        self.write_config()
+        middle_options = dict(self.snapshot['nodes'][0], role='middle')
+        self.snapshot = dict(self.snapshot,
+            nodes=[self.snapshot['nodes'][0], middle_options, self.snapshot['nodes'][1]])
+        queue = Queue(config.prototype_state_dir, node_ids=('cluster', 'middle', 'main'),
+                      treedar_node_ids=('main',), reference_enabled=True)
+        self.addCleanup(queue.close)
+        capacity = {
+            'cluster': dict(ready=True, maxImages=1, maxInputBytes=None, taskQueueCount=0),
+            'middle': dict(ready=True, maxImages=4, maxInputBytes=None, taskQueueCount=0),
+            'main': dict(ready=True, maxImages=None, maxInputBytes=None, taskQueueCount=0),
+        }
+        runtime = self.runtime(queue, config=config, discover_capacities=lambda: dict(capacity))
+        large, _ = runtime.store.submit(self.reference_submission(3))
+        small, _ = runtime.store.submit(self.reference_submission(1))
+        cluster_token = self.value['workers']['cluster']['bearer']
+        middle_token = self.value['workers']['middle']['bearer']
+        main_token = self.value['workers']['main']['bearer']
+        prefix = '/ltds/worker/v1'
+        cluster = runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + cluster_token}, protected_transport=True)
+        middle = runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + middle_token}, protected_transport=True)
+        main = runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + main_token}, protected_transport=True)
+        self.assertEqual(cluster.status, 200)
+        self.assertEqual(cluster.body['job']['jobId'], small['jobId'])
+        self.assertEqual(middle.status, 200)
+        self.assertEqual(middle.body['job']['jobId'], large['jobId'])
+        self.assertEqual(main.status, 200)
+        self.assertIsNone(main.body['job'])
+
+        # A lower live maxImages value after /next invalidates the intermediate
+        # node's advisory assignment. The atomic claim must recompute capacity.
+        capacity['middle']['maxImages'] = 2
+        middle_claim = runtime.api.handle('POST', prefix + '/claim',
+            {'Authorization': 'Bearer ' + middle_token},
+            protocol.canonical_json(dict(jobId=large['jobId'], claimRequestId='stale-middle-claim')),
+            protected_transport=True)
+        self.assertEqual(middle_claim.status, 409)
+        main = runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + main_token}, protected_transport=True)
+        self.assertEqual(main.body['job']['jobId'], large['jobId'])
+
+        # Removing cluster availability also invalidates its stale assignment;
+        # the still-available middle node can accept the smaller queued job.
+        capacity['cluster'] = dict(ready=False, maxImages=None, maxInputBytes=None, taskQueueCount=0)
+        claim = runtime.api.handle('POST', prefix + '/claim',
+            {'Authorization': 'Bearer ' + cluster_token},
+            protocol.canonical_json(dict(jobId=small['jobId'], claimRequestId='stale-cluster-claim')),
+            protected_transport=True)
+        self.assertEqual(claim.status, 409)
+        self.assertIsNone(runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + cluster_token}, protected_transport=True).body['job'])
+        self.assertEqual(runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + middle_token}, protected_transport=True).body['job']['jobId'],
+            small['jobId'])
+
+    def test_partial_engine_outage_still_admits_and_queues_work_for_healthy_node(self):
+        queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
+                      treedar_node_ids=('main',), reference_enabled=True)
+        self.addCleanup(queue.close)
+        cluster_options, main_options = self.snapshot['nodes']
+        self.snapshot = dict(self.snapshot, ready=False, reason='node_unavailable',
+            commonOptions=[], availableOptions=[dict(item) for item in main_options['options']],
+            availableNodeIds=['main'], nodes=[
+                dict(cluster_options, available=False, options=[]), main_options])
+        capacities = {
+            'cluster': dict(ready=False, maxImages=None, maxInputBytes=None, taskQueueCount=0),
+            'main': dict(ready=True, maxImages=None, maxInputBytes=None, taskQueueCount=0),
+        }
+        runtime = self.runtime(queue, discover_capacities=lambda: dict(capacities))
+        viewer_token = self.value['viewerBearers']['staging']
+        options = runtime.api.handle('GET', protocol.PREFIX + '/options',
+            {'Authorization': 'Bearer ' + viewer_token}, protected_transport=True)
+        self.assertEqual(options.status, 200)
+        candidate = self.reference_submission(1, ('future-toggle', True))
+        payload = {key: candidate[key] for key in
+                   ('schemaVersion', 'submissionId', 'manifest', 'pipeline')}
+        payload['capabilityFingerprint'] = options.body['capabilityFingerprint']
+        payload['pipeline']['odm']['optionsFingerprint'] = options.body['optionsFingerprint']
+        admitted = runtime.api.handle('POST', protocol.PREFIX + '/jobs',
+            {'Authorization': 'Bearer ' + viewer_token}, protocol.canonical_json(payload),
+            protected_transport=True)
+        self.assertEqual(admitted.status, 201, admitted.body)
+        self.assertEqual(admitted.body['status'], 'queued')
+        worker_token = self.value['workers']['main']['bearer']
+        next_job = runtime.api.handle('GET', '/ltds/worker/v1/next',
+            {'Authorization': 'Bearer ' + worker_token}, protected_transport=True)
+        self.assertEqual(next_job.status, 200)
+        self.assertEqual(next_job.body['job']['jobId'], admitted.body['jobId'])
+
+        self.snapshot = dict(self.snapshot, ready=False, commonOptions=[], availableOptions=[],
+            availableNodeIds=[], nodes=[dict(node, available=False, options=[])
+                for node in self.snapshot['nodes']])
+        no_engines = runtime.api.handle('GET', protocol.PREFIX + '/options',
+            {'Authorization': 'Bearer ' + viewer_token}, protected_transport=True)
+        self.assertEqual(no_engines.status, 503)
+
+    def test_worker_claim_rechecks_live_node_option_definitions_and_falls_through(self):
+        queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
+                      treedar_node_ids=('main',), reference_enabled=True)
+        self.addCleanup(queue.close)
+        capacities = {node: dict(ready=True, maxImages=None, maxInputBytes=None,
+            taskQueueCount=0) for node in ('cluster', 'main')}
+        runtime = self.runtime(queue, discover_capacities=lambda: dict(capacities))
+        job, _ = runtime.store.submit(self.reference_submission(1, ('future-toggle', True)))
+        cluster_token = self.value['workers']['cluster']['bearer']
+        main_token = self.value['workers']['main']['bearer']
+        prefix = '/ltds/worker/v1'
+        cluster = runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + cluster_token}, protected_transport=True)
+        self.assertEqual(cluster.body['job']['jobId'], job['jobId'])
+
+        self.snapshot = dict(self.snapshot, nodes=[
+            dict(node, options=[item for item in node['options'] if item['name'] != 'future-toggle'])
+            if node['role'] == 'cluster' else node for node in self.snapshot['nodes']])
+        rejected = runtime.api.handle('POST', prefix + '/claim',
+            {'Authorization': 'Bearer ' + cluster_token},
+            protocol.canonical_json(dict(jobId=job['jobId'], claimRequestId='changed-option-cluster')),
+            protected_transport=True)
+        self.assertEqual(rejected.status, 409)
+        fallback = runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + main_token}, protected_transport=True)
+        self.assertEqual(fallback.body['job']['jobId'], job['jobId'])
+
+    def test_malformed_capacity_probe_disables_only_that_node(self):
+        queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
+                      treedar_node_ids=('main',), reference_enabled=True)
+        self.addCleanup(queue.close)
+        runtime = self.runtime(queue)
+        probes = {
+            'cluster': dict(ready=False, maxImages='unavailable', taskQueueCount='unknown'),
+            # A malformed count must not be interpreted as an idle node even
+            # when the provider's top-level readiness flag says true.
+            'main': dict(ready=True, maxImages=None, taskQueueCount=True),
+        }
+        with patch('processing.reference_runtime.probe_node',
+                   side_effect=lambda node_id, *_args: probes[node_id]):
+            capacities = runtime._discover_capacities()
+        self.assertFalse(capacities['cluster']['ready'])
+        self.assertIsNone(capacities['cluster']['maxImages'])
+        self.assertEqual(capacities['cluster']['taskQueueCount'], 1)
+        self.assertFalse(capacities['main']['ready'])
+        self.assertIsNone(capacities['main']['maxImages'])
+        self.assertEqual(capacities['main']['taskQueueCount'], 1)
+        # Both records remain schema-valid, so the broken node cannot make a
+        # healthy fleet refresh fail as a whole.
+        runtime.store.update_fleet_snapshot(capacities, self.snapshot['nodes'])
+
     @unittest.skipUnless(os.name=='posix','Linux coordinator recovery authority')
     def test_schema2_authority_mismatch_fails_before_tls_services_or_listener_and_closes_queue(self):
         queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True)
@@ -329,7 +522,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertEqual(listed.status,200)
         self.assertEqual(listed.body['environment'],'staging')
         self.assertEqual(listed.body['optionsFingerprint'],before.body['engines']['odm']['optionsFingerprint'])
-        self.assertTrue(all(option['type'] in ('bool','int','float') for option in listed.body['options']))
+        self.assertTrue(all(option['type'] in ('bool','int','float','enum','string') for option in listed.body['options']))
         self.snapshot["commonOptions"].append(dict(name="new-engine-flag", type="bool", value=True))
         after = caps()
         refreshed = runtime.api.handle('GET','/ltds/v1/options',headers,protected_transport=True)
@@ -350,7 +543,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
 
     def test_discovery_allowlist_uses_definitions_and_excludes_string_path_credentials(self):
         first = discovered_policy(self.snapshot, self.config)
-        self.assertEqual(first[2], {"future-quality", "future-toggle"})
+        self.assertEqual(first[2], {"future-quality", "future-toggle", "safe-enum", "free-text", "safe-string-choice"})
         reordered = copy.deepcopy(self.snapshot)
         reordered["commonOptions"].reverse()
         reordered["nodes"].reverse()
@@ -358,6 +551,53 @@ class ReferenceRuntimeTests(unittest.TestCase):
         changed = copy.deepcopy(self.snapshot)
         changed["nodes"][0]["engineVersion"] = "synthetic-2"
         self.assertNotEqual(first[0], discovered_policy(changed, self.config)[0])
+
+    def test_enum_values_are_checked_against_fresh_engine_choices(self):
+        _, _, allowed = discovered_policy(self.snapshot, self.config)
+        payload = {"pipeline": {"odm": {"options": {"safe-enum": "high"}}}}
+        validate_discovered_option_values(payload, self.snapshot, allowed)
+        payload["pipeline"]["odm"]["options"]["safe-enum"] = "unadvertised"
+        with self.assertRaisesRegex(ValueError, "current engine definition"):
+            validate_discovered_option_values(payload, self.snapshot, allowed)
+        payload["pipeline"]["odm"]["options"]["safe-enum"] = 7
+        with self.assertRaisesRegex(ValueError, "current engine definition"):
+            validate_discovered_option_values(payload, self.snapshot, allowed)
+        payload["pipeline"]["odm"]["options"] = []
+        with self.assertRaisesRegex(ValueError, "current engine definition"):
+            validate_discovered_option_values(payload, self.snapshot, allowed)
+        payload["pipeline"]["odm"]["options"] = {
+            "future-quality": 1, "free-text": "bounded text", "safe-string-choice": "second"}
+        validate_discovered_option_values(payload, self.snapshot, allowed)
+        payload["pipeline"]["odm"]["options"]["future-quality"] = 0
+        with self.assertRaisesRegex(ValueError, "current engine definition"):
+            validate_discovered_option_values(payload, self.snapshot, allowed)
+        payload["pipeline"]["odm"]["options"]["future-quality"] = 1
+        payload["pipeline"]["odm"]["options"]["free-text"] = "x" * 4001
+        with self.assertRaisesRegex(ValueError, "current engine definition"):
+            validate_discovered_option_values(payload, self.snapshot, allowed)
+
+    def test_dynamic_job_admission_accepts_current_enum_and_rejects_unknown_choice(self):
+        queue = Queue(self.config.prototype_state_dir, node_ids=("cluster", "main"), reference_enabled=True)
+        self.addCleanup(queue.close)
+        runtime = self.runtime(queue)
+        headers = {"Authorization": "Bearer " + self.value["viewerBearers"]["staging"]}
+        payload = json.loads((Path(__file__).resolve().parents[1] /
+                              "contracts/reference-v1.contract.json").read_text())["submission"]
+        payload["submissionId"] = str(uuid.uuid4())
+        payload["capabilityFingerprint"] = discovered_policy(self.snapshot, self.config)[0]
+        payload["pipeline"]["odm"]["optionsFingerprint"] = discovered_policy(self.snapshot, self.config)[1]
+        payload["pipeline"]["odm"]["options"] = {
+            "safe-enum": "high", "free-text": "synthetic note", "safe-string-choice": "second"}
+        route = "/ltds/v1/jobs"
+        accepted = runtime.api.handle("POST", route, headers, json.dumps(payload).encode(),
+                                      protected_transport=True)
+        self.assertEqual(accepted.status, 201)
+        payload["submissionId"] = str(uuid.uuid4())
+        payload["pipeline"]["odm"]["options"]["safe-enum"] = "unadvertised"
+        rejected = runtime.api.handle("POST", route, headers, json.dumps(payload).encode(),
+                                      protected_transport=True)
+        self.assertEqual(rejected.status, 400)
+        runtime.close()
 
     def test_listener_only_starts_explicitly_and_stops_before_queue_release(self):
         queue = Queue(self.config.prototype_state_dir, node_ids=("cluster", "main"), reference_enabled=True)

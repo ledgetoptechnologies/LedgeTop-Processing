@@ -169,6 +169,9 @@ class DispatcherTests(unittest.TestCase):
         self.assertFalse(list(self.state.glob('dispatch-*.json')))
 
     def test_main_policy_is_passed_to_child_and_recorded(self):
+        # This policy test targets the main-only TreeDar node in the planned
+        # layout, so the smaller cluster node must not advertise TreeDar.
+        self.handler.prototype_queue.treedar_node_ids = ('main',)
         self.submit('main-unrestricted-fixture')
         _, report, _ = self.invoke(node_id='main', resource_policy='main-unrestricted', max_jobs=1)
         self.assertEqual(report['completed'], 1)

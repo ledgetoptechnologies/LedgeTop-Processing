@@ -1,15 +1,21 @@
 import copy
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+import io
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 import uuid
 
 from processing import reference_protocol as p
-from processing.prototype import Queue, PROFILE as LEGACY_PROFILE
+from processing.prototype import Queue, PROFILE as LEGACY_PROFILE, VIEWER_PROFILE
+from processing.config import ProcessingNode
 from processing.maintenance import Conflict
 from processing.reference_store import ReferenceStore, PROFILE
+from processing.viewer_service import ViewerService
+from processing.viewer_tasks import TaskStore
 
 
 class ReferenceStoreTests(unittest.TestCase):
@@ -17,7 +23,9 @@ class ReferenceStoreTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.queue = Queue(self.directory.name, node_ids=("cluster", "node-2"))
         self.queue.allowed_profiles.add(PROFILE)
+        self.queue.allowed_profiles.add(VIEWER_PROFILE)
         self.store = ReferenceStore(self.queue)
+        self.viewer_store = TaskStore(self.queue, Path(self.directory.name) / "viewer-inputs")
         self.fixture = json.loads((Path(__file__).resolve().parents[1] /
                                   "contracts/reference-v1.contract.json").read_text())
         self.submission = p.validate_submission(self.fixture["submission"], environment="staging",
@@ -32,6 +40,36 @@ class ReferenceStoreTests(unittest.TestCase):
         raw["submissionId"] = str(uuid.uuid4())
         return p.validate_submission(raw, environment="staging",
             capability_fingerprint=raw["capabilityFingerprint"])
+
+    def submission_with_images(self, count, environment="staging"):
+        raw = copy.deepcopy(self.fixture["submission"])
+        raw["submissionId"] = str(uuid.uuid4())
+        original = raw["manifest"]["objects"][0]
+        raw["manifest"]["objects"] = []
+        for index in range(count):
+            item = dict(original, id=f"image-{index + 1}", name=f"image-{index + 1:04}.jpg")
+            raw["manifest"]["objects"].append(item)
+        raw["manifest"].update(objectCount=count, totalBytes=count * original["byteSize"],
+                                inputCounts={"images": count, "lidarObjects": 0, "points": 0})
+        raw["manifest"]["sha256"] = p.manifest_sha256(raw["manifest"])
+        return p.validate_submission(raw, environment=environment,
+            capability_fingerprint=raw["capabilityFingerprint"])
+
+    def viewer_job(self, count, environment="staging"):
+        identifier = str(uuid.uuid4())
+        self.viewer_store.initialize(identifier, "Synthetic Viewer task", [], None, environment)
+        for index in range(count):
+            data = ("photo-%d" % index).encode()
+            self.viewer_store.upload(identifier, "photo-%04d.jpg" % index,
+                                     io.BytesIO(data), len(data))
+        self.viewer_store.commit(identifier)
+        return self.viewer_store.task(identifier)
+
+    def fleet(self, cluster_images=1):
+        self.store.update_fleet_snapshot({
+            "cluster": dict(ready=True, maxImages=cluster_images, maxInputBytes=None, taskQueueCount=0),
+            "node-2": dict(ready=True, maxImages=None, maxInputBytes=None, taskQueueCount=0),
+        })
 
     def reserve(self, job):
         self.store.claim(job["jobId"], node_id="cluster", worker_id="worker",
@@ -96,6 +134,109 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertEqual(len(queue_jobs), 1)
         self.assertEqual(queue_jobs[0]["profile"], PROFILE)
 
+    def test_earlier_eligible_viewer_job_blocks_reference_claim_on_same_node(self):
+        self.fleet()
+        viewer = self.viewer_job(1)
+        reference, _ = self.store.submit(self.submission_with_images(1))
+        self.assertIsNone(self.store.next_for_node("cluster"))
+        self.assertIsNone(self.store.claim(reference["jobId"], node_id="cluster", worker_id="reference-worker",
+            worker_instance_id="reference-instance", claim_request_id="reference-before-viewer"))
+        claimed = self.queue.claim({"workerId": "viewer-dispatch", "nodeId": "cluster",
+            "profiles": [VIEWER_PROFILE], "expectedJobId": viewer["job_id"]})
+        self.assertEqual(claimed["id"], viewer["job_id"])
+
+    def test_oversized_viewer_job_does_not_block_small_reference_on_cluster(self):
+        self.fleet(cluster_images=1)
+        viewer = self.viewer_job(3)
+        reference, _ = self.store.submit(self.submission_with_images(1))
+        self.assertEqual(self.store.next_for_node("cluster")["jobId"], reference["jobId"])
+        self.assertIsNone(self.store.next_for_node("node-2"))
+        reference_claim = self.store.claim(reference["jobId"], node_id="cluster", worker_id="reference-worker",
+            worker_instance_id="reference-instance", claim_request_id="reference-cluster-small")
+        self.assertIsNotNone(reference_claim)
+        viewer_claim = self.queue.claim({"workerId": "viewer-dispatch", "nodeId": "node-2",
+            "profiles": [VIEWER_PROFILE], "expectedJobId": viewer["job_id"]})
+        self.assertIsNotNone(viewer_claim)
+
+    def test_viewer_dispatch_refreshes_shared_size_snapshot_before_atomic_claim(self):
+        viewer = self.viewer_job(3)
+        reference, _ = self.store.submit(self.submission_with_images(1))
+
+        class Engine:
+            def initialize(self, task):
+                self.task = task
+
+            def upload(self, identifier, item):
+                self.asserted = Path(item["path"]).is_file()
+
+            def action(self, action, identifier):
+                return {"success": True}
+
+        engines = {node: Engine() for node in ("cluster", "node-2")}
+        config = SimpleNamespace(
+            processing_nodes=(ProcessingNode("cluster", "http://cluster.example", max_input_bytes=1000),
+                              ProcessingNode("node-2", "http://node-2.example")),
+            prototype_state_dir=self.directory.name, local_max_photos=1,
+            local_max_input_bytes=1000, viewer_max_input_bytes=1000)
+        def probe(node_id, _url, _token):
+            return dict(ready=True, maxImages=1 if node_id == "cluster" else None,
+                        taskQueueCount=0)
+        service = ViewerService(self.queue, config, store=self.viewer_store,
+                                engines=engines, probe=probe)
+        catalog = {"ready": True, "commonOptions": [], "nodes": [
+            dict(role="cluster", available=True, options=[]),
+            dict(role="node-2", available=True, options=[])]}
+        service._catalog = lambda: catalog
+
+        service.tick()
+        task = self.viewer_store.task(viewer["uuid"])
+        self.assertEqual(task["node_id"], "node-2")
+        self.assertEqual(task["job"]["status"], "running")
+        self.assertEqual(self.store.next_for_node("cluster")["jobId"], reference["jobId"])
+
+    def test_production_reference_job_preempts_staging_viewer_queue_order(self):
+        self.fleet()
+        viewer = self.viewer_job(1, environment="staging")
+        reference, _ = self.store.submit(self.submission_with_images(1, environment="production"))
+        self.assertEqual(self.store.next_for_node("cluster")["jobId"], reference["jobId"])
+        self.assertIsNone(self.queue.claim({"workerId": "viewer-dispatch", "nodeId": "cluster",
+            "profiles": [VIEWER_PROFILE], "expectedJobId": viewer["job_id"]}))
+        claimed = self.store.claim(reference["jobId"], node_id="cluster", worker_id="reference-worker",
+            worker_instance_id="reference-instance", claim_request_id="production-priority-claim")
+        self.assertIsNotNone(claimed)
+
+    def test_concurrent_viewer_and_reference_claims_cannot_bypass_shared_head(self):
+        self.fleet()
+        reference, _ = self.store.submit(self.submission_with_images(1))
+        viewer = self.viewer_job(1)
+
+        def claim_reference():
+            return self.store.claim(reference["jobId"], node_id="cluster", worker_id="reference-worker",
+                worker_instance_id="reference-instance", claim_request_id="race-reference-claim")
+
+        def claim_viewer():
+            return self.queue.claim({"workerId": "viewer-dispatch", "nodeId": "cluster",
+                "profiles": [VIEWER_PROFILE], "expectedJobId": viewer["job_id"]})
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            reference_claim, viewer_claim = list(pool.map(lambda fn: fn(), (claim_reference, claim_viewer)))
+        self.assertIsNotNone(reference_claim)
+        self.assertIsNone(viewer_claim)
+        self.assertEqual(self.queue.get(reference["jobId"])["nodeId"], "cluster")
+        self.assertEqual(self.queue.get(viewer["job_id"])["status"], "queued")
+
+    def test_mismatched_viewer_task_environment_blocks_cross_profile_bypass(self):
+        self.fleet()
+        viewer = self.viewer_job(1, environment="staging")
+        reference, _ = self.store.submit(self.submission_with_images(1))
+        with self.queue._db() as db:
+            db.execute("UPDATE viewer_tasks SET environment='production' WHERE uuid=?", (viewer["uuid"],))
+        self.assertIsNone(self.store.next_for_node("cluster"))
+        self.assertIsNone(self.store.claim(reference["jobId"], node_id="cluster", worker_id="reference-worker",
+            worker_instance_id="reference-instance", claim_request_id="reference-after-invalid-viewer"))
+        self.assertIsNone(self.queue.claim({"workerId": "viewer-dispatch", "nodeId": "cluster",
+            "profiles": [VIEWER_PROFILE], "expectedJobId": viewer["job_id"]}))
+
     def test_submission_conflicts_and_unvalidated_digests(self):
         self.store.submit(self.submission)
         spoofed = copy.deepcopy(self.submission)
@@ -141,6 +282,102 @@ class ReferenceStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.next_for_node("cluster"))
         self.assertEqual(self.store.next_for_node("node-2")["jobId"], job["jobId"])
 
+    def test_reference_workers_claim_one_job_per_node_in_queue_order(self):
+        store = ReferenceStore(self.queue, local_max_photos=1,
+            local_max_input_bytes=20 * 1024**3, main_node_id="node-2")
+        small, _ = store.submit(self.new_submission())
+        large_raw = copy.deepcopy(self.fixture["submission"])
+        large_raw["submissionId"] = str(uuid.uuid4())
+        first = copy.deepcopy(large_raw["manifest"]["objects"][0])
+        first.update(id="image-2", name="image-2.jpg")
+        large_raw["manifest"]["objects"].append(first)
+        large_raw["manifest"]["objectCount"] = 2
+        large_raw["manifest"]["totalBytes"] *= 2
+        large_raw["manifest"]["inputCounts"]["images"] = 2
+        large_raw["manifest"]["sha256"] = p.manifest_sha256(large_raw["manifest"])
+        large_submission = p.validate_submission(large_raw, environment="staging",
+            capability_fingerprint=large_raw["capabilityFingerprint"])
+        large, _ = store.submit(large_submission)
+
+        self.assertEqual(store.next_for_node("cluster")["jobId"], small["jobId"])
+        store.claim(small["jobId"], node_id="cluster", worker_id="cluster-worker",
+            worker_instance_id="cluster-instance", claim_request_id="cluster-claim")
+        # A running cluster job must not suppress the queue head that only the
+        # main node can accept. Each physical node has its own active slot.
+        self.assertEqual(store.next_for_node("node-2")["jobId"], large["jobId"])
+        self.assertIsNotNone(store.claim(large["jobId"], node_id="node-2",
+            worker_id="main-worker", worker_instance_id="main-instance",
+            claim_request_id="main-claim"))
+
+        later_small, _ = store.submit(self.new_submission())
+        self.assertIsNone(store.claim(later_small["jobId"], node_id="cluster",
+            worker_id="cluster-worker", worker_instance_id="cluster-instance",
+            claim_request_id="cluster-second-claim"))
+
+    def test_ordered_live_capacity_routes_jobs_across_three_nodes_and_keeps_claim_atomic(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        queue = Queue(directory.name, node_ids=("cluster", "middle", "main"),
+                      treedar_node_ids=("main",), reference_enabled=True)
+        self.addCleanup(queue.close)
+        store = ReferenceStore(queue, local_max_photos=1,
+            local_max_input_bytes=20 * 1024**3, main_node_id="main",
+            node_limits={"middle": {"maxImages": 4}})
+        capacities = {
+            "cluster": {"ready": True, "maxImages": 1, "maxInputBytes": None, "taskQueueCount": 0},
+            "middle": {"ready": True, "maxImages": 4, "maxInputBytes": None, "taskQueueCount": 0},
+            "main": {"ready": True, "maxImages": None, "maxInputBytes": None, "taskQueueCount": 0},
+        }
+        node_options = [dict(role=node, available=True, options=[]) for node in queue.node_ids]
+        store.update_fleet_snapshot(capacities, node_options)
+        large, _ = store.submit(self.submission_with_images(3))
+        small, _ = store.submit(self.submission_with_images(1))
+        self.assertEqual(store.next_for_node("cluster")["jobId"], small["jobId"])
+        self.assertEqual(store.next_for_node("middle")["jobId"], large["jobId"])
+        self.assertIsNone(store.next_for_node("main"))
+
+        # A simultaneous claimant on a later capable node cannot steal a job
+        # while an earlier eligible node remains idle.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            answers = list(pool.map(lambda node: store.claim(small["jobId"], node_id=node,
+                worker_id=node + "-worker", worker_instance_id=node + "-instance",
+                claim_request_id=node + "-claim"), ("cluster", "middle")))
+        claims = [answer for answer in answers if answer is not None]
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0]["nodeId"], "cluster")
+
+        # The intermediate node takes the larger job it fits, preserving FIFO
+        # for that node. Once cluster and middle are occupied, small work uses
+        # the next idle capable node in the configured order.
+        self.assertEqual(store.next_for_node("middle")["jobId"], large["jobId"])
+        store.claim(large["jobId"], node_id="middle", worker_id="middle-worker",
+            worker_instance_id="middle-instance", claim_request_id="middle-claim")
+        later, _ = store.submit(self.submission_with_images(1))
+        self.assertEqual(store.next_for_node("main")["jobId"], later["jobId"])
+
+    def test_live_unavailable_or_busy_first_node_falls_through_without_violating_size(self):
+        self.store.local_max_photos = 1
+        job, _ = self.store.submit(self.submission_with_images(1))
+        self.store.update_fleet_snapshot({
+            "cluster": {"ready": False, "maxImages": None, "maxInputBytes": None, "taskQueueCount": 0},
+            "node-2": {"ready": True, "maxImages": 10, "maxInputBytes": None, "taskQueueCount": 0},
+        }, [dict(role="cluster", available=False, options=[]),
+            dict(role="node-2", available=True, options=[])])
+        self.assertEqual(self.store.next_for_node("node-2")["jobId"], job["jobId"])
+        self.assertIsNone(self.store.next_for_node("cluster"))
+
+    def test_preferred_node_in_maintenance_falls_through_to_next_eligible_node(self):
+        job, _ = self.store.submit(self.submission_with_images(1))
+        stamp = datetime.now(timezone.utc).isoformat()
+        self.queue.schedule_node('cluster', {'expectedRevision': 0, 'drainAt': stamp,
+            'notBefore': stamp, 'afterJobId': None, 'targetImage': 'sha256:' + 'a' * 64})
+        self.assertEqual(self.queue.get_node('cluster')['state'], 'draining')
+        self.assertIsNone(self.store.next_for_node('cluster'))
+        self.assertEqual(self.store.next_for_node('node-2')['jobId'], job['jobId'])
+        claim = self.store.claim(job['jobId'], node_id='node-2', worker_id='fallback-worker',
+            worker_instance_id='fallback-instance', claim_request_id='maintenance-fallback-claim')
+        self.assertEqual(claim['nodeId'], 'node-2')
+
     def test_metadata_quota_rolls_back_both_tables(self):
         store = ReferenceStore(self.queue, max_metadata_bytes=1)
         with self.assertRaises(Conflict):
@@ -164,18 +401,20 @@ class ReferenceStoreTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             self.store.get("unknown")
 
-    def test_global_engine_lock_includes_legacy_treedar(self):
+    def test_legacy_treedar_can_run_on_another_idle_node(self):
         job, _ = self.store.submit(self.submission)
         self.reserve(job)
         legacy, _ = self.queue.submit({"requestId": "legacy", "environment": "staging", "profile": LEGACY_PROFILE})
         claim = self.store.get(job["jobId"], private=True)
         self.assertEqual(claim["jobId"], job["jobId"])
-        self.assertIsNone(self.queue.claim({"workerId": "legacy", "profiles": [LEGACY_PROFILE]}))
+        other_node_claim = self.queue.claim({"workerId": "legacy", "profiles": [LEGACY_PROFILE], "nodeId": "node-2"})
+        self.assertEqual(other_node_claim["nodeId"], "node-2")
+        # Per-node serialization remains strict even while another node runs.
+        self.assertIsNone(self.queue.claim({"workerId": "legacy-2", "profiles": [LEGACY_PROFILE], "nodeId": "cluster"}))
         self.store.update_phase(job["jobId"], "held", error="worker_uncertain")
         with self.assertRaises(Conflict):
             self.store.update_phase(job["jobId"], "cancelled")
-        self.assertIsNone(self.queue.claim({"workerId": "legacy", "profiles": [LEGACY_PROFILE]}))
-        self.assertEqual(self.queue.get(legacy["id"])["status"], "queued")
+        self.assertEqual(self.queue.get(legacy["id"])["status"], "running")
 
     def test_restart_preserves_identity_and_holds_uncertain_engine(self):
         job, _ = self.store.submit(self.submission)

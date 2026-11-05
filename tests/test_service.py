@@ -4,9 +4,10 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from unittest.mock import patch
 
 from processing.app import make_handler
-from processing.config import Config
+from processing.config import Config, ProcessingNode
 from processing.policy import plan
 from processing.provider import probe_node
 
@@ -98,6 +99,32 @@ class ServiceTests(unittest.TestCase):
         result = probe_node("local", f"http://127.0.0.1:{self.node.server_port}")
         self.assertTrue(result["ready"])
         self.assertEqual(result["viewerProviderType"], "nodeodm")
+
+    def test_dynamic_plan_route_returns_the_selected_intermediate_node(self):
+        config = Config(api_token=TOKEN, local_node_url='', main_node_url='',
+            local_max_photos=1000, local_max_input_bytes=20_000,
+            prototype_node_ids=('cluster', 'middle', 'main'), processing_nodes=(
+                ProcessingNode('cluster', 'http://cluster.invalid:3000', max_input_bytes=20_000),
+                ProcessingNode('middle', 'http://middle.invalid:3000'),
+                ProcessingNode('main', 'http://main.invalid:3000'),
+            ))
+        server = start_server(make_handler(config))
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f'http://127.0.0.1:{server.server_port}/v1/plan'
+        payload = json.dumps({'engine': 'odm', 'photoCount': 3, 'inputBytes': 4000}).encode()
+        request = Request(url, data=payload, headers={
+            'Authorization': f'Bearer {TOKEN}', 'Content-Type': 'application/json'})
+        limits = {'cluster': 2, 'middle': 4, 'main': None}
+        with patch('processing.app.probe_node', side_effect=lambda node, origin, token: {
+                'role': node, 'configured': True, 'ready': True,
+                'maxImages': limits[node], 'taskQueueCount': 0}):
+            with urlopen(request, timeout=5) as response:
+                result = json.load(response)
+        self.assertEqual(result['decision'], 'middle')
+        self.assertEqual(result['nodeId'], 'middle')
+        self.assertEqual([node['id'] for node in result['nodes']], ['cluster', 'middle', 'main'])
+        self.assertFalse(result['executesWork'])
 
     def test_rejects_invalid_job_body(self):
         with self.assertRaises(HTTPError) as exc:

@@ -75,9 +75,10 @@ have passed across both PCs. Continuous workers and full Viewer task integration
 remain separate work.
 
 [Dynamic engine option discovery](docs/engine-options.md) fetches current NodeODX
-flags and metadata per request and reports a conservative shared catalog across
-configured engines. This management API does not yet implement the Viewer's
-native provider task lifecycle.
+flags and metadata per request, reports a strict shared catalog, and separately
+exposes fresh options from currently available nodes for Viewer scheduling. This
+management API does not itself implement the Viewer's native provider task
+lifecycle.
 
 1. Copy `.env.example` to `.env`. Replace the example token with a private,
    random value of at least 32 characters. Keep `.env` outside Git.

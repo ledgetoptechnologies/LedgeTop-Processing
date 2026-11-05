@@ -67,15 +67,19 @@ class MaintenanceTests(unittest.TestCase):
         self.assertIsNotNone(self.queue.claim({'workerId': 'w'}))
 
     def test_after_job_requires_exact_running_node_and_drains_immediately(self):
-        self.submit()
+        self.submit('cluster-first')
+        cluster_job = self.queue.claim({'workerId': 'cluster-worker', 'nodeId': 'cluster'})
+        self.assertIsNotNone(cluster_job)
+        self.submit('main-target')
         job = self.queue.claim({'workerId': 'w', 'nodeId': 'main'})
+        self.assertIsNotNone(job)
         with self.assertRaises(Conflict):
             self.schedule(after=job['id'])
         self.assertEqual(self.schedule('main', after=job['id'], seconds=60)['state'], 'draining')
         with self.assertRaises(Conflict):
             self.schedule(after='does-not-exist')
 
-    def test_node_maintenance_independent_but_job_slot_still_global(self):
+    def test_node_maintenance_independent_and_slots_are_per_node(self):
         self.schedule()
         self.assertEqual(self.queue.get_node('main')['state'], 'active')
         queued = self.submit()

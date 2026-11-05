@@ -2,7 +2,7 @@
 
 import unittest
 
-from processing.policy import plan
+from processing.policy import plan, plan_ordered_nodes
 
 
 class RoutingPolicyTests(unittest.TestCase):
@@ -67,6 +67,62 @@ class RoutingPolicyTests(unittest.TestCase):
             with self.subTest(state=state):
                 self.main = {"ready": True, "taskQueueCount": 0, "maxImages": None, **state}
                 self.assertEqual(self.route(allow_main_fallback=True)["decision"], "wait")
+
+    def test_ordered_fleet_routes_to_first_live_capacity_then_falls_through(self):
+        nodes = [
+            {"id": "cluster", "ready": True, "taskQueueCount": 0, "maxImages": 1000,
+             "maxInputBytes": 20_000},
+            {"id": "middle", "ready": True, "taskQueueCount": 0, "maxImages": 4000,
+             "maxInputBytes": 90_000},
+            {"id": "main", "ready": True, "taskQueueCount": 0, "maxImages": None},
+        ]
+        self.assertEqual(plan_ordered_nodes(100, 1000, nodes)["nodeId"], "cluster")
+        self.assertEqual(plan_ordered_nodes(1001, 20_001, nodes)["nodeId"], "middle")
+        self.assertEqual(plan_ordered_nodes(5000, 100_000, nodes)["nodeId"], "main")
+
+    def test_ordered_fleet_skips_busy_maintenance_and_unavailable_nodes(self):
+        nodes = [
+            {"id": "cluster", "ready": True, "taskQueueCount": 1, "maxImages": 1000},
+            {"id": "middle", "ready": True, "taskQueueCount": 0, "maxImages": 4000,
+             "maintenanceState": "draining"},
+            {"id": "main", "ready": True, "taskQueueCount": 0, "maxImages": None},
+        ]
+        self.assertEqual(plan_ordered_nodes(100, 1000, nodes)["nodeId"], "main")
+        nodes[2]["taskQueueCount"] = 1
+        self.assertEqual(plan_ordered_nodes(100, 1000, nodes),
+                         {"decision": "wait", "reason": "nodes_busy"})
+
+    def test_ordered_fleet_requires_each_requested_profile_and_feature(self):
+        nodes = [
+            {"id": "cluster", "ready": True, "taskQueueCount": 0, "maxImages": 1000,
+             "allowedProfiles": ["odm"], "features": ["photo"]},
+            {"id": "main", "ready": True, "taskQueueCount": 0, "maxImages": None,
+             "allowedProfiles": ["odm", "treedar"], "features": ["photo", "lidar"]},
+        ]
+        result = plan_ordered_nodes(50, 100, nodes, required_profile="treedar",
+                                    required_features=("lidar",))
+        self.assertEqual(result["nodeId"], "main")
+        self.assertEqual(plan_ordered_nodes(50, 100, nodes, required_features=("gaussian",)),
+                         {"decision": "wait", "reason": "no_node_with_required_capabilities"})
+
+    def test_ordered_fleet_rejects_duplicate_or_unbounded_inventories(self):
+        node = {"id": "cluster", "ready": True, "taskQueueCount": 0}
+        for nodes in ([], [node] * 9, [node, dict(node)], [dict(node, id="bad node")]):
+            with self.subTest(nodes=nodes), self.assertRaises(ValueError):
+                plan_ordered_nodes(0, 0, nodes)
+
+    def test_invalid_live_engine_limit_fails_closed_for_that_node(self):
+        nodes = [
+            {"id": "cluster", "ready": True, "taskQueueCount": 0, "maxImages": True},
+            {"id": "main", "ready": True, "taskQueueCount": 0, "maxImages": None},
+        ]
+        self.assertEqual(plan_ordered_nodes(100, 100, nodes)["nodeId"], "main")
+
+    def test_malformed_legacy_node_probe_fails_closed(self):
+        self.assertEqual(plan(50, 100, None, self.main, 1000, 20_000),
+                         {"decision": "wait", "reason": "local_unavailable"})
+        self.assertEqual(plan(1500, 100, self.local, None, 1000, 20_000),
+                         {"decision": "wait", "reason": "main_unavailable"})
 
 
 if __name__ == "__main__":

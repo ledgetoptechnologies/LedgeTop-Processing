@@ -97,14 +97,12 @@ class ReferenceWorkerAPI:
         if job is None:
             return {'job': None, 'execution': None}
         # Discovery remains advisory. Read the immutable submission and bind it
-        # to the same current global head within one SQLite read snapshot.
+        # to the same currently selected node/job pair within one snapshot.
         with self.store.queue._db() as db:
-            db.execute('BEGIN')
-            head = db.execute("SELECT id FROM jobs WHERE status='queued' ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq LIMIT 1").fetchone()
-            if (not head or head['id'] != job['jobId']
-                    or db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone()
-                    or self.store.queue._node(db, identity['node_id'])['state'] not in ('active', 'scheduled')):
-                raise Conflict('advisory queue head changed')
+            db.execute('BEGIN IMMEDIATE')
+            candidate = self.store._candidate_row(db, identity['node_id'])
+            if candidate is None or candidate['job_id'] != job['jobId']:
+                raise Conflict('advisory node selection changed')
             row = self.store._row(db, job['jobId'])
             bound = ('jobId', 'generation', 'environment', 'manifestSha256', 'pipelineDigest')
             current = self.store._public(row)
