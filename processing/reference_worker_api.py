@@ -13,6 +13,7 @@ from . import reference_protocol as protocol
 from .maintenance import Conflict
 from .reference_api import Response
 from .reference_transfer import OBJECT_PREFIX, TransferError, validate_grant
+from .source_range_transfer import OBJECT_PREFIX as SOURCE_RANGE_OBJECT_PREFIX, RENEWAL_PATH, RENEWAL_ACK_PATH
 
 
 PREFIX = "/ltds/worker/v1"
@@ -40,6 +41,25 @@ class _SourceBrokerStream:
         if not self.closed:
             self.closed = True
             self.reader.close()
+
+
+class _SourceRangeBrokerStream(_SourceBrokerStream):
+    def __init__(self, reader, *, byte_size, file_identity):
+        super().__init__(reader, byte_size=byte_size)
+        self.file_identity = file_identity
+
+    def chunks(self):
+        while self.remaining:
+            chunk=self.reader.read(min(64*1024,self.remaining))
+            if not isinstance(chunk,bytes) or not chunk or len(chunk)>self.remaining:
+                raise OSError('source range changed during delivery')
+            self.remaining-=len(chunk)
+            yield chunk
+        info = __import__('os').fstat(self.reader.fileno())
+        identity = (info.st_dev,info.st_ino,info.st_size,info.st_mode,info.st_nlink,
+                    info.st_uid,info.st_mtime_ns,info.st_ctime_ns)
+        if identity != self.file_identity:
+            raise OSError('source object changed during range delivery')
 
 
 class ReferenceWorkerAPI:
@@ -152,6 +172,62 @@ class ReferenceWorkerAPI:
         except Exception:
             return self._error(503, "source_storage_unavailable")
 
+    def _source_range_object(self, path, headers):
+        import re
+        from .reference_binary import BinaryResponse
+        match = re.fullmatch(re.escape(SOURCE_RANGE_OBJECT_PREFIX) + r"([A-Za-z0-9][A-Za-z0-9_-]{0,127})", path)
+        if match is None or self.source_spool is None:
+            return self._error(404,"not_found")
+        authorization = self._header(headers,'Authorization')
+        if authorization is None or not authorization.startswith('Bearer '):
+            return self._error(401,'source_grant_required')
+        token = authorization[7:]
+        raw_range = self._header(headers,'Range')
+        range_match = re.fullmatch(r'bytes=(0|[1-9][0-9]{0,15})-(0|[1-9][0-9]{0,15})',raw_range or '')
+        request_id = self._header(headers,'X-Processing-Request-ID')
+        if (not token.isascii() or not 32 <= len(token) <= 4096 or range_match is None
+                or not re.fullmatch(r'[a-f0-9]{64}',request_id or '')
+                or self._header(headers,'Accept-Encoding') not in (None,'identity')):
+            return self._error(400,'invalid_source_range')
+        try:
+            start,end=map(int,range_match.groups())
+            if end < start or end > protocol.MAX_SAFE_INTEGER:
+                return self._error(416,'invalid_source_range')
+            reader, receipt = self.store.source_range_for_grant(token,match[1],range_start=start,
+                range_length=end-start+1,request_id=request_id,if_match=self._header(headers,'If-Match'),
+                source_spool=self.source_spool)
+            stream=_SourceRangeBrokerStream(reader,byte_size=receipt['rangeLength'],
+                file_identity=receipt['fileIdentity'])
+            return BinaryResponse(stream=stream,status=206,headers={
+                'Content-Type':'application/octet-stream','Content-Length':str(receipt['rangeLength']),
+                'Content-Range':f"bytes {start}-{end}/{receipt['byteSize']}",
+                'ETag':'"sha256-'+receipt['sha256']+'"','X-Processing-Request-ID':request_id,
+                'Accept-Ranges':'bytes','Cache-Control':'no-store'})
+        except (Conflict,TransferError):
+            return self._error(409,'source_range_unavailable')
+        except Exception:
+            return self._error(503,'source_storage_unavailable')
+
+    def _source_renewal(self, path, body):
+        if self.source_spool is None:
+            return self._error(503,'renewal_authority_unavailable')
+        try:
+            request=protocol.decode_submission(body)
+            if path == RENEWAL_PATH:
+                response=self.store.renew_source_transfer_grant(request,source_spool=self.source_spool)
+            else:
+                response=self.store.acknowledge_source_transfer_grant(request)
+            return Response(200,response)
+        except Conflict as error:
+            code=str(error)
+            if code in ('grant_not_expired','renewal_authority_unavailable'):
+                return self._error(409,code)
+            return self._error(409,'source_renewal_unavailable')
+        except (ValueError,TypeError):
+            return self._error(400,'invalid_source_renewal')
+        except Exception:
+            return self._error(503,'renewal_authority_unavailable')
+
     def _next(self, identity):
         job = self.store.next_for_node(identity['node_id'])
         if job is None:
@@ -181,6 +257,14 @@ class ReferenceWorkerAPI:
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
         if protected_transport is not True:
             return self._error(503, "protected_transport_required")
+        if isinstance(path,str) and path.startswith(SOURCE_RANGE_OBJECT_PREFIX):
+            if method != 'GET' or body:
+                return self._error(405,'method_not_allowed')
+            return self._source_range_object(path,headers)
+        if path in (RENEWAL_PATH,RENEWAL_ACK_PATH):
+            if method != 'POST' or not body:
+                return self._error(405,'method_not_allowed')
+            return self._source_renewal(path,body)
         if isinstance(path, str) and path.startswith(OBJECT_PREFIX):
             if method != "GET" or body:
                 return self._error(405, "method_not_allowed")

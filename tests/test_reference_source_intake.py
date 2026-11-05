@@ -105,7 +105,7 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
         self.payload["manifest"]["totalBytes"] = len(image_bytes) + len(derived_bytes)
         self.rehash()
 
-    def _make_reserved_source_job(self, directory, spool, claim_suffix):
+    def _make_reserved_source_job(self, directory, spool, claim_suffix, *, source_range_v2=False):
         worker_token = "synthetic-worker-token-012345"
         queue = Queue(directory)
         queue.allowed_profiles.add(PROFILE)
@@ -152,6 +152,11 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
             "generation": claim.body["generation"], "expiresAt": expires,
             "manifestSha256": job["manifestSha256"], "byteBudget": self.payload["manifest"]["totalBytes"],
             "nonce": "source-nonce-" + claim_suffix}
+        if source_range_v2:
+            from processing.source_range_transfer import build_source_transfer_request
+            reservation = build_source_transfer_request(store.get(job['jobId'],private=True),
+                reservation_id=reservation["reservationId"], expires_at=expires,
+                nonce=reservation["nonce"])
         reserved = control.handle("POST", f"/ltds/worker/v1/jobs/{job['jobId']}/reservation",
             {"Authorization": "Bearer " + worker_token},
             p.canonical_json({"claimToken": claim_token, "transferRequest": reservation}),

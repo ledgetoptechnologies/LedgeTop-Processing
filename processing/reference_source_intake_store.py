@@ -12,6 +12,7 @@ from .maintenance import Conflict
 from . import reference_protocol as protocol
 
 PROFILE = "reference-pipeline-v1"
+SOURCE_RANGE_GRANT_TTL_SECONDS = 6 * 60 * 60
 
 _SOURCE_INTAKE_FIELDS = {"schemaVersion", "submissionId", "providerTaskId", "sourceManifest",
                          "viewerTaskId", "derivedManifest", "manifest", "pipeline", "capabilityFingerprint",
@@ -24,7 +25,411 @@ def _json(value):
     return protocol.canonical_json(value).decode("utf-8")
 
 
+def _open_pinned_source(source_spool, job_id, generation, object_id, expected):
+    """Open one pinned spool inode without hashing it again for each range."""
+    import os
+    import stat
+    source_spool._assert_mount()
+    key = source_spool._key(job_id, generation, object_id)
+    target = source_spool.root / key
+    if source_spool._directory(job_id, generation) != target.parent:
+        raise Conflict('source spool directory changed')
+    fd = os.open(target, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0))
+    try:
+        info = os.fstat(fd)
+        identity = (info.st_dev, info.st_ino, info.st_size, info.st_mode, info.st_nlink,
+                    info.st_uid, info.st_mtime_ns, info.st_ctime_ns)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or (os.name != 'nt' and info.st_uid != os.geteuid())
+                or info.st_dev != source_spool._mount_identity[0]
+                or (info.st_size, str(info.st_dev), str(info.st_ino), info.st_mode, info.st_nlink,
+                    info.st_uid, info.st_mtime_ns, info.st_ctime_ns)
+                    != (expected['byte_size'], str(expected['device']), str(expected['inode']), expected['mode'],
+                        expected['link_count'], expected['owner_uid'], expected['mtime_ns'], expected['ctime_ns'])):
+            raise Conflict('source object pin changed')
+        return os.fdopen(fd, 'rb'), identity
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _ensure_source_range_schema(queue):
+    """Additive broker journal tables; legacy grant rows remain unchanged."""
+    if getattr(queue,'_source_range_schema_ready',False):
+        return
+    with queue._db() as db:
+        db.executescript('''
+            CREATE TABLE IF NOT EXISTS reference_source_grant_renewals (
+              job_id TEXT NOT NULL REFERENCES reference_jobs(job_id), sequence INTEGER NOT NULL,
+              renewal_id TEXT NOT NULL, request_json TEXT NOT NULL, request_sha256 TEXT NOT NULL,
+              previous_grant_sha256 TEXT NOT NULL, successor_grant_json TEXT NOT NULL,
+              successor_sha256 TEXT NOT NULL, acked INTEGER NOT NULL DEFAULT 0 CHECK(acked IN (0,1)),
+              created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY(job_id,sequence), UNIQUE(renewal_id));
+            CREATE TABLE IF NOT EXISTS reference_source_range_usage (
+              job_id TEXT NOT NULL REFERENCES reference_jobs(job_id), generation INTEGER NOT NULL,
+              reservation_id TEXT NOT NULL, requests_used INTEGER NOT NULL DEFAULT 0,
+              bytes_used INTEGER NOT NULL DEFAULT 0, attempts_used INTEGER NOT NULL DEFAULT 0,
+              PRIMARY KEY(job_id,generation));
+            CREATE TABLE IF NOT EXISTS reference_source_range_requests (
+              job_id TEXT NOT NULL, generation INTEGER NOT NULL, request_id TEXT NOT NULL,
+              object_id TEXT NOT NULL, range_start INTEGER NOT NULL, range_length INTEGER NOT NULL,
+              attempts_used INTEGER NOT NULL DEFAULT 0,
+              PRIMARY KEY(job_id,generation,request_id));
+            CREATE TABLE IF NOT EXISTS reference_source_object_pins (
+              job_id TEXT NOT NULL REFERENCES reference_jobs(job_id), generation INTEGER NOT NULL,
+              object_id TEXT NOT NULL, byte_size INTEGER NOT NULL, sha256 TEXT NOT NULL,
+              mount_id TEXT NOT NULL, device TEXT NOT NULL, inode TEXT NOT NULL,
+              mode INTEGER NOT NULL, link_count INTEGER NOT NULL, owner_uid INTEGER NOT NULL,
+              mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL,
+              PRIMARY KEY(job_id,generation,object_id));
+        ''')
+    queue._source_range_schema_ready=True
+
+
 class ReferenceSourceIntakeMethods:
+    def renew_source_transfer_grant(self, request, *, source_spool, clock=None):
+        """Create or replay one durable, claim-bound V2 grant successor."""
+        _ensure_source_range_schema(self.queue)
+        import hashlib
+        import hmac
+        import math
+        from datetime import datetime, timezone
+        from .source_range_transfer import MAX_RENEWAL_SEQUENCE, validate_source_grant
+
+        if source_spool is None or type(request) is not dict:
+            raise Conflict('renewal_authority_unavailable')
+        protocol._closed(request, ('protocol','renewalId','sequence','previousGrantSha256','previousGrant'),
+                         'source range renewal')
+        if request.get('protocol') != 'source-range-v2-renewal':
+            raise Conflict('source renewal request invalid')
+        protocol._slug(request.get('renewalId'), 'renewal ID')
+        sequence = request.get('sequence')
+        if type(sequence) is not int or not 1 <= sequence <= MAX_RENEWAL_SEQUENCE:
+            raise Conflict('source renewal sequence invalid')
+        previous = request.get('previousGrant')
+        if type(previous) is not dict:
+            raise Conflict('source renewal grant invalid')
+        protocol._hash(request.get('previousGrantSha256'),'previous grant digest')
+        previous_sha = hashlib.sha256(protocol.canonical_json(previous)).hexdigest()
+        if not hmac.compare_digest(previous_sha, request.get('previousGrantSha256', '')):
+            raise Conflict('source renewal grant digest mismatch')
+        request_encoded = _json(request)
+        request_sha = protocol.digest(request)
+        read_clock = time.time if clock is None else clock
+        previous_now = None
+
+        def now():
+            nonlocal previous_now
+            value = read_clock()
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise Conflict('invalid source grant clock')
+            if previous_now is not None and value < previous_now:
+                raise Conflict('source grant clock moved backwards')
+            previous_now = value
+            return value
+
+        def capture(db, job_id):
+            row = self._row(db, job_id)
+            claim = db.execute('''SELECT request_id,job_id,node_id,worker_id,instance_id,token
+                FROM reference_claims WHERE job_id=?''', (job_id,)).fetchone()
+            receipts = db.execute('''SELECT generation,object_id,object_kind,byte_size,sha256,mount_id,storage_key,receipt_json
+                FROM reference_source_object_receipts WHERE job_id=? ORDER BY generation,object_id''',
+                (job_id,)).fetchall()
+            grant = db.execute('SELECT grant_json,digest FROM reference_transfer_grants WHERE job_id=?',
+                               (job_id,)).fetchone()
+            pins = db.execute('''SELECT generation,object_id,byte_size,sha256,mount_id,device,inode,mode,
+                link_count,owner_uid,mtime_ns,ctime_ns FROM reference_source_object_pins
+                WHERE job_id=? ORDER BY generation,object_id''',(job_id,)).fetchall()
+            return (row, dict(claim) if claim else None, [dict(x) for x in receipts],
+                    dict(grant) if grant else None, [dict(x) for x in pins])
+
+        job_id = previous.get('jobId')
+        protocol._slug(job_id, 'job ID')
+        with self.queue._db() as db:
+            # Exact retries, including retries after a lost response, get the
+            # same already-minted successor. Never mint on a changed request.
+            prior = db.execute('''SELECT request_json,request_sha256,previous_grant_sha256,
+                successor_grant_json,successor_sha256 FROM reference_source_grant_renewals
+                WHERE job_id=? AND (sequence=? OR renewal_id=?)''',
+                               (job_id, sequence, request['renewalId'])).fetchall()
+            if prior:
+                if (len(prior) != 1 or prior[0]['request_json'] != request_encoded
+                        or prior[0]['request_sha256'] != request_sha
+                        or prior[0]['previous_grant_sha256'] != previous_sha
+                        or prior[0]['successor_sha256'] != protocol.digest(json.loads(prior[0]['successor_grant_json']))):
+                    raise Conflict('source renewal replay conflict')
+                successor = json.loads(prior[0]['successor_grant_json'])
+                return {'protocol':'source-range-v2-renewal','renewalId':request['renewalId'],
+                    'sequence':sequence,'previousGrantSha256':previous_sha,'grant':successor}
+            db.execute('BEGIN')
+            row, claim, receipt_rows, grant_row, pin_rows = capture(db, job_id)
+            latest = db.execute('SELECT COALESCE(MAX(sequence),0) FROM reference_source_grant_renewals WHERE job_id=?',
+                                (job_id,)).fetchone()[0]
+            if latest + 1 != sequence:
+                raise Conflict('source renewal sequence conflict')
+            snapshot = {'row': dict(row), 'claim': claim, 'receipts': receipt_rows,
+                        'grant': grant_row, 'pins': pin_rows, 'latest': latest}
+            db.commit()
+
+        request_now = now()
+        if (row['status'] != 'running' or row['phase'] != 'fetching'
+                or claim is None or claim['token'] != row['private_claim_token']
+                or not row['claim_hash']
+                or not hmac.compare_digest(hashlib.sha256(claim['token'].encode()).hexdigest(), row['claim_hash'])):
+            raise Conflict('source renewal authority unavailable')
+        if (grant_row is None or grant_row['digest'] != protocol.digest(previous)
+                or json.loads(grant_row['grant_json']) != previous):
+            raise Conflict('source renewal previous grant changed')
+        private = self._record(row, True)
+        try:
+            source_receipt=json.loads(row['source_receipt_json'])
+            derived_receipt=json.loads(row['derived_receipt_json'])
+            if (type(source_receipt) is not dict or type(derived_receipt) is not dict
+                    or protocol.digest(source_receipt)!=row['source_receipt_sha']
+                    or protocol.digest(derived_receipt)!=row['derived_receipt_sha']
+                    or source_receipt.get('receiptType')!='source_retention'
+                    or derived_receipt.get('receiptType')!='attempt_derived_input'
+                    or (source_receipt.get('jobId'),source_receipt.get('attemptId'),source_receipt.get('generation'),
+                        source_receipt.get('environment'),source_receipt.get('pipelineManifestSha256'),
+                        source_receipt.get('sourceManifestSha256')) !=
+                       (job_id,row['submission_id'],row['generation'],row['environment'],
+                        row['pipeline_manifest_sha'],row['source_manifest_sha'])
+                    or (derived_receipt.get('jobId'),derived_receipt.get('attemptId'),derived_receipt.get('generation'),
+                        derived_receipt.get('environment'),derived_receipt.get('derivedManifestSha256')) !=
+                       (job_id,row['submission_id'],row['generation'],row['environment'],row['derived_manifest_sha'])):
+                raise Conflict('source renewal retention receipts changed')
+            reservation_expiry = datetime.fromisoformat(
+                private['transferRequest']['expiresAt'].replace('Z','+00:00')).timestamp()
+            if not math.isfinite(reservation_expiry) or reservation_expiry <= request_now:
+                raise Conflict('renewal_authority_unavailable')
+            old = validate_source_grant(previous, job=private, clock=lambda: request_now, allow_expired=True)
+            if old.expires > request_now:
+                raise Conflict('grant_not_expired')
+            source = json.loads(row['source_manifest_json'])
+            derived = json.loads(row['derived_manifest_json'])
+            expected = {item['id']: item for item in source['objects']}
+            expected.update({item['id']: item for item in derived['objects']})
+            granted_ids = {item.id for item in old.objects}
+            if not granted_ids or not granted_ids.issubset(expected) or len(receipt_rows) != len(expected):
+                raise Conflict('source renewal custody closure changed')
+            by_id = {item['object_id']: item for item in receipt_rows}
+            if set(by_id) != set(expected):
+                raise Conflict('source renewal custody receipt missing')
+            pins_by_id = {pin['object_id']:pin for pin in pin_rows if pin['generation']==row['generation']}
+            if len(pins_by_id)!=len(pin_rows) or set(pins_by_id)!=granted_ids:
+                raise Conflict('source renewal pins unavailable')
+            for item in old.objects:
+                stored = by_id[item.id]
+                if (stored['generation'] != row['generation'] or stored['byte_size'] != item.byte_size
+                        or stored['sha256'] != item.sha256 or stored['mount_id'] != source_spool.mount_id
+                        or stored['storage_key'] != source_spool.storage_key(job_id,row['generation'],item.id)):
+                    raise Conflict('source renewal custody binding changed')
+                receipt = json.loads(stored['receipt_json'])
+                if ((receipt.get('jobId'),receipt.get('generation'),receipt.get('objectId'),
+                     receipt.get('byteSize'),receipt.get('sha256'),receipt.get('mountId'),receipt.get('storageKey'))
+                        != (job_id,row['generation'],item.id,item.byte_size,item.sha256,
+                            source_spool.mount_id,stored['storage_key'])):
+                    raise Conflict('source renewal receipt changed')
+                reader,_identity = _open_pinned_source(source_spool,job_id,row['generation'],item.id,pins_by_id[item.id])
+                reader.close()
+            verified_at = now()
+            expiry = min(verified_at + SOURCE_RANGE_GRANT_TTL_SECONDS, reservation_expiry)
+            if expiry <= max(verified_at, old.expires):
+                raise Conflict('renewal_authority_unavailable')
+            grant_expiry = datetime.fromtimestamp(expiry, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z')
+            successor = dict(previous)
+            successor.update(expiresAt=grant_expiry, token=secrets.token_urlsafe(32))
+            validate_source_grant(successor, job=private, clock=lambda: verified_at)
+        except Conflict:
+            raise
+        except Exception:
+            raise Conflict('renewal_authority_unavailable') from None
+
+        response = {'protocol':'source-range-v2-renewal','renewalId':request['renewalId'],
+            'sequence':sequence,'previousGrantSha256':previous_sha,'grant':successor}
+        successor_encoded = _json(successor)
+        successor_sha = protocol.digest(successor)
+        commit_now = now()
+        if reservation_expiry <= commit_now or expiry <= commit_now or expiry <= old.expires:
+            raise Conflict('renewal_authority_unavailable')
+        validate_source_grant(successor,job=private,clock=lambda:commit_now)
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current, current_claim, current_receipts, current_grant, current_pins = capture(db, job_id)
+            current_latest = db.execute('SELECT COALESCE(MAX(sequence),0) FROM reference_source_grant_renewals WHERE job_id=?',
+                                        (job_id,)).fetchone()[0]
+            if (_json({'row':dict(current),'claim':current_claim,'receipts':current_receipts,
+                       'grant':current_grant,'pins':current_pins,'latest':current_latest})
+                    != _json(snapshot)):
+                raise Conflict('source renewal authority changed during verification')
+            latest = db.execute('SELECT COALESCE(MAX(sequence),0) FROM reference_source_grant_renewals WHERE job_id=?',
+                                (job_id,)).fetchone()[0]
+            if latest + 1 != sequence:
+                raise Conflict('source renewal sequence conflict')
+            db.execute('''INSERT INTO reference_source_grant_renewals
+                (job_id,sequence,renewal_id,request_json,request_sha256,previous_grant_sha256,
+                 successor_grant_json,successor_sha256) VALUES(?,?,?,?,?,?,?,?)''',
+                (job_id,sequence,request['renewalId'],request_encoded,request_sha,previous_sha,
+                 successor_encoded,successor_sha))
+        return response
+
+    def acknowledge_source_transfer_grant(self, request, *, clock=None):
+        """Install a previously returned successor only after its exact ACK."""
+        _ensure_source_range_schema(self.queue)
+        import hashlib
+        import hmac
+        from .source_range_transfer import validate_source_grant
+        protocol._closed(request, ('protocol','renewalId','sequence','grantSha256','token'), 'source renewal ACK')
+        if request.get('protocol') != 'source-range-v2-renewal-ack':
+            raise Conflict('source renewal ACK invalid')
+        protocol._slug(request.get('renewalId'), 'renewal ID')
+        protocol._hash(request.get('grantSha256'), 'source grant digest')
+        if type(request.get('sequence')) is not int or request['sequence'] < 1:
+            raise Conflict('source renewal ACK invalid')
+        token = request.get('token')
+        if type(token) is not str or not 1 <= len(token) <= 4096 or not token.isascii():
+            raise Conflict('source renewal ACK invalid')
+        token_sha = hashlib.sha256(token.encode('ascii')).hexdigest()
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('''SELECT job_id,sequence,successor_grant_json,successor_sha256,acked
+                FROM reference_source_grant_renewals WHERE renewal_id=? AND sequence=?''',
+                (request['renewalId'],request['sequence'])).fetchone()
+            if row is None:
+                raise Conflict('source renewal ACK unavailable')
+            job_id = row['job_id']; successor = json.loads(row['successor_grant_json'])
+            if (row['successor_sha256'] != request['grantSha256']
+                    or row['successor_sha256'] != protocol.digest(successor)
+                    or not hmac.compare_digest(successor.get('token',''),token)):
+                raise Conflict('source renewal ACK binding changed')
+            response = {'protocol':'source-range-v2-renewal-ack','renewalId':request['renewalId'],
+                'sequence':request['sequence'],'grantSha256':request['grantSha256']}
+            if row['acked']:
+                return response
+            current = self._row(db, job_id)
+            claim = db.execute('SELECT token FROM reference_claims WHERE job_id=?',(job_id,)).fetchone()
+            if (current['status'] != 'running' or current['phase'] != 'fetching'
+                    or claim is None or claim['token'] != current['private_claim_token']
+                    or not current['claim_hash']
+                    or not hmac.compare_digest(hashlib.sha256(claim['token'].encode()).hexdigest(),current['claim_hash'])):
+                raise Conflict('source renewal authority unavailable')
+            private = self._record(current, True)
+            validate_source_grant(successor, job=private, clock=clock or time.time)
+            current_grant = db.execute('SELECT grant_json FROM reference_transfer_grants WHERE job_id=?',(job_id,)).fetchone()
+            renew = db.execute('SELECT previous_grant_sha256 FROM reference_source_grant_renewals WHERE job_id=? AND sequence=?',
+                               (job_id,request['sequence'])).fetchone()
+            if current_grant is None or protocol.digest(json.loads(current_grant['grant_json'])) != renew['previous_grant_sha256']:
+                raise Conflict('source renewal predecessor changed')
+            db.execute('UPDATE reference_transfer_grants SET grant_json=?,digest=? WHERE job_id=?',
+                       (_json(successor),row['successor_sha256'],job_id))
+            db.execute('INSERT INTO reference_source_grant_tokens(token_sha256,job_id,generation) VALUES(?,?,?)',
+                       (token_sha,job_id,current['generation']))
+            db.execute('UPDATE reference_source_grant_renewals SET acked=1 WHERE job_id=? AND sequence=?',
+                       (job_id,request['sequence']))
+            return response
+
+    def source_range_for_grant(self, token, object_id, *, range_start, range_length,
+                               request_id, if_match, source_spool, clock=None):
+        """Authorize and open one canonical V2 range; client verifies the full object digest."""
+        _ensure_source_range_schema(self.queue)
+        import hashlib
+        import os
+        import stat
+        from .source_range_transfer import CHUNK_BYTES, _request_id, SourceIdentity, validate_source_grant
+        if type(token) is not str or not token or not token.isascii() or source_spool is None:
+            raise Conflict('source grant unavailable')
+        token_sha = hashlib.sha256(token.encode('ascii')).hexdigest()
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            token_row = db.execute('SELECT job_id,generation FROM reference_source_grant_tokens WHERE token_sha256=?',(token_sha,)).fetchone()
+            if token_row is None:
+                raise Conflict('source grant unavailable')
+            job = self._row(db,token_row['job_id'])
+            claim = db.execute('SELECT token FROM reference_claims WHERE job_id=?',(token_row['job_id'],)).fetchone()
+            grant_row = db.execute('SELECT grant_json,digest FROM reference_transfer_grants WHERE job_id=?',(token_row['job_id'],)).fetchone()
+            if (grant_row is None or token_row['generation'] != job['generation'] or job['status'] != 'running'
+                    or job['phase'] != 'fetching' or job['source_state'] != 'accepted' or job['derived_state'] != 'accepted'
+                    or claim is None or claim['token'] != job['private_claim_token'] or not job['claim_hash']
+                    or not hmac.compare_digest(hashlib.sha256(claim['token'].encode('ascii')).hexdigest(),job['claim_hash'])):
+                raise Conflict('source grant execution is not active')
+            grant = json.loads(grant_row['grant_json'])
+            if grant_row['digest'] != protocol.digest(grant) or grant.get('token') != token:
+                raise Conflict('source grant unavailable')
+            private = self._record(job,True)
+            checked = validate_source_grant(grant,job=private,clock=clock or time.time)
+            item = next((entry for entry in checked.objects if entry.id == object_id),None)
+            if item is None or type(range_start) is not int or type(range_length) is not int:
+                raise Conflict('source range unavailable')
+            expected_length = min(CHUNK_BYTES,item.byte_size-range_start)
+            if (range_start < 0 or range_start >= item.byte_size or range_start % CHUNK_BYTES
+                    or range_length != expected_length or if_match != '"sha256-'+item.sha256+'"'):
+                raise Conflict('source range identity mismatch')
+            identity = SourceIdentity(grant['environment'],grant['jobId'],grant['reservationId'],
+                grant['generation'],grant['manifestSha256'],grant['sourceVersion'])
+            identity_json = json.dumps(identity.canonical(),sort_keys=True,separators=(',',':'))
+            if request_id != _request_id(identity_json,item,range_start,range_length):
+                raise Conflict('source range request identity mismatch')
+            usage = db.execute('SELECT requests_used,bytes_used,attempts_used,reservation_id FROM reference_source_range_usage WHERE job_id=? AND generation=?',
+                               (token_row['job_id'],job['generation'])).fetchone()
+            if usage is None:
+                db.execute('INSERT INTO reference_source_range_usage(job_id,generation,reservation_id) VALUES(?,?,?)',
+                           (token_row['job_id'],job['generation'],grant['reservationId']))
+                used = (0,0,0,grant['reservationId'])
+            else:
+                used = tuple(usage)
+            if used[3] != grant['reservationId']:
+                raise Conflict('source range reservation changed')
+            prior = db.execute('SELECT object_id,range_start,range_length,attempts_used FROM reference_source_range_requests WHERE job_id=? AND generation=? AND request_id=?',
+                               (token_row['job_id'],job['generation'],request_id)).fetchone()
+            if prior:
+                if (prior['object_id'],prior['range_start'],prior['range_length']) != (object_id,range_start,range_length):
+                    raise Conflict('source range replay conflict')
+                attempts = prior['attempts_used']+1
+            else:
+                if used[0]+1 > grant['requestBudget'] or used[1]+range_length > grant['byteBudget']:
+                    raise Conflict('source range budget exhausted')
+                attempts = 1
+                db.execute('INSERT INTO reference_source_range_requests(job_id,generation,request_id,object_id,range_start,range_length,attempts_used) VALUES(?,?,?,?,?,?,0)',
+                           (token_row['job_id'],job['generation'],request_id,object_id,range_start,range_length))
+                db.execute('UPDATE reference_source_range_usage SET requests_used=requests_used+1,bytes_used=bytes_used+? WHERE job_id=? AND generation=?',
+                           (range_length,token_row['job_id'],job['generation']))
+            if used[2]+1 > grant['attemptBudget']:
+                raise Conflict('source range attempt budget exhausted')
+            db.execute('UPDATE reference_source_range_requests SET attempts_used=? WHERE job_id=? AND generation=? AND request_id=?',
+                       (attempts,token_row['job_id'],job['generation'],request_id))
+            db.execute('UPDATE reference_source_range_usage SET attempts_used=attempts_used+1 WHERE job_id=? AND generation=?',
+                       (token_row['job_id'],job['generation']))
+            receipt_row = db.execute('''SELECT byte_size,sha256,mount_id,storage_key,receipt_json FROM reference_source_object_receipts
+                WHERE job_id=? AND generation=? AND object_id=?''',(token_row['job_id'],job['generation'],object_id)).fetchone()
+            pin = db.execute('''SELECT byte_size,sha256,mount_id,device,inode,mode,link_count,owner_uid,mtime_ns,ctime_ns
+                FROM reference_source_object_pins WHERE job_id=? AND generation=? AND object_id=?''',
+                (token_row['job_id'],job['generation'],object_id)).fetchone()
+            if (receipt_row is None or (receipt_row['byte_size'],receipt_row['sha256'],receipt_row['mount_id'])
+                    != (item.byte_size,item.sha256,source_spool.mount_id)
+                    or receipt_row['storage_key'] != source_spool.storage_key(token_row['job_id'],job['generation'],object_id)
+                    or pin is None or (pin['byte_size'],pin['sha256'],pin['mount_id']) !=
+                        (item.byte_size,item.sha256,source_spool.mount_id)):
+                raise Conflict('source object receipt changed')
+            expected_receipt={'schemaVersion':1,'jobId':token_row['job_id'],'generation':job['generation'],
+                'objectId':object_id,'storageKey':receipt_row['storage_key'],'byteSize':item.byte_size,
+                'sha256':item.sha256,'mountId':source_spool.mount_id}
+            if receipt_row['receipt_json'] != _json(expected_receipt):
+                raise Conflict('source object receipt changed')
+            pin_row=dict(pin)
+        # The accepted source receipt was fully hashed before initial grant
+        # minting, and the worker verifies the assembled full-object digest
+        # before use. Here enforce no-follow, regular inode, owner, mount, link,
+        # and size checks without rereading a 50GB object for every 8MB range.
+        try:
+            reader,file_identity=_open_pinned_source(source_spool,token_row['job_id'],job['generation'],object_id,pin_row)
+            import os
+            os.lseek(reader.fileno(),range_start,os.SEEK_SET)
+            return reader, {'byteSize':item.byte_size,'rangeStart':range_start,'rangeLength':range_length,
+                'sha256':item.sha256,'fileIdentity':file_identity}
+        except Exception:
+            raise Conflict('source_storage_unavailable') from None
+
     def _source_completion_ack(self, row, receipt_rows):
         """Project the immutable intake completion acknowledgement from durable receipts.
 
@@ -527,8 +932,10 @@ class ReferenceSourceIntakeMethods:
 
     def mint_source_transfer_grant(self, job_id, *, source_spool, clock=None):
         """Seal a claim-bound broker grant only after durable source intake acceptance."""
+        _ensure_source_range_schema(self.queue)
         from datetime import datetime
         from .reference_transfer import validate_grant
+        from .source_range_transfer import validate_source_grant
         read_clock = time.time if clock is None else clock
         previous_clock = None
 
@@ -554,6 +961,9 @@ class ReferenceSourceIntakeMethods:
                                    (job_id,)).fetchone()
             token_rows = db.execute('''SELECT token_sha256,job_id,generation FROM reference_source_grant_tokens
                 WHERE job_id=? ORDER BY token_sha256''', (job_id,)).fetchall()
+            pins = db.execute('''SELECT generation,object_id,byte_size,sha256,mount_id,device,inode,mode,
+                link_count,owner_uid,mtime_ns,ctime_ns FROM reference_source_object_pins
+                WHERE job_id=? ORDER BY generation,object_id''',(job_id,)).fetchall()
             claim_value = dict(claim) if claim is not None else None
             snapshot = {
                 'row': {key: row[key] for key in (
@@ -568,6 +978,7 @@ class ReferenceSourceIntakeMethods:
                 'receipts': [dict(item) for item in receipts],
                 'grant': dict(grant_row) if grant_row is not None else None,
                 'tokens': [dict(item) for item in token_rows],
+                'pins': [dict(item) for item in pins],
             }
             return row, claim_value, snapshot
 
@@ -593,7 +1004,9 @@ class ReferenceSourceIntakeMethods:
         request = json.loads(row['transfer_json']) if row['transfer_json'] else None
         if not isinstance(request, dict):
             raise Conflict('worker reservation is unavailable')
+        source_range_v2 = request.get('protocol') == 'source-range-v2'
         try:
+            verified_pins = []
             expiry = datetime.fromisoformat(request['expiresAt'].replace('Z', '+00:00')).timestamp()
         except (KeyError, ValueError, AttributeError, OverflowError, OSError):
             raise Conflict('worker reservation expiry is invalid') from None
@@ -642,8 +1055,23 @@ class ReferenceSourceIntakeMethods:
                             job_id, row['generation'], obj['id'])):
                     raise Conflict('pipeline source receipt binding changed')
                 receipt = json.loads(stored['receipt_json'])
-                actual = source_spool.verify_object(job_id=job_id, generation=row['generation'],
-                    object_id=obj['id'], byte_size=obj['byteSize'], sha256=obj['sha256'])
+                if source_range_v2:
+                    reader,actual = source_spool.open_verified_object(job_id=job_id,generation=row['generation'],
+                        object_id=obj['id'],byte_size=obj['byteSize'],sha256=obj['sha256'])
+                    try:
+                        import os,stat
+                        info=os.fstat(reader.fileno())
+                        identity=(info.st_dev,info.st_ino,info.st_size,info.st_mode,info.st_nlink,
+                            info.st_uid,info.st_mtime_ns,info.st_ctime_ns)
+                        if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:
+                            raise Conflict('source object inode is not privately retained')
+                        verified_pins.append((obj['id'],obj['byteSize'],obj['sha256'],source_spool.mount_id,
+                            str(identity[0]),str(identity[1]),identity[3],identity[4],identity[5],identity[6],identity[7]))
+                    finally:
+                        reader.close()
+                else:
+                    actual = source_spool.verify_object(job_id=job_id, generation=row['generation'],
+                        object_id=obj['id'], byte_size=obj['byteSize'], sha256=obj['sha256'])
                 if _json(actual) != _json(receipt):
                     raise Conflict('pipeline source object is no longer retained')
         except (KeyError, TypeError, ValueError):
@@ -658,8 +1086,8 @@ class ReferenceSourceIntakeMethods:
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             current, current_claim, current_snapshot = capture(db)
-            before_cas = {key: value for key, value in snapshot.items() if key not in ('grant', 'tokens')}
-            after_cas = {key: value for key, value in current_snapshot.items() if key not in ('grant', 'tokens')}
+            before_cas = {key: value for key, value in snapshot.items() if key not in ('grant', 'tokens', 'pins')}
+            after_cas = {key: value for key, value in current_snapshot.items() if key not in ('grant', 'tokens', 'pins')}
             if _json(after_cas) != _json(before_cas):
                 raise Conflict('source grant authority changed during verification')
             if (current['status'] != 'running' or current['phase'] != 'awaiting_transfer'
@@ -680,22 +1108,58 @@ class ReferenceSourceIntakeMethods:
                             'token_sha256': token_hash, 'job_id': job_id,
                             'generation': current['generation']}
                         or any(persisted.get(key) != request.get(key) for key in (
-                            'reservationId','generation','expiresAt','manifestSha256','byteBudget','nonce'))
+                            ('protocol','reservationId','generation','manifestSha256','byteBudget','nonce',
+                             'sourceVersion','objectIds','chunkBytes','requestBudget','attemptBudget')
+                            if source_range_v2 else
+                             ('reservationId','generation','expiresAt','manifestSha256','byteBudget','nonce')))
                         or persisted.get('jobId') != job_id
                         or persisted.get('environment') != current['environment']
                         or persisted.get('objectIds') != [item['id'] for item in objects]):
                     raise Conflict('persisted source grant binding changed')
+                if source_range_v2:
+                    expected_pins = [{
+                        'generation':current['generation'],'object_id':item[0], 'byte_size':item[1],
+                        'sha256':item[2], 'mount_id':item[3], 'device':item[4], 'inode':item[5],
+                        'mode':item[6], 'link_count':item[7], 'owner_uid':item[8],
+                        'mtime_ns':item[9], 'ctime_ns':item[10]} for item in verified_pins]
+                    expected_pins.sort(key=lambda pin:(pin['generation'],pin['object_id']))
+                    if _json(expected_pins) != _json(current_snapshot['pins']):
+                        raise Conflict('persisted source grant pins changed')
                 commit_now = checked_now()
-                validate_grant(persisted, job=self._record(current, True), clock=lambda: commit_now)
+                if source_range_v2:
+                    validate_source_grant(persisted, job=self._record(current, True), clock=lambda: commit_now)
+                else:
+                    validate_grant(persisted, job=self._record(current, True), clock=lambda: commit_now)
                 return persisted
+            if source_range_v2:
+                if snapshot['pins']:
+                    raise Conflict('source range pins exist before initial grant')
             commit_now = checked_now()
             if commit_now >= expiry:
                 raise Conflict('worker reservation expired during source verification')
-            grant = {key: request[key] for key in
-                     ('reservationId', 'generation', 'expiresAt', 'manifestSha256', 'byteBudget', 'nonce')}
-            grant.update(jobId=job_id, environment=current['environment'],
-                         objectIds=[item['id'] for item in objects], token=secrets.token_urlsafe(32))
-            validate_grant(grant, job=self._record(current, True), clock=lambda: commit_now)
+            if source_range_v2:
+                from datetime import datetime, timezone
+                reservation_expiry = datetime.fromisoformat(request['expiresAt'].replace('Z','+00:00')).timestamp()
+                grant_expiry = min(commit_now + SOURCE_RANGE_GRANT_TTL_SECONDS, reservation_expiry)
+                if grant_expiry <= commit_now:
+                    raise Conflict('worker reservation expired during source verification')
+                grant = {key: request[key] for key in ('protocol','reservationId','generation','manifestSha256',
+                    'sourceVersion','objectIds','chunkBytes','requestBudget','byteBudget','nonce','attemptBudget')}
+                grant.update(expiresAt=datetime.fromtimestamp(grant_expiry,timezone.utc).isoformat(
+                    timespec='milliseconds').replace('+00:00','Z'), jobId=job_id,
+                    environment=current['environment'], token=secrets.token_urlsafe(32))
+                validate_source_grant(grant, job=self._record(current, True), clock=lambda: commit_now)
+                for item in verified_pins:
+                    db.execute('''INSERT INTO reference_source_object_pins
+                        (job_id,generation,object_id,byte_size,sha256,mount_id,device,inode,mode,
+                         link_count,owner_uid,mtime_ns,ctime_ns) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                        (job_id,row['generation'],*item))
+            else:
+                grant = {key: request[key] for key in
+                         ('reservationId', 'generation', 'expiresAt', 'manifestSha256', 'byteBudget', 'nonce')}
+                grant.update(jobId=job_id, environment=current['environment'],
+                             objectIds=[item['id'] for item in objects], token=secrets.token_urlsafe(32))
+                validate_grant(grant, job=self._record(current, True), clock=lambda: commit_now)
             encoded = _json(grant)
             digest = protocol.digest(grant)
             token_sha = hashlib.sha256(grant['token'].encode('ascii')).hexdigest()

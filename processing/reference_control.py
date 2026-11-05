@@ -23,8 +23,10 @@ class ReferenceControlAPI:
 
     def handle(self, method, path, headers, body=b'', *, protected_transport=False):
         from .reference_transfer import OBJECT_PREFIX
+        from .source_range_transfer import OBJECT_PREFIX as SOURCE_RANGE_OBJECT_PREFIX, RENEWAL_PATH, RENEWAL_ACK_PATH
         api = self.worker if (isinstance(path, str) and
-            (path.startswith(WORKER_PREFIX + '/') or path.startswith(OBJECT_PREFIX))) else self.viewer
+            (path.startswith(WORKER_PREFIX + '/') or path.startswith(OBJECT_PREFIX)
+             or path.startswith(SOURCE_RANGE_OBJECT_PREFIX) or path in (RENEWAL_PATH, RENEWAL_ACK_PATH))) else self.viewer
         return api.handle(method, path, headers, body, protected_transport=protected_transport)
 
     def stream_source_object(self, path, headers, reader, content_length, *, protected_transport=False):
