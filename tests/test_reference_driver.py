@@ -374,7 +374,8 @@ class ReferenceDriverTests(unittest.TestCase):
         self.ledger.clock = lambda: time.time() + 10**6
 
     def end_job(self, job):
-        self.queue.operator(job['jobId'], 'hold', dict(note='synthetic'))
+        if self.queue.get(job['jobId'])['status'] != 'held':
+            self.queue.operator(job['jobId'], 'hold', dict(note='synthetic'))
         self.queue.operator(job['jobId'], 'resolve', dict(note='synthetic', workerStopped=True))
 
     def assert_unstarted_terminal(self, job, reason, result):
