@@ -130,15 +130,27 @@ class OptionsTests(unittest.TestCase):
         self.assertEqual(result['nodes'][1]['options'], other.options)
 
     def test_configured_outage_closes_fleet_and_never_serves_stale_catalog(self):
-        nodes = [('local', self.engine.origin, self.engine.token), ('main', self.engine.origin, self.engine.token)]
+        other = Engine()
+        self.addCleanup(other.close)
+        nodes = [('local', self.engine.origin, self.engine.token), ('main', other.origin, other.token)]
         self.assertTrue(catalog(nodes)['ready'])
-        self.engine.mode = 'unavailable'
+        other.mode = 'unavailable'
         failed = catalog(nodes)
         self.assertFalse(failed['ready'])
         self.assertEqual(failed['commonOptions'], [])
         self.assertIsNone(failed['commonOptionsSha256'])
-        self.assertTrue(all(node['options'] == [] for node in failed['nodes']))
+        self.assertEqual(failed['availableNodeIds'], ['local'])
+        self.assertEqual(failed['availableOptions'], self.engine.options)
+        self.assertIsNotNone(failed['availableOptionsSha256'])
+        self.assertEqual(failed['nodes'][1]['options'], [])
         self.assertNotIn(self.engine.token, json.dumps(failed))
+        self.assertNotIn(other.token, json.dumps(failed))
+
+        self.engine.mode = 'unavailable'
+        offline = catalog(nodes)
+        self.assertEqual(offline['availableNodeIds'], [])
+        self.assertEqual(offline['availableOptions'], [])
+        self.assertIsNone(offline['availableOptionsSha256'])
 
     def test_missing_configuration_is_reported_and_does_not_hide_valid_single_node(self):
         result = catalog([('local', self.engine.origin, self.engine.token), ('main', '', '')])

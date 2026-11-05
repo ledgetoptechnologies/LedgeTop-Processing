@@ -131,6 +131,10 @@ class ViewerService:
 
     def options(self):
         current = self._catalog()
+        if 'availableOptions' in current:
+            if type(current['availableOptions']) is not list:
+                raise Conflict('engine catalog unavailable')
+            return current['availableOptions']
         if not current['ready']:
             raise Conflict('engine catalog unavailable')
         return current['commonOptions']

@@ -21,10 +21,21 @@ The response contains each node's options, engine/API versions and hashes. Its
 `commonOptions` includes only definitions present and exactly equal on every
 configured node. Different defaults/help/types/domains are reported as conflicts;
 flags present on only one node stay in that node's catalog. An unavailable or
-malformed configured node closes the shared catalog rather than serving stale
-data. An unconfigured role is reported separately and does not restrict an
-otherwise valid single-node catalog. This conservative intersection can be
-smaller than the set of flags usable when a future job is pinned to one node.
+malformed configured node closes `commonOptions` rather than serving stale data.
+An unconfigured role is reported separately and does not restrict an otherwise
+valid single-node catalog. The separate `availableOptions` field is the exact
+intersection across nodes that returned a fresh valid catalog in this request;
+`availableNodeIds` and `availableOptionsSha256` bind that view to the responding
+nodes and definitions. It is empty when no configured node is available.
+
+The Viewer-compatible native facade can admit a queued task using that current
+available-node intersection, including when one configured engine is offline.
+The shared scheduler revalidates requested option values against the chosen
+node's fresh definitions during candidate selection and atomic claim. A job
+without custom options can still be queued when all engines are offline; it
+remains queued until an eligible node returns. This does not use stale option
+metadata or promise that a particular future node supports options selected
+while it was unavailable.
 
 The reference-runtime candidate now admits typed booleans/numbers, bounded string
 enums and free-text strings up to 4,000 characters. It validates current choice

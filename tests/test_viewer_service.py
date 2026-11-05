@@ -336,6 +336,47 @@ class ViewerServiceTests(unittest.TestCase):
         self.busy['cluster'] = 0
         self.assertEqual(self.fleet.max_active, 1)
 
+    def test_new_job_can_be_enqueued_and_routed_when_small_node_is_down(self):
+        self.unavailable.add('cluster')
+        self.service._catalog = lambda: {
+            'ready': False,
+            'commonOptions': [],
+            'availableOptions': [dict(item) for item in OPTIONS],
+            'nodes': [
+                {'role': 'cluster', 'configured': True, 'available': False, 'options': []},
+                {'role': 'main', 'configured': True, 'available': True, 'options': OPTIONS},
+            ],
+        }
+
+        identifier = self.submit()
+        self.service.tick()
+
+        self.assertEqual(self.task(identifier)['node_id'], 'main')
+        self.assertTrue(self.engines['main'].calls)
+        self.assertFalse(self.engines['cluster'].calls)
+
+    def test_empty_option_job_can_queue_while_all_engines_are_down(self):
+        self.unavailable.update(('cluster', 'main'))
+        self.service._catalog = lambda: {
+            'ready': False,
+            'commonOptions': [],
+            'availableOptions': [],
+            'nodes': [
+                {'role': 'cluster', 'configured': True, 'available': False, 'options': []},
+                {'role': 'main', 'configured': True, 'available': False, 'options': []},
+            ],
+        }
+
+        identifier = self.initialize(options=[])
+        self.upload(identifier)
+        self.service.commit(identifier)
+        self.service.tick()
+
+        self.assertIsNone(self.task(identifier)['node_id'])
+        self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+        self.assertFalse(self.engines['cluster'].calls)
+        self.assertFalse(self.engines['main'].calls)
+
     def test_unavailable_small_node_falls_back_when_fleet_catalog_is_closed(self):
         identifier = self.submit(options=REQUEST_OPTIONS)
         self.service.close()
@@ -346,6 +387,7 @@ class ViewerServiceTests(unittest.TestCase):
         self.service._catalog = lambda: {
             'ready': False,
             'commonOptions': [],
+            'availableOptions': [dict(item) for item in OPTIONS],
             'nodes': [
                 {'role': 'cluster', 'configured': True, 'available': False, 'options': []},
                 {'role': 'main', 'configured': True, 'available': True, 'options': OPTIONS},

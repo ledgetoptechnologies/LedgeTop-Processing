@@ -158,11 +158,16 @@ def catalog(nodes):
     common = set.intersection(*(set(options) for options in by_node.values())) if by_node else set()
     conflicting = sorted(name for name in common
         if len({_canonical(options[name]) for options in by_node.values()}) > 1)
-    safe_names = common - set(conflicting) if ready else set()
+    safe_available_names = common - set(conflicting)
+    safe_names = safe_available_names if ready else set()
     reference = next(iter(by_node.values()), {})
     common_options = [reference[name] for name in sorted(safe_names)]
+    available_options = [reference[name] for name in sorted(safe_available_names)]
     return {'ready': ready, 'reason': None if ready else ('node_unavailable' if configured else 'not_configured'),
             'nodes': snapshots, 'commonOptions': common_options,
+            'availableOptions': available_options,
+            'availableOptionsSha256': _sha(available_options) if available else None,
+            'availableNodeIds': [node['role'] for node in available],
             'commonOptionsSha256': _sha(common_options) if ready else None,
             'conflictingNames': conflicting,
             'unsupportedByNode': {node_id: sorted(union - set(options)) for node_id, options in by_node.items()}}
