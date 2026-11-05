@@ -95,6 +95,57 @@ class EnrolledStateTests(unittest.TestCase):
         self.assertEqual(self.leases.stat().st_mode & 0o7777, 0o711)
         self.assertEqual(self.file.stat().st_mode & 0o7777, 0o600)
 
+    def actual_layout(self):
+        self.state.chmod(0o755)
+        self.database.chmod(0o600)
+        self.leases.chmod(0o711)
+        self.file.chmod(0o600)
+        lock = self.state / 'coordinator.lock'
+        lock.write_bytes(b'')
+        lock.chmod(0o644)
+        return lock
+
+    @unittest.skipUnless(os.name == 'posix', 'full installed Linux ownership layout')
+    def test_full_actual_layout_factory_preserves_permissions_bytes_and_exclusion(self):
+        from processing.app import make_handler
+        from processing.config import Config
+        lock = self.actual_layout()
+        before = {path: path.read_bytes() for path in (self.file, lock)}
+        original_database = self.database.read_bytes()
+        with self.assertRaises(authority_lease.LeaseUnavailable): Queue(self.state)
+        self.assertEqual(self.database.read_bytes(), original_database)
+        handler = make_handler(Config('synthetic-api-' + 'x' * 32, '', '', 1000, 2000,
+            prototype_state_dir=str(self.state), authority_lease_dir=str(self.leases)))
+        self.queue = handler.prototype_queue
+        self.lease = self.queue.authority_lease
+        with self.assertRaises(authority_lease.LeaseUnavailable):
+            authority_lease.acquire(self.leases, self.state)
+        self.assertEqual(self.state.stat().st_mode & 0o7777, 0o755)
+        self.assertEqual(lock.stat().st_mode & 0o7777, 0o644)
+        self.assertEqual(self.database.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(self.leases.stat().st_mode & 0o7777, 0o711)
+        self.assertEqual(self.file.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual({path: path.read_bytes() for path in before}, before)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT authority_id FROM coordinator_identity').fetchone()[0], self.authority)
+            self.assertEqual(tuple(db.execute('SELECT singleton,required FROM coordinator_authority_lease').fetchone()), (1, 1))
+
+    @unittest.skipUnless(os.name == 'posix', 'legacy state root foreign-write refusal')
+    def test_writable_or_unenrolled_public_state_root_is_refused_unchanged(self):
+        lock = self.actual_layout()
+        for mode in (0o770, 0o777):
+            self.state.chmod(mode)
+            before = {path: path.read_bytes() for path in (self.database, self.file, lock)}
+            with self.subTest(mode=mode), self.assertRaises(authority_lease.LeaseUnavailable):
+                authority_lease.acquire(self.leases, self.state)
+            self.assertEqual({path: path.read_bytes() for path in before}, before)
+        self.state.chmod(0o755)
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.execute('DROP TABLE coordinator_authority_lease')
+        before = self.database.read_bytes()
+        with self.assertRaises(authority_lease.LeaseUnavailable): Queue(self.state)
+        self.assertEqual(self.database.read_bytes(), before)
+
     @unittest.skipUnless(os.name == 'posix', 'actual unsafe enrolled directory permissions')
     def test_group_or_world_writable_enrolled_directory_is_refused(self):
         before = self.database.read_bytes()

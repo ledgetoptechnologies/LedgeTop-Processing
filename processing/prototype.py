@@ -66,6 +66,9 @@ class Queue(Maintenance):
                 raise authority_leases.LeaseUnavailable('actual_authority_lease_required')
             authority_lease.check(root)
         self.authority_lease = authority_lease
+        if os.name == 'posix' and root.exists() and root.stat().st_mode & 0o077:
+            if (root.stat().st_mode & 0o7777) != 0o755 or not lease_required or authority_lease is None:
+                raise authority_leases.LeaseUnavailable('private_state_or_exact_enrolled_legacy_layout_required')
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._lock = (root / "coordinator.lock").open("a+b")
         self._lock.seek(0)

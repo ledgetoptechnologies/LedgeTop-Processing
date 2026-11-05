@@ -32,10 +32,27 @@ Fresh parent read-only metadata identified the actual enrolled directory as
 UID/GID10001 mode0711 and its file as UID/GID10001 mode0600/single-link. The
 external directory check therefore permits exactly owner0700 or owner0711:
 0711 allows search, but no foreign writes or directory listing. The original
-file must remain0600. The state directory retains its separate private0700
-requirement. Exact0711 positive and0770/0777 negative cases are included; no
+file must remain0600. Exact0711 positive and0770/0777 negative cases are included; no
 installed permission was changed or normalized. Deployment compatibility still
 requires checking the original mounted state directory, not just this lease.
+
+The subsequent parent metadata check found the full actual layout: enrolled
+state root0755, database0600, main lock0644, external directory0711 and external
+file0600, all UID/GID10001 and single-link files. Exact state0755 is accepted
+only after reading the valid existing required marker/private database and
+then acquiring the actual enrolled external descriptor before any Queue write.
+An unenrolled0755 or writable0770/0777 state root is refused unchanged. New or
+unenrolled state still requires0700; NAS/source roots and source-reader private
+directories were not relaxed. A full-layout fixture checks actual make_handler
+and ReferenceRuntime construction (synthetic TLS loading), descriptor exclusion,
+unchanged modes/lease+lock bytes and the old authority/marker rows.
+
+Final bounded Linux check passed **84/84 tests, no skips, in3.397s** across
+`test_authority_lease_current`, `test_reference_runtime`,
+`test_coordinator_freeze` and `test_node_roles`. Existing dependency image,
+one CPU/1GiB, read-only source, no network and private tmpfs were used; the
+owned `ltds-enrolled-actual-layout` container exited and auto-removed. No actual
+host permissions, containers, original data, NAS or deployment changed.
 
 This is not a qualified installed cutover. Current-V2 census/backup/rollback
 still must preserve the actual 22 terminal jobs, seven legacy Viewer tasks,

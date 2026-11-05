@@ -232,9 +232,19 @@ class FreezeGate:
                 or not stat.S_ISREG(lock_info.st_mode) or db_info.st_nlink != 1 or lock_info.st_nlink != 1
                 or (opened.st_dev, opened.st_ino) != (lock_info.st_dev, lock_info.st_ino)):
             raise CoordinatorFrozen('original_coordinator_identity_required')
-        if os.name == 'posix' and (root_info.st_uid != os.geteuid() or db_info.st_uid != os.geteuid()
-                or lock_info.st_uid != os.geteuid() or root_info.st_mode & 0o077 or lock_info.st_mode & 0o022):
-            raise CoordinatorFrozen('private_original_coordinator_lease_required')
+        if os.name == 'posix':
+            root_mode = stat.S_IMODE(root_info.st_mode)
+            enrolled = getattr(queue, 'authority_lease', None)
+            if root_mode == 0o755:
+                from .authority_lease import AuthorityLease
+                if type(enrolled) is not AuthorityLease or stat.S_IMODE(db_info.st_mode) != 0o600:
+                    raise CoordinatorFrozen('exact_enrolled_legacy_state_layout_required')
+                enrolled.check(root)
+            elif root_mode != 0o700:
+                raise CoordinatorFrozen('private_original_coordinator_lease_required')
+            if (root_info.st_uid != os.geteuid() or db_info.st_uid != os.geteuid()
+                    or lock_info.st_uid != os.geteuid() or lock_info.st_mode & 0o022):
+                raise CoordinatorFrozen('private_original_coordinator_lease_required')
         result = dict(authorityId=queue.authority_id, database=str(database),
             databaseIdentity=[db_info.st_dev, db_info.st_ino], root=str(root),
             rootIdentity=[root_info.st_dev, root_info.st_ino], lease=str(lease),

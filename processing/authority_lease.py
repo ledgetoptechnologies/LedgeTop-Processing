@@ -19,7 +19,7 @@ class LeaseUnavailable(RuntimeError):
     pass
 
 
-def _private(path, *, directory=False, lease_directory=False, lease_file=False):
+def _private(path, *, directory=False, lease_directory=False, lease_file=False, state_directory=False):
     path = Path(path).absolute()
     if path.resolve() != path or any(parent.is_symlink() for parent in path.parents):
         raise LeaseUnavailable('authority_lease_original_paths_required')
@@ -30,6 +30,7 @@ def _private(path, *, directory=False, lease_directory=False, lease_file=False):
     if os.name == 'posix':
         mode = stat.S_IMODE(info.st_mode)
         allowed = (mode in (0o700, 0o711) if lease_directory else
+                   mode in (0o700, 0o755) if state_directory else
                    mode == 0o600 if lease_file else
                    not info.st_mode & (0o077 if directory else 0o022))
         if info.st_uid != os.geteuid() or not allowed:
@@ -43,7 +44,7 @@ def inspect_state(state_dir):
     database = root / 'jobs.sqlite3'
     if not database.exists():
         return None, False, None
-    _private(root, directory=True)
+    _, root_info = _private(root, directory=True, state_directory=True)
     database, before = _private(database)
     if any(Path(str(database) + suffix).exists() for suffix in ('-journal', '-wal', '-shm')):
         raise LeaseUnavailable('authority_state_io_not_quiescent')
@@ -63,6 +64,9 @@ def inspect_state(state_dir):
                     or db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='coordinator_authority_lease'").fetchone()
                     or authority is None):
                 raise LeaseUnavailable('authority_lease_marker_changed')
+        if os.name == 'posix' and stat.S_IMODE(root_info.st_mode) == 0o755:
+            if not required or stat.S_IMODE(before.st_mode) != 0o600:
+                raise LeaseUnavailable('legacy_public_state_requires_enrollment_and_private_database')
         after = database.stat()
         if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
             raise LeaseUnavailable('authority_identity_changed_during_read')
@@ -92,6 +96,8 @@ class AuthorityLease:
         self.path = directory / (authority + '.lease')
         self.state_path = Path(state_dir).absolute() / 'jobs.sqlite3'
         self._state_identity = state_identity
+        state_root = self.state_path.parent.stat()
+        self._state_root_identity = (state_root.st_dev, state_root.st_ino, state_root.st_mode, state_root.st_uid, state_root.st_gid)
         self._directory_identity = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
         self._pid, self._descriptor = os.getpid(), None
         import fcntl
@@ -127,6 +133,10 @@ class AuthorityLease:
         if state_dir is not None and Path(state_dir).absolute() / 'jobs.sqlite3' != self.state_path:
             raise LeaseUnavailable('authority_lease_state_binding_changed')
         _, state = _private(self.state_path)
+        _, state_root = _private(self.state_path.parent, directory=True, state_directory=True)
+        if ((state_root.st_dev, state_root.st_ino, state_root.st_mode, state_root.st_uid, state_root.st_gid) != self._state_root_identity
+                or stat.S_IMODE(state_root.st_mode) == 0o755 and stat.S_IMODE(state.st_mode) != 0o600):
+            raise LeaseUnavailable('authority_lease_state_root_identity_changed')
         if (state.st_dev, state.st_ino) != self._state_identity:
             raise LeaseUnavailable('authority_lease_state_identity_changed')
 

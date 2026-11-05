@@ -527,6 +527,44 @@ class ReferenceRuntimeTests(unittest.TestCase):
             db.execute("UPDATE reference_jobs SET input_json='{}'")
         self.assertEqual(gate.status()['reservedControlBytes'], before, 'refused payload mutation rolls back reservation')
 
+    @unittest.skipUnless(os.name == 'posix', 'exact installed enrolled Linux layout')
+    def test_actual_legacy_layout_handler_reference_startup_keeps_original_leases_and_modes(self):
+        from contextlib import closing
+        import sqlite3
+        from processing import authority_lease
+        state = Path(self.config.prototype_state_dir)
+        state.mkdir(mode=0o755); state.chmod(0o755)
+        authority = str(uuid.uuid4())
+        database = state / 'jobs.sqlite3'
+        with closing(sqlite3.connect(database)) as db, db:
+            db.execute('CREATE TABLE coordinator_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),authority_id TEXT NOT NULL)')
+            db.execute('INSERT INTO coordinator_identity VALUES(1,?)', (authority,))
+            db.execute(authority_lease.MARKER_DDL)
+            db.execute('INSERT INTO coordinator_authority_lease VALUES(1,1)')
+        database.chmod(0o600)
+        lock = state / 'coordinator.lock'; lock.write_bytes(b''); lock.chmod(0o644)
+        leases = self.root / 'enrolled-lease'; leases.mkdir(mode=0o711); leases.chmod(0o711)
+        original_lease = leases / (authority + '.lease')
+        original_lease.write_bytes(b'synthetic original diagnostic'); original_lease.chmod(0o600)
+        before = (lock.read_bytes(), original_lease.read_bytes())
+        config = replace(self.config, viewer_enabled=False, authority_lease_dir=str(leases),
+                         reference_config_path=str(self.path))
+        self.value = self.recovery_config(authority, config=config); self.write_config()
+        first, second = self.tls_patches()
+        with first, second:
+            handler = make_handler(config)
+        self.addCleanup(handler.prototype_queue.close)
+        self.addCleanup(handler.reference_listener.close)
+        self.assertIsNotNone(handler.reference_listener)
+        self.assertEqual(handler.prototype_queue.authority_id, authority)
+        self.assertEqual(state.stat().st_mode & 0o7777, 0o755)
+        self.assertEqual(database.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual(lock.stat().st_mode & 0o7777, 0o644)
+        self.assertEqual(leases.stat().st_mode & 0o7777, 0o711)
+        self.assertEqual(original_lease.stat().st_mode & 0o7777, 0o600)
+        self.assertEqual((lock.read_bytes(), original_lease.read_bytes()), before)
+        with self.assertRaises(authority_lease.LeaseUnavailable): authority_lease.acquire(leases, state)
+
     def test_partial_engine_outage_still_admits_and_queues_work_for_healthy_node(self):
         queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
                       treedar_node_ids=('main',), reference_enabled=True)
