@@ -6,6 +6,20 @@ approval. Runtime acceptance remains incomplete.
 
 ## Latest combined and native-host preparation checkpoint
 
+Processing `54c28d8e646f95937e6950596f42fdf2cc0b1e82` subsequently passed
+**505/505 selected Linux tests, no skips**, in 127.949 seconds across 33 modules.
+This adds durable worker acceptance-observation and immutable lookup binding to
+the combined scope below. The actual loopback HTTPS lost-reply, committed replay,
+driver reopen and result-cleanup cases are included. One CPU/2 GiB, read-only
+sources and dependencies, disabled external networking and an owned temporary
+disk volume were used; the container and labeled volume were removed.
+
+This checkpoint still uses frozen Viewer `2317d400` and the old synthetic-only
+converter. It does not prove source release/deletion, Viewer hold retirement,
+installed/NAS acceptance, licensed conversion or real-photo/GCP engine execution.
+The image and inactive native-PC preparations below remain at `51cff44`; they do
+not yet include the observation changes.
+
 Processing `51cff44f019eab81ba482adf3f1f298ecd32f571` passed **485/485 selected
 Linux tests, no skips**, in 122.705 seconds across 32 modules. This combines
 actual Viewer intake/result/conversion/publication, live-description option
@@ -34,8 +48,9 @@ installed. The owned one-CPU/2 GiB builder was stopped after export; cache kept.
 
 Both PCs also qualified the private inactive `51cff44` source preparation below.
 That is source/dependency readiness, not activation or installed acceptance.
-Source deletion remains disabled. New durable worker acceptance-observation
-code is being developed separately and is **not** included in this checkpoint.
+Source deletion remains disabled. Durable worker acceptance-observation is
+included in the newer source-only `54c28d8` checkpoint above, but is **not** in
+these `51cff44` image and native-PC preparations.
 
 GCP boundary: Viewer import/serialization tests pass, but a subsequent worker
 audit found all-image guards in Driver/Router/EngineWorker and staged execution
