@@ -126,6 +126,45 @@ class EngineCacheCleanupFixture(ResultsFixture):
 
 
 class EngineCacheCleanupTests(EngineCacheCleanupFixture, unittest.TestCase):
+    def test_partial_source_metadata_never_uses_v1_cleanup_fallback(self):
+        proof = self.admitted()
+        original = json.loads(self.worker._row(self.job['jobId'])['identity'])
+        digest = 'a' * 64
+        submission_id = original['job']['submission']['submissionId']
+        binding = dict(coordinatorAuthorityId=self.authority,
+            viewerPrincipalId='synthetic-viewer-principal', submissionId=submission_id,
+            activationId=str(uuid.uuid4()), viewerTaskId=str(uuid.uuid4()),
+            viewerAttemptId=submission_id, providerTaskId=self.job['jobId'],
+            preparedEnvelopeSha256=digest, jobId=self.job['jobId'], generation=1,
+            environment='staging', inputManifestSha256=self.job['manifestSha256'],
+            pipelineDigest=self.job['pipelineDigest'], sourceManifestSha256='b' * 64,
+            derivedManifestSha256='c' * 64, sourceReceiptSha256='d' * 64, derivedReceiptSha256='e' * 64)
+        cases = []
+        top_null_nested_v2 = json.loads(json.dumps(original))
+        top_null_nested_v2['job']['sourceIntakeVersion'] = None
+        top_null_nested_v2['job']['submission']['sourceIntakeVersion'] = 2
+        cases.append(('null-top-marker-with-v2-nested-marker', top_null_nested_v2))
+        binding_without_markers = json.loads(json.dumps(original))
+        binding_without_markers['job']['sourceAcceptanceBinding'] = binding
+        binding_without_markers['sourceAcceptanceBinding'] = binding
+        cases.append(('binding-without-markers', binding_without_markers))
+        nested_null = json.loads(json.dumps(original))
+        nested_null['job']['sourceIntakeVersion'] = 2
+        nested_null['job']['submission']['sourceIntakeVersion'] = None
+        nested_null['job']['sourceAcceptanceBinding'] = binding
+        nested_null['sourceAcceptanceBinding'] = binding
+        cases.append(('v2-top-with-null-nested-marker', nested_null))
+
+        for label, identity in cases:
+            with self.subTest(label=label):
+                with self.worker._db() as db:
+                    db.execute('UPDATE executions SET identity=? WHERE job=?',
+                        (json.dumps(identity, sort_keys=True, separators=(',', ':')), self.job['jobId']))
+                result = self.cleanup.remove(self.job['jobId'], viewer_receipts=proof)
+                self.assertEqual((result['state'], result['reason']),
+                    ('held', 'source_acceptance_binding_unavailable'))
+                self.assertEqual(self.remove_calls, [])
+
     def test_v2_signed_copy_receipt_is_required_and_unlocks_only_exact_cleanup(self):
         binding = self.prepare_v2_job()
         self.metadata_ack()

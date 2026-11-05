@@ -95,6 +95,7 @@ class EngineCacheCleanup:
             db.execute('UPDATE removals SET phase=?,updated_at=CURRENT_TIMESTAMP WHERE job=?', (phase, job_id))
 
     def _success(self, job_id):
+        from .reference_engine_worker import _source_intake_version
         row = self.worker._row(job_id)
         if not row['result'] or not row['outbox_id']:
             raise _Held('sealed_success_required')
@@ -144,12 +145,11 @@ class EngineCacheCleanup:
             environment=job['environment'], inputManifestSha256=job['manifestSha256'], pipelineDigest=job['pipelineDigest'],
             resultManifestSha256=result['resultManifestSha256'], outboxId=row['outbox_id'],
             coordinatorReceiptSha256=p.digest(receipt), reservationId=reservation, inputs=inputs)
-        source_intake_version = job.get('sourceIntakeVersion', job.get('submission', {}).get('sourceIntakeVersion'))
+        try:
+            source_intake_version = _source_intake_version(job, source['job'], source)
+        except ValueError:
+            raise _Held('source_acceptance_binding_unavailable') from None
         if source_intake_version == 2:
-            if (type(job.get('sourceIntakeVersion')) is not int or job.get('sourceIntakeVersion') != 2
-                    or type(job.get('submission', {}).get('sourceIntakeVersion')) is not int
-                    or job.get('submission', {}).get('sourceIntakeVersion') != 2):
-                raise _Held('source_acceptance_binding_unavailable')
             try:
                 from .source_acceptance_binding import validate_source_acceptance_binding
                 source_binding = validate_source_acceptance_binding(source['job'].get('sourceAcceptanceBinding'), job)
@@ -161,8 +161,6 @@ class EngineCacheCleanup:
             except (ImportError, TypeError, ValueError, KeyError):
                 raise _Held('source_acceptance_binding_unavailable') from None
             identity.update(sourceIntakeVersion=2, sourceAcceptanceBinding=source_binding)
-        elif source_intake_version is not None or 'sourceAcceptanceBinding' in source['job']:
-            raise _Held('source_acceptance_binding_unavailable')
         return identity, result
 
     def _verify_inputs(self, identity):
@@ -177,8 +175,14 @@ class EngineCacheCleanup:
             raise _Held('viewer_receipt_keys_not_configured')
         if type(receipts) is not list or not 0 < len(receipts) <= p.MAX_OBJECTS:
             raise _Held('full_viewer_receipts_required')
-        source_intake_version = identity.get('sourceIntakeVersion')
+        metadata_present = 'sourceIntakeVersion' in identity or 'sourceAcceptanceBinding' in identity
+        source_intake_version = None
         source_binding = identity.get('sourceAcceptanceBinding')
+        if metadata_present:
+            if (type(identity.get('sourceIntakeVersion')) is not int or identity['sourceIntakeVersion'] != 2
+                    or type(source_binding) is not dict):
+                raise _Held('source_acceptance_binding_unavailable')
+            source_intake_version = 2
         if source_intake_version == 2:
             try:
                 from .source_acceptance_binding import validate_source_acceptance_binding

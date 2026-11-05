@@ -29,6 +29,22 @@ class WorkerHeld(ValueError):
     pass
 
 
+def _source_intake_version(job, *binding_records):
+    submission = job.get('submission') if type(job) is dict else None
+    records = (job, submission, *binding_records)
+    marker_present = any(type(record) is dict and 'sourceIntakeVersion' in record for record in records)
+    binding_present = any(type(record) is dict and 'sourceAcceptanceBinding' in record for record in records)
+    if not marker_present and not binding_present:
+        return None
+    if (type(job) is not dict or type(submission) is not dict
+            or type(job.get('sourceIntakeVersion')) is not int or job['sourceIntakeVersion'] != 2
+            or type(submission.get('sourceIntakeVersion')) is not int or submission['sourceIntakeVersion'] != 2
+            or any(type(record) is not dict or 'sourceAcceptanceBinding' not in record
+                   or type(record['sourceAcceptanceBinding']) is not dict for record in binding_records)):
+        raise ValueError('incomplete V2 source-intake binding')
+    return 2
+
+
 class ReferenceEngineWorker:
     def __init__(self, path, *, ledger, outbox, engine, engine_id, node_id,
                  authority_id, coordinator_origin, gate_generation, worker_id,
@@ -149,12 +165,11 @@ class ReferenceEngineWorker:
         """A ready, already claimed job and externally admitted scratch are required."""
         submission = job['submission']
         source_binding = None
-        source_intake_version = job.get('sourceIntakeVersion', submission.get('sourceIntakeVersion'))
+        try:
+            source_intake_version = _source_intake_version(job, job)
+        except ValueError:
+            raise WorkerHeld('source_acceptance_binding_unavailable') from None
         if source_intake_version == 2:
-            if (type(job.get('sourceIntakeVersion')) is not int or job.get('sourceIntakeVersion') != 2
-                    or type(submission.get('sourceIntakeVersion')) is not int
-                    or submission.get('sourceIntakeVersion') != 2):
-                raise WorkerHeld('source_acceptance_binding_unavailable')
             try:
                 from .source_acceptance_binding import validate_source_acceptance_binding
                 source_binding = validate_source_acceptance_binding(job.get('sourceAcceptanceBinding'), job)
@@ -337,13 +352,12 @@ class ReferenceEngineWorker:
             raise WorkerHeld('Viewer acceptance requires a durable local result')
         identity = json.loads(row['identity'])
         job, reservation = identity['job'], identity['reservation']
-        source_intake_version = job.get('sourceIntakeVersion', job.get('submission', {}).get('sourceIntakeVersion'))
+        try:
+            source_intake_version = _source_intake_version(job, job, identity)
+        except ValueError:
+            raise WorkerHeld('source_acceptance_binding_unavailable') from None
         source_binding = identity.get('sourceAcceptanceBinding')
         if source_intake_version == 2:
-            if (type(job.get('sourceIntakeVersion')) is not int or job.get('sourceIntakeVersion') != 2
-                    or type(job.get('submission', {}).get('sourceIntakeVersion')) is not int
-                    or job.get('submission', {}).get('sourceIntakeVersion') != 2):
-                raise WorkerHeld('source_acceptance_binding_unavailable')
             try:
                 from .source_acceptance_binding import validate_source_acceptance_binding
                 job_binding = validate_source_acceptance_binding(job.get('sourceAcceptanceBinding'), job)

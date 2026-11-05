@@ -15,6 +15,7 @@ from processing.reference_engine_worker import ReferenceEngineWorker, WorkerHeld
 from processing.reference_protocol import validate_submission, validate_result_manifest
 from processing.scratch_policy import ScratchLedger
 from processing.worker_outbox import WorkerOutbox
+from tests.viewer_receipt_signer import SyntheticViewerSigner
 from tests.viewer_v2_receipt_signer import SyntheticViewerCopyV2Signer
 
 
@@ -170,6 +171,83 @@ class ReferenceEngineWorkerTests(unittest.TestCase):
         with self.worker._db() as db:
             self.assertIsNone(db.execute('SELECT 1 FROM executions WHERE job=?',
                 (self.job['jobId'],)).fetchone())
+
+    def test_any_partial_or_malformed_source_metadata_cannot_select_v1_at_start(self):
+        from processing.reference_source_intake_canonical import pipeline_digest
+        submission = self.job['submission']
+        submission['sourceIntakeVersion'] = self.job['sourceIntakeVersion'] = 2
+        submission['pipelineDigest'] = self.job['pipelineDigest'] = pipeline_digest(submission['pipeline'])
+        self.job['authorityId'] = self.authority
+        binding = self.source_acceptance_binding()
+        binding['pipelineDigest'] = self.job['pipelineDigest']
+        self.job['sourceAcceptanceBinding'] = binding
+        valid_v2 = copy.deepcopy(self.job)
+        cases = []
+        missing_binding = copy.deepcopy(valid_v2)
+        missing_binding['sourceIntakeVersion'] = None
+        missing_binding.pop('sourceAcceptanceBinding')
+        cases.append(('explicit-null-top-marker', missing_binding))
+        nested_null = copy.deepcopy(valid_v2)
+        nested_null['submission']['sourceIntakeVersion'] = None
+        cases.append(('explicit-null-nested-marker', nested_null))
+        boolean_marker = copy.deepcopy(valid_v2)
+        boolean_marker['sourceIntakeVersion'] = True
+        cases.append(('boolean-marker', boolean_marker))
+        unknown_marker = copy.deepcopy(valid_v2)
+        unknown_marker['sourceIntakeVersion'] = 3
+        cases.append(('unknown-marker', unknown_marker))
+        binding_without_marker = copy.deepcopy(self.job)
+        binding_without_marker.pop('sourceIntakeVersion')
+        binding_without_marker['submission'].pop('sourceIntakeVersion')
+        cases.append(('binding-without-markers', binding_without_marker))
+
+        for label, job in cases:
+            with self.subTest(label=label):
+                self.job = copy.deepcopy(job)
+                self.worker = self.make_worker()
+                with self.assertRaisesRegex(WorkerHeld, 'source_acceptance_binding_unavailable'):
+                    self.start()
+                self.assertEqual(self.engine.calls, [])
+                with self.worker._db() as db:
+                    self.assertIsNone(db.execute('SELECT 1 FROM executions WHERE job=?',
+                        (self.job['jobId'],)).fetchone())
+
+    def test_malformed_v2_markers_cannot_fall_back_to_v1_acceptance(self):
+        from processing import reference_protocol as p
+        from processing.reference_source_intake_canonical import pipeline_digest
+        submission = self.job['submission']
+        submission['sourceIntakeVersion'] = self.job['sourceIntakeVersion'] = 2
+        submission['pipelineDigest'] = self.job['pipelineDigest'] = pipeline_digest(submission['pipeline'])
+        self.job['authorityId'] = self.authority
+        binding = self.source_acceptance_binding()
+        binding['pipelineDigest'] = self.job['pipelineDigest']
+        self.job['sourceAcceptanceBinding'] = binding
+        signer = SyntheticViewerCopyV2Signer()
+        self.worker = self.make_worker(viewer_receipt_keys=signer.trusted_keys)
+        self.start()
+        self.worker.poll(self.job['jobId'])
+        row = self.worker._row(self.job['jobId'])
+        identity = json.loads(row['identity'])
+        identity['job']['sourceIntakeVersion'] = None
+        identity['job'].pop('sourceAcceptanceBinding')
+        identity.pop('sourceAcceptanceBinding')
+        with self.worker._db() as db:
+            db.execute('UPDATE executions SET identity=? WHERE job=?',
+                (p.canonical_json(identity).decode(), self.job['jobId']))
+        result = json.loads(row['result'])
+        acceptance = dict(schemaVersion=1, receiptId='outer-v1-acceptance',
+            storageReceiptId='outer-v1-storage', jobId=self.job['jobId'], generation=1,
+            environment='staging', inputManifestSha256=self.job['manifestSha256'],
+            pipelineDigest=self.job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
+            acceptedObjectIds=[item['id'] for item in result['objects']],
+            acceptedAt='2026-11-04T12:00:00Z', validationVersion='ltds-reference-v1')
+        v1_signer = SyntheticViewerSigner()
+        self.worker.viewer_receipt_keys = v1_signer.trusted_keys
+        with self.assertRaisesRegex(WorkerHeld, 'source_acceptance_binding_unavailable'):
+            self.worker.apply_viewer_acceptance(self.job['jobId'], [v1_signer.envelope(acceptance, result)])
+        with self.ledger._transaction() as db:
+            self.assertIsNone(db.execute('SELECT accepted FROM objects WHERE reservation=?',
+                ('reservation-1',)).fetchone()[0])
 
     def test_v2_acceptance_requires_signed_v2_copy_and_persists_verified_coverage(self):
         from processing.reference_source_intake_canonical import pipeline_digest
