@@ -154,7 +154,12 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
     require(str(uuid.UUID(operation_id))==operation_id,'canonical_fixture_operation_required')
     suffix=uuid.UUID(operation_id).hex[:16];name='ltds-phase-original-'+suffix
     authority=str(uuid.uuid5(uuid.UUID(operation_id),'synthetic-original-authority'))
-    root=Path(artifact_root)/operation_id;root.mkdir(mode=0o700)
+    import stat
+    outer=Path(artifact_root).absolute();info=outer.lstat()
+    require(outer.resolve()==outer and not any(p.is_symlink() for p in outer.parents) and
+            stat.S_ISDIR(info.st_mode) and info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)==0o700,
+            'original_private_task_artifact_root_required')
+    root=outer/operation_id;root.mkdir(mode=0o700)
     operation=root/'operation';operation.mkdir(mode=0o700)
     source_root=Path(__file__).resolve().parents[1]
     names=dict(state=name+'-state',lease='ltds-phase-lease-'+suffix,
