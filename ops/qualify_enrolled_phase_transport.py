@@ -28,6 +28,9 @@ def private_write(path, raw):
     path=Path(path)
     with path.open('xb') as output:
         path.chmod(0o600);output.write(raw);output.flush();os.fsync(output.fileno())
+    directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
+    try:os.fsync(directory)
+    finally:os.close(directory)
     return dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest())
 
 
@@ -36,6 +39,86 @@ def environment_bytes(value):
                 type(v) is str and '\n' not in v and '\r' not in v for k,v in value.items()),
             'closed_fixture_environment_required')
     return ''.join(k+'='+v+'\n' for k,v in sorted(value.items())).encode()
+
+
+def private_docker_logs(container_id, *, maximum=262144):
+    """Read both multiplexed Docker log streams, privately and bounded.
+
+    Docker CLI forwards container stderr to its own stderr, which the normal
+    command API deliberately does not return. This exact-ID GET avoids losing
+    constructor stderr; it never accepts another socket, URL or Docker action.
+    """
+    import http.client
+    import time
+    require(re.fullmatch('[a-f0-9]{64}',container_id) is not None and
+            type(maximum) is int and 0<maximum<=262144,'bounded_owned_log_request_required')
+    class UnixConnection(http.client.HTTPConnection):
+        def connect(self):
+            self.sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+            self.sock.settimeout(5);self.sock.connect('/run/docker.sock')
+            self.log_socket=self.sock
+    connection=UnixConnection('docker',timeout=5)
+    response=None;deadline=time.monotonic()+10
+    try:
+        connection.request('GET','/containers/'+container_id+'/logs?stdout=1&stderr=1&timestamps=1&tail=200')
+        response=connection.getresponse();require(response.status==200,'private_owned_logs_unavailable')
+        chunks=[];size=0
+        while size<=maximum:
+            remaining=deadline-time.monotonic();require(remaining>0,'private_owned_log_deadline_reached')
+            connection.log_socket.settimeout(min(1,remaining))
+            chunk=response.read1(min(65536,maximum+1-size))
+            if not chunk:break
+            chunks.append(chunk);size+=len(chunk)
+        raw=b''.join(chunks)
+        return raw[:maximum],len(raw)>maximum
+    finally:
+        if response is not None:response.close()
+        connection.close()
+
+
+def capture_failure(docker, root, operation_id, *, driver=None, plan=None):
+    """Diagnostic reads only; never remove, stop, restart or reconcile an app."""
+    from . import enrolled_coordinator_transport as t
+    root=Path(root);folder=root/'failure-diagnostic';folder.mkdir(mode=0o700)
+    snapshots=[];failures=[]
+    identities=docker.matching(['label='+TASK_LABEL+'='+operation_id])
+    require(len(identities)<=16,'bounded_owned_failure_inventory_required')
+    for identity in identities:
+        try:
+            item=docker.inspect(identity)
+            require(item['Id']==identity and item['Config']['Labels'].get(TASK_LABEL)==operation_id,
+                    'owned_failure_container_required')
+            if plan is not None:
+                require(item['Image'] in (plan['predecessor']['imageId'],plan['candidate']['imageId']),
+                        'pinned_failure_image_required')
+            role=item['Config']['Labels'].get(t.ROLE_LABEL)
+            state={name:item['State'].get(name) for name in
+                   ('Running','Pid','StartedAt','FinishedAt','ExitCode','OOMKilled','Error')}
+            value=dict(containerId=identity,imageId=item['Image'],role=role,state=state,
+                mounts=item.get('Mounts'),immutableRecipeSha256=t.digest(t.immutable_container_recipe(item)),
+                environmentSha256=t.digest(t.container_environment(item)))
+            snapshots.append(value)
+            if role in ('bootstrap','final'):
+                raw,truncated=private_docker_logs(identity)
+                value['privateLog']=dict(private_write(folder/(identity+'.docker-log'),raw),
+                    bytes=len(raw),truncated=truncated,multiplexedStdoutStderr=True)
+                if driver is not None and state['Running'] is True:
+                    try:
+                        health=driver.boundary.fresh(identity,t.operator_script('GET','/healthz'))
+                        value['freshDiagnosticHealth']=dict(status=health.get('status'),
+                            bodySha256=t.digest(health.get('body')),separateReadOnlyObservation=True)
+                    except BaseException:
+                        value['freshDiagnosticHealth']=dict(unavailable=True,separateReadOnlyObservation=True)
+        except BaseException:
+            failures.append(dict(containerId=identity,classification='private_diagnostic_incomplete'))
+    record=dict(schemaVersion=1,operationId=operation_id,retainedForInspection=True,
+        mutationOutcomeUnknown=docker.mutation_unknown,planSha256=t.digest(plan) if plan is not None else None,
+        containers=snapshots,failures=failures)
+    raw=t.canonical(record);require(len(raw)<=1048576,'bounded_private_failure_summary_required')
+    reference=private_write(folder/'summary.json',raw)
+    print(json.dumps(dict(diagnosticRetained=True,containers=len(snapshots),incomplete=len(failures),
+        summarySha256=reference['sha256'],mutationOutcomeUnknown=docker.mutation_unknown)),flush=True)
+    return record
 
 
 def fixture_bundle(root, *, operation_id, authority_id, old, candidate_image,
@@ -134,6 +217,7 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
     from .qualify_enrolled_docker_transport import QualificationDocker,cleanup_owned,initialize_fixture
     from .qualify_enrolled_holder_transport import owned_volume,verify_desktop_cli
     docker=QualificationDocker();volumes=[];events=[];result=None
+    driver=plan=None;failed=False
     verify_desktop_cli(docker.binary,cli_sha)
     require(docker.command('info','--format','{{.ID}}',output_limit=256).decode().strip()==daemon_id,
             'explicit_fixture_daemon_required')
@@ -222,6 +306,13 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
                     config_source=config_source,lease_source=external,spool_volume=names['spool'],physical=physical,
                     material=material,source_root=source_root,cli_sha=cli_sha,daemon_id=daemon_id,
                     workers=workers.manifests())
+                # Preserve authoritative reviewed inputs before the journal can
+                # dispatch. A failed diagnostic never reconstructs them from
+                # candidate rows or replaces the original expected window.
+                private_write(operation/'reviewed-plan.json',t.canonical(plan))
+                private_write(operation/'reviewed-bundle.json',t.canonical(bundle))
+                for role in ('bootstrap','final'):
+                    private_write(operation/('reviewed-'+role+'-config.json'),t.canonical(material[role]))
                 class PhaseDriver(ConcreteCutoverDriver):
                     def _workers(self):return workers.ready(self.bundle['workers'])
                 driver=PhaseDriver(plan,bundle,operation,docker=docker)
@@ -255,9 +346,28 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
                     postResumeConnectedCatalog=catalogs,
                     fixtureSystemdEngineCoordinatorTransport=True,productionHostEnrollmentQualified=False,
                     desktopReadonly0777Exemption=True,installedQualified=False)
+    except BaseException:
+        failed=True
+        try:capture_failure(docker,root,operation_id,driver=driver,plan=plan)
+        except BaseException:
+            print(json.dumps(dict(diagnosticRetained=True,classification='private_capture_incomplete',
+                                  operationId=operation_id)),flush=True)
+        raise
     finally:
-        if workers is not None:workers.__exit__(None,None,None)
-        cleanup_owned(docker,operation_id,volumes)
+        try:
+            if workers is not None:workers.__exit__(None,None,None)
+        except BaseException:
+            failed=True
+            raise
+        finally:
+            if not failed and result is not None:
+                cleanup_owned(docker,operation_id,volumes)
+            else:
+                # A failed app/state is diagnostic evidence even when Docker
+                # mutation outcomes are known. Stopping/removing it requires a
+                # separate reviewed action, never this finally clause.
+                print(json.dumps(dict(retainedFailedOperation=operation_id,taskVolumes=volumes,
+                    inspectionOnly=True,mutationOutcomeUnknown=docker.mutation_unknown)),flush=True)
     print(json.dumps(result,sort_keys=True),flush=True)
     return result
 
