@@ -138,12 +138,39 @@ class WorkerHoldTests(unittest.TestCase):
         self.assertNotIn('queueReason', self.public(job))
         self.assertNotIn('watch', self.row(job)[1])
 
-    def test_http_404_counts_as_not_found_and_failed_list_counts_as_unreachable(self):
+    def engine_replies(self, info, tasks):
+        def read(route, **kwargs):
+            value = tasks if route == '/task/list' else info
+            if isinstance(value, Exception):
+                raise value
+            return value
+        self.native.read.side_effect = read
+
+    def test_absence_needs_a_not_found_read_and_a_well_formed_task_list_census(self):
         job = self.executing()
-        self.native.read.side_effect = lambda route, **kwargs: None
-        self.assertEqual(self.worker.task_observation(job['jobId']), ('missing', None))
-        self.engine_down()
-        self.assertEqual(self.worker.task_observation(job['jobId']), ('unreachable', None))
+        identifier, down = job['jobId'], EngineUnavailable('engine_read_unavailable')
+        for info in (None, down):
+            self.engine_replies(info, [{'uuid': str(uuid.uuid4())}, ])
+            self.assertEqual(self.worker.task_observation(identifier), ('missing', None))
+            self.engine_replies(info, [])
+            self.assertEqual(self.worker.task_observation(identifier), ('missing', None))
+            for tasks in (down, {'tasks': []}, [{'uuid': identifier}], [{'id': identifier}], ['text'], None):
+                self.engine_replies(info, tasks)
+                self.assertEqual(self.worker.task_observation(identifier), ('unreachable', None), tasks)
+
+    def test_malformed_200_is_neither_present_nor_absent_and_keeps_the_suspicion(self):
+        job = self.executing()
+        identifier = job['jobId']
+        self.driver.step()
+        for info in ({'uuid': identifier, 'status': {}}, {'uuid': identifier, 'status': {'code': 99}},
+                     {'uuid': identifier, 'status': {'code': '40'}}, {'uuid': identifier, 'status': {'code': True}},
+                     {'uuid': identifier, 'status': 40}, {'uuid': str(uuid.uuid4()), 'status': {'code': 40}}, {}, [], 'text'):
+            self.engine_replies(info, [])
+            self.assertEqual(self.worker.task_observation(identifier), ('unreachable', None), info)
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertEqual(self.row(job)[1]['suspect']['count'], 9)
+        self.engine_replies({'uuid': identifier, 'status': {'code': 20}}, [])
+        self.assertEqual(self.worker.task_observation(identifier)[0], 'present')
 
     def test_lost_node_is_observed_after_elapsed_time_not_on_short_outage(self):
         job = self.executing()
