@@ -19,7 +19,7 @@ class LeaseUnavailable(RuntimeError):
     pass
 
 
-def _private(path, *, directory=False):
+def _private(path, *, directory=False, lease_directory=False, lease_file=False):
     path = Path(path).absolute()
     if path.resolve() != path or any(parent.is_symlink() for parent in path.parents):
         raise LeaseUnavailable('authority_lease_original_paths_required')
@@ -27,8 +27,13 @@ def _private(path, *, directory=False):
     if ((directory and not stat.S_ISDIR(info.st_mode))
             or (not directory and (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1))):
         raise LeaseUnavailable('authority_lease_original_identity_required')
-    if os.name == 'posix' and (info.st_uid != os.geteuid() or info.st_mode & (0o077 if directory else 0o022)):
-        raise LeaseUnavailable('authority_lease_private_ownership_required')
+    if os.name == 'posix':
+        mode = stat.S_IMODE(info.st_mode)
+        allowed = (mode in (0o700, 0o711) if lease_directory else
+                   mode == 0o600 if lease_file else
+                   not info.st_mode & (0o077 if directory else 0o022))
+        if info.st_uid != os.geteuid() or not allowed:
+            raise LeaseUnavailable('authority_lease_private_ownership_required')
     return path, info
 
 
@@ -81,7 +86,7 @@ class AuthorityLease:
             raise LeaseUnavailable('authority_lease_requires_existing_authority')
         if not enrolled:
             raise LeaseUnavailable('new_authority_enrollment_requires_reviewed_migration')
-        directory, info = _private(directory, directory=True)
+        directory, info = _private(directory, directory=True, lease_directory=True)
         self.authority = authority
         self.directory = directory
         self.path = directory / (authority + '.lease')
@@ -112,8 +117,8 @@ class AuthorityLease:
     def check(self, state_dir=None):
         if self._pid != os.getpid() or self._descriptor is None:
             raise LeaseUnavailable('authority_lease_owner_required')
-        directory, root = _private(self.directory, directory=True)
-        path, info = _private(self.path)
+        directory, root = _private(self.directory, directory=True, lease_directory=True)
+        path, info = _private(self.path, lease_file=True)
         opened = os.fstat(self._descriptor)
         identity = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_nlink, value.st_uid, value.st_gid)
         if ((root.st_dev, root.st_ino, root.st_mode, root.st_uid, root.st_gid) != self._directory_identity

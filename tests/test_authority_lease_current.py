@@ -87,6 +87,24 @@ class EnrolledStateTests(unittest.TestCase):
         self.assertFalse(self.file.exists())
         self.assertEqual(self.database.read_bytes(), before)
 
+    @unittest.skipUnless(os.name == 'posix', 'actual installed0711 private owner flock')
+    def test_installed0711_directory_is_accepted_without_permission_changes(self):
+        self.leases.chmod(0o711)
+        self.lease = authority_lease.acquire(self.leases, self.state)
+        self.queue = Queue(self.state, authority_lease=self.lease)
+        self.assertEqual(self.leases.stat().st_mode & 0o7777, 0o711)
+        self.assertEqual(self.file.stat().st_mode & 0o7777, 0o600)
+
+    @unittest.skipUnless(os.name == 'posix', 'actual unsafe enrolled directory permissions')
+    def test_group_or_world_writable_enrolled_directory_is_refused(self):
+        before = self.database.read_bytes()
+        for mode in (0o770, 0o777):
+            self.leases.chmod(mode)
+            with self.subTest(mode=mode), self.assertRaises(authority_lease.LeaseUnavailable):
+                authority_lease.acquire(self.leases, self.state)
+            self.assertEqual(self.database.read_bytes(), before)
+        self.leases.chmod(0o700)
+
     @unittest.skipUnless(os.name == 'posix', 'actual Linux factory compatibility')
     def test_actual_handler_restores_installed_external_lease_configuration(self):
         from processing.app import make_handler

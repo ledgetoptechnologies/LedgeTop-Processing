@@ -28,6 +28,15 @@ excluding a copied state actor, wrong/fake state binding, missing lease file
 refusal, actual make_handler configuration and real process death. The latter
 Linux cases are present and pending the serialized Linux test slot.
 
+Fresh parent read-only metadata identified the actual enrolled directory as
+UID/GID10001 mode0711 and its file as UID/GID10001 mode0600/single-link. The
+external directory check therefore permits exactly owner0700 or owner0711:
+0711 allows search, but no foreign writes or directory listing. The original
+file must remain0600. The state directory retains its separate private0700
+requirement. Exact0711 positive and0770/0777 negative cases are included; no
+installed permission was changed or normalized. Deployment compatibility still
+requires checking the original mounted state directory, not just this lease.
+
 This is not a qualified installed cutover. Current-V2 census/backup/rollback
 still must preserve the actual 22 terminal jobs, seven legacy Viewer tasks,
 file reservations/option evidence and the exact external mount before a
