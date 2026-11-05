@@ -71,9 +71,12 @@ def _write_tls_material(directory: Path):
 
 def _engine_snapshot():
     options = [
-        {"name": "pc-ept", "type": "bool", "domain": "", "value": "false", "help": "Required output"},
-        {"name": "gltf", "type": "bool", "domain": "", "value": "false", "help": "Required output"},
-        {"name": "3d-tiles", "type": "bool", "domain": "", "value": "false", "help": "Required output"},
+        {"name": "pc-ept", "type": "bool", "domain": "", "value": "false",
+         "help": "Export the georeferenced point cloud in Entwine Point Tile (EPT) format. Default: %(default)s"},
+        {"name": "gltf", "type": "bool", "domain": "", "value": "false",
+         "help": "Generate single file Binary glTF (GLB) textured models. Default: %(default)s"},
+        {"name": "3d-tiles", "type": "bool", "domain": "", "value": "false",
+         "help": "Generate OGC 3D Tiles outputs. Default: %(default)s"},
         {"name": "orthophoto-resolution", "type": "float", "domain": "positive float",
          "value": "2", "help": "Synthetic numeric processing setting"},
         {"name": "feature-quality", "type": "enum", "domain": ["low", "medium", "high"],
