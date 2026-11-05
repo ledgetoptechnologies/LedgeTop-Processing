@@ -37,6 +37,16 @@ const config = JSON.parse(fs.readFileSync(process.env.LTDS_PAIRING_CONFIG, 'utf8
         environment: 'staging', timeoutMs: 5000 }) };
     const before = outbox.getIntent(attemptId);
     const run = () => processSourceReleaseAttempt({ attemptId, processing, storage, sourceIntake, sourceRelease });
+    if (config.sourceReleasePhase === 'rerun') {
+      const original = processing.getAttempt(attemptId);
+      const next = processing.createAttempt({ taskId: original.taskId, providerId: original.providerId,
+        options: original.options, capabilityFingerprint: config.capabilityFingerprint });
+      assert.notEqual(next.id, original.id);
+      assert.equal(processing.getTask(original.taskId).activeAttemptId, next.id);
+      assert.equal(processing.getAttempt(original.id).status, 'published');
+      process.stdout.write(JSON.stringify({ superseded: true }) + '\n');
+      return;
+    }
     if (config.sourceReleasePhase === 'terminal-crash') {
       const prepare = db.prepare.bind(db);
       db.prepare = sql => {

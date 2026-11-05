@@ -564,6 +564,7 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
         resumed = viewer("resume")
         self.assertEqual(resumed["state"], "waiting_policy")
         self.assertEqual(first["requestSha256"], resumed["requestSha256"])
+        self.assertTrue(viewer("rerun")["superseded"], "a normal rerun must not strand the prior accepted release")
         self.assertEqual(drops["count"], 1)
         self.assertEqual(len(requests), 1, "restart must find the committed authorization without another POST")
         auth = json.loads(requests[0])["authorization"]
