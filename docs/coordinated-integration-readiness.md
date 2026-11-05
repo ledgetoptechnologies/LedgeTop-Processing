@@ -4,6 +4,53 @@ This record describes the review branch
 `codex/viewer-accepted-copy-integration-candidate-20261103`. It is not a deployment
 approval. Runtime acceptance remains incomplete.
 
+## November 5 combined candidate checkpoint
+
+Processing `667ee7d9eda11fad1caa0569ba8b967dd84bdd67` paired with immutable Viewer
+`2317d40029f5b0dbbb002cd319c8f25d321a1bfb` passed **271/271 Linux tests, no
+skips**, across 18 selected modules. This includes the shared option policy,
+actual HTTPS provider setup and two initial `processOne` submissions, intake and
+range transfer, scheduling, worker recovery, result delivery/copy ACK replay,
+cleanup and actual Viewer ingestion in both roundtrip modes.
+
+The Viewer ZIP SHA-256 is
+`648c05e55c724c7cc57958b812f22bbd6137cfd1172c121f32401b5e1b4b2532`;
+the exact dependency lock SHA-256 is
+`a0eaead118642843905756fcfe3f53b5336b5a437e22a2f80677d6f06087fb12`.
+Python 3.13.17 and Node 24.22.2 ran with one CPU, 2 GiB memory, read-only source
+and dependency mounts and external networking disabled. CommonJS and production
+ES-module imports passed preflight. The suite initially demonstrated the ingest
+free-space guard on a 512 MiB tmpfs (269 passed, two rejected insufficient space).
+The full successful run used a dedicated disposable disk volume with sufficient
+space; no application storage guard was weakened. Its owned container exited and
+the labeled volume was removed.
+
+Ingestion now verifies actual accepted archive bytes, OBJ/MTL/PNG/GLB closure,
+registered asset hashes, a one-point EPT tree and a trusted mandatory pending
+`mesh_tiles` job. The synthetic GLB fixture checks its emitted texture reference,
+PNG bytes, triangle indices and position bounds. **The model stays staged and
+unpublished.** Controlled conversion, its verified receipt and a browser-openable
+result remain required, along with NAS and installed-runtime acceptance.
+
+Viewer's six-file focused run at `c19b9fec` passed 57/59 with two incorrect DTO
+assertions. The final changed-file rerun at `2317d400` passed 20/20 with no skips;
+the other focused files were unchanged. These checks preserve required output
+formats and conservative holds without deleting uncertain uploads or raw GCP
+CSV files. The fresh client binding fix and parser dependency fix remain in the
+final Viewer candidate.
+
+A local image from the qualified Processing source is
+`sha256:57f01267c88439d872f6782b54511e314614a76145e32cfe2fad003e5ca0fac8`,
+tagged `ledgetop-processing:integration-667ee7d`, revision label `667ee7d`.
+It passed imports/shared option policy and an actual health-200 check as UID
+10001 with a read-only filesystem and networking disabled. Reference processing
+was disabled for that smoke check; this is not configured TLS/NAS startup proof.
+The image is local only. Neither running PC, TrueNAS, main nor a registry was
+updated; the older inactive host preparations below remain unchanged.
+
+See [the local qualification procedure](local-viewer-pairing-qualification.md)
+for dependency/mount, disk preflight and cleanup requirements.
+
 ## Follow-up option and provider integration qualification
 
 Processing `f5e2737e89effb31a8c2e7b943b79d53baca3e6a` fixes the shared ODM
