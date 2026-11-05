@@ -250,7 +250,7 @@ def prepare(spec,*,now=None):
             finally:os.close(f)
         # Validate real daemon schema/private TLS access without factory startup.
         from ops.reference_worker_daemon import load_config
-        load_config(out/'worker-config.json')
+        load_config(str(out/'worker-config.json'))
         os.fsync(target);os.fsync(fd)
         require(install.directory_identity(out.parent)==parent and
                 created[:6]==install.identity(out.lstat())[:6],'preparation_parent_changed')

@@ -45,6 +45,11 @@ checks real `load_config` in process without `build_worker`; and returns only
 config/manifest/unit hashes with `preparationOnly: true`. The CLI accepts only
 `--spec /absolute/private/spec.json` and reports a sanitized hold on any error.
 It has not been invoked against installed credentials by this implementation.
+The generated manifest is service-owned staging material. The existing installer
+CLI requires a root-owned 0600 manifest: the separately reviewed privileged
+execution bundle must exclusive-copy and hash-verify these exact manifest bytes
+into a NEW root-private file, preserving all config/artifact owner descriptors.
+Do not relax the installer ownership check or change existing input ownership.
 
 This validates pinned staging material, not live host/Docker boot identity,
 external port mapping, complete idle state, current kernel lease ownership or
