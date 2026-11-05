@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import stat
@@ -95,7 +96,33 @@ class SystemdWorkerControl:
         if result.returncode:raise WorkerHandoverHeld('worker_service_command_failed')
         return result.stdout
 
+    def _loaded_unit(self):
+        # Fragment bytes do not prove what systemd loaded: drop-ins and a stale
+        # manager cache can change termination or launch semantics independently.
+        names=('FragmentPath','DropInPaths','NeedDaemonReload','Type','KillMode','KillSignal',
+            'SendSIGKILL','UMask','NoNewPrivileges','ExecStart','ExecStartPre','ExecStartPost',
+            'ExecStop','ExecStopPost','ExecReload','FailureAction','SuccessAction')
+        raw=self._run(['show','--no-pager','--property='+','.join(names),self.unit])
+        if len(raw)>32768:raise WorkerHandoverHeld('loaded_worker_unit_changed')
+        lines=raw.splitlines()
+        if len(lines)!=len(names) or any('=' not in line for line in lines):
+            raise WorkerHandoverHeld('loaded_worker_unit_unavailable')
+        fields=dict(line.split('=',1) for line in lines)
+        expected=dict(FragmentPath=self.settings['unitFile'],DropInPaths='',NeedDaemonReload='no',Type='simple',
+            KillMode='mixed',KillSignal='15',SendSIGKILL='no',UMask='0077',NoNewPrivileges='yes',
+            ExecStartPre='',ExecStartPost='',ExecStop='',ExecStopPost='',ExecReload='',FailureAction='none',SuccessAction='none')
+        if set(fields)!=set(names) or any(fields.get(key)!=value for key,value in expected.items()):
+            raise WorkerHandoverHeld('loaded_worker_unit_changed')
+        # systemctl show's ExecStart value is a structured command record. Refuse
+        # multiple commands or unsupported encodings instead of guessing argv.
+        command=fields['ExecStart']
+        match=re.fullmatch(r'\{ path=([^;{}]+) ; argv\[\]=([^;{}]+) ; ignore_errors=no ; start_time=[^;{}]* ; stop_time=[^;{}]* ; pid=[0-9]+ ; code=[^;{}]* ; status=[^;{}]* \}',command)
+        expected_argv=[str(self.python),'-B','-m','ops.reference_worker_daemon','--config',str(self.config)]
+        if match is None or match.group(1)!=str(self.python) or shlex.split(match.group(2))!=expected_argv:
+            raise WorkerHandoverHeld('loaded_worker_command_changed')
+
     def probe(self):
+        self._loaded_unit()
         raw=self._run(['show','--no-pager','--property=MainPID,ActiveState,SubState,ControlGroup,InvocationID,FragmentPath',self.unit])
         fields=dict(line.split('=',1) for line in raw.splitlines() if '=' in line)
         if (set(fields)!={'MainPID','ActiveState','SubState','ControlGroup','InvocationID','FragmentPath'}
@@ -136,6 +163,7 @@ class SystemdWorkerControl:
 
     def command(self,action):
         if action not in ('stop','start'):raise WorkerHandoverHeld('invalid_worker_service_action')
+        self._loaded_unit()
         self._run(['--no-block',action,self.unit])
 
 
@@ -269,7 +297,15 @@ class ReferenceWorkerHandover:
         self._gate_owner=gate
         if self.state is None:
             raw,config=self._config()
-            proof,process=self.ready(expected_sha=digest(raw),activation=config['maintenanceReadiness']['activation'])
+            while True:
+                try:
+                    proof,process=self.ready(expected_sha=digest(raw),activation=config['maintenanceReadiness']['activation'])
+                    break
+                except HTTPError as error:
+                    if error.code!=503 or self.clock()>=deadline:raise
+                except (URLError,TimeoutError):
+                    if self.clock()>=deadline:raise
+                time.sleep(min(0.05,max(0,deadline-self.clock())))
             self.state=dict(schemaVersion=1,manifestSha256=self._manifest_sha,planId=node['planId'],targetImage=node['targetImage'],
                 targetEngineVersion=node['targetEngineVersion'],oldConfig=base64.b64encode(raw).decode(),oldConfigSha256=digest(raw),
                 oldProof=proof,oldProcess=process,activationId=str(uuid.uuid4()),stage='stop_pending')

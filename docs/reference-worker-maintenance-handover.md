@@ -23,7 +23,11 @@ source drift; it is not hardware attestation against a privileged administrator.
 The reviewed unit uses the exact Python `-B -m ops.reference_worker_daemon --config`
 command, Type=simple, UMask=0077, NoNewPrivileges=yes, KillMode=mixed and
 SendSIGKILL=no. The controller verifies the unit hash, process command, executable,
-working directory and owner. It only requests graceful start/stop on that unit.
+working directory and owner. Before each action and readiness process probe, it
+also checks the loaded unit: no drop-ins or pending daemon reload, exact effective
+command, no lifecycle hooks, and matching termination/security properties.
+Unsupported systemctl command-record encodings hold closed. It only requests
+graceful start/stop on that unit.
 A stop needs both the original process gone and its cgroup empty; an active service
 flag never proves readiness. No automatic forced kill is used.
 

@@ -79,6 +79,9 @@ class TreeDarFactoryMigrationTests(unittest.TestCase):
 
     def open(self,*,provision=False,runner=None):
         driver,server=self.host.build(provision=provision)
+        # Both engines use synthetic transports in this network-isolated fixture.
+        # Keep real factory/gate/journal checks; only physical Docker identity is supplied.
+        driver.worker.engine_probe=lambda deadline:self.host.config['engineId']
         controller=driver.execution_router.treedar_worker.controller
         controller.runner=runner or engine_fixture.FakeDocker(controller.config)
         controller.runner.id=hashlib.sha256(str(controller.path).encode()).hexdigest()

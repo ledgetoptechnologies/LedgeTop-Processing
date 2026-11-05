@@ -162,6 +162,19 @@ class ReferenceWorkerHandoverTests(unittest.TestCase):
                     self.assertEqual(supervisor.advance(identifier),result)
                 self.assertEqual(self.control.calls,['stop','start'])
 
+    def test_transient_old_driver_busy_readiness_retries_before_any_stop(self):
+        from urllib.error import HTTPError
+        from ops.reference_worker_handover import ReferenceWorkerHandover
+        original=ReferenceWorkerHandover._https_readiness;busy=[]
+        def transient(instance,request,config):
+            if not busy:
+                self.assertEqual(self.control.calls,[]);busy.append(True)
+                raise HTTPError('https://synthetic.invalid',503,'synthetic driver busy',{},None)
+            return original(instance,request,config)
+        with patch.object(ReferenceWorkerHandover,'_https_readiness',transient):
+            self.assertEqual(self.run_update()['status'],'succeeded')
+        self.assertEqual(self.control.calls,['stop','start'])
+
     def test_failed_new_worker_readiness_restores_old_config_and_factory_pin_without_reopen(self):
         old=self.worker_path.read_bytes();self.control.fail_new=True
         result=self.run_update()
