@@ -25,6 +25,62 @@ def _json(value):
 
 
 class ReferenceSourceIntakeMethods:
+    def _source_acceptance_binding(self, row):
+        """Project only the authenticated, persisted V2 source/attempt identity."""
+        from .source_acceptance_binding import validate_source_acceptance_binding
+        from .viewer_source_attestation import PROOF_FIELDS, PROTOCOL as SOURCE_PROTOCOL, proof_digest
+        try:
+            if row['source_state'] != 'accepted' or row['derived_state'] != 'accepted':
+                raise ValueError('source receipts are not complete')
+            attestation = json.loads(row['source_attestation_json'])
+            protocol._closed(attestation, ('proof', 'signature', 'attestationSha256'), 'persisted source proof')
+            proof = attestation['proof']
+            protocol._closed(proof, PROOF_FIELDS, 'persisted source proof body')
+            if (type(proof['schemaVersion']) is not int or proof['schemaVersion'] != 2
+                    or proof['protocol'] != SOURCE_PROTOCOL
+                    or attestation['attestationSha256'] != row['source_attestation_sha']
+                    or proof_digest(proof) != row['source_attestation_sha']):
+                raise ValueError('source proof changed')
+            expected_proof = dict(authorityId=self.queue.authority_id, environment=row['environment'],
+                submissionId=row['submission_id'], viewerAttemptId=row['submission_id'],
+                viewerTaskId=row['viewer_task_id'], providerTaskId=row['provider_task_id'],
+                sourceManifestSha256=row['source_manifest_sha'], derivedManifestSha256=row['derived_manifest_sha'],
+                pipelineManifestSha256=row['manifest_sha'], pipelineDigest=row['pipeline_digest'])
+            if any(proof[key] != value for key, value in expected_proof.items()):
+                raise ValueError('persisted source identity changed')
+            source = json.loads(row['source_receipt_json'])
+            derived = json.loads(row['derived_receipt_json'])
+            if protocol.digest(source) != row['source_receipt_sha'] or protocol.digest(derived) != row['derived_receipt_sha']:
+                raise ValueError('source receipts changed')
+            common = dict(jobId=row['job_id'], attemptId=row['submission_id'],
+                          generation=row['generation'], environment=row['environment'])
+            if (type(source.get('schemaVersion')) is not int or source['schemaVersion'] != 2
+                    or source.get('receiptType') != 'source_retention'
+                    or source.get('retentionGuarantee') != 'until_explicit_source_release_v1'
+                    or type(derived.get('schemaVersion')) is not int or derived['schemaVersion'] != 1
+                    or derived.get('receiptType') != 'attempt_derived_input'
+                    or any(source[key] != value or derived[key] != value for key, value in common.items())
+                    or source['sourceManifestSha256'] != row['source_manifest_sha']
+                    or source['pipelineManifestSha256'] != row['manifest_sha']
+                    or source['pipelineDigest'] != row['pipeline_digest']
+                    or derived['derivedManifestSha256'] != row['derived_manifest_sha']):
+                raise ValueError('source receipt identity changed')
+            binding = dict(coordinatorAuthorityId=self.queue.authority_id,
+                viewerPrincipalId=proof['principalId'], submissionId=row['submission_id'],
+                activationId=proof['activationId'], viewerTaskId=row['viewer_task_id'],
+                viewerAttemptId=row['submission_id'], providerTaskId=row['provider_task_id'],
+                preparedEnvelopeSha256=proof['preparedEnvelopeSha256'], jobId=row['job_id'],
+                generation=row['generation'], environment=row['environment'],
+                inputManifestSha256=row['manifest_sha'], pipelineDigest=row['pipeline_digest'],
+                sourceManifestSha256=row['source_manifest_sha'], derivedManifestSha256=row['derived_manifest_sha'],
+                sourceReceiptSha256=row['source_receipt_sha'], derivedReceiptSha256=row['derived_receipt_sha'])
+            return validate_source_acceptance_binding(binding, dict(sourceIntakeVersion=2,
+                jobId=row['job_id'], generation=row['generation'], environment=row['environment'],
+                manifestSha256=row['manifest_sha'], pipelineDigest=row['pipeline_digest'],
+                authorityId=self.queue.authority_id, attemptId=row['submission_id']))
+        except (KeyError, TypeError, ValueError):
+            raise Conflict('persisted V2 source acceptance binding unavailable') from None
+
     def submit_source_intake(self, validated, *, capability_fingerprint,
                              options_fingerprint, allowed_odm_options,
                              source_spool, trusted_source_keys, authority_id,

@@ -283,6 +283,9 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             result.update(submission=json.loads(row["input_json"]),
                           resultManifest=json.loads(row["result_json"]) if row["result_json"] else None,
                           claimToken=row["private_claim_token"], executionPhase=row["phase"])
+            if row['source_state'] == 'accepted' and row['derived_state'] == 'accepted':
+                result.update(authorityId=self.queue.authority_id,
+                              sourceAcceptanceBinding=self._source_acceptance_binding(row))
         return result
 
     def _quota(self, db, extra_bytes=0):

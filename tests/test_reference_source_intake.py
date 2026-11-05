@@ -628,6 +628,11 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                     claim=api.store.claim(job["jobId"],node_id="cluster",worker_id="worker",
                         worker_instance_id="instance",claim_request_id="after-receipts")
                     self.assertEqual((claim["sourceIntakeVersion"],claim["submission"]["sourceIntakeVersion"]),(2,2))
+                    binding = claim['sourceAcceptanceBinding']
+                    self.assertEqual(binding['viewerTaskId'], self.payload['viewerTaskId'])
+                    self.assertEqual(binding['coordinatorAuthorityId'], queue.authority_id)
+                    self.assertEqual(binding['sourceReceiptSha256'], completed.body['sourceReceiptSha256'])
+                    self.assertEqual(binding['preparedEnvelopeSha256'], request['sourceAttestation']['proof']['preparedEnvelopeSha256'])
                     parent_claim=api.store.claim_snapshot(job["jobId"],node_id="cluster",worker_id="worker",
                         worker_instance_id="instance",claim_token=claim["claimToken"])
                     self.assertEqual(parent_claim["sourceIntakeVersion"],2)
@@ -641,6 +646,7 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                     self.assertEqual(reopened.reconcile_source_spool(spool),{"jobs":1,"adopted":0,"held":0})
                     stored=reopened.get(job["jobId"],private=True)
                     self.assertEqual(stored["submission"]["sourceIntakeVersion"],2)
+                    self.assertEqual(stored['sourceAcceptanceBinding'], binding)
                     recovered_claim=reopened.claim_snapshot(job["jobId"],node_id="cluster",worker_id="worker",
                         worker_instance_id="instance",claim_token=claim["claimToken"])
                     self.assertEqual(recovered_claim["sourceIntakeVersion"],2)
