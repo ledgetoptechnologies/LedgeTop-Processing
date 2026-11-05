@@ -421,6 +421,15 @@ class CoordinatorDeathTests(ProcessingHarness):
         self.run_to_engine()
 
 
+class EarlyRowTests(ProcessingHarness):
+    def test_a_row_where_none_can_be_is_never_recovered_or_started(self):
+        self.lost_processing_reply()
+        self.restart_coordinator()
+        with self.driver.worker._db() as db:
+            db.execute("INSERT INTO executions(job,identity,receipt,phase) VALUES(?,'{}','r','prepared')", (self.job_id,))
+        self.assert_stays_held('source_recovery_execution_exists')
+
+
 class AmbiguousEvidenceTests(ProcessingHarness):
     def setUp(self):
         super().setUp()
