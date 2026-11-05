@@ -473,18 +473,37 @@ def _census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
         sqlite_bound = 4 * max_metadata_bytes + (4 * row_count + 256) * page_size
         _require(page_count * page_size == initial.st_size <= sqlite_bound, 'sqlite_physical_budget_exceeded')
         files, total_artifact, directories = {}, 0, {}
+        pilot_manifest, pilot_files, pilot_directories, pilot_bytes = {}, 0, 0, 0
         for path in root.rglob('*'):
             budget.check()
             relative = path.relative_to(root).as_posix()
             info = path.lstat()
+            parts = path.relative_to(root).parts
+            opaque_pilot = parts[0] == 'pilot-journals'
+            if opaque_pilot:
+                _require(len(parts) <= 3, 'opaque_pilot_depth_exceeded')
+                if stat.S_ISDIR(info.st_mode):
+                    pilot_directories += 1
+                    _require(len(parts) < 3 and pilot_directories <= 65 and stat.S_IMODE(info.st_mode) == 0o700,
+                             'opaque_pilot_directory_bounds_exceeded')
+                    expected_dirs.add(relative)
+                else:
+                    _require(len(parts) >= 2 and stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+                             not info.st_mode & 0o7077 and info.st_size <= 65536, 'opaque_pilot_private_file_required')
+                    pilot_files += 1; pilot_bytes += info.st_size
+                    _require(pilot_files <= 64 and pilot_bytes <= 1048576, 'opaque_pilot_file_bounds_exceeded')
+                    expected_files[relative] = None
             if stat.S_ISDIR(info.st_mode):
                 _require(relative in expected_dirs, 'unknown_predecessor_path')
                 directories[relative] = _same(_owned(path, uid, directory=True))
+                if opaque_pilot:
+                    path_id = hmac.new(key,b'path\0'+relative.encode(),hashlib.sha256).hexdigest()
+                    pilot_manifest[path_id] = dict(kind='directory',mode=stat.S_IMODE(info.st_mode))
                 continue
             _require(relative in expected_files, 'unknown_predecessor_path')
-            limit = sqlite_bound if relative == 'jobs.sqlite3' else max_artifact_bytes
+            limit = 65536 if opaque_pilot else sqlite_bound if relative == 'jobs.sqlite3' else max_artifact_bytes
             expected = expected_files[relative]
-            if metadata_only:
+            if metadata_only and not opaque_pilot:
                 observed = _owned(path,uid)
                 _require(observed.st_size <= limit and (expected is None or observed.st_size == expected[0]),
                          'retained_artifact_size_mismatch')
@@ -498,6 +517,8 @@ def _census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
                 _require(total_artifact <= max_artifact_bytes, 'retained_artifact_budget_exceeded')
             path_id = hmac.new(key, b'path\0' + relative.encode(), hashlib.sha256).hexdigest()
             files[path_id] = {k: v for k, v in result.items() if k != 'sha256'}
+            if opaque_pilot:
+                pilot_manifest[path_id] = dict(kind='file',**files[path_id])
         _require(all((root / path).is_file() for path in expected_files) and
                  all((root / path).is_dir() for path in expected_dirs), 'missing_retained_path')
         _require(all(_same((root / path).lstat()) == identity for path, identity in directories.items()),
@@ -510,7 +531,9 @@ def _census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
                     retainedFilesValidated=not metadata_only, directFileBytesRead=budget.used,
                     sourceCommit=SOURCE, authorityId=authority_id,
                     schemaSha256=hashlib.sha256(_canonical(schema)).hexdigest(), tables=tables, files=files,
-                    nodeMaintenanceHistory=maintenance_history,
+                    nodeMaintenanceHistory=maintenance_history,pilotClosureProven=False,
+                    opaquePilotJournals=dict(files=pilot_files,directories=pilot_directories,bytes=pilot_bytes,
+                        manifestSha256=hashlib.sha256(_canonical(pilot_manifest)).hexdigest()),
                     metadataBytes=logical_bytes, artifactBytes=total_artifact, sqliteBytes=initial.st_size,
                     sqlitePhysicalBound=sqlite_bound, sqliteCoarsePhysicalBound=coarse_physical_bound,
                     archiveReceipts=len(archive_checks),

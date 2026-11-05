@@ -251,6 +251,59 @@ class ClosedPredecessorCensusTests(unittest.TestCase):
         self.mutate("UPDATE nodes SET revision=revision-1 WHERE id='main'")
         with self.assertRaisesRegex(c.CensusRefused,'unbound_direct_closed_plan_metadata'): self.census()
 
+    def add_opaque_pilot(self):
+        root=self.root/'pilot-journals';root.mkdir(mode=0o700)
+        for index in range(3):
+            directory=root/('lt-aa5-'+uuid.uuid4().hex);directory.mkdir(mode=0o700)
+            for node in ('cluster','main'):
+                for suffix in ('.json','.json.cancel-intent','.child-start.json','.child-exit.json'):
+                    target=directory/(node+suffix)
+                    target.write_bytes(b'{"syntheticOpaque":true,"notClosureProof":true}')
+                    target.chmod(0o600)
+        return root
+
+    def test_bounded_opaque_pilot_manifest_is_retained_without_closure_or_adoption(self):
+        root=self.add_opaque_pilot()
+        before=self.census();probe=self.probe()
+        for result in (before,probe):
+            self.assertFalse(result['pilotClosureProven'])
+            self.assertEqual(result['opaquePilotJournals']['files'],24)
+            self.assertEqual(result['opaquePilotJournals']['directories'],4)
+        self.assertEqual(before['opaquePilotJournals'],probe['opaquePilotJournals'])
+        target=next(root.rglob('*.child-exit.json'));original=target.read_bytes()
+        target.write_bytes(b'x'*len(original))
+        after=self.census()
+        self.assertNotEqual(before['opaquePilotJournals']['manifestSha256'],after['opaquePilotJournals']['manifestSha256'])
+        self.assertEqual(before['tables'],after['tables'])
+        self.assertFalse(after['pilotClosureProven'])
+
+    def test_opaque_pilot_file_size_count_and_total_bounds(self):
+        root=self.root/'pilot-journals';root.mkdir(mode=0o700)
+        target=root/'opaque';target.write_bytes(b'x'*65537);target.chmod(0o600)
+        with self.assertRaisesRegex(c.CensusRefused,'opaque_pilot_private_file_required'):self.probe()
+        target.unlink()
+        for index in range(65):
+            target=root/('opaque-'+str(index));target.write_bytes(b'');target.chmod(0o600)
+        with self.assertRaisesRegex(c.CensusRefused,'opaque_pilot_file_bounds_exceeded'):self.probe()
+        for target in root.iterdir():target.unlink()
+        for index in range(17):
+            target=root/('opaque-'+str(index));target.write_bytes(b'x'*65536);target.chmod(0o600)
+        with self.assertRaisesRegex(c.CensusRefused,'opaque_pilot_file_bounds_exceeded'):self.census()
+
+    def test_opaque_pilot_empty_directory_count_is_bounded(self):
+        root=self.root/'pilot-journals';root.mkdir(mode=0o700)
+        for index in range(65):(root/('opaque-'+str(index))).mkdir(mode=0o700)
+        with self.assertRaisesRegex(c.CensusRefused,'opaque_pilot_directory_bounds_exceeded'):self.probe()
+
+    def test_opaque_pilot_depth_permissions_and_unknown_roots_remain_closed(self):
+        root=self.add_opaque_pilot();directory=next(root.iterdir());target=directory/'third';target.mkdir(mode=0o700)
+        with self.assertRaisesRegex(c.CensusRefused,'opaque_pilot_directory_bounds_exceeded'):self.probe()
+        target.rmdir();target=next(directory.iterdir());target.chmod(0o644)
+        with self.assertRaisesRegex(c.CensusRefused,'opaque_pilot_private_file_required'):self.probe()
+        target.chmod(0o600)
+        other=self.root/'unknown-pilot-journals';other.mkdir(mode=0o700)
+        with self.assertRaisesRegex(c.CensusRefused,'unknown_predecessor_path'):self.probe()
+
     def probe(self, **kwargs):
         args=dict(key=self.key,authority_id=self.authority,node_ids=('cluster','main'),uid=os.geteuid(),
                   max_artifact_bytes=16*1024*1024,reviewed_schema_bytes=c.SCHEMA_PATH.read_bytes())
