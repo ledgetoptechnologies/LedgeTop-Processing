@@ -595,12 +595,32 @@ class ReferenceStore:
         A safe retry needs an explicit ScratchLedger expiry attestation proving
         no engine mutation, plus a future reconciliation API. Until then freeze.
         """
-        protocol._closed(transfer_request, ("reservationId", "generation", "expiresAt", "manifestSha256", "byteBudget", "nonce"), "transfer request")
+        source_range_v2 = type(transfer_request) is dict and transfer_request.get('protocol') == 'source-range-v2'
+        if source_range_v2:
+            protocol._closed(transfer_request, ("protocol", "reservationId", "generation", "expiresAt",
+                "manifestSha256", "sourceVersion", "objectIds", "chunkBytes", "requestBudget",
+                "byteBudget", "nonce", "attemptBudget"), "source-range-v2 transfer request")
+        else:
+            protocol._closed(transfer_request, ("reservationId", "generation", "expiresAt", "manifestSha256", "byteBudget", "nonce"), "transfer request")
         for key in ("reservationId", "nonce"):
             protocol._slug(transfer_request[key], key)
         protocol._integer(transfer_request["generation"], "generation")
         protocol._integer(transfer_request["byteBudget"], "byteBudget")
         protocol._hash(transfer_request["manifestSha256"], "manifestSha256")
+        if source_range_v2:
+            from .source_range_transfer import CHUNK_BYTES, source_version_for_manifest
+            protocol._string(transfer_request['sourceVersion'], 'sourceVersion', 256)
+            protocol._integer(transfer_request['chunkBytes'], 'chunkBytes')
+            protocol._integer(transfer_request['requestBudget'], 'requestBudget')
+            protocol._integer(transfer_request['attemptBudget'], 'attemptBudget')
+            protocol._closed({'objectIds': transfer_request['objectIds']}, ('objectIds',), 'source object closure')
+            if (transfer_request['protocol'] != 'source-range-v2' or transfer_request['chunkBytes'] != CHUNK_BYTES
+                    or not isinstance(transfer_request['objectIds'], list)
+                    or any(type(value) is not str for value in transfer_request['objectIds'])
+                    or len(transfer_request['objectIds']) != len(set(transfer_request['objectIds']))):
+                raise ValueError('invalid source-range-v2 transfer request')
+            for value in transfer_request['objectIds']:
+                protocol._slug(value, 'source object ID')
         protocol._string(transfer_request["expiresAt"], "expiresAt", 40)
         if not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z', transfer_request['expiresAt']):
             raise ValueError('transfer expiry must use UTC millisecond wire format')
@@ -610,6 +630,8 @@ class ReferenceStore:
                 raise ValueError("missing offset")
         except ValueError:
             raise ValueError("transfer expiry must be an offset timestamp") from None
+        if source_range_v2 and expiry.timestamp() <= time.time():
+            raise Conflict('source-range-v2 reservation already expired')
         self.queue._known_node(node_id)
         encoded = _json(transfer_request)
         with self.queue._db() as db:
@@ -623,6 +645,15 @@ class ReferenceStore:
                 raise Conflict("reference job cannot be reserved in this phase")
             submission = json.loads(row["input_json"])
             total_bytes = submission['manifest']['totalBytes']
+            if source_range_v2:
+                manifest = submission['manifest']
+                required_ranges = sum((item['byteSize'] + CHUNK_BYTES - 1) // CHUNK_BYTES for item in manifest['objects'])
+                if (transfer_request['sourceVersion'] != source_version_for_manifest(manifest)
+                        or set(transfer_request['objectIds']) != {item['id'] for item in manifest['objects']}
+                        or transfer_request['requestBudget'] != required_ranges
+                        or transfer_request['attemptBudget'] < required_ranges
+                        or transfer_request['attemptBudget'] > 3 * required_ranges):
+                    raise Conflict('source-range-v2 transfer identity mismatch')
             if ((transfer_request['generation'], transfer_request['manifestSha256']) != (
                     row['generation'], row['manifest_sha']) or not total_bytes <= transfer_request['byteBudget'] <=
                     min(protocol.MAX_SAFE_INTEGER, 3 * total_bytes)):
@@ -661,7 +692,11 @@ class ReferenceStore:
                 return self._transfer_grant_ack(grant)
             if row['phase'] != 'awaiting_transfer' or row['status'] != 'running':
                 raise Conflict('job is not awaiting a transfer grant')
-            validate_grant(grant, job=self._record(row, True), clock=clock or time.time)
+            if json.loads(row['transfer_json'] or '{}').get('protocol') == 'source-range-v2':
+                from .source_range_transfer import validate_source_grant
+                validate_source_grant(grant, job=self._record(row, True), clock=clock or time.time)
+            else:
+                validate_grant(grant, job=self._record(row, True), clock=clock or time.time)
             if not old:
                 self._quota(db, len(encoded.encode()))
                 db.execute('INSERT INTO reference_transfer_grants VALUES(?,?,?)', (job_id, encoded, digest))

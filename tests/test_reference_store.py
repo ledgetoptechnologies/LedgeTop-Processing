@@ -16,6 +16,7 @@ from processing.maintenance import Conflict
 from processing.reference_store import ReferenceStore, PROFILE
 from processing.viewer_service import ViewerService
 from processing.viewer_tasks import TaskStore
+from processing.source_range_transfer import CHUNK_BYTES, source_version_for_manifest
 
 
 class ReferenceStoreTests(unittest.TestCase):
@@ -119,6 +120,67 @@ class ReferenceStoreTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 self.store.reserve(job['jobId'], transfer, node_id='cluster')
         self.assertEqual(self.store.reserve(job['jobId'], self.fixture['transferRequest'], node_id='cluster')['phase'], 'awaiting_transfer')
+
+    def test_source_range_v2_reservation_is_bound_and_durable_in_the_shared_queue(self):
+        submission = copy.deepcopy(self.fixture['submission'])
+        submission['submissionId'] = str(uuid.uuid4())
+        submission['manifest']['id'] = 'dataset-fixture-store'
+        submission['manifest']['sha256'] = p.manifest_sha256(submission['manifest'])
+        submission = p.validate_submission(submission, environment='staging',
+            capability_fingerprint=submission['capabilityFingerprint'])
+        job, _ = self.store.submit(submission)
+        claim = self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+            worker_instance_id='instance-v2', claim_request_id='claim-v2-' + job['jobId'])
+        manifest = claim['submission']['manifest']
+        chunks = sum((item['byteSize'] + CHUNK_BYTES - 1) // CHUNK_BYTES for item in manifest['objects'])
+        transfer = {
+            'protocol': 'source-range-v2', 'reservationId': 'reservation-v2',
+            'generation': claim['generation'], 'expiresAt': '2030-01-01T00:00:00.000Z',
+            'manifestSha256': manifest['sha256'], 'sourceVersion': source_version_for_manifest(manifest),
+            'objectIds': [item['id'] for item in manifest['objects']], 'chunkBytes': CHUNK_BYTES,
+            'requestBudget': chunks, 'byteBudget': manifest['totalBytes'],
+            'nonce': 'nonce-v2', 'attemptBudget': chunks * 3,
+        }
+        reserved = self.store.reserve(job['jobId'], transfer, node_id='cluster')
+        self.assertEqual(reserved['phase'], 'awaiting_transfer')
+        self.assertEqual(reserved['transferRequest'], transfer)
+        self.assertEqual(self.store.reserve(job['jobId'], transfer, node_id='cluster'), reserved)
+
+        grant = {**transfer, 'expiresAt': '2029-01-01T00:00:00.000Z',
+            'jobId': job['jobId'], 'environment': 'staging', 'token': 'A' * 43}
+        receipt = self.store.receive_transfer_grant(job['jobId'], grant)
+        self.assertTrue(receipt['accepted'])
+        public = self.store.get(job['jobId'])
+        self.assertNotIn('token', json.dumps(public))
+        self.assertEqual(self.store.private_transfer_grant(job['jobId']), grant)
+
+    def test_source_range_v2_reservation_rejects_source_identity_and_unbounded_budgets(self):
+        submission = copy.deepcopy(self.fixture['submission'])
+        submission['submissionId'] = str(uuid.uuid4())
+        submission['manifest']['id'] = 'dataset-fixture-store'
+        submission['manifest']['sha256'] = p.manifest_sha256(submission['manifest'])
+        submission = p.validate_submission(submission, environment='staging',
+            capability_fingerprint=submission['capabilityFingerprint'])
+        job, _ = self.store.submit(submission)
+        claim = self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+            worker_instance_id='instance-v2', claim_request_id='claim-v2-' + job['jobId'])
+        manifest = claim['submission']['manifest']
+        chunks = sum((item['byteSize'] + CHUNK_BYTES - 1) // CHUNK_BYTES for item in manifest['objects'])
+        base = {'protocol': 'source-range-v2', 'reservationId': 'reservation-v2',
+            'generation': claim['generation'], 'expiresAt': '2030-01-01T00:00:00.000Z',
+            'manifestSha256': manifest['sha256'], 'sourceVersion': source_version_for_manifest(manifest),
+            'objectIds': [item['id'] for item in manifest['objects']], 'chunkBytes': CHUNK_BYTES,
+            'requestBudget': chunks, 'byteBudget': manifest['totalBytes'],
+            'nonce': 'nonce-v2', 'attemptBudget': chunks * 3}
+        for mutation in (
+            {'sourceVersion': 'dataset:wrong:' + manifest['sha256']},
+            {'objectIds': ['unbound-object']},
+            {'requestBudget': chunks + 1},
+            {'attemptBudget': chunks * 4},
+            {'expiresAt': '2020-01-01T00:00:00.000Z'},
+        ):
+            with self.subTest(mutation=mutation), self.assertRaises(Conflict):
+                self.store.reserve(job['jobId'], {**base, **mutation}, node_id='cluster')
 
     def test_disabled_profile_fails_closed(self):
         self.queue.allowed_profiles.remove(PROFILE)

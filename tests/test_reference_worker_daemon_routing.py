@@ -129,6 +129,16 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
         self.assertEqual(self.docker_calls,[])
         self.assertFalse((self.state/'lidar-provenance.sqlite').exists())
 
+    def test_source_range_v2_remains_explicit_opt_in(self):
+        default = self.load()
+        self.assertFalse(default['sourceRangeV2Enabled'])
+        self.config['sourceRangeV2Enabled'] = True
+        settings = self.load()
+        driver, _ = self.build(settings, provision=True)
+        self.assertTrue(driver.source_range_v2_enabled)
+        self.assertIsNotNone(driver.source_range_client)
+        self.assertEqual(self.docker_calls, [])
+
     def test_main_tree_composition_shares_exact_components_and_only_probes_local_docker(self):
         self.route()
         driver,_=self.build(provision=True)
