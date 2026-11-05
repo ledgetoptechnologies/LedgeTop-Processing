@@ -42,4 +42,37 @@ and synthetic input. It does not prove survey accuracy, NAVD88 geoid support,
 photogrammetric reconstruction, installed candidate deployment or client data
 acceptance. Updated cross-language result/cleanup fixtures explicitly select
 ellipsoidal heights and assert both retained values; their combined rerun is
-recorded separately once complete.
+described below.
+
+## Cross-language return and cleanup qualification
+
+Processing `3072db7` with Viewer `ddb2e8cb` exercised the real application
+repositories, loopback TLS transfer, signed receipts and persistent worker
+outboxes, with a simulated photogrammetry engine:
+
+- Whole-object GCP transfer and ranged GCP transfer both passed in the three-case
+  run logged as `ltds-combined-qualification-db47c39e56d3`. They verify the
+  generated `gcp_list.txt` reaches the native multipart boundary while raw CSV
+  stays retained and never enters native multipart, then exercise result copy,
+  deliberately lost acceptance reply and cleanup.
+- That run's third case reached verified publication but failed when its rerun
+  fixture omitted the newly required explicit height choice. The fixture now
+  carries the original immutable evidence's selected height into the new attempt.
+- The corrected signed-release case independently passed **1/1**, no skips, in
+  **29.250 seconds**, logged as `ltds-combined-qualification-1a3745a4bbf6`.
+  It performs licensed conversion, verifies outputs, kills the real Viewer
+  process between durable terminal receipt and hold retirement, creates a new
+  attempt, restarts/reconciles, advances the injected 24-hour clock and verifies
+  only redundant processing copies become eligible for removal. Viewer source,
+  accepted model files and raw GCP CSV remain intact.
+
+The first attempt also exposed a fixture's overly strict floating-point equality
+(a sub-femtometre arithmetic-order difference); its numeric comparison now uses
+1e-12 m tolerance while the generated file's CRS, coordinate order and rounded
+height bytes remain asserted independently. No product height validation was
+relaxed. These failed attempts are not counted as passing suite runs.
+
+All runs used the existing bounded one-CPU, 2 GiB read-only/network-isolated
+Docker qualification environment and existing converter/dependencies. Exact
+task containers and volumes were removed and absence verified. No live client
+job, TrueNAS configuration, installed service or permission was changed.
