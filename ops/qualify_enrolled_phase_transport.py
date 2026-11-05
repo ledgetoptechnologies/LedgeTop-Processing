@@ -40,7 +40,7 @@ def environment_bytes(value):
 
 def fixture_bundle(root, *, operation_id, authority_id, old, candidate_image,
                    candidate_source, state_volume, config_source, lease_source,
-                   spool_volume, physical, material, source_root, cli_sha, daemon_id):
+                   spool_volume, physical, material, source_root, cli_sha, daemon_id, workers):
     """Bind files/config/source independently, before candidate constructors.
 
     All qualification receipts explicitly describe this synthetic fixture; they
@@ -75,11 +75,12 @@ def fixture_bundle(root, *, operation_id, authority_id, old, candidate_image,
     for role in ('bootstrap','final','holder'):
         env={} if role=='holder' else dict(native,
             PROCESSING_LEGACY_VIEWER_READ_ONLY='1' if role=='final' else '0',
-            PROCESSING_REFERENCE_CONFIG='/run/processing-reference/'+directory+'/'+role+'.json')
+            PROCESSING_REFERENCE_CONFIG='/run/processing-reference/'+role+'.json')
         files[role+'Environment']=private_write(root/(role+'.env'),environment_bytes(env))
         mounts=[dict(type='volume',source=state_volume,target='/prototype-state',readOnly=role=='holder'),
             dict(type='bind',source=lease_source,target='/run/qualification-original-lease',readOnly=False),
-            dict(type='bind',source=config_source,target='/run/processing-reference',readOnly=True)]
+            dict(type='bind',source=config_source+'/'+directory,target='/run/processing-reference',readOnly=True),
+            dict(type='bind',source=config_source,target='/run/phase-tls',readOnly=True)]
         if role=='final':mounts.append(dict(type='volume',source=spool_volume,target='/qualification-spool',readOnly=False))
         recipes[role]=dict(schemaVersion=1,name=journal.NAME if role=='final' else
             'ltds-phase-'+role+'-'+uuid.UUID(operation_id).hex[:16],imageId=candidate_image,
@@ -90,7 +91,7 @@ def fixture_bundle(root, *, operation_id, authority_id, old, candidate_image,
             readOnly=True,init=role!='holder',pidsLimit=96,memoryBytes=384*1024**2,nanoCpus=250000000,
             stopSignal='SIGTERM',stopTimeout=-1,restartPolicy={'Name':'no','MaximumRetryCount':0})
         if role!='holder':files[role+'Config']=dict(path=config_source+'/'+directory+'/'+role+'.json',
-            containerPath='/run/processing-reference/'+directory+'/'+role+'.json',sha256=hashlib.sha256(configs[role]).hexdigest())
+            containerPath='/run/processing-reference/'+role+'.json',sha256=hashlib.sha256(configs[role]).hexdigest())
     gates={};qualifications={}
     for name in ('nasQualificationSha256','pilotClosureSha256','legacyDeliverySha256','workerQualificationSha256'):
         qualifications[name]=private_write(root/(name+'.json'),t.canonical(dict(schemaVersion=1,
@@ -107,18 +108,6 @@ def fixture_bundle(root, *, operation_id, authority_id, old, candidate_image,
             predecessorRecipeSha256=t.digest(t.immutable_container_recipe(old)),
             predecessorEnvironmentSha256=t.digest(t.container_environment(old)),censusKeySha256=files['censusKey']['sha256'],
             reviewedCountsSha256=files['reviewedCounts']['sha256'],deploymentSha256='0'*64),gates=gates)
-    # The SSH manifests are type-checked but never used by this fixture. Actual
-    # factory/TLS readiness above supplies the explicit local transport seam.
-    workers=[]
-    for node in ('cluster','main'):
-        workers.append(dict(nodeId=node,sshHost='192.0.2.1',sshUid=1000,
-            settings=dict(schemaVersion=1,unitName='fixture-'+node+'.service',unitFile='/private/fixture.service',
-                unitSha256='1'*64,pythonExecutable='/usr/bin/python3',configPath='/private/fixture.json',
-                sourceRoot=str(source_root),sourceSha256='2'*64,readinessOrigin='https://127.0.0.1:19999',
-                readinessCAFile='/private/fixture-ca.pem'),
-            expected=dict(nodeId=node,workerId='worker-'+node,workerInstanceId='instance-'+node,
-                authorityId=authority_id,engineId='fixture-engine-'+node,gateGeneration=1,engineVersion='3.8.5',
-                configSha256='3'*64,sourceSha256='2'*64,activation=None)))
     value=dict(schemaVersion=1,profile=deployment.PROFILE,operationId=operation_id,authorityId=authority_id,
         candidateSourceCommit=candidate_source,reviewedSourceRoot=str(source_root),
         host=dict(dockerEngineId=daemon_id,bootId=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
@@ -164,8 +153,16 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
     source_root=Path(__file__).resolve().parents[1]
     names=dict(state=name+'-state',lease='ltds-phase-lease-'+suffix,
                config='ltds-phase-config-'+suffix,spool='ltds-phase-spool-'+suffix)
-    material=configuration_material(operation_id,authority)
+    controller=docker.inspect(socket.gethostname())
+    require(controller['Config']['Labels'].get('org.ledgetop.phase-controller')==operation_id and
+            controller['State']['Running'] is True and controller['HostConfig']['NetworkMode']=='bridge',
+            'owned_private_bridge_controller_required')
+    worker_host=controller['NetworkSettings']['Networks']['bridge']['IPAddress']
+    material=configuration_material(operation_id,authority,worker_host)
+    workers=None
     try:
+        workers=LocalWorkerReadinessFixtures(root/'workers',material,authority).__enter__()
+        refresh_configuration_seed(material,operation_id)
         owned={}
         for role,value in names.items():
             volumes.append(value);owned[role]=owned_volume(docker,value,operation_id)
@@ -212,10 +209,6 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
                 original_name=name,state_volume=names['state'],original_image_id=journal.PREDECESSOR_IMAGE,
                 original_source=journal.PREDECESSOR_SOURCE,operation_directory=operation) as profile:
             old=docker.inspect(old_id)
-            plan,bundle=fixture_bundle(operation,operation_id=operation_id,authority_id=authority,old=old,
-                candidate_image=candidate_image,candidate_source=candidate_source,state_volume=names['state'],
-                config_source=config_source,lease_source=external,spool_volume=names['spool'],physical=physical,
-                material=material,source_root=source_root,cli_sha=cli_sha,daemon_id=daemon_id)
             class DesktopBoundary(BoundaryProbe):
                 def host(self):
                     verify_desktop_cli(self.bundle['host']['dockerBinary'],cli_sha)
@@ -223,9 +216,14 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
                             'fixture_daemon_changed')
                     require(Path('/proc/sys/kernel/random/boot_id').read_text().strip()==self.bundle['host']['bootId'],
                             'fixture_boot_changed')
-            with LocalWorkerReadinessFixtures(root/'workers',material,authority) as workers:
+            if workers is not None:
+                plan,bundle=fixture_bundle(operation,operation_id=operation_id,authority_id=authority,old=old,
+                    candidate_image=candidate_image,candidate_source=candidate_source,state_volume=names['state'],
+                    config_source=config_source,lease_source=external,spool_volume=names['spool'],physical=physical,
+                    material=material,source_root=source_root,cli_sha=cli_sha,daemon_id=daemon_id,
+                    workers=workers.manifests())
                 class PhaseDriver(ConcreteCutoverDriver):
-                    def _workers(self):return workers.ready()
+                    def _workers(self):return workers.ready(self.bundle['workers'])
                 driver=PhaseDriver(plan,bundle,operation,docker=docker)
                 driver.boundary=DesktopBoundary(plan,bundle,docker,driver.tracked)
                 controller=journal.FirstEnrolledCutover(operation,plan,driver);controller.prepare()
@@ -238,17 +236,57 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
                 expected='rolled-back-rebaseline-required' if rollback else 'complete'
                 require(state['phase']==expected,'actual_phase_sequence_incomplete')
                 require(state['admissionOpened'] is (not rollback),'actual_admission_projection_changed')
+                catalogs=None
+                if not rollback:
+                    final=driver._find('final')['Id']
+                    first=driver.boundary.fresh(final,catalog_observer_source(authority),maximum=65536)
+                    for instance in workers.instances:
+                        instance['backend'].fixture_options.append(dict(name='fixture-catalog-refresh',type='bool',value=False))
+                    second=driver.boundary.fresh(final,catalog_observer_source(authority),maximum=65536)
+                    require('fixture-catalog-refresh' not in first['names'] and
+                            'fixture-catalog-refresh' in second['names'] and
+                            first['fingerprint']!=second['fingerprint'],'actual_live_catalog_refresh_required')
+                    catalogs=dict(before=first,after=second)
                 result=dict(schemaVersion=1,profile=profile,operationId=operation_id,
                     originalImageId=journal.PREDECESSOR_IMAGE,candidateImageId=candidate_image,candidateSourceCommit=candidate_source,
                     phases=events,terminalPhase=state['phase'],admissionOpened=state['admissionOpened'],
                     actualDockerPhases=True,actualApplicationGate=True,actualFullCustodyTar=True,
                     actualFactoryWorkerTLS=True,connectedWorkerSSHQualified=False,
+                    postResumeConnectedCatalog=catalogs,
                     fixtureSystemdEngineCoordinatorTransport=True,productionHostEnrollmentQualified=False,
                     desktopReadonly0777Exemption=True,installedQualified=False)
     finally:
+        if workers is not None:workers.__exit__(None,None,None)
         cleanup_owned(docker,operation_id,volumes)
     print(json.dumps(result,sort_keys=True),flush=True)
     return result
+
+
+def catalog_observer_source(authority):
+    """Actual app GET plus production relay client from FINAL's namespace."""
+    return ('import os,json,ssl,http.client,sys\nsys.path.insert(0,"/app")\n'
+        'from processing.reference_worker_catalog import WorkerCatalogClient\n'
+        'from processing.reference_recovery import RecoveryNodeBinding\n'
+        'cfg=json.load(open(os.environ["PROCESSING_REFERENCE_CONFIG"]))\n'
+        'context=ssl.create_default_context(cafile=cfg["listener"]["clientCA"])\n'
+        'conn=http.client.HTTPSConnection("127.0.0.1",cfg["listener"]["port"],context=context,timeout=10)\n'
+        'try:\n'
+        ' conn.request("GET","/ltds/v1/options",headers={"Authorization":"Bearer "+cfg["viewerBearers"]["production"]})\n'
+        ' response=conn.getresponse();raw=response.read(1048577)\n'
+        ' assert response.status==200 and len(raw)<=1048576\n'
+        ' body=json.loads(raw)\n'
+        'finally:conn.close()\n'
+        'bindings={node:RecoveryNodeBinding(node_id=node,engine_id=value["engineId"],authority_id=value["authorityId"],'
+        'coordinator_origin=value["coordinatorOrigin"],gate_generation=value["gateGeneration"],output_budget=value["outputBudget"])'
+        ' for node,value in cfg["recoveryBindings"].items()}\n'
+        'client=WorkerCatalogClient(cfg["workers"],node_ids=("cluster","main"),authority_id='+repr(authority)+','
+        'ssl_context=context,recovery_bindings=bindings)\n'
+        'snapshot,capacities=client.discover()\n'
+        'assert len(snapshot["nodes"])==2 and all(node["available"] for node in snapshot["nodes"])\n'
+        'assert capacities=={"cluster":{"ready":True,"maxImages":1000,"taskQueueCount":0},'
+        '"main":{"ready":True,"maxImages":None,"taskQueueCount":0}}\n'
+        'print(json.dumps({"names":sorted(option["name"] for option in body["options"]),'
+        '"fingerprint":body["optionsFingerprint"],"capacities":capacities,"availableNodes":2}))\n').encode()
 
 
 def main(argv=None):
@@ -263,7 +301,7 @@ def main(argv=None):
             rollback=args.rollback)
 
 
-def configuration_material(operation_id, authority_id):
+def configuration_material(operation_id, authority_id, worker_host='127.0.0.1'):
     """Make ephemeral synthetic TLS/signing inputs for NEW owned volumes only.
 
     No original or user key is read. The returned seeder runs as UID10001 and
@@ -278,13 +316,15 @@ def configuration_material(operation_id, authority_id):
     from cryptography.x509.oid import NameOID
     for value in (operation_id, authority_id):
         require(str(uuid.UUID(value)) == value, 'canonical_fixture_identity_required')
+    worker_ip=ipaddress.ip_address(worker_host)
+    require(worker_ip.is_private and not worker_ip.is_unspecified, 'private_fixture_worker_address_required')
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'localhost')])
     cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
         .serial_number(x509.random_serial_number()).not_valid_before(datetime.now(timezone.utc)-timedelta(minutes=1))
         .not_valid_after(datetime.now(timezone.utc)+timedelta(days=1))
         .add_extension(x509.SubjectAlternativeName([x509.DNSName('localhost'),
-            x509.IPAddress(ipaddress.ip_address('127.0.0.1'))]), critical=False)
+            x509.IPAddress(ipaddress.ip_address('127.0.0.1')),x509.IPAddress(worker_ip)]), critical=False)
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .sign(key, hashes.SHA256()))
     pem_key = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
@@ -300,8 +340,8 @@ def configuration_material(operation_id, authority_id):
         resultBearer='synthetic-result-'+secrets.token_hex(24))
         for index,node in enumerate(('cluster','main'))}
     common = dict(schemaVersion=2,listener=dict(host='0.0.0.0',port=8443,
-        certificate='/run/processing-reference/fixture-cert.pem',
-        privateKey='/run/processing-reference/fixture-key.pem',clientCA='/run/processing-reference/fixture-cert.pem'),
+        certificate='/run/phase-tls/fixture-cert.pem',
+        privateKey='/run/phase-tls/fixture-key.pem',clientCA='/run/phase-tls/fixture-cert.pem'),
         viewerBearers=dict(production=credentials['PROCESSING_VIEWER_TOKEN'],
                           staging=credentials['PROCESSING_VIEWER_STAGING_TOKEN']),
         workers=workers,streamBudget=dict(maxConcurrent=1,maxObjectBytes=1048576),
@@ -334,9 +374,28 @@ def configuration_material(operation_id, authority_id):
         'root.chmod(0o700)\n(root/"source").mkdir(mode=0o700)\n'
         'p=root/".ltds-phase-marker";p.write_bytes('+repr(marker.encode())+');p.chmod(0o600)\n'
         'print(json.dumps({"uid":os.getuid(),"gid":os.getgid()}))\n')
-    return dict(bootstrap=common,final=final,configurationFiles=files,credentials=credentials,
+    return dict(bootstrap=common,final=final,configurationFiles=files,credentials=credentials,workerHost=worker_host,
                 configSeed=config_seed,spoolSeed=spool_seed,
                 configurationSha256={name:hashlib.sha256(raw).hexdigest() for name,raw in files.items()})
+
+
+def refresh_configuration_seed(material,operation_id):
+    """Seal actual worker origins into config bytes BEFORE seeding or hashing."""
+    from .enrolled_coordinator_transport import canonical
+    directory='first-cutover-'+operation_id
+    for role in ('bootstrap','final'):
+        material['configurationFiles'][directory+'/'+role+'.json']=canonical(material[role])
+    packet={name:base64.b64encode(raw).decode() for name,raw in material['configurationFiles'].items()}
+    material['configurationSha256']={name:hashlib.sha256(raw).hexdigest()
+        for name,raw in material['configurationFiles'].items()}
+    material['configSeed']=('import base64,json,os,pathlib\nroot=pathlib.Path("/prototype-state")\n'
+        'assert os.getuid()==os.getgid()==10001 and next(root.iterdir(),None) is None\n'
+        'root.chmod(0o700)\nfiles='+repr(packet)+'\n'
+        'for name,raw in files.items():\n'
+        ' p=root/name;p.parent.mkdir(mode=0o700,parents=True,exist_ok=True)\n'
+        ' with p.open("xb") as out:out.write(base64.b64decode(raw))\n'
+        ' p.chmod(0o600)\n'
+        'print(json.dumps({"uid":os.getuid(),"gid":os.getgid()}))\n')
 
 
 class LocalWorkerReadinessFixtures:
@@ -363,7 +422,18 @@ class LocalWorkerReadinessFixtures:
                 root = self.root/node; root.mkdir(mode=0o700)
                 for name in ('fixture-key.pem','fixture-cert.pem'):
                     target=root/name;target.write_bytes(self.material['configurationFiles'][name]);target.chmod(0o600)
-                backend=NativeNodeFixture(root/'native.sqlite',engine_version='3.8.5',synthetic_enabled=True).start()
+                class CatalogNativeFixture(NativeNodeFixture):
+                    def _dispatch(self,method,path,headers,body):
+                        if method=='GET' and path=='/options':return 200,self.fixture_options,False
+                        status,value,extra=super()._dispatch(method,path,headers,body)
+                        if method=='GET' and path=='/info':value=dict(value,maxImages=self.fixture_max)
+                        return status,value,extra
+                backend=CatalogNativeFixture(root/'native.sqlite',engine_version='3.8.5',synthetic_enabled=True)
+                from .native_node_fixture import OPTIONS
+                backend.fixture_options=[dict(value) for value in OPTIONS]+[dict(name=name,type='bool',value=False)
+                    for name in ('pc-ept','gltf','3d-tiles')]
+                backend.fixture_max=1000 if node=='cluster' else None
+                backend.start()
                 instance=dict(node=node,root=root,backend=backend,thread=None,stop=None,server=None)
                 self.instances.append(instance)
                 with socket.socket() as probe:
@@ -381,11 +451,12 @@ class LocalWorkerReadinessFixtures:
                     engineOrigin=backend.origin,engineToken='',workerBearer=worker['bearer'],
                     resultReadBearer=worker['resultBearer'],caFile=str(root/'fixture-cert.pem'),
                     serverCertFile=str(root/'fixture-cert.pem'),serverKeyFile=str(root/'fixture-key.pem'),
-                    listenHost='127.0.0.1',listenPort=port,outputBudget=1048576,safetyFloor=0,
+                    listenHost='0.0.0.0',listenPort=port,outputBudget=1048576,safetyFloor=0,
                     transferTtl=600,cleanupGrace=3600,pollSeconds=0.1,engineVersion='3.8.5',shareResults=True,
                     maintenanceReadiness=dict(schemaVersion=1,bearer='synthetic-readiness-'+secrets.token_hex(24),
                         sourceRoot=str(source),sourceSha256=source_digest(source),activation=None))
                 path=root/'worker.json';save(path,config)
+                worker['resultOrigin']='https://'+self.material['workerHost']+':'+str(port)
                 driver,server=daemon.build_worker(daemon.load_config(str(path)))
                 instance['server']=server
                 driver.worker.engine_probe=lambda deadline, engine=engine:engine
@@ -397,44 +468,57 @@ class LocalWorkerReadinessFixtures:
                 driver._request=request
                 stop=threading.Event();service=daemon.WorkerService(driver,server,poll_seconds=0.1)
                 thread=threading.Thread(target=service.run,args=(stop,),name='phase-worker-'+node)
-                instance.update(stop=stop,thread=thread,service=service,path=path,config=config,port=port)
+                unit=root/'fixture-worker.service'
+                unit.write_bytes(b'# Explicit qualification thread process-control seam; never loaded by systemd.\n')
+                unit.chmod(0o600)
+                manifest=dict(nodeId=node,sshHost='127.0.0.1',sshUid=os.geteuid(),
+                    settings=dict(schemaVersion=1,unitName='fixture-'+node+'.service',unitFile=str(unit),
+                        unitSha256=hashlib.sha256(unit.read_bytes()).hexdigest(),pythonExecutable=sys.executable,
+                        configPath=str(path),sourceRoot=str(source),sourceSha256=config['maintenanceReadiness']['sourceSha256'],
+                        readinessOrigin=worker['resultOrigin'],readinessCAFile=config['caFile']),
+                    expected=dict(nodeId=node,workerId=config['workerId'],workerInstanceId=config['workerInstanceId'],
+                        authorityId=self.authority,engineId=engine,gateGeneration=1,engineVersion=config['engineVersion'],
+                        configSha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                        sourceSha256=config['maintenanceReadiness']['sourceSha256'],activation=None))
+                instance.update(stop=stop,thread=thread,service=service,path=path,config=config,port=port,manifest=manifest)
                 thread.start()
             return self
         except BaseException:
             self.__exit__(None,None,None)
             raise
 
-    def ready(self):
-        import http.client
-        import ssl
+    def manifests(self):
+        from .enrolled_coordinator_transport import canonical,decode
+        return decode(canonical([instance['manifest'] for instance in self.instances]))
+
+    def ready(self, planned_workers=None):
         import time
-        from processing.reference_worker_readiness import PATH,PROTOCOL
-        from .enrolled_coordinator_transport import digest
+        from urllib.error import HTTPError
+        from .enrolled_worker_readiness_probe import probe
+        planned=self.manifests() if planned_workers is None else planned_workers
+        require(type(planned) is list and len(planned)==2 and
+                [item['nodeId'] for item in planned]==['cluster','main'], 'complete_planned_worker_inventory_required')
         result=[]
-        for instance in self.instances:
-            config=instance['config'];nonce=str(uuid.uuid4());raw=instance['path'].read_bytes()
-            request=json.dumps(dict(schemaVersion=1,nonce=nonce,requireIdle=True)).encode()
-            context=ssl.create_default_context(cafile=config['caFile'])
+        for instance,manifest in zip(self.instances,planned):
+            # Pin the entire manifest before any TLS request. A valid but
+            # unplanned second worker may never substitute for this slot.
+            require(manifest==instance['manifest'],'planned_worker_fixture_changed')
+            class LocalControl:
+                def probe(self):
+                    active=instance['thread'].is_alive()
+                    return dict(pid=os.getpid() if active else 0,active='active' if active else 'inactive',
+                        substate='running' if active else 'dead',cgroup='/fixture-thread/'+instance['node'],
+                        invocationId=instance['node'],startTime=Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19])
             deadline=time.monotonic()+10
             while True:
-                connection=http.client.HTTPSConnection('127.0.0.1',instance['port'],context=context,timeout=3)
                 try:
-                    connection.request('POST',PATH,request,headers={'Content-Type':'application/json',
-                        'Authorization':'Bearer '+config['maintenanceReadiness']['bearer']})
-                    response=connection.getresponse();body=response.read(65537)
-                    if response.status==503 and time.monotonic()<deadline:
+                    packet=probe(manifest,str(uuid.uuid4()),control=LocalControl())
+                    break
+                except HTTPError as error:
+                    if error.code==503 and time.monotonic()<deadline:
                         time.sleep(0.02);continue
-                    require(response.status==200 and len(body)<=65536,'actual_fixture_worker_unready')
-                    value=json.loads(body);break
-                finally:connection.close()
-            expected=dict(protocol=PROTOCOL,nonce=nonce,nodeId=instance['node'],workerId=config['workerId'],
-                workerInstanceId=config['workerInstanceId'],authorityId=self.authority,engineId=config['engineId'],
-                gateGeneration=1,engineVersion='3.8.5',configSha256=hashlib.sha256(raw).hexdigest(),
-                sourceSha256=config['maintenanceReadiness']['sourceSha256'],ready=True,idle=True,pid=os.getpid())
-            require(all(value.get(name)==item for name,item in expected.items()) and
-                    instance['thread'].is_alive() and instance['service'].health()['state']=='ready',
-                    'actual_fixture_worker_binding_changed')
-            stamp=Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19]
+                    raise
+            value=packet['readiness'];stamp=packet['process']['startTime']
             result.append(dict(nodeId=instance['node'],configSha256=value['configSha256'],
                 sourceSha256=value['sourceSha256'],engineVersion=value['engineVersion'],
                 instanceId=value['workerInstanceId'],bootId=value['bootId'],pid=value['pid'],startTime=stamp,

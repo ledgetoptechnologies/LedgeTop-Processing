@@ -78,11 +78,15 @@ class ActualWorkerFixtureTests(unittest.TestCase):
         material=q.configuration_material(operation,authority)
         with tempfile.TemporaryDirectory() as temporary:
             with q.LocalWorkerReadinessFixtures(Path(temporary)/'workers',material,authority) as workers:
-                first=workers.ready();second=workers.ready()
+                planned=workers.manifests()
+                first=workers.ready(planned);second=workers.ready(planned)
                 self.assertEqual(first,second)
                 self.assertEqual([item['nodeId'] for item in first],['cluster','main'])
                 self.assertTrue(all(item['engineVersion']=='3.8.5' for item in first))
                 self.assertTrue(all(item['driverBindingSha256'] and item['loadedSourceSha256'] for item in first))
+                swapped=copy.deepcopy(planned);swapped[0]=copy.deepcopy(planned[1]);swapped[0]['nodeId']='cluster'
+                with self.assertRaisesRegex(RuntimeError,'planned_worker_fixture_changed'):
+                    workers.ready(swapped)
                 # The actual committed engine pin, rather than an injected DTO,
                 # must control the live TLS readiness response.
                 import sqlite3
