@@ -398,6 +398,12 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                     self.assertEqual(qualified["outputStatus"], "published")
                     self.assertTrue(qualified["publishedTilesVerified"])
                     self.assertFalse(qualified["publishedObj"])
+                    self.assertEqual(qualified["actualTilesetHttp"], 200)
+                    self.assertEqual(qualified["actualBinaryChildHttp"], 200)
+                    self.assertEqual(qualified["publicationReplayAuditCount"], 1)
+                    self.assertTrue(qualified["invalidTokenRejected"])
+                    self.assertTrue(qualified["revokedTokenRejected"])
+                    self.assertTrue(qualified["privateObjRejected"])
                 self.assertEqual(accepted["drop_count"], 1)
                 self.assertEqual(transport.calls.count(("initialize", state["providerTaskId"])), 1,
                                  "accepted-copy retry and cleanup must not duplicate engine task execution")
