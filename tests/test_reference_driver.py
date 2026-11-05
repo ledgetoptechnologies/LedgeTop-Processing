@@ -533,6 +533,78 @@ class ReferenceDriverTests(unittest.TestCase):
         with self.driver._lock:
             self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'busy'})
 
+    def assert_word_settles_nothing(self, job, word):
+        # Served on both routes so no settlement path can dodge the bad body.
+        real = self.driver._request
+        def request(method, suffix, payload=None, *, claim_token=None):
+            if suffix == '/claim' or suffix.endswith('/claim-state'):
+                return 200, word
+            return real(method, suffix, payload, claim_token=claim_token)
+        before = self.data(job), self.lease(job)
+        with patch.object(self.driver, '_request', side_effect=request):
+            self.assertEqual(self.driver.reconcile_unstarted(job['jobId']),
+                {'state': 'held', 'reason': 'unstarted_claim_requires_reconciliation'})
+        stage, data = self.data(job)
+        self.assertEqual(stage, before[0][0])
+        self.assertNotIn('unstartedOutcome', data)
+        self.assertEqual(self.lease(job), before[1])
+        self.assertGreater(self.lease(job)['remaining'], 0)
+
+    def ended_claim_state(self, job):
+        self.advance(job, 'processing_pending')
+        self.end_job(job)
+        token = self.data(job)[1]['claim']['claimToken']
+        return self.driver._request('GET', '/jobs/' + job['jobId'] + '/claim-state', claim_token=token)[1]
+
+    def test_malformed_terminal_body_settles_nothing(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        for word in ({'jobId': job['jobId'], 'status': 'cancelled'}, {'jobId': job['jobId'], 'status': 'failed'},
+                {'jobId': job['jobId'], 'status': 'cancelled', 'claimState': 'ended'},
+                dict(state, unknown=True), {key: value for key, value in state.items() if key != 'generation'}):
+            with self.subTest(word=sorted(word)):
+                self.assert_word_settles_nothing(job, word)
+
+    def test_cross_generation_terminal_word_settles_nothing(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        self.assert_word_settles_nothing(job, dict(state, generation=state['generation'] + 1))
+
+    def test_claim_shaped_terminal_word_with_any_wrong_binding_settles_nothing(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        self.assertIn(state['status'], ('failed', 'cancelled'))
+        for key, wrong in (('authorityId', '00000000-0000-4000-8000-000000000000'), ('jobId', 'other-job'),
+                ('environment', 'production' if state['environment'] == 'staging' else 'staging'),
+                ('nodeId', 'other-node'), ('workerId', 'other-worker'), ('workerInstanceId', 'other-instance'),
+                ('claimRequestId', 'driver-other'), ('claimTokenSha256', 'f' * 64),
+                ('manifestSha256', 'f' * 64), ('pipelineDigest', 'f' * 64)):
+            with self.subTest(key=key):
+                self.assertNotEqual(state[key], wrong)
+                self.assert_word_settles_nothing(job, dict(state, **{key: wrong}))
+
+    def test_exact_word_for_a_live_or_succeeded_job_settles_nothing(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        for status in ('running', 'held', 'succeeded'):
+            with self.subTest(status=status):
+                self.assert_word_settles_nothing(job, dict(state, status=status))
+
+    def test_the_exact_word_still_settles_after_every_refusal(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        self.assert_word_settles_nothing(job, dict(state, generation=state['generation'] + 1))
+        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+
+    def test_row_without_its_claim_cannot_be_reconciled(self):
+        job = self.submit()
+        self.advance(job, 'fetching')
+        stage, data = self.data(job)
+        del data['claim']
+        with self.driver._db() as db:
+            db.execute('UPDATE driver_jobs SET stage=?,data=? WHERE job=?', ('claim_pending', json.dumps(data), job['jobId']))
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'held', 'reason': 'unstarted_reconciliation_unavailable'})
+
     def test_outage_during_the_coordinator_check_keeps_the_named_hold(self):
         job = self.submit()
         self.advance(job, 'fetching')
