@@ -42,6 +42,8 @@ class RecoveryHarness(RenewalHarness):
 
     def receipts(self):
         with self.queue._db() as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='reference_recovery_receipts'").fetchone():
+                return []
             return [json.loads(row[0]) for row in db.execute('SELECT receipt_json FROM reference_recovery_receipts')]
 
     def identity(self):
@@ -413,8 +415,15 @@ class RecoveryRefusalTests(RecoveryHarness):
             self.assertFalse(self.state()['eligible'], status)
             self.assert_refused()
 
-    def test_job_that_left_fetching(self):
+    def test_job_that_left_fetching_with_ranges_unserved(self):
+        # Schema 3 covers processing only once every range was served.
         self.assert_ineligible("UPDATE reference_jobs SET phase='processing' WHERE job_id=?", self.job_id)
+        self.assertEqual(self.state()['schemaVersion'], 3)
+        self.assertIsNone(self.state()['sourceTransfer'])
+
+    def test_job_past_processing(self):
+        self.assert_ineligible("UPDATE reference_jobs SET phase='waiting_for_delivery' WHERE job_id=?", self.job_id)
+        self.assertEqual(self.state()['schemaVersion'], 2)
 
     def test_job_error_recorded(self):
         self.assert_ineligible("UPDATE reference_jobs SET error='synthetic' WHERE job_id=?", self.job_id)
@@ -714,7 +723,7 @@ class RecoveryManyObjectTests(RecoveryHarness):
         self.assertEqual(self.status(), ('held', 'coordinator_restart'))
 
 
-class StepThroughRecoveryTests(RecoveryHarness):
+class StepHarness(RecoveryHarness):
     """step() from the driver's own reservation to execution_pending, through a restart.
 
     Real step, recovery, routed v2 coordinator, fenced ledger, range client and
@@ -722,7 +731,6 @@ class StepThroughRecoveryTests(RecoveryHarness):
     the coordinator. Gate, engine and TLS are absent: nothing here reaches them.
     """
     harness_reserves = False
-    extra_objects = 10
 
     def start_transfer(self):
         self.now = [time.time()]
@@ -783,6 +791,18 @@ class StepThroughRecoveryTests(RecoveryHarness):
         self.assertEqual(self.fenced(reservation), ('reserved', True, 1))
         self.assertEqual(self.row()[1]['sourceRecovery'], {'attempts': 0, 'pending': None})
 
+    def lost_phase_reply(self):
+        self.step('awaiting_grant')
+        self.step('fetching_pending')
+        self.lose_reply.add('phase')
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertEqual((self.row()[0], self.store.get(self.job_id)['phase']), ('fetching_pending', 'fetching'))
+        return self.row()[1]['reservation']
+
+
+class StepThroughRecoveryTests(StepHarness):
+    extra_objects = 10
+
     def test_mid_fetch_restart_past_the_lease_resumes_the_drivers_own_reservation(self):
         reservation = self.to_fetching()
         self.step('fetching')
@@ -809,14 +829,6 @@ class StepThroughRecoveryTests(RecoveryHarness):
         self.step('processing_pending')
         self.assert_bound(reservation, 'processing_pending')
         self.step('execution_pending')
-
-    def lost_phase_reply(self):
-        self.step('awaiting_grant')
-        self.step('fetching_pending')
-        self.lose_reply.add('phase')
-        self.assertEqual(self.driver.step()['state'], 'retry_wait')
-        self.assertEqual((self.row()[0], self.store.get(self.job_id)['phase']), ('fetching_pending', 'fetching'))
-        return self.row()[1]['reservation']
 
     def test_lost_fetching_phase_reply_recovers_instead_of_looping_on_409(self):
         reservation = self.lost_phase_reply()
