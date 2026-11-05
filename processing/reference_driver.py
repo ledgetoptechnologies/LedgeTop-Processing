@@ -1190,7 +1190,10 @@ class ReferenceDriver:
         reason and a fence keeps its capacity. An operator ends the job, then this
         ends the row. A gate left by a crash stays the operator's physical step.
         """
-        _, reply = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
+        try:
+            _, reply = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
+        except (DriverHeld, DriverWait):
+            reply = None  # No word is not a word: the named hold outlives an outage.
         if reply is None or reply.get('jobId') != job_id or reply.get('status') not in ('failed', 'cancelled'):
             if data.get('unstartedHold') != reason:
                 data['unstartedHold'] = reason
