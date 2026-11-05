@@ -6,6 +6,14 @@ approval. Runtime acceptance remains incomplete.
 
 ## Latest combined and native-host preparation checkpoint
 
+The licensed ImageSharp 3.2.0 converter from exact Viewer `6718d1b` now builds
+successfully. Paired converter/Viewer integration passed **6/6 tests, no skips**
+in 67.585 seconds, including actual conversion, verified derivatives,
+publication, source/result handoff and lost acknowledgement recovery. See
+`evidence/licensed-converter-build-20261105.md`. This is a separate synthetic
+checkpoint from the broader historical 682-test run below; no runtime was
+published or deployed.
+
 A local coordinator image from the qualified `ad9e9d3` source is now built and
 smoke-tested: `sha256:b2d972605b1e2a86851c434b3d4735a3d71dce56a72fd88eb466756a37147b87`,
 tag `ledgetop-processing:qualification-ad9e9d3`. Actual app health, UID 10001,
@@ -34,11 +42,18 @@ installed updates. Existing inactive `e11231a` source preparations are writable
 to their owner and do not yet meet the new optional automatic-maintenance source
 deployment requirement.
 
-The coordinator freeze/registered-epoch/census upgrade path, source-release
+The coordinator freeze/registered-epoch primitives are now integrated through
+`cba0cee`, preserving newer maintenance code. Integrated Linux regression passed
+**112/112 tests, no skips**, in 289.909 seconds across freeze, runtime, source
+operations/readers, node inventory, worker readiness and worker handover. The
+one-CPU/2 GiB runner and its ownership-verified temporary volume were removed.
+This is not installed updater acceptance: restoring the actual predecessor's
+external authority lease and qualifying its current schema/census remain open.
+The predecessor authority lease/census upgrade path, source-release
 backend/timer/executor, Viewer readiness inventory/outbox/hold retirement and
 Claude's revised staging fence remain on separate work branches. They are not
-included in this 682-test checkpoint. Installed NAS custody, licensed conversion,
-real-photo/real-LiDAR and multi-PC acceptance remain open.
+included in the 682-test checkpoint. Installed NAS custody, real-photo/real-LiDAR
+and multi-PC acceptance remain open.
 
 Processing `18e37ac` passed **126/126 focused Linux integration tests, no skips**,
 in 68.948 seconds across ten modules. This includes actual Viewer whole/range

@@ -25,7 +25,10 @@ eight ordered node IDs. Set `PROCESSING_PROTOTYPE_NODE_IDS=cluster,middle,main`
 to prefer the small cluster, then an intermediate node, then main. For each ID,
 configure `PROCESSING_NODE_<ID>_URL` and `PROCESSING_NODE_<ID>_TOKEN` (uppercase
 the ID and replace punctuation with underscores); `_MAX_INPUT_BYTES` is an
-optional per-node ceiling. The legacy `LOCAL_NODE_*` and `MAIN_NODE_*` names
+optional per-node ceiling. `_MAX_IMAGES` accepts a positive integer or the
+literal `null` for no configured photo cap. When omitted, cluster inherits
+`LOCAL_MAX_PHOTOS` and other nodes have no configured photo cap; live engine
+limits still apply. The legacy `LOCAL_NODE_*` and `MAIN_NODE_*` names
 remain supported for cluster and main. All configured nodes participate in the
 fresh exact-definition options intersection, and a configured unavailable node
 closes option admission. The cluster's photo ceiling remains the lower of its
@@ -44,7 +47,18 @@ The policy is rejected on other nodes. The default `bounded-fixture` policy
 remains suitable for small isolated checks. This is not a general real-data
 TreeDar worker service.
 
-## Rollout status
+## Current review versus historical rollout
+
+The current coordinated review branch has newer generic inventory, per-node
+limits, worker custody and maintenance code. Its installed acceptance is still
+pending; see `coordinated-integration-readiness.md`. A November 5 read-only SSH
+refresh still found coordinator image
+`sha256:7fae9385fb5ca829783fe05eef2fdb1983abf4d491b2b9f795e55b617a5a0004`
+running on cluster and main's existing NodeODX container running. No service was
+changed. Do not interpret the following older rollout evidence as installation
+of the current coordinated version or its new reference worker service.
+
+### Historical node-role rollout
 
 Core eligibility, dispatcher and resource policy changes are committed as
 `6532dbb`. The cluster coordinator was rebuilt locally and deployed, preserving
