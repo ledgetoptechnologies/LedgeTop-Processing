@@ -374,8 +374,9 @@ class ViewerService:
                     'maxInputBytes': node_config.max_input_bytes,
                     'taskQueueCount': task_count if valid_task_count else 1,
                 }
-                if node_id == 'cluster':
-                    configured_max = self.config.local_max_photos
+                from .config import node_image_limit
+                configured_max = node_image_limit(node_config, self.config.local_max_photos)
+                if configured_max is not None:
                     snapshot['maxImages'] = min(live_max, configured_max) if type(live_max) is int else configured_max
                 if node_config.max_input_bytes is not None:
                     snapshot['maxInputBytes'] = node_config.max_input_bytes

@@ -25,7 +25,7 @@ from .reference_result_proxy import ResultProxy
 from .reference_store import ReferenceStore
 from .reference_tls import verified_client_context
 from .reference_recovery import RecoveryNodeBinding
-from .config import normalized_node_origin
+from .config import normalized_node_origin, node_image_limit
 from .reference_source_intake import SOURCE_PREFIX
 from .reference_limits import V2_SOURCE_INTAKE_BYTES
 
@@ -135,9 +135,8 @@ def load_reference_settings(path, config):
             raise RuntimeConfigurationError("invalid TLS listener address")
         for field in ("certificate", "privateKey", "clientCA"):
             _file(listener[field], private=field == "privateKey")
-        if (not config.prototype_state_dir or not config.local_node_url or not config.main_node_url
-                or "main" not in config.prototype_node_ids):
-            raise RuntimeConfigurationError("reference runtime requires persistent shared state and both configured nodes")
+        if not config.prototype_state_dir:
+            raise RuntimeConfigurationError("reference runtime requires persistent shared state")
         viewers = value["viewerBearers"]
         workers = value["workers"]
         if type(viewers) is not dict or not viewers or not set(viewers) <= {"production", "staging"}:
@@ -147,6 +146,7 @@ def load_reference_settings(path, config):
         legacy = {secret for secret in (config.api_token, config.prototype_operator_token,
             config.prototype_observer_token, config.viewer_token, config.viewer_staging_token,
             config.local_node_token, config.main_node_token) if secret}
+        legacy.update(node.token for node in config.node_endpoints if node.token)
         credentials = []
         for token in viewers.values():
             credentials.append(token)
@@ -422,8 +422,9 @@ class ReferenceRuntime:
             worker_context = verified_client_context(settings.listener["clientCA"])
             self._server_context = server_context
             endpoints = config.node_endpoints
-            node_limits = {node.id: {"maxInputBytes": node.max_input_bytes}
-                           for node in endpoints if node.max_input_bytes is not None}
+            node_limits = {node.id: {"maxImages": node_image_limit(node, config.local_max_photos),
+                                    "maxInputBytes": node.max_input_bytes}
+                           for node in endpoints}
             self.store = ReferenceStore(queue, local_max_photos=config.local_max_photos,
                 local_max_input_bytes=config.local_max_input_bytes,
                 main_node_id=next((node.id for node in endpoints if node.id == "main"),

@@ -111,9 +111,11 @@ def make_handler(config: Config):
             result = []
             for node in _node_configs(config):
                 snapshot = {**probe_node(node.id, node.url, node.token), 'id': node.id}
-                if node.id == 'cluster':
+                from .config import node_image_limit
+                configured_max = node_image_limit(node, config.local_max_photos)
+                if configured_max is not None:
                     live_max = snapshot.get('maxImages')
-                    snapshot['maxImages'] = min(live_max, config.local_max_photos) if type(live_max) is int else config.local_max_photos
+                    snapshot['maxImages'] = min(live_max, configured_max) if type(live_max) is int else configured_max
                 if node.max_input_bytes is not None:
                     snapshot['maxInputBytes'] = node.max_input_bytes
                 if queue is not None:

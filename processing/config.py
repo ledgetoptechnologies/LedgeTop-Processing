@@ -4,7 +4,22 @@ from dataclasses import dataclass, field
 import ipaddress
 import os
 import re
+from enum import Enum
 from urllib.parse import urlsplit
+
+
+class _ImageLimit(Enum):
+    INHERIT = "inherit"
+
+
+def node_image_limit(node, local_max_photos):
+    """An omitted cap preserves legacy defaults; explicit None is unlimited."""
+    value = getattr(node, "max_images", _ImageLimit.INHERIT)
+    if value is _ImageLimit.INHERIT:
+        return local_max_photos if node.id == "cluster" else None
+    if value is not None and (type(value) is not int or not 1 <= value <= 1_000_000):
+        raise ValueError("per-node image limit must be a positive integer or null")
+    return value
 
 
 @dataclass(frozen=True, repr=False)
@@ -15,9 +30,11 @@ class ProcessingNode:
     url: str
     token: str = field(default="", repr=False)
     max_input_bytes: int | None = None
+    max_images: int | None | _ImageLimit = _ImageLimit.INHERIT
 
     def __repr__(self):
-        return f"ProcessingNode(id={self.id!r}, max_input_bytes={self.max_input_bytes!r})"
+        return (f"ProcessingNode(id={self.id!r}, max_input_bytes={self.max_input_bytes!r}, "
+                f"max_images={self.max_images!r})")
 
 
 @dataclass(frozen=True)
@@ -115,7 +132,7 @@ def from_environment() -> Config:
                      or any(ord(char) < 33 or ord(char) > 126 for char in observer)):
         raise ValueError("prototype observer token must be a separate printable credential of at least 32 characters")
     node_ids = tuple(os.environ.get("PROCESSING_PROTOTYPE_NODE_IDS", "cluster").split(","))
-    if (not 1 <= len(node_ids) <= 8 or 'cluster' not in node_ids or len(set(node_ids)) != len(node_ids)
+    if (not 1 <= len(node_ids) <= 8 or len(set(node_ids)) != len(node_ids)
             or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", node) for node in node_ids)):
         raise ValueError("PROCESSING_PROTOTYPE_NODE_IDS must list 1 to 8 unique ASCII node IDs")
     suffixes = tuple(_node_env_suffix(node) for node in node_ids)
@@ -152,7 +169,13 @@ def from_environment() -> Config:
             max_input_bytes = local_max_input_bytes
         else:
             max_input_bytes = None
-        node_endpoints.append(ProcessingNode(node_id, _node_origin(url), node_token, max_input_bytes))
+        max_images_name = f"PROCESSING_NODE_{suffix}_MAX_IMAGES"
+        max_images = _ImageLimit.INHERIT
+        if max_images_name in os.environ:
+            raw = os.environ[max_images_name]
+            max_images = None if raw == "null" else _positive_int(raw, max_images_name, 1_000_000)
+        node_endpoints.append(ProcessingNode(node_id, _node_origin(url), node_token,
+                                             max_input_bytes, max_images))
     normalized_origins = [normalized_node_origin(node.url) for node in node_endpoints if node.url]
     if len(normalized_origins) != len(set(normalized_origins)):
         raise ValueError("processing nodes must use unique normalized engine origins")
@@ -160,7 +183,7 @@ def from_environment() -> Config:
     if any(len(value) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in value) for value in node_tokens):
         raise ValueError('node tokens must contain at most 4096 non-space printable ASCII characters')
     if viewer == '1':
-        if (not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR') or 'main' not in node_ids
+        if (not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR')
                 or any(not node.url for node in node_endpoints)):
             raise ValueError('Viewer requires persistent state and every configured processing node endpoint')
         credentials = (token, operator, observer)

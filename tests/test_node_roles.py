@@ -127,6 +127,31 @@ class NodeRoleConfigTests(unittest.TestCase):
     def environment(self, **values):
         return patch.dict(os.environ, {'PROCESSING_API_TOKEN': TOKEN, **values}, clear=True)
 
+    def test_per_node_photo_cap_absent_null_and_explicit(self):
+        from processing.config import node_image_limit
+        with self.environment(PROCESSING_PROTOTYPE_NODE_IDS='cluster,middle,main',
+                PROCESSING_NODE_MIDDLE_MAX_IMAGES='2500'):
+            config = from_environment()
+        self.assertEqual([node_image_limit(n, config.local_max_photos)
+                          for n in config.node_endpoints], [1000, 2500, None])
+        with self.environment(PROCESSING_NODE_CLUSTER_MAX_IMAGES='null'):
+            config = from_environment()
+        self.assertIsNone(node_image_limit(config.node_endpoints[0], 1000))
+        for value in ('0', '-1', 'true', '1000001', ''):
+            with self.subTest(value=value), self.environment(PROCESSING_NODE_CLUSTER_MAX_IMAGES=value):
+                with self.assertRaises(ValueError): from_environment()
+
+    def test_ordinary_inventory_has_no_required_role_name(self):
+        with self.environment(PROCESSING_PROTOTYPE_NODE_IDS='small,large',
+                PROCESSING_PROTOTYPE_STATE_DIR='C:/state', PROCESSING_VIEWER_ENABLED='1',
+                PROCESSING_VIEWER_TOKEN='viewer-production-secret-000000000000',
+                PROCESSING_NODE_SMALL_URL='http://small.invalid:3000',
+                PROCESSING_NODE_LARGE_URL='http://large.invalid:3000'):
+            config = from_environment()
+        self.assertEqual(tuple(n.id for n in config.node_endpoints), ('small', 'large'))
+        self.assertEqual(config.local_node_url, '')
+        self.assertEqual(config.main_node_url, '')
+
     def test_default_cap_includes_1000_and_routes_1001_to_main(self):
         with self.environment():
             config = from_environment()
