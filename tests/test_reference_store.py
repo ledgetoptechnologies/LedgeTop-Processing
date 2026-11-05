@@ -1,5 +1,6 @@
 import copy
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import io
 import json
 from pathlib import Path
@@ -364,6 +365,18 @@ class ReferenceStoreTests(unittest.TestCase):
             dict(role="node-2", available=True, options=[])])
         self.assertEqual(self.store.next_for_node("node-2")["jobId"], job["jobId"])
         self.assertIsNone(self.store.next_for_node("cluster"))
+
+    def test_preferred_node_in_maintenance_falls_through_to_next_eligible_node(self):
+        job, _ = self.store.submit(self.submission_with_images(1))
+        stamp = datetime.now(timezone.utc).isoformat()
+        self.queue.schedule_node('cluster', {'expectedRevision': 0, 'drainAt': stamp,
+            'notBefore': stamp, 'afterJobId': None, 'targetImage': 'sha256:' + 'a' * 64})
+        self.assertEqual(self.queue.get_node('cluster')['state'], 'draining')
+        self.assertIsNone(self.store.next_for_node('cluster'))
+        self.assertEqual(self.store.next_for_node('node-2')['jobId'], job['jobId'])
+        claim = self.store.claim(job['jobId'], node_id='node-2', worker_id='fallback-worker',
+            worker_instance_id='fallback-instance', claim_request_id='maintenance-fallback-claim')
+        self.assertEqual(claim['nodeId'], 'node-2')
 
     def test_metadata_quota_rolls_back_both_tables(self):
         store = ReferenceStore(self.queue, max_metadata_bytes=1)

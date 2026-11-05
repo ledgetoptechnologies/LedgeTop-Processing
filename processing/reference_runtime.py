@@ -28,6 +28,7 @@ from .reference_result_proxy import ResultProxy
 from .reference_store import ReferenceStore
 from .reference_tls import verified_client_context
 from .reference_recovery import RecoveryNodeBinding
+from .config import normalized_node_origin
 
 MAX_CONFIG_BYTES = 64 * 1024
 _UNSAFE = re.compile(r"\b(file|filename|path|directory|folder|url|uri|endpoint|host|hostname|"
@@ -126,6 +127,27 @@ class RuntimeConfigurationError(ValueError):
     """Bounded startup error, without private configuration or file contents."""
 
 
+def _validate_node_configuration(config, queue_node_ids=None):
+    """Validate ordered node identity and syntactic endpoint uniqueness.
+
+    Normalized URL identity catches duplicate spellings only; the configured
+    Engine IDs are daemon identities and are not physical-host attestation.
+    """
+    try:
+        node_ids = tuple(config.prototype_node_ids)
+        endpoints = tuple(config.node_endpoints)
+        endpoint_ids = tuple(node.id for node in endpoints)
+        origins = tuple(normalized_node_origin(node.url) for node in endpoints)
+    except Exception:
+        raise RuntimeConfigurationError("ordered processing node configuration is invalid") from None
+    if (not node_ids or len(node_ids) != len(set(node_ids)) or endpoint_ids != node_ids
+            or len(origins) != len(set(origins))):
+        raise RuntimeConfigurationError("ordered processing nodes must have unique IDs and origins")
+    if queue_node_ids is not None and tuple(queue_node_ids) != node_ids:
+        raise RuntimeConfigurationError("processing node order must match the queue authority")
+    return node_ids
+
+
 @dataclass(frozen=True, repr=False)
 class ReferenceSettings:
     listener: dict
@@ -168,6 +190,10 @@ def load_reference_settings(path, config):
         value = p.decode_submission(raw)
         if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
+        node_ids = _validate_node_configuration(config)
+        if len(node_ids) > 1 and value["schemaVersion"] != 2:
+            raise RuntimeConfigurationError(
+                "multi-node dispatch requires daemon identity bindings; these do not prove physical-host identity")
         fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
         p._closed(value, fields + (("recoveryBindings",) if value["schemaVersion"]==2 else ()), "runtime configuration")
         listener = value["listener"]
@@ -228,16 +254,40 @@ def load_reference_settings(path, config):
                     physical["coordinatorOrigin"],physical["gateGeneration"],physical["outputBudget"])
             if len({binding.authority_id for binding in recovery.values()})!=1:
                 raise RuntimeConfigurationError("recovery nodes must share one configured authority")
+            if len({binding.engine_id for binding in recovery.values()}) != len(recovery):
+                raise RuntimeConfigurationError("each configured node must bind a unique Docker Engine daemon")
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
                                  {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
 
+def _available_discovery_snapshot(snapshot):
+    """Build the admission view from the healthy subset of the configured fleet.
+
+    A single offline engine must not stop new work from entering the durable
+    queue when another configured node can accept it. The worker selector and
+    atomic claim still receive every node and mark unavailable ones ineligible.
+    """
+    if type(snapshot) is not dict or type(snapshot.get("nodes")) is not list:
+        raise RuntimeConfigurationError("configured engine catalog unavailable")
+    available = [node for node in snapshot["nodes"] if type(node) is dict
+                 and node.get("available") is True
+                 and node.get("configured", True) is True]
+    if not available:
+        raise RuntimeConfigurationError("no configured engine is available")
+    if snapshot.get("ready") is True:
+        definitions = snapshot.get("commonOptions")
+    else:
+        definitions = snapshot.get("availableOptions")
+    if type(definitions) is not list:
+        raise RuntimeConfigurationError("available engine definitions unavailable")
+    return {**snapshot, "ready": True, "nodes": available, "commonOptions": definitions}
+
+
 def discovered_policy(snapshot, config):
     """Build opaque identities from actual fleet definitions and routing policy."""
-    if type(snapshot) is not dict or snapshot.get("ready") is not True:
-        raise RuntimeConfigurationError("configured engine catalog unavailable")
+    snapshot = _available_discovery_snapshot(snapshot)
     options = []
     for option in snapshot["commonOptions"]:
         name = option.get("name")
@@ -345,7 +395,7 @@ class _DynamicAPI:
             if environment is None:
                 return Response(401, {"error": "unauthorized"})
             try:
-                snapshot = self.discover()
+                snapshot = _available_discovery_snapshot(self.discover())
                 capability, options, allowed = discovered_policy(snapshot, self.config)
                 if path == p.PREFIX + '/options' and method == 'GET':
                     definitions = sorted((option for option in snapshot['commonOptions'] if option['name'] in allowed), key=lambda option: option['name'])
@@ -377,10 +427,16 @@ class ReferenceRuntime:
         self._server, self._thread = None, None
         try:
             recovery=settings.recovery_bindings
+            node_ids = _validate_node_configuration(config, queue.node_ids)
+            if type(settings.workers) is not dict or set(settings.workers) != set(node_ids):
+                raise RuntimeConfigurationError("worker bindings must exactly cover configured nodes")
+            if len(node_ids) > 1 and recovery is None:
+                raise RuntimeConfigurationError(
+                    "multi-node dispatch requires daemon identity bindings; these do not prove physical-host identity")
             if recovery is not None:
-                if (type(recovery) is not dict or set(recovery)!=set(config.prototype_node_ids)
-                        or set(recovery)!=set(queue.node_ids)):
+                if (type(recovery) is not dict or set(recovery)!=set(node_ids)):
                     raise RuntimeConfigurationError("recovery binding coverage changed")
+                engine_ids = []
                 for node,physical in recovery.items():
                     if (type(physical) is not RecoveryNodeBinding or physical.node_id!=node
                             or physical.authority_id!=queue.authority_id):
@@ -388,6 +444,9 @@ class ReferenceRuntime:
                     # Recheck even direct settings callers before any listener
                     # or feature startup can expose the configured authority.
                     RecoveryNodeBinding(**vars(physical))
+                    engine_ids.append(physical.engine_id)
+                if len(engine_ids) != len(set(engine_ids)):
+                    raise RuntimeConfigurationError("each configured node must bind a unique Docker Engine daemon")
                 recovery=dict(recovery)
             server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             server_context.minimum_version = ssl.TLSVersion.TLSv1_2

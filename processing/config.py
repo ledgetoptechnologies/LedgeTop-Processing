@@ -1,6 +1,7 @@
 """Strict startup configuration for the private routing prototype."""
 
 from dataclasses import dataclass, field
+import ipaddress
 import os
 import re
 from urllib.parse import urlsplit
@@ -72,6 +73,24 @@ def _node_origin(value: str) -> str:
     return value.rstrip("/")
 
 
+def normalized_node_origin(value: str) -> tuple[str, str, int]:
+    """Return the normalized identity of an exact HTTP(S) engine origin.
+
+    This detects syntactic aliases (host case, trailing DNS dot, and omitted
+    default port). It does not resolve DNS or prove that two origins reach
+    different physical hosts.
+    """
+    origin = _node_origin(value)
+    parsed = urlsplit(origin)
+    host = parsed.hostname
+    try:
+        host = ipaddress.ip_address(host).compressed
+    except ValueError:
+        host = host.rstrip(".").encode("idna").decode("ascii").lower()
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    return parsed.scheme.lower(), host, port
+
+
 def _positive_int(value: str, name: str, maximum: int) -> int:
     try:
         number = int(value)
@@ -134,6 +153,9 @@ def from_environment() -> Config:
         else:
             max_input_bytes = None
         node_endpoints.append(ProcessingNode(node_id, _node_origin(url), node_token, max_input_bytes))
+    normalized_origins = [normalized_node_origin(node.url) for node in node_endpoints if node.url]
+    if len(normalized_origins) != len(set(normalized_origins)):
+        raise ValueError("processing nodes must use unique normalized engine origins")
     node_tokens = tuple(node.token for node in node_endpoints)
     if any(len(value) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in value) for value in node_tokens):
         raise ValueError('node tokens must contain at most 4096 non-space printable ASCII characters')
