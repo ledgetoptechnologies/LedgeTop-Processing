@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import ssl
+import sys
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 from urllib.error import HTTPError
+from urllib.parse import quote
 
 from processing import reference_protocol as p
 from processing.options import catalog_from_snapshots, _sha
@@ -108,7 +110,7 @@ class WorkerCatalogTests(unittest.TestCase):
         for replacement in ([dict(name='new',help=self.fixture.engine.token)],
                             [dict(name='new',help=self.fixture.token)],
                             [dict(name='new',help='x'*300000)],
-                            [dict(name='same'),dict(name='same')],[] ): 
+                            [dict(name='same'),dict(name='same')],[] ):
             self.fixture.options=replacement
             response=self.fixture.request()
             self.assertEqual(response.status,503)
@@ -117,6 +119,21 @@ class WorkerCatalogTests(unittest.TestCase):
         for change in ({'taskQueueCount':True},{'maxImages':0},{'engineVersion':'unapproved'}):
             previous=self.fixture.info;self.fixture.info=dict(previous,**change)
             self.assertEqual(self.fixture.request().status,503);self.fixture.info=previous
+
+    def test_url_encoded_native_credential_is_not_exposed_in_dynamic_help(self):
+        self.fixture.engine.token='private&native/token with space'
+        for encoded in (quote(self.fixture.engine.token,safe=''),quote(self.fixture.engine.token,safe='').lower()):
+            self.fixture.options=[dict(name='future',help='url?token='+encoded)]
+            self.assertEqual(self.fixture.request().status,503)
+
+    def test_original_engine_id_grammar_and_exact_recovery_binding_are_preserved(self):
+        self.fixture.worker.engine_id='engine:legacy.id-1'
+        client=self.client()
+        client.bindings={'cluster':SimpleNamespace(engine_id=self.fixture.worker.engine_id,gate_generation=1)}
+        self.assertTrue(client.discover()[0]['ready'])
+        client.bindings['cluster'].gate_generation=2
+        catalog,capacity=client.discover()
+        self.assertFalse(catalog['ready']);self.assertFalse(capacity['cluster']['ready'])
 
     def test_client_nonce_identity_binding_and_oversized_response_fail_only_the_node(self):
         other=Fixture('main',self.fixture.authority)
@@ -176,6 +193,56 @@ class WorkerCatalogTests(unittest.TestCase):
                 self.assertFalse(wrong.discover()[0]['ready'])
             finally:
                 server.shutdown();server.server_close();thread.join(2);self.assertFalse(thread.is_alive())
+
+
+@unittest.skipUnless(sys.platform.startswith('linux'),'actual worker/Queue ownership requires Linux')
+class WorkerCatalogWiringTests(unittest.TestCase):
+    def test_runtime_defaults_discover_workers_without_direct_native_discovery(self):
+        from tests import test_reference_runtime as fixtures
+        from processing.reference_runtime import ReferenceRuntime
+        from processing.prototype import Queue
+        host=fixtures.ReferenceRuntimeTests(methodName='runTest');self.addCleanup(host.doCleanups);host.setUp()
+        queue=Queue(host.config.prototype_state_dir,node_ids=('cluster','main'),treedar_node_ids=('main',),reference_enabled=True)
+        self.addCleanup(queue.close)
+        cluster,main=Fixture('cluster',queue.authority_id),Fixture('main',queue.authority_id)
+        host.value=host.recovery_config(queue.authority_id)
+        for fixture in (cluster,main):
+            fixture.worker.engine_id=host.value['recoveryBindings'][fixture.node]['engineId']
+            host.value['workers'][fixture.node].update(fixture.config())
+        host.write_config()
+        first,second=host.tls_patches()
+        with first,second:
+            runtime=ReferenceRuntime(queue,host.config,host.settings())
+        self.addCleanup(runtime.close)
+        runtime._worker_catalog.opener=LocalOpener(cluster,main)
+        with patch('processing.options._get_json',side_effect=AssertionError('native discovery forbidden')), \
+             patch('processing.provider._get_json',side_effect=AssertionError('native capacity forbidden')):
+            catalog=runtime.api.discover()
+            self.assertTrue(catalog['ready']);self.assertIsNotNone(runtime.api.discover_fleet)
+            cluster.info['maxImages']=400;main.info['taskQueueCount']=1
+            capacities=runtime._discover_capacities()
+            self.assertEqual(capacities['cluster']['maxImages'],400)
+            self.assertEqual(capacities['main']['taskQueueCount'],1)
+            self.assertEqual(capacities['cluster']['maxInputBytes'],host.config.node_endpoints[0].max_input_bytes)
+
+    def test_real_factory_catalog_is_below_readiness_wrapper_and_works_with_busy_driver(self):
+        from tests import test_reference_worker_handover as fixtures
+        host=fixtures.ReferenceWorkerHandoverTests(methodName='runTest');self.addCleanup(host.doCleanups);host.setUp()
+        config=host.config
+        worker=dict(workerId=config['workerId'],instanceId=config['workerInstanceId'],
+                    resultOrigin='https://127.0.0.1:'+str(config['listenPort']),resultBearer=config['resultReadBearer'])
+        context=ssl.create_default_context(cafile=config['caFile'])
+        client=WorkerCatalogClient({'cluster':worker},node_ids=('cluster',),authority_id=config['authorityId'],ssl_context=context)
+        with host.backend._db() as db: before=db.execute('SELECT COUNT(*) FROM calls').fetchone()[0]
+        driver=host.control.service.driver
+        self.assertTrue(driver._lock.acquire(timeout=2))
+        try:
+            catalog,capacity=client.discover()
+            self.assertTrue(catalog['ready'],catalog)
+            self.assertEqual(capacity['cluster']['maxImages'],1000)
+        finally:driver._lock.release()
+        with host.backend._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM calls').fetchone()[0],before)
+        self.assertEqual(host.control.calls,[])
 
 
 if __name__=='__main__':unittest.main()

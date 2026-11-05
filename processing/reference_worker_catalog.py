@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 from urllib.error import HTTPError
+from urllib.parse import unquote, unquote_plus
 import uuid
 
 from . import reference_protocol as p
@@ -15,11 +16,25 @@ from .options import (MAX_INFO, MAX_OPTIONS, _canonical, _contains_secret, _sha,
                       _validate_info, _validate_options, catalog_from_snapshots)
 from .provider import _viewer_type, REQUIRED_VIEWER_OUTPUTS
 from .reference_result_proxy import _origin, _NoRedirects
+from .node_gate import ENGINE
 
 PATH = '/ltds/worker/v1/catalog'
 PROTOCOL = 'ltds-worker-engine-catalog-v1'
 MAX_RESPONSE = MAX_INFO + MAX_OPTIONS + 8192
 IDENTITY = ('nodeId', 'workerId', 'workerInstanceId', 'authorityId', 'engineId', 'gateGeneration')
+
+
+def reflects_secret(value, secret):
+    if not secret: return False
+    if _contains_secret(value, secret): return True
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, str) and (secret in unquote(item) or secret in unquote_plus(item)):
+            return True
+        if isinstance(item, dict): pending.extend(item.keys()); pending.extend(item.values())
+        elif isinstance(item, list): pending.extend(item)
+    return False
 
 
 def validate_metadata(info, options):
@@ -43,6 +58,9 @@ class WorkerCatalogAPI:
             raise ValueError('existing worker result authentication required')
         p._slug(worker_instance_id, 'worker instance')
         self.inner, self.worker, self.instance = inner, worker, worker_instance_id
+        # Preserve the existing factory's exact result/reader owner inspection
+        # seam; this is the same object, never a replacement session.
+        self.results = inner.results
 
     def handle(self, method, path, headers, body=b'', *, protected_transport=False):
         if path != PATH:
@@ -68,7 +86,7 @@ class WorkerCatalogAPI:
             info, options = validate_metadata(raw_info, raw_options)
             if info['engineVersion'] != worker.version: raise ValueError('engine pin changed')
             for secret in (worker.engine.token, *self.inner._readers):
-                if _contains_secret([raw_info, options], secret): raise ValueError('private credential reflected')
+                if reflects_secret([raw_info, options], secret): raise ValueError('private credential reflected')
             worker._verify_local_engine()
             value = dict(schemaVersion=1, protocol=PROTOCOL, nonce=request['nonce'],
                 nodeId=worker.node_id, workerId=worker.worker_id, workerInstanceId=self.instance,
@@ -109,13 +127,14 @@ class WorkerCatalogClient:
                 value['workerId'] != configured['workerId'] or value['workerInstanceId'] != configured['instanceId'] or
                 value['authorityId'] != self.authority):
             raise ValueError('worker catalog identity changed')
-        p._slug(value['engineId'], 'engine identity')
+        if type(value['engineId']) is not str or not ENGINE.fullmatch(value['engineId']):
+            raise ValueError('fixed worker engine identity required')
         p._integer(value['gateGeneration'], 'gate generation')
         binding = self.bindings.get(node)
         if binding is not None and (value['engineId'],value['gateGeneration']) != (binding.engine_id,binding.gate_generation):
             raise ValueError('worker catalog physical binding changed')
         info, options = validate_metadata(value['info'], value['options'])
-        if _contains_secret(value, configured['resultBearer']): raise ValueError('catalog reflected credential')
+        if reflects_secret(value, configured['resultBearer']): raise ValueError('catalog reflected credential')
         return info, options
 
     def _snapshot(self, node):
