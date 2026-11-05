@@ -138,6 +138,13 @@ class StructuredTransportTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name=='posix','Linux selector pipes and private file modes')
 class BoundedSubprocessTests(unittest.TestCase):
+    def test_reaped_client_numeric_pid_is_never_signalled_again(self):
+        class Reaped:
+            returncode=0
+            pid=12345
+        with patch.object(t.os,'killpg',side_effect=AssertionError('reaped identity must not be signalled')):
+            t._terminate_owned(Reaped())
+
     def test_immutable_proof_cannot_be_replaced_and_rearmed_dispatch_has_distinct_artifact(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);root.chmod(0o700);proofs=t.PrivateProofs(root)
@@ -194,6 +201,21 @@ class BoundedSubprocessTests(unittest.TestCase):
                        'import sys;sys.stdout.write("x");sys.exit(1)'):
             with self.assertRaises(t.TransportHeld):
                 t.BoundedSubprocess().run([sys.executable,'-c',source],sink=lambda _:None,output_limit=100)
+
+    def test_stream_larger_than_control_output_cap_uses_constant_memory_sink(self):
+        import hashlib
+        total=17*1024*1024;seen=0;largest=0;digest=hashlib.sha256()
+        def sink(chunk):
+            nonlocal seen,largest
+            seen+=len(chunk);largest=max(largest,len(chunk));digest.update(chunk)
+        result=t.BoundedSubprocess().run([sys.executable,'-c',
+            'import os;block=b"x"*65536\nfor _ in range(272):os.write(1,block)'],
+            sink=sink,output_limit=total,timeout=5)
+        expected=hashlib.sha256()
+        for _ in range(272):expected.update(b'x'*65536)
+        self.assertEqual(seen,total);self.assertLessEqual(largest,65536)
+        self.assertEqual(result,dict(clientExitCode=0,streamClosed=True,bytes=total,sha256=expected.hexdigest()))
+        self.assertEqual(digest.hexdigest(),expected.hexdigest())
 
     def test_exact_proof_replay_repeats_file_and_directory_durability_barriers(self):
         with tempfile.TemporaryDirectory() as directory:

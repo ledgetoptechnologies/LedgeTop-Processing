@@ -56,12 +56,15 @@ def decode(raw, maximum=1024 * 1024):
 
 def _terminate_owned(process):
     """Only our isolated client process group, never the Docker daemon/container."""
+    # Successful/failed wait already reaped this PID after all registered pipes
+    # closed. Its numeric PID/PGID can be reused; do not signal it afterward.
+    if process.returncode is not None:
+        return
     try:
-        if process.poll() is None:
-            if os.getpgid(process.pid) != process.pid:
-                raise TransportHeld('owned_client_group_changed')
-        # The isolated group remains ours if its leader exited but descendants
-        # retained a pipe. Its PGID remains reserved while such members live.
+        # Do not poll/reap the leader before checking and signalling the group.
+        # Even an exited zombie still reserves its original PID/session here.
+        if os.getpgid(process.pid) != process.pid:
+            raise TransportHeld('owned_client_group_changed')
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
