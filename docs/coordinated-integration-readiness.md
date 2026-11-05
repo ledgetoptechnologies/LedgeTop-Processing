@@ -73,6 +73,17 @@ An exact-lock production dependency audit also reported body-parser
 `GHSA-27r3-jxmh-p828` (high, `<1.20.9`); the Viewer owner has been asked to review
 the targeted fix before release. No broad dependency update was performed here.
 
+**Immediate Viewer admission code gate:** at `66031588`, provider creation,
+refresh/probe and background health still use the legacy `NodeOdmProvider`.
+That requests `/info` and query-token `/options`; the coordinated TLS API uses
+Bearer-authenticated reference capabilities/options, with the legacy facade
+correctly disabled. Fresh health/options are required before HTTP task admission,
+so inserting a provider directly in the wire fixture does not prove the UI can
+schedule work. The Viewer owner has the concrete shared-adapter/bootstrap and
+HTTP acceptance test requirements. This gate must pass before installed Viewer
+job scheduling is described as ready; it must not be bypassed by enabling the
+legacy executor or fabricating cached health.
+
 ## November 4 worker integration checkpoint
 
 ### Actual client and host preparation checkpoint
