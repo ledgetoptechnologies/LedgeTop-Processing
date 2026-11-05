@@ -8,6 +8,7 @@ import unittest
 import uuid
 
 from processing import reference_driver as driver_module
+from processing.maintenance import Conflict
 from processing.node_gate import NodeGate
 from processing.prototype import Queue
 from processing.reference_control import ReferenceControlAPI
@@ -281,9 +282,25 @@ class WorkerHoldTests(unittest.TestCase):
             row = json.loads(db.execute('SELECT data FROM driver_jobs').fetchone()[0])
             row['fetchAttempts'] = {obj['id']: 3 for obj in row['claim']['submission']['manifest']['objects']}
             db.execute('UPDATE driver_jobs SET data=?', (json.dumps(row),))
-        result = self.driver.step()
-        self.assertEqual((result['state'], result['observing']), ('held', 'source_transfer_unavailable'))
+        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'worker_fetch_attempt_budget_exhausted'})
         self.assert_observing(job, 'source_transfer_unavailable')
+
+    def test_observed_job_escalates_under_the_same_report_on_irreversible_evidence(self):
+        job = self.fetching()
+        with self.driver._db() as db:
+            row = json.loads(db.execute('SELECT data FROM driver_jobs').fetchone()[0])
+            row['fetchAttempts'] = {obj['id']: 3 for obj in row['claim']['submission']['manifest']['objects']}
+            db.execute('UPDATE driver_jobs SET data=?', (json.dumps(row),))
+        self.driver.step()
+        self.assert_observing(job, 'source_transfer_unavailable')
+        watch = self.row(job)[1]['watch']
+        self.expire_reservation()
+        self.driver._active_job = job['jobId']
+        self.driver._hold('reservation_expired')
+        self.assert_public_held(job, 'reservation_expired')
+        hold = self.row(job)[1]['hold']
+        self.assertEqual((hold['holdId'], hold['sequence']), (watch['holdId'], watch['sequence'] + 1))
+        self.assertNotIn('watch', self.row(job)[1])
 
     def test_refusal_message_without_a_lapsed_ledger_lease_is_not_a_hold(self):
         job = self.fetching()
@@ -360,6 +377,231 @@ class WorkerHoldTests(unittest.TestCase):
         self.store.update_fleet_snapshot({'cluster': dict(ready=False, taskQueueCount=0)})
         self.assertEqual(self.driver.step()['state'], 'claim_pending')
         self.assertEqual(self.row(first)[0], 'claim_pending')
+
+    def claim_request(self):
+        with self.driver._db() as db:
+            return db.execute('SELECT claim_request FROM driver_jobs').fetchone()[0]
+
+    def post_claim(self, job, request_id):
+        return self.api.handle('POST', '/ltds/worker/v1/claim', {'Authorization': 'Bearer ' + TOKEN},
+            json.dumps(dict(jobId=job['jobId'], claimRequestId=request_id)).encode(), protected_transport=True)
+
+    def post_withdrawal(self, job, request_id, bearer=TOKEN):
+        return self.api.handle('POST', '/ltds/worker/v1/claim-withdrawal', {'Authorization': 'Bearer ' + bearer},
+            json.dumps(dict(jobId=job['jobId'], claimRequestId=request_id)).encode(), protected_transport=True)
+
+    def claim_count(self, job):
+        with self.queue._db() as db:
+            return db.execute('SELECT COUNT(*) FROM reference_claims WHERE job_id=?', (job['jobId'],)).fetchone()[0]
+
+    def reply(self, reply):
+        """The next /claim reply is replaced exactly; later ones are real."""
+        real = self.driver._request
+        def once(method, suffix, payload=None, *, claim_token=None):
+            if suffix == '/claim':
+                self.driver._request = real
+                return reply
+            return real(method, suffix, payload, claim_token=claim_token)
+        self.driver._request = once
+
+    def lose_reply(self, route, count=1):
+        """The POST reaches the coordinator; its reply is lost, as on a timeout."""
+        real, left = self.driver._request, [count]
+        def lossy(method, suffix, payload=None, *, claim_token=None):
+            result = real(method, suffix, payload, claim_token=claim_token)
+            if suffix == route and left[0]:
+                left[0] -= 1
+                raise DriverWait('coordinator_unavailable')
+            return result
+        self.driver._request = lossy
+
+    def test_malformed_or_wrong_job_claim_replies_retain_the_intent(self):
+        job = self.submit()
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        request_id, identifier = self.claim_request(), job['jobId']
+        dropped = dict(jobId=identifier, status='cancelled', claimState='dropped')
+        for reply in (dict(dropped, jobId=str(uuid.uuid4())), dict(dropped, extra=True), dict(dropped, claimState='gone'),
+                      dict(dropped, claimState=['dropped']), dict(dropped, status='queued'), dict(dropped, status='nonsense'),
+                      dict(jobId=identifier, status='queued', claimState='dropped'), dict(jobId=identifier, status='running', claimState='refused'),
+                      dict(jobId=identifier, status='cancelled'), dict(status='cancelled', claimState='dropped'),
+                      dict(jobId=str(uuid.uuid4()), status='cancelled', claimToken='synthetic'), {}):
+            self.reply((200, reply))
+            self.assertNotEqual(self.driver.step()['state'], 'claim_dropped', reply)
+            self.assertEqual(self.claim_request(), request_id)
+            self.assertEqual(self.row(job)[0], 'claim_pending')
+        self.assertEqual(self.driver.step()['state'], 'claimed')
+        self.assertEqual(self.claim_count(job), 1)
+
+    def test_every_local_witness_retains_a_dropped_claim_row(self):
+        job = self.submit()
+        self.driver.step()
+        reply = (200, dict(jobId=job['jobId'], status='cancelled', claimState='dropped'))
+        for key in driver_module.CLAIM_EFFECTS:
+            self.assertFalse(self.driver._claim_retirable(job['jobId'], {key: None}, reply[1]), key)
+        self.assertTrue(self.driver._claim_retirable(job['jobId'], {}, reply[1]))
+        self.ledger.reserve(job_id=job['jobId'], generation=1, reservation_id='synthetic-reservation', manifest_sha256=job['manifestSha256'],
+            input_bytes=1, output_budget=1, environment='staging', ttl_seconds=60, worker_ready=True)
+        self.assertFalse(self.driver._claim_retirable(job['jobId'], {}, reply[1]))
+
+    def test_engine_execution_or_gate_witness_retains_a_dropped_claim_row(self):
+        job = self.submit()
+        reply = dict(jobId=job['jobId'], status='cancelled', claimState='dropped')
+        real, row = self.worker._row, dict(phase='prepared')
+        self.worker._row = lambda identifier: row
+        self.assertFalse(self.driver._claim_retirable(job['jobId'], {}, reply))
+        self.worker._row = real
+        with NodeGate('engine') as gate:
+            state = gate.snapshot()
+            gate.reserve(state['nodeId'], state['coordinatorOrigin'], state['authorityId'], state['generation'], 'a' * 32)
+        self.assertFalse(self.driver._claim_retirable(job['jobId'], {}, reply))
+
+    def overtaken(self):
+        staging = self.submit()
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        return staging, self.submit(environment='production')
+
+    def test_production_arriving_after_staging_next_is_not_starved(self):
+        staging, production = self.overtaken()
+        self.assertEqual(self.driver.step()['state'], 'claim_dropped')
+        self.assertIsNone(self.row(staging))
+        self.advance(production, 'claimed')
+        self.assertEqual(self.store.get(production['jobId'], private=True)['status'], 'running')
+        self.assertEqual(self.store.get(staging['jobId'], private=True)['status'], 'queued')
+        self.assertEqual(self.claim_count(staging), 0)
+
+    def test_lost_refusal_reply_replays_the_same_request_to_the_same_refusal(self):
+        staging, production = self.overtaken()
+        request_id = self.claim_request()
+        self.lose_reply('/claim-withdrawal')
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertEqual(self.claim_request(), request_id)
+        self.assertEqual(self.row(staging)[0], 'claim_pending')
+        self.assertEqual(self.driver.step()['state'], 'claim_dropped')
+        self.advance(production, 'claimed')
+        self.assertEqual(self.claim_count(staging), 0)
+
+    def test_withdrawal_lost_before_it_arrived_leaves_the_request_undecided(self):
+        staging, production = self.overtaken()
+        request_id, real = self.claim_request(), self.driver._request
+        def unreachable(method, suffix, payload=None, *, claim_token=None):
+            if suffix == '/claim-withdrawal':
+                raise DriverWait('coordinator_unavailable')
+            return real(method, suffix, payload, claim_token=claim_token)
+        self.driver._request = unreachable
+        self.assertEqual(self.steps(3)[-1]['state'], 'retry_wait')
+        self.assertEqual(self.claim_request(), request_id)
+        self.driver._request = real
+        self.assertEqual(self.driver.step()['state'], 'claim_dropped')
+        self.advance(production, 'claimed')
+
+    def test_admission_that_won_the_race_stands_over_the_withdrawal(self):
+        staging = self.submit()
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        request_id, real = self.claim_request(), self.driver._request
+        production = {}
+        def delayed(method, suffix, payload=None, *, claim_token=None):
+            # The original POST is admitted, then its reply vanishes; the worker
+            # sees only a refusal from a replay that lost the race.
+            if suffix == '/claim' and not production:
+                real(method, suffix, payload, claim_token=claim_token)
+                production['job'] = self.submit(environment='production')
+                return 409, None
+            if suffix == '/next':
+                return 200, dict(job=dict(jobId=production['job']['jobId']))
+            return real(method, suffix, payload, claim_token=claim_token)
+        self.driver._request = delayed
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        self.assertEqual(self.row(staging)[0], 'claim_pending')
+        self.driver._request = real
+        self.assertEqual(self.post_withdrawal(staging, request_id).body,
+            dict(jobId=staging['jobId'], status='running', claimState='admitted'))
+        self.assertEqual(self.driver.step()['state'], 'claimed')
+        self.assertEqual(self.claim_count(staging), 1)
+        self.assertEqual(self.store.get(production['job']['jobId'], private=True)['status'], 'queued')
+
+    def test_waiting_with_nothing_else_offered_never_withdraws(self):
+        staging = self.submit()
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        request_id = self.claim_request()
+        self.store.update_fleet_snapshot({'cluster': dict(ready=False, taskQueueCount=0)})
+        self.assertEqual({item['state'] for item in self.steps(3)}, {'claim_pending'})
+        self.assertEqual(self.claim_request(), request_id)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM reference_outbox WHERE kind='claim_refusal'").fetchone()[0], 0)
+
+    def test_timeout_with_unknown_acceptance_keeps_the_claim_and_never_duplicates(self):
+        staging = self.submit()
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        self.lose_reply('/claim')
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        production = self.submit(environment='production')
+        self.assertEqual(self.row(staging)[0], 'claim_pending')
+        self.assertEqual(self.driver.step()['state'], 'claimed')
+        self.assertEqual(self.claim_count(staging), 1)
+        self.assertEqual(self.store.get(production['jobId'], private=True)['status'], 'queued')
+        self.assertEqual(self.store.get(staging['jobId'], private=True)['status'], 'running')
+
+    def test_delayed_original_post_cannot_admit_after_the_row_was_retired(self):
+        staging, production = self.overtaken()
+        request_id = self.claim_request()
+        self.assertEqual(self.driver.step()['state'], 'claim_dropped')
+        # Before the worker reaches production, production goes and the staging
+        # job is the head again: the same request must still not admit it.
+        self.store.update_phase(production['jobId'], 'cancelled')
+        response = self.post_claim(staging, request_id)
+        self.assertEqual(response.body, dict(jobId=staging['jobId'], status='queued', claimState='refused'))
+        self.assertEqual(self.claim_count(staging), 0)
+        self.assertEqual(self.store.get(staging['jobId'], private=True)['status'], 'queued')
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        self.assertNotEqual(self.claim_request(), request_id)
+        self.advance(staging, 'claimed')
+        self.assertEqual(self.claim_count(staging), 1)
+        self.assertEqual(self.post_claim(staging, request_id).body,
+            dict(jobId=staging['jobId'], status='running', claimState='dropped'))
+        self.assertEqual(self.claim_count(staging), 1)
+
+    def test_refusal_survives_a_coordinator_restart_and_binds_its_worker(self):
+        staging, production = self.overtaken()
+        request_id = self.claim_request()
+        self.assertEqual(self.post_withdrawal(staging, request_id).body['claimState'], 'refused')
+        self.assertEqual(self.post_withdrawal(staging, request_id).body['claimState'], 'refused')
+        self.assertEqual(self.post_claim(staging, request_id).body['claimState'], 'refused')
+        self.restart_coordinator()
+        self.store.update_phase(production['jobId'], 'cancelled')
+        self.assertEqual(self.post_claim(staging, request_id).body['claimState'], 'refused')
+        with self.assertRaises(Conflict):
+            self.store.claim(staging['jobId'], node_id='cluster', worker_id='other', worker_instance_id='instance',
+                claim_request_id=request_id)
+        self.assertEqual(self.claim_count(staging), 0)
+
+    def test_refusals_are_never_sent_and_are_pruned_once_the_job_left_the_queue(self):
+        staging, production = self.overtaken()
+        self.assertEqual(self.driver.step()['state'], 'claim_dropped')
+        self.assertEqual(self.store.pending_outbox(now=time.time() + 10**6), [])
+        self.advance(production, 'claimed')
+        self.store.update_phase(staging['jobId'], 'cancelled')
+        third = self.submit()
+        with self.queue._db() as db:
+            rows = db.execute("SELECT acknowledged FROM reference_outbox WHERE kind='claim_refusal'").fetchall()
+        self.assertEqual([row[0] for row in rows], [1])
+        self.assertEqual(self.post_withdrawal(third, 'synthetic-other').body['claimState'], 'refused')
+        with self.queue._db() as db:
+            rows = db.execute("SELECT identity FROM reference_outbox WHERE kind='claim_refusal'").fetchall()
+        self.assertEqual([row[0] for row in rows], ['claim-refusal:synthetic-other'])
+
+    def test_withdrawal_refuses_another_workers_request_and_malformed_bodies(self):
+        job = self.submit()
+        self.driver.step()
+        request_id = self.claim_request()
+        self.driver.step()
+        other = ReferenceWorkerAPI(self.store, None, bearer_workers={
+            OTHER: dict(node_id='cluster', worker_id='other', worker_instance_id='other-instance')})
+        response = other.handle('POST', '/ltds/worker/v1/claim-withdrawal', {'Authorization': 'Bearer ' + OTHER},
+            json.dumps(dict(jobId=job['jobId'], claimRequestId=request_id)).encode(), protected_transport=True)
+        self.assertEqual(response.status, 409)
+        self.assertEqual(self.api.handle('POST', '/ltds/worker/v1/claim-withdrawal', {'Authorization': 'Bearer ' + TOKEN},
+            json.dumps(dict(jobId=job['jobId'], claimRequestId=request_id, extra=1)).encode(), protected_transport=True).status, 400)
+        self.assertEqual(self.claim_count(job), 1)
 
     def test_scratch_shortage_waits_bounded_then_shows_and_a_pass_clears(self):
         self.ledger.probe = lambda root: 0
@@ -501,6 +743,35 @@ class WorkerHoldTests(unittest.TestCase):
             self.assertIsNone(db.execute('SELECT error FROM reference_jobs').fetchone()[0])
         self.assertNotIn('queueReason', self.public(job))
 
+    ADDITIVE = {'queueReason', 'queueMessage', 'holdObservation', 'holdEngineStatusCode'}
+
+    def legacy(self, record):
+        """What a Viewer built before these fields reads from a job record."""
+        return {key: value for key, value in record.items() if key not in self.ADDITIVE}
+
+    def test_old_consumers_see_an_observed_job_exactly_as_before(self):
+        job = self.executing()
+        before = self.public(job)
+        self.assertFalse(self.ADDITIVE & set(before))
+        self.long_outage(job)
+        after = self.public(job)
+        self.assertEqual(self.ADDITIVE, self.ADDITIVE & set(after))
+        self.assertEqual(self.legacy(after), before)
+        self.engine_up()
+        self.driver.step()
+        self.assertEqual(self.public(job), before)
+
+    def test_hold_fields_are_additive_on_the_existing_held_status(self):
+        job = self.fetching()
+        self.expire_reservation()
+        self.steps(2)
+        record = self.public(job)
+        self.assertEqual(set(record) - set(self.legacy(record)), self.ADDITIVE)
+        self.assertEqual((record['status'], record['phase']), ('held', 'held'))
+        self.assertEqual((record['holdObservation'], record['holdEngineStatusCode']), (None, None))
+        listed = self.api.handle('GET', '/ltds/v1/jobs/' + job['jobId'], {'Authorization': 'Bearer ' + VIEWER}, protected_transport=True).body
+        self.assertEqual(json.loads(json.dumps(listed)), record)
+
     def test_delayed_older_report_cannot_replace_a_newer_one(self):
         job = self.executing()
         self.long_outage(job)
@@ -593,6 +864,9 @@ class WorkerHoldTests(unittest.TestCase):
         self.assertEqual((result['state'], result['terminalStatus']), ('operator_terminal', 'failed'))
         self.assertEqual(self.row(job)[0], 'completed')
         self.assertEqual(self.worker._row(job['jobId'])['phase'], 'initialize_pending')
+        self.assertNotIn('queueReason', self.public(job))
+        with self.queue._db() as db:
+            self.assertEqual(json.loads(db.execute('SELECT result FROM jobs WHERE id=?', (job['jobId'],)).fetchone()[0])['note'], 'synthetic')
         self.transport.fail_initialize = False
         self.advance(second, 'claimed')
         self.assertEqual(self.public(second)['status'], 'running')

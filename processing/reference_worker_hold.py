@@ -35,6 +35,8 @@ FIELDS = ('schemaVersion', 'protocol', 'holdId', 'sequence', 'coordinatorAuthori
     'engineStatusCode')
 ACK_FIELDS = ('schemaVersion', 'protocol', 'jobId', 'generation', 'holdId', 'sequence', 'requestSha256',
     'reasonCode', 'heldAt', 'ackSha256')
+REFUSAL_KIND = 'claim_refusal'
+REFUSAL_PREFIX = 'claim-refusal:'
 RECORD_FIELDS = ('holdId', 'sequence', 'requestSha256', 'reasonCode', 'observation', 'engineStatusCode', 'heldAt')
 
 
@@ -110,13 +112,13 @@ def queue_status(record):
         holdEngineStatusCode=record['engineStatusCode'])
 
 
-def _permitted(row, reason):
+def _permitted(row, reason, old):
     """Whether this report may be recorded against the job's current authority."""
     if row['result_json'] or row['terminal_failure_json']:
         return False
     status, held = row['status'], row['held_reason']
-    if reason in TERMINAL_REASONS:
-        return status in ('failed', 'cancelled')
+    if status in ('failed', 'cancelled'):
+        return reason in TERMINAL_REASONS or reason is None and old is not None and old['reasonCode'] in TERMINAL_REASONS
     if status == 'running':
         return True
     # Same-reason updates only: an escalated hold keeps its code, and any other
@@ -154,7 +156,7 @@ def report(store, job_id, request, *, identity, claim_token):
                 raise Conflict('stale worker hold report')
             if request['sequence'] == old['sequence']:
                 return make_ack(job_id, row['generation'], old)
-        if not _permitted(row, reason):
+        if not _permitted(row, reason, old):
             # Operator holds stay as they are and delivered work is not reopened.
             raise Conflict('job cannot take a worker hold')
         held_at = (old['heldAt'] if old is not None and old['reasonCode'] == reason else
@@ -163,7 +165,7 @@ def report(store, job_id, request, *, identity, claim_token):
             reasonCode=reason, observation=request['observation'],
             engineStatusCode=request['engineStatusCode'], heldAt=held_at)
         # The operator's own terminal note stays beside the report.
-        value = json.loads(row['queue_result']) if reason in TERMINAL_REASONS and row['queue_result'] else {}
+        value = json.loads(row['queue_result']) if row['status'] in ('failed', 'cancelled') and row['queue_result'] else {}
         result = p.canonical_json(dict(value, workerHold=record)).decode('ascii')
         if reason in HOLD_REASONS and row['status'] == 'running':
             db.execute("UPDATE jobs SET status='held',held_reason=?,result=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
@@ -174,17 +176,63 @@ def report(store, job_id, request, *, identity, claim_token):
         return make_ack(job_id, row['generation'], record)
 
 
-def claim_dropped(store, job_id, claim_request_id):
-    """The job status when this unanswered claim can never succeed, else None.
+def claim_refused(db, job_id, request_id, *, node_id, worker_id, worker_instance_id):
+    """Whether this request carries a durable refusal; another binding is a conflict."""
+    row = db.execute("SELECT payload_json FROM reference_outbox WHERE identity=? AND kind=?",
+        (REFUSAL_PREFIX + request_id, REFUSAL_KIND)).fetchone()
+    if row is None:
+        return False
+    if row[0] != p.canonical_json(dict(jobId=job_id, nodeId=node_id, workerId=worker_id, workerInstanceId=worker_instance_id)).decode():
+        raise Conflict('claim request belongs to different worker binding')
+    return True
+
+
+def withdraw_claim(store, job_id, request_id, *, node_id, worker_id, worker_instance_id):
+    """(status, claimState): one atomic decision for a request its worker gave up on.
+
+    The original POST may still be in flight or replayed, so a worker can never
+    retire a row on its own. Here the first arrival decides: an admission stands
+    (claimState admitted, every replay returns that claim), otherwise the request
+    is refused for good (refused, every replay and delayed POST is refused). The
+    job itself is untouched and stays queued. Stored as an already acknowledged
+    reference_outbox row, which is never sent, to keep the schema census and quota
+    unchanged. A job that left queued cannot be claimed by any request, so such
+    rows are simply pruned.
+    """
+    binding = dict(jobId=job_id, nodeId=node_id, workerId=worker_id, workerInstanceId=worker_instance_id)
+    with store.queue._db() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT status FROM jobs WHERE id=?', (job_id,)).fetchone()
+        if row is None:
+            raise Conflict('unknown claim withdrawal')
+        old = db.execute('SELECT * FROM reference_claims WHERE request_id=?', (request_id,)).fetchone()
+        if old is not None:
+            if (old['job_id'], old['node_id'], old['worker_id'], old['instance_id']) != (job_id, node_id, worker_id, worker_instance_id):
+                raise Conflict('claim request belongs to different worker binding')
+            return row['status'], 'admitted'
+        if row['status'] != 'queued':
+            return row['status'], 'dropped'
+        if not claim_refused(db, job_id, request_id, node_id=node_id, worker_id=worker_id, worker_instance_id=worker_instance_id):
+            store._quota(db, 512)
+            db.execute("""DELETE FROM reference_outbox WHERE kind=? AND json_extract(payload_json,'$.jobId')
+                NOT IN (SELECT id FROM jobs WHERE status='queued')""", (REFUSAL_KIND,))
+            db.execute("INSERT INTO reference_outbox(identity,kind,payload_json,digest,acknowledged) VALUES(?,?,?,?,1)",
+                (REFUSAL_PREFIX + request_id, REFUSAL_KIND, p.canonical_json(binding).decode(), p.digest(binding)))
+        return row['status'], 'refused'
+
+
+def claim_dropped(store, job_id, claim_request_id, identity):
+    """(status, claimState) when this unanswered claim can never succeed, else None.
 
     A job leaves queued only by claim or cancellation and never returns, so any
-    other status without this request's claim proves nothing started here.
+    other status without this request's claim proves nothing started here. A
+    queued job proves it only through this request's durable refusal.
     """
     with store.queue._db() as db:
         db.execute('BEGIN')
         row = db.execute('SELECT status FROM jobs WHERE id=?', (job_id,)).fetchone()
-        if row is None or row['status'] == 'queued':
+        if row is None or db.execute('SELECT 1 FROM reference_claims WHERE request_id=?', (claim_request_id,)).fetchone():
             return None
-        if db.execute('SELECT 1 FROM reference_claims WHERE request_id=?', (claim_request_id,)).fetchone():
-            return None
-        return row['status']
+        if row['status'] != 'queued':
+            return row['status'], 'dropped'
+        return (row['status'], 'refused') if claim_refused(db, job_id, claim_request_id, **identity) else None

@@ -303,11 +303,19 @@ class ReferenceWorkerAPI:
                     # 200 because the driver cannot read a 409 body. Lets a
                     # driver drop an unstarted row instead of starving the node.
                     from .reference_worker_hold import claim_dropped
-                    status = claim_dropped(self.store, payload["jobId"], payload["claimRequestId"])
-                    if status is not None:
-                        return Response(200, {"jobId": payload["jobId"], "status": status, "claimState": "dropped"})
+                    dropped = claim_dropped(self.store, payload["jobId"], payload["claimRequestId"], identity)
+                    if dropped is not None:
+                        return Response(200, {"jobId": payload["jobId"], "status": dropped[0], "claimState": dropped[1]})
                     return self._error(409, "claim_unavailable")
                 return Response(200, claim)
+            if method == "POST" and path == PREFIX + "/claim-withdrawal":
+                payload = protocol.decode_submission(body)
+                protocol._closed(payload, ("jobId", "claimRequestId"), "claim withdrawal")
+                protocol._slug(payload["jobId"], "job ID")
+                protocol._slug(payload["claimRequestId"], "claim request ID")
+                from .reference_worker_hold import withdraw_claim
+                status, state = withdraw_claim(self.store, payload["jobId"], payload["claimRequestId"], **identity)
+                return Response(200, {"jobId": payload["jobId"], "status": status, "claimState": state})
             if method == "POST" and path == PREFIX + "/results":
                 payload = protocol.decode_submission(body)
                 protocol._closed(payload, ("claimRequestId", "claimToken", "delivery"), "worker results")
