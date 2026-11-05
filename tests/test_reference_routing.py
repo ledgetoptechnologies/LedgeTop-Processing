@@ -49,14 +49,15 @@ class ReferenceRoutingTests(unittest.TestCase):
         self.assertIsNone(self.claim(job, 'cluster'))
         self.assertEqual(self.claim(job, 'main')['nodeId'], 'main')
 
-    def test_small_job_waits_while_cluster_held(self):
+    def test_small_job_falls_through_to_main_while_cluster_held(self):
         job = self.submit()
         self.queue.schedule_node('cluster', {'expectedRevision': 0,
             'drainAt': '2020-01-01T00:00:00Z', 'notBefore': '2020-01-01T00:00:00Z',
             'afterJobId': None, 'targetImage': 'sha256:' + 'a'*64})
         self.assertIsNone(self.claim(job, 'cluster'))
-        self.assertIsNone(self.claim(job, 'main'))
-        self.assertEqual(self.queue.get(job['jobId'])['status'], 'queued')
+        claimed = self.claim(job, 'main')
+        self.assertEqual(claimed['nodeId'], 'main')
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'running')
 
     def test_treedar_metadata_is_main_only_even_when_tiny(self):
         manifest = self.payload['manifest']
