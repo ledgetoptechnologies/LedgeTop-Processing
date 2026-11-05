@@ -943,7 +943,9 @@ class ReferenceDriver:
             with self._db() as db:
                 row = db.execute('SELECT * FROM driver_jobs WHERE job=?', (job_id,)).fetchone()
             data = json.loads(row['data']) if row is not None else {}
-            if 'reservation' not in data or 'claim' not in data or row['stage'] == 'completed':
+            if ('reservation' not in data or 'claim' not in data or row['stage'] == 'completed'
+                    or 'outboxId' in data or 'failureOutboxId' in data):
+                # An outbox means the engine ran and a delivery is owed: never unstarted.
                 raise DriverHeld('unstarted_reconciliation_unavailable')
             return self._unstarted(job_id, row['stage'], data, 'unstarted_claim_requires_reconciliation')
         except DriverHeld as error:

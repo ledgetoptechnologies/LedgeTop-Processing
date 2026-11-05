@@ -629,6 +629,20 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(self.driver.step()['state'], 'processing_pending')
         self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
 
+    def test_reconciliation_leaves_a_row_that_owes_a_delivery(self):
+        job = self.submit()
+        self.advance(job, 'executing')
+        self.end_job(job)
+        for key in ('outboxId', 'failureOutboxId'):
+            with self.subTest(key=key):
+                _, data = self.data(job)
+                data.pop('outboxId', None)
+                data[key] = 'owed-delivery'
+                self.driver._save(job['jobId'], 'failure_delivering', data)
+                self.assertEqual(self.driver.reconcile_unstarted(job['jobId']),
+                    {'state': 'held', 'reason': 'unstarted_reconciliation_unavailable'})
+                self.assertEqual(self.data(job)[0], 'failure_delivering')
+
     def test_reconciliation_never_touches_a_started_engine_or_runs_beside_a_step(self):
         job = self.submit()
         self.advance(job, 'executing')
