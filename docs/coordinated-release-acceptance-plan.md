@@ -1,0 +1,75 @@
+# Coordinated release acceptance plan
+
+This is an execution checklist, not evidence of deployment or approval for client
+data. The complete Processing/Viewer goal remains active. Photo-job acceptance is
+the first operational milestone, not a replacement for the remaining scope.
+
+## Integration decisions
+
+- Use V2 Viewer source admission, ReferenceStore, the node-local reference worker,
+  and the existing durable result/accepted-copy receipt chain as one path.
+- Coordinated multi-node configuration must refuse the legacy direct Viewer
+  executor. Do not add a second node execution or receipt protocol.
+- Allow one job per physical host, with different hosts executing concurrently.
+  This supersedes the original global one-job execution rule. All engines on a
+  host share its reservation. Production outranks waiting staging work without
+  interrupting an already running job.
+- Prefer the first eligible idle node. Cluster accepts at most 1,000 photos;
+  main has no photo-count cap. Node order and eligibility are configuration,
+  not hard-coded node-count assumptions.
+- Start deployment qualification with the existing systemd worker unit and
+  queue/node gates. The inactive custom host-supervisor experiment is outside
+  this release; it cannot currently establish restartable engine quiescence.
+- Keep results and uncertain outcomes. Unknown acceptance, failed fsync, expired
+  connectivity or restart never authorizes deletion or duplicate engine work.
+
+## Work ownership and sequence
+
+1. Source-intake owner integrates spool, Store, HTTP and runtime configuration,
+   preserving existing receipt configurations. Verify interrupted publication,
+   directory-fsync failure, immutable identity, capacity and replay behavior.
+2. Worker integration owner incorporates pinned live-engine probes, cleanup
+   checks and refusal of the alternate direct executor. Preserve reservations
+   when identity is unavailable or mismatched.
+3. Combine both on one exact revision. Run affected Linux tests and the actual
+   Viewer V2 client against it; historical tests on separate heads do not qualify
+   this combined revision.
+4. Prepare immutable builds, configuration and installation/rollback records.
+   Verify installed identities, persistent paths, TLS, gate ownership and unit
+   lifecycle. Only Beau performs TrueNAS changes. Its spool uses a separate
+   subfolder in the existing Viewer Storage dataset.
+5. Run the acceptance matrix below, then a small real mapping dataset. Large
+   client jobs remain unqualified until these operational gates pass.
+
+## Photo-job acceptance matrix
+
+Every row needs the exact Processing and Viewer revisions, test/run identity,
+observed result and retained-state/cleanup outcome. A synthetic test does not
+establish installed or real-data acceptance.
+
+| ID | Exercise | Required observation |
+| --- | --- | --- |
+| P1 | Actual Viewer V2 submit and interrupted POST replay | One immutable job; no alternate legacy submission or duplicate admission |
+| P2 | Two eligible small jobs while both hosts are idle | First uses cluster; next can use main; at most one engine job per host |
+| P3 | Oversized job while main is busy and cluster becomes idle | Job remains queued for an eligible node; cluster never receives it |
+| P4 | Reorder/add/remove configured nodes | Selection obeys current eligibility/order; unavailable nodes do not strand otherwise runnable jobs |
+| P5 | Waiting production and staging jobs | Production goes first; running jobs retain ownership |
+| P6 | Queue, engine execution and logs | Viewer reports queued until actual execution, then exposes correct status and node logs |
+| P7 | Restart during upload, engine submission and execution | Replay reconciles durable identity; no duplicate engine start or lost source |
+| P8 | Worker finishes with coordinator unavailable | Result/outbox persists; reconnect delivers the original completion |
+| P9 | Viewer unavailable or acceptance reply lost | Durable delivery retries and reconciles acceptance without deleting the only copy |
+| P10 | Disk full, corrupt content, changed engine identity | New/unsafe work holds; no false success, silent deletion or competing execution |
+| P11 | Confirmed result acceptance and cleanup | Only explicitly releasable processing copies disappear; Viewer result stays readable |
+| P12 | Drain, update, failed health check and resume | No new host claims while drained; running work finishes; rollback only in its supported pre-reopen window |
+| P13 | Installed small real mapping job | Results return to Viewer and can be opened; retained sources and logs are accounted for |
+
+## Remaining full-goal deliverables
+
+After the photo milestone, qualify genuine LAS/LAZ TreeDar input and typed outputs
+on main using the same per-host reservation and durable handoff. Keep Gaussian
+splats disabled while exposing only its agreed future scaffold. Finish NAS source
+custody, retention and disk/capacity safeguards; do not describe logical holds as
+physical quotas. Qualify unattended maintenance and reboot recovery. Complete
+Viewer rendered UI acceptance, Operations-aligned dark colors, and the customer
+to project/subcategory to task hierarchy. Record current Claude ownership from
+an actual acknowledgement, not historical co-author trailers.

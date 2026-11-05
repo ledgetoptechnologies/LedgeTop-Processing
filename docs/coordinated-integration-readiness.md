@@ -4,6 +4,24 @@ This record describes the review branch
 `codex/viewer-accepted-copy-integration-candidate-20261103`. It is not a deployment
 approval. Runtime acceptance remains incomplete.
 
+## November 4 worker integration checkpoint
+
+Worker integration code `06560c6` (parent `5b2d0f8`) incorporates the pinned
+live-engine probe before mutations and cleanup, rejects the alternate legacy
+Viewer executor in multi-node reference configuration, and retains the current
+V2 admission validator from `49107f3`. The selected Linux source-intake validator,
+protocol, engine worker/cleanup, driver/routing, runtime, daemon routing,
+execution, results, combined preparation and worker-unit suite passed **179/179
+with no skips** on Ubuntu 24.04 as unprivileged `pilot`.
+
+This checkpoint does not include the in-progress Store/HTTP/spool intake
+integration or prove installed workers, physical-host attestation, NAS custody,
+actual Viewer V2 submission or real processing. The earlier missing live-probe
+items below describe the earlier checkpoint and are now implemented in this
+candidate, pending installed qualification. See
+[the acceptance plan](coordinated-release-acceptance-plan.md) for the current
+dependency order and explicit per-host concurrency rule.
+
 Identity follow-up `572cf56` integrates duplicate-origin/daemon-ID checks and
 requires daemon bindings for multi-node startup. It preserves schema-v3/v4
 result-delivery configuration while requiring their recovery bindings too.
