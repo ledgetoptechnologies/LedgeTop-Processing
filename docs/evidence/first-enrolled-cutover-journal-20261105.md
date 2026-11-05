@@ -45,3 +45,26 @@ driver and strict declared-transform/rollback verifier must be integrated and
 qualified before this mode can activate anything. Gate RPC and helper lifecycle
 steps are being refined to keep each mutation independently journaled; no hidden
 second controller or generic startup bypass is authorized.
+
+
+The refined driver contract journals lease-holder creation separately from
+starting it, and journals bootstrap Gate intent, drain and seal as three separate
+RPC mutations. Early rollback includes its own known-recipe holder-create phase
+because the original may have stopped before forward holder creation.
+
+The driver's observe/verify path is read-only with respect to deployment,
+processing/source data, leases and APIs. One narrow metadata exception is allowed:
+an already owned private operation-receipt directory may receive a bounded,
+0600, O_EXCL, fsynced proof artifact bound to the pending intent. Existing artifacts
+must be byte-identical and descriptor/hash verified; they are never overwritten.
+An ambiguous local artifact creation is inspected by exact path/identity/bytes.
+No container creation/start, authority lease acquisition, RPC POST, source mutation
+or repair can occur in observation. The main journal stores only its proof digest.
+
+
+Refinement validation: 21/21 journal cases passed within the combined77-case
+Linux run in3.976 seconds. Independent freeze-RPC loss/inspection and holder
+creation ordering are now included. The first refined run found one stale test
+index after the new rollback-holder phase; the test now advances by exact action.
+No production behavior was weakened. The task container was removed and its exact
+label inventory was empty.

@@ -27,12 +27,15 @@ IMAGE = re.compile(r'sha256:[0-9a-f]{64}\Z')
 STEPS = (
     ('disable-predecessor-restart','restart-disabled'),
     ('stop-predecessor','predecessor-stopped'),
+    ('create-original-lease-holder','original-lease-holder-created'),
     ('acquire-original-leases','original-leases-held'),
     ('capture-full-custody','custody-verified'),
     ('copy-verified-backup','backup-verified'),
     ('release-original-leases','original-leases-released'),
     ('create-bootstrap','bootstrap-created'),
     ('start-bootstrap','bootstrap-running'),
+    ('intent-bootstrap-gate','bootstrap-freeze-intent'),
+    ('drain-bootstrap-gate','bootstrap-draining'),
     ('seal-bootstrap-gate','bootstrap-frozen'),
     ('stop-bootstrap','bootstrap-stopped'),
     ('acquire-frozen-original-leases','frozen-original-leases-held'),
@@ -48,6 +51,7 @@ STEPS = (
 READ_ACTIONS = frozenset(('capture-full-custody','verify-frozen-transform','verify-final-readiness'))
 ROLLBACK_STEPS = (
     ('stop-exact-candidates','rollback-candidates-stopped'),
+    ('create-rollback-lease-holder','rollback-lease-holder-created'),
     ('acquire-rollback-original-leases','rollback-original-leases-held'),
     ('verify-rollback-projection','rollback-projection-verified'),
     ('release-rollback-original-leases','rollback-original-leases-released'),

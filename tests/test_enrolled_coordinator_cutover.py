@@ -144,6 +144,29 @@ class EnrolledCutoverJournalTests(unittest.TestCase):
         self.assertEqual(self.driver.calls,[])
         self.assertIsNone(self.actor.journal.read()['pending'])
 
+    def test_each_freeze_rpc_is_independently_journaled_and_not_replayed(self):
+        for action in ('intent-bootstrap-gate','drain-bootstrap-gate','seal-bootstrap-gate'):
+            with self.subTest(action=action):
+                # Each case starts from an independent exact journal owner.
+                with tempfile.TemporaryDirectory() as directory:
+                    Path(directory).chmod(0o700);driver=Boundary()
+                    actor=c.FirstEnrolledCutover(Path(directory),self.plan,driver);driver.controller=actor;actor.prepare()
+                    while c.STEPS[actor.journal.read()['index']][0]!=action:actor.advance()
+                    driver.loss=action;driver.after=True
+                    with self.assertRaises(c.CutoverHeld):actor.advance()
+                    self.assertEqual(actor.journal.read()['pending']['action'],action)
+                    count=len(driver.calls)
+                    with self.assertRaises(c.CutoverHeld):actor.advance()
+                    actor.inspect();self.assertEqual(len(driver.calls),count)
+
+    def test_holder_create_precedes_start_and_rollback_can_create_missing_holder(self):
+        actions=[action for action,_ in c.STEPS]
+        self.assertLess(actions.index('create-original-lease-holder'),actions.index('acquire-original-leases'))
+        self.actor.advance();self.actor.advance();self.actor.begin_rollback()
+        self.actor.advance();self.actor.advance()
+        self.assertEqual(self.actor.journal.read()['phase'],'rollback-lease-holder-created')
+        self.assertEqual(self.actor.journal.read()['pending'],None)
+
     def test_bad_effect_or_declared_transform_stays_pending(self):
         self.until('verify-frozen-transform');self.driver.wrong.add('verify-frozen-transform')
         calls=list(self.driver.calls)
@@ -201,7 +224,9 @@ class EnrolledCutoverJournalTests(unittest.TestCase):
 
     def test_rollback_transform_rejection_never_restarts_predecessor(self):
         self.until('create-final');self.actor.begin_rollback()
-        self.actor.advance();self.actor.advance();self.driver.wrong.add('verify-rollback-projection')
+        while self.actor._steps(self.actor.journal.read())[self.actor.journal.read()['index']][0]!='verify-rollback-projection':
+            self.actor.advance()
+        self.driver.wrong.add('verify-rollback-projection')
         with self.assertRaises(c.CutoverHeld):self.actor.advance()
         self.assertNotIn('start-exact-predecessor',[action for action,_ in self.driver.calls])
 
