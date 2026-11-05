@@ -150,7 +150,7 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
     def test_actual_viewer_signed_source_release_after_verified_publication(self):
         if os.environ.get("LTDS_RUN_CONTROLLED_CONVERSION_QUALIFICATION") != "1":
             self.skipTest("controlled converter qualification is not enabled")
-        self._roundtrip(source_range_v2_enabled=False, controlled_conversion=True,
+        self._roundtrip(source_range_v2_enabled=False, controlled_conversion=True, with_gcp=True,
                         source_release_qualification=True)
 
     def _roundtrip(self, *, source_range_v2_enabled, controlled_conversion=False, with_gcp=False,
@@ -567,6 +567,13 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
         self.assertEqual(drops["count"], 1)
         self.assertEqual(len(requests), 1, "restart must find the committed authorization without another POST")
         auth = json.loads(requests[0])["authorization"]
+        from processing.source_release_contract import closure, digest
+        with store.queue._db() as db:
+            row = store._row(db, auth["jobId"])
+            retained = closure(json.loads(row["source_manifest_json"]), json.loads(row["derived_manifest_json"]), retained=True)
+        self.assertTrue(retained, "GCP qualification must exercise a nonempty permanent closure")
+        retained_paths = [(spool.root / spool.storage_key(auth["jobId"], auth["generation"], obj["id"]), obj)
+                          for obj in retained]
         self.assertGreater(len(auth["eligibleObjects"]), 0)
         paths = [spool.root / spool.storage_key(auth["jobId"], auth["generation"], obj["id"])
                  for obj in auth["eligibleObjects"]]
@@ -575,17 +582,25 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
         self.assertTrue(all(path.is_file() for path in paths), "no source copy may be removed before policy age")
         # The injected monotonic clock is only a synthetic test dependency.
         # Exercise every normal <=300-second credit checkpoint, never edit the journal age.
-        for _ in range(288):
+        for _ in range(287):
             clock[0] += 300_000_000_000
             service.checkpoint_timers()
+        service.run_once()
+        self.assertTrue(all(path.is_file() for path in paths), "23h55m is still before the approved 24h policy")
+        clock[0] += 300_000_000_000
+        service.checkpoint_timers()
         for _ in range(len(paths) + 6): service.run_once()
         terminal = viewer("terminal")
         self.assertEqual(terminal["state"], "released")
+        self.assertEqual(terminal["preservedClosureSha256"], digest(retained))
         replay = viewer("terminal-replay")
         self.assertEqual(replay["receiptSha256"], terminal["receiptSha256"])
         self.assertEqual(len(requests), 1)
         self.assertEqual([status for method, _, status in responses if method == "GET"], [404, 200, 200])
         self.assertFalse(any(path.exists() for path in paths))
+        for path, obj in retained_paths:
+            self.assertEqual(path.stat().st_size, obj["byteSize"])
+            self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), obj["sha256"])
         after = {p.relative_to(root / "models").as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                  for p in (root / "models").rglob("*") if p.is_file()}
         self.assertEqual(after, before, "source retirement must preserve every accepted Viewer model byte")

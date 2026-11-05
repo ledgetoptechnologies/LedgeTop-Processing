@@ -54,8 +54,11 @@ const config = JSON.parse(fs.readFileSync(process.env.LTDS_PAIRING_CONFIG, 'utf8
       assert.equal(intent.state, 'released');
       assert.ok(intent.receipt && intent.receiptSha256);
       assert.equal(intent.receipt.removedObjectCount, intent.authorization.eligibleObjects.length);
+      assert.equal(intent.receipt.removedBytes,
+        intent.authorization.eligibleObjects.reduce((sum, obj) => sum + obj.byteSize, 0));
     }
     process.stdout.write(JSON.stringify({ state: intent.status.state,
-      requestSha256: intent.requestSha256, receiptSha256: intent.receiptSha256 }) + '\n');
+      requestSha256: intent.requestSha256, receiptSha256: intent.receiptSha256,
+      preservedClosureSha256: intent.receipt?.preservedClosureSha256 }) + '\n');
   } finally { db.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
