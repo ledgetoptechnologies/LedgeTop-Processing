@@ -6,13 +6,22 @@ approval. Runtime acceptance remains incomplete.
 
 ## Latest combined and native-host preparation checkpoint
 
+At `ac8f4fe`, integrated source-release, exact replay, predecessor census and
+all eight actual Viewer pairings passed **156/156 Linux tests, no skips**, in
+142.949 seconds. Viewer is exact `fe49d665`, including retained GCP byte fixes
+and supported submission lookup recovery; the licensed 3.2.0 converter is reused.
+The owned bounded runner and scratch volume were removed. The release backend
+is still default-disabled. Viewer release-worker integration, installed cutover,
+NAS durability and typed TreeDar readiness remain open. See
+`evidence/source-release-and-viewer-recovery-integration-20261105.md`.
+
 Existing V2 admission replay no longer depends on a fresh fleet catalog.
 `1025e44` + `3346383` passed **104/104 selected Linux tests**, no skips, in
 10.890 seconds, including ten focused identity/revocation/CAS/TLS regressions
 and the existing large metadata case. New requests still require fresh
 admission validation. See `evidence/source-catalog-replay-recovery-20261105.md`.
-The matching Viewer `5caf5d88` is frozen for paired qualification; the previous
-paired checkpoint below uses Viewer `6718d1b` and is not its replacement proof.
+Viewer `5caf5d88` was superseded by the corrected `fe49d665` in the newer paired
+checkpoint above. The previous paired checkpoint below uses Viewer `6718d1b`.
 
 Processing `65ecd4e` passed **112/112 selected Linux tests, no skips**, in
 96.263 seconds across nine modules. This includes all eight actual Viewer/Python

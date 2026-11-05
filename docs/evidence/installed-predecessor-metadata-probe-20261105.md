@@ -40,3 +40,23 @@ This refusal is not a successful custody census or cutover approval. No service
 was stopped, lease acquired, journal recovered, file removed, permission changed
 or TrueNAS configuration altered. Full content verification, stopped-writer
 ownership, declared startup transforms and rollback remain separate gates.
+
+## Follow-up after the closed-direct-history correction
+
+`ba62b79` integrates the exact closed-direct maintenance classification from
+`a0a35cc`. A second bounded, read-only stdin probe passed that classification
+and then exited 2 with `unknown_predecessor_path`. There was no stderr; its own
+PID/start identity was verified absent afterward. This is another safe refusal,
+not a successful custody or activation check.
+
+Read-only path metadata identified `pilot-journals`: three private 0700
+directories, each holding eight private 0600 files owned by UID 10001. They are
+node journals, cancellation intents and child-start/exit records; content was
+not changed or treated as proof of a completed lifecycle.
+
+Historical `da629ae` and `c43192f` already describe bounded opaque retention for
+these records, but no trustworthy committed producer/schema was found. The
+current census must explicitly retain their closed, keyed byte inventory under
+strict path/owner/type/size bounds. Filenames alone cannot prove cancellation,
+child exit or supervisor absence. That custody work and stopped-writer proof
+remain open; no file was deleted or wildcard allowlist introduced.
