@@ -234,10 +234,32 @@ def load_reference_settings(path, config):
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
 
+def _available_discovery_snapshot(snapshot):
+    """Build the admission view from the healthy subset of the configured fleet.
+
+    A single offline engine must not stop new work from entering the durable
+    queue when another configured node can accept it. The worker selector and
+    atomic claim still receive every node and mark unavailable ones ineligible.
+    """
+    if type(snapshot) is not dict or type(snapshot.get("nodes")) is not list:
+        raise RuntimeConfigurationError("configured engine catalog unavailable")
+    available = [node for node in snapshot["nodes"] if type(node) is dict
+                 and node.get("available") is True
+                 and node.get("configured", True) is True]
+    if not available:
+        raise RuntimeConfigurationError("no configured engine is available")
+    if snapshot.get("ready") is True:
+        definitions = snapshot.get("commonOptions")
+    else:
+        definitions = snapshot.get("availableOptions")
+    if type(definitions) is not list:
+        raise RuntimeConfigurationError("available engine definitions unavailable")
+    return {**snapshot, "ready": True, "nodes": available, "commonOptions": definitions}
+
+
 def discovered_policy(snapshot, config):
     """Build opaque identities from actual fleet definitions and routing policy."""
-    if type(snapshot) is not dict or snapshot.get("ready") is not True:
-        raise RuntimeConfigurationError("configured engine catalog unavailable")
+    snapshot = _available_discovery_snapshot(snapshot)
     options = []
     for option in snapshot["commonOptions"]:
         name = option.get("name")
@@ -345,7 +367,7 @@ class _DynamicAPI:
             if environment is None:
                 return Response(401, {"error": "unauthorized"})
             try:
-                snapshot = self.discover()
+                snapshot = _available_discovery_snapshot(self.discover())
                 capability, options, allowed = discovered_policy(snapshot, self.config)
                 if path == p.PREFIX + '/options' and method == 'GET':
                     definitions = sorted((option for option in snapshot['commonOptions'] if option['name'] in allowed), key=lambda option: option['name'])

@@ -237,8 +237,20 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertEqual(main.status, 200)
         self.assertIsNone(main.body['job'])
 
-        # A fresh probe that removes cluster capacity makes the stale claim
-        # fail. The node-specific queue candidate is recomputed before claim.
+        # A lower live maxImages value after /next invalidates the intermediate
+        # node's advisory assignment. The atomic claim must recompute capacity.
+        capacity['middle']['maxImages'] = 2
+        middle_claim = runtime.api.handle('POST', prefix + '/claim',
+            {'Authorization': 'Bearer ' + middle_token},
+            protocol.canonical_json(dict(jobId=large['jobId'], claimRequestId='stale-middle-claim')),
+            protected_transport=True)
+        self.assertEqual(middle_claim.status, 409)
+        main = runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + main_token}, protected_transport=True)
+        self.assertEqual(main.body['job']['jobId'], large['jobId'])
+
+        # Removing cluster availability also invalidates its stale assignment;
+        # the still-available middle node can accept the smaller queued job.
         capacity['cluster'] = dict(ready=False, maxImages=None, maxInputBytes=None, taskQueueCount=0)
         claim = runtime.api.handle('POST', prefix + '/claim',
             {'Authorization': 'Bearer ' + cluster_token},
@@ -247,6 +259,50 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertEqual(claim.status, 409)
         self.assertIsNone(runtime.api.handle('GET', prefix + '/next',
             {'Authorization': 'Bearer ' + cluster_token}, protected_transport=True).body['job'])
+        self.assertEqual(runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + middle_token}, protected_transport=True).body['job']['jobId'],
+            small['jobId'])
+
+    def test_partial_engine_outage_still_admits_and_queues_work_for_healthy_node(self):
+        queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
+                      treedar_node_ids=('main',), reference_enabled=True)
+        self.addCleanup(queue.close)
+        cluster_options, main_options = self.snapshot['nodes']
+        self.snapshot = dict(self.snapshot, ready=False, reason='node_unavailable',
+            commonOptions=[], availableOptions=[dict(item) for item in main_options['options']],
+            availableNodeIds=['main'], nodes=[
+                dict(cluster_options, available=False, options=[]), main_options])
+        capacities = {
+            'cluster': dict(ready=False, maxImages=None, maxInputBytes=None, taskQueueCount=0),
+            'main': dict(ready=True, maxImages=None, maxInputBytes=None, taskQueueCount=0),
+        }
+        runtime = self.runtime(queue, discover_capacities=lambda: dict(capacities))
+        viewer_token = self.value['viewerBearers']['staging']
+        options = runtime.api.handle('GET', protocol.PREFIX + '/options',
+            {'Authorization': 'Bearer ' + viewer_token}, protected_transport=True)
+        self.assertEqual(options.status, 200)
+        candidate = self.reference_submission(1, ('future-toggle', True))
+        payload = {key: candidate[key] for key in
+                   ('schemaVersion', 'submissionId', 'manifest', 'pipeline')}
+        payload['capabilityFingerprint'] = options.body['capabilityFingerprint']
+        payload['pipeline']['odm']['optionsFingerprint'] = options.body['optionsFingerprint']
+        admitted = runtime.api.handle('POST', protocol.PREFIX + '/jobs',
+            {'Authorization': 'Bearer ' + viewer_token}, protocol.canonical_json(payload),
+            protected_transport=True)
+        self.assertEqual(admitted.status, 201, admitted.body)
+        self.assertEqual(admitted.body['status'], 'queued')
+        worker_token = self.value['workers']['main']['bearer']
+        next_job = runtime.api.handle('GET', '/ltds/worker/v1/next',
+            {'Authorization': 'Bearer ' + worker_token}, protected_transport=True)
+        self.assertEqual(next_job.status, 200)
+        self.assertEqual(next_job.body['job']['jobId'], admitted.body['jobId'])
+
+        self.snapshot = dict(self.snapshot, ready=False, commonOptions=[], availableOptions=[],
+            availableNodeIds=[], nodes=[dict(node, available=False, options=[])
+                for node in self.snapshot['nodes']])
+        no_engines = runtime.api.handle('GET', protocol.PREFIX + '/options',
+            {'Authorization': 'Bearer ' + viewer_token}, protected_transport=True)
+        self.assertEqual(no_engines.status, 503)
 
     def test_worker_claim_rechecks_live_node_option_definitions_and_falls_through(self):
         queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
