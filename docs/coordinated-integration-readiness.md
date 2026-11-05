@@ -4,6 +4,62 @@ This record describes the review branch
 `codex/viewer-accepted-copy-integration-candidate-20261103`. It is not a deployment
 approval. Runtime acceptance remains incomplete.
 
+## Follow-up option and provider integration qualification
+
+Processing `f5e2737e89effb31a8c2e7b943b79d53baca3e6a` fixes the shared ODM
+option-name policy so the actual `3d-tiles` output survives discovery, HTTP
+admission, Driver refresh/validation and native-stage validation. Names remain
+bounded to 80 lowercase ASCII letters, digits and hyphens, starting with a
+letter or digit. Explicit allowlists and unsafe-option restrictions remain.
+
+The changed protocol/runtime/API/Driver/native-stage modules passed 122 Linux
+tests, followed by the additional real NativeEngine HTTP option regression
+(123 checks total). The new tests failed against the prior runtime before
+passing with the mounted candidate. An independent read-only review found no
+actionable issue. This is local synthetic qualification, not installed engine
+acceptance; the inactive host preparations and image below still contain the
+older `8ff9a72` runtime.
+
+The shared safe-option follow-up is integrated as `33ea01c`: coordinator,
+Driver and native stage now use the same current enum/text/type/domain policy.
+Public aliases normalize to the documented types, and the options fingerprint
+covers those exact returned definitions. Worker-local alias support remains;
+file/path/credential definitions and unsafe values remain excluded. The
+integrated protocol/API/runtime/Driver/native-stage/policy checks passed
+**130/130 Linux tests, no skips**, in a network-isolated, read-only bounded
+container; its process exited and the container was removed.
+
+Actual HTTPS provider pairing then exposed Viewer's rejection of raw NodeODM
+boolean/numeric string defaults. The Viewer owner prepared
+`6a1e729785dd70a54c454100b85a07df6d68cd8b`, including typed-default normalization
+and a server-managed-coordinator-only bypass of the legacy provider admission
+limit. Ordinary NodeODM/ClusterODM limits remain. The actual two-submission
+pairing is still being qualified; provider create/health/enable/refresh alone
+does not prove that the coordinator receives both queued tasks.
+
+The fresh-submit test exposed a separate P0 Viewer client defect: fresh
+`createOrReplay` returned the persisted outbox row, while accepted replay
+returned its remote binding. The submit worker expects the binding before
+source upload. A successful metadata POST and `queued_upstream` status can
+therefore coexist with zero source object receipts. The Viewer owner is fixing
+the client return boundary without changing the outbox transaction contract.
+Acceptance must require actual source PUT/completion and persisted receipts for
+both submissions. The earlier 205-test roundtrip exercised accepted-intent
+resume; it did not qualify this fresh initial-producer path.
+
+Additional work remains active: qualify the fresh producer fix with the actual
+two-submission path; exercise actual Viewer archive ingestion and required
+derivative enqueue; qualify the targeted Viewer parser dependency fix. The
+existing text-only result archive does not prove model ingestion, conversion,
+publication or an openable result. Do not treat any pending candidate as a
+deployment or client-processing acceptance.
+
+The linked native EH listener remains subscribed with its process identity
+verified. Managed interactive MCP initialization still fails at the HTTP header
+helper. No new Hub-note review checkpoint or fresh Claude acknowledgement has
+been established; Viewer coordination continues through the authorized app
+chat, with GitHub as the existing fallback.
+
 ## November 4 combined qualification and inactive host preparation
 
 Runtime code `8ff9a7276493c383f9ef250aeead4fca42117fba` paired with an immutable
