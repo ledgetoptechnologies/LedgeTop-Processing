@@ -366,7 +366,7 @@ class ReferenceEngineWorker:
                 pipeline_digest=job['pipelineDigest'], result_manifest_sha256=result['resultManifestSha256'],
                 result_manifest=result, owned_prefix='jobs/' + reservation,
                 local_objects={'odm-archive': relative})
-            if not gate.resolved(row['receipt']):
+            if not gate.resolved(row['receipt'], job_id):
                 gate.prepare_completion(row['receipt'], dict(status='succeeded',
                     result={'resultManifestSha256': result['resultManifestSha256']}))
             with self._db() as db:
@@ -389,7 +389,7 @@ class ReferenceEngineWorker:
             job_ack = dict(id=job_id, workerId=self.worker_id, nodeId=self.node_id,
                 authorityId=self.authority_id, status='succeeded',
                 result={'resultManifestSha256': json.loads(row['result'])['resultManifestSha256']})
-            if not gate.resolved(row['receipt']):
+            if not gate.resolved(row['receipt'], job_id):
                 gate.acknowledge(row['receipt'], job_ack)
             self._phase(job_id, 'delivered')
 

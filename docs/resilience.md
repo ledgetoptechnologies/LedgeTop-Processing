@@ -16,6 +16,14 @@ authenticated `GET /v1/prototype/authority` and included in job responses. An
 independent test database gets a different ID. Keep the database durable; do not
 clone production state/credentials into staging.
 
+`resolve` keeps one entry per abandoned receipt in `resolutions.json`, beside
+`gate.json`, so a delivery still owed on that receipt can finish after later
+resolves. An entry leaves when its job completes. `resolutions` lists them. At 64
+entries `resolve` refuses instead of erasing one: `retire-resolution --receipt-id
+RECEIPT --delivery-abandoned` frees a slot, and that receipt's delivery then fails
+closed, so use it only for a delivery that will never happen, such as a result the
+coordinator refuses because the job has ended.
+
 Before worker activation, an operator inspects the actual local Docker Engine ID
 and coordinator authority, then provisions the host gate explicitly:
 

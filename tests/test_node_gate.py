@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from processing.node_gate import GateError, NodeGate, canonical_gate_path
+from processing.node_gate import MAX_RESOLUTIONS, GateError, NodeGate, canonical_gate_path
 
 
 ENGINE = 'physical-docker-engine:one'
@@ -200,6 +200,99 @@ class NodeGateTests(unittest.TestCase):
         with NodeGate(ENGINE) as gate:
             self.assertEqual(gate.snapshot()['lastResolution']['reservation']['receiptId'], RECEIPT)
             gate.reserve('cluster', ORIGIN, AUTHORITY, 2, 'b' * 32)
+
+    def resolve(self, gate, receipt, job=None):
+        generation = gate.snapshot()['generation']
+        gate.reserve('cluster', ORIGIN, AUTHORITY, generation, receipt)
+        if job is not None:
+            gate.bind(receipt, dict(self.job(), id=job))
+        gate.resolve(receipt, generation, old_worker_stopped=True, coordinator_resolved=True, note='done')
+
+    def test_later_resolve_keeps_evidence_bound_to_each_exact_receipt_and_job(self):
+        first, second = 'a' * 32, 'b' * 32
+        job_a, job_b = str(uuid.uuid4()), str(uuid.uuid4())
+        with NodeGate(ENGINE) as gate:
+            self.resolve(gate, first, job_a)
+            shape = set(gate.snapshot())
+            self.resolve(gate, second, job_b)
+            self.assertEqual(gate.snapshot()['lastResolution']['reservation']['receiptId'], second)
+            self.assertEqual(set(gate.snapshot()), shape)
+            self.assertTrue(gate.resolved(first, job_a))
+            self.assertTrue(gate.resolved(second, job_b))
+            for receipt, job in ((first, job_b), (second, job_a), ('c' * 32, job_a), (first, None)):
+                with self.subTest(receipt=receipt, job=job):
+                    self.assertFalse(gate.resolved(receipt, job))
+            gate.retire_job(job_a)
+            self.assertFalse(gate.resolved(first, job_a))
+            self.assertTrue(gate.resolved(second, job_b))
+            gate.retire_job(job_a)
+
+    def test_a_receipt_held_again_or_never_resolved_is_not_resolved(self):
+        job = str(uuid.uuid4())
+        with NodeGate(ENGINE) as gate:
+            self.assertFalse(gate.resolved('a' * 32, job))
+            self.resolve(gate, 'a' * 32, job)
+            gate.reserve('cluster', ORIGIN, AUTHORITY, 2, 'a' * 32)
+            self.assertFalse(gate.resolved('a' * 32, job))
+
+    def test_last_resolution_alone_is_not_evidence(self):
+        job = str(uuid.uuid4())
+        with NodeGate(ENGINE) as gate:
+            self.resolve(gate, 'a' * 32, job)
+            (self.root / 'resolutions.json').unlink()
+            self.assertEqual(gate.snapshot()['lastResolution']['reservation']['receiptId'], 'a' * 32)
+            self.assertFalse(gate.resolved('a' * 32, job))
+
+    def test_death_inside_resolve_is_no_resolution_and_retries(self):
+        job = str(uuid.uuid4())
+        with NodeGate(ENGINE) as gate:
+            self.reserve(gate)
+            gate.bind(RECEIPT, dict(self.job(), id=job))
+            with patch.object(gate, '_save', side_effect=OSError('synthetic death')), self.assertRaises(OSError):
+                gate.resolve(RECEIPT, 1, old_worker_stopped=True, coordinator_resolved=True, note='done')
+            self.assertIn(RECEIPT, gate.resolutions())
+            self.assertFalse(gate.resolved(RECEIPT, job))
+            self.assertEqual(gate.snapshot()['reservation']['receiptId'], RECEIPT)
+            gate.resolve(RECEIPT, 1, old_worker_stopped=True, coordinator_resolved=True, note='done')
+            self.assertTrue(gate.resolved(RECEIPT, job))
+
+    def test_full_evidence_refuses_a_resolve_and_erases_nothing(self):
+        with NodeGate(ENGINE) as gate:
+            jobs = {}
+            for number in range(MAX_RESOLUTIONS):
+                receipt = format(number, '032x')
+                jobs[receipt] = str(uuid.uuid4())
+                self.resolve(gate, receipt, jobs[receipt])
+            self.assertLessEqual((self.root / 'resolutions.json').stat().st_size, 16384)
+            generation = gate.snapshot()['generation']
+            gate.reserve('cluster', ORIGIN, AUTHORITY, generation, 'f' * 32)
+            before = (self.root / 'gate.json').read_bytes()
+            with self.assertRaisesRegex(GateError, 'must complete or be retired'):
+                gate.resolve('f' * 32, generation, old_worker_stopped=True, coordinator_resolved=True, note='done')
+            self.assertEqual((self.root / 'gate.json').read_bytes(), before)
+            self.assertTrue(all(gate.resolved(receipt, job) for receipt, job in jobs.items()))
+            first = format(0, '032x')
+            for abandoned, receipt in ((False, first), (True, 'e' * 32)):
+                with self.assertRaises(GateError):
+                    gate.retire_resolution(receipt, delivery_abandoned=abandoned)
+            gate.retire_resolution(first, delivery_abandoned=True)
+            gate.resolve('f' * 32, generation, old_worker_stopped=True, coordinator_resolved=True, note='done')
+            self.assertEqual(len(gate.resolutions()), MAX_RESOLUTIONS)
+
+    def test_tampered_evidence_fails_closed(self):
+        job = str(uuid.uuid4())
+        with NodeGate(ENGINE) as gate:
+            self.resolve(gate, 'a' * 32, job)
+            path = self.root / 'resolutions.json'
+            entry = {'jobId': job, 'generation': 1}
+            many = {format(number, '032x'): entry for number in range(MAX_RESOLUTIONS + 1)}
+            for raw in ('not-json', '[]', json.dumps({'short': entry}), json.dumps({'a' * 32: dict(entry, extra=1)}),
+                    json.dumps({'a' * 32: dict(entry, generation=True)}), json.dumps({'a' * 32: dict(entry, jobId='x')}),
+                    json.dumps(many), ' ' * 16385):
+                with self.subTest(raw=raw[:30]):
+                    path.write_text(raw)
+                    with self.assertRaisesRegex(GateError, 'operator inspection'):
+                        gate.resolved('a' * 32, job)
 
     def test_corrupt_state_or_engine_replacement_retains_guard(self):
         with NodeGate(ENGINE) as gate:

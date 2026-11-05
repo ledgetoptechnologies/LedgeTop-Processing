@@ -322,6 +322,10 @@ class ReferenceDriver:
             # Nothing can write for a completed row, and only this row could ever
             # end its fence, so however it ended a never-started reservation ends too.
             self.ledger.settle_unstarted(data['reservation']['reservationId'], transfer_ended=True)
+        if stage == 'completed':
+            # Before the row: a death here costs a replay, the other order leaks an entry.
+            with NodeGate(self.worker.engine_id) as gate:
+                gate.retire_job(job_id)
         with self._db() as db:
             db.execute('UPDATE driver_jobs SET stage=?,data=? WHERE job=?',
                        (stage, p.canonical_json(data).decode(), job_id))
@@ -951,7 +955,7 @@ class ReferenceDriver:
         if local['phase'] == 'failure_delivered' and self.failure_outbox.get(data['failureOutboxId'])['state'] == 'acknowledged':
             return
         with NodeGate(self.worker.engine_id) as gate:
-            if (gate.resolved(local['receipt'])
+            if (gate.resolved(local['receipt'], job_id)
                     or self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, self._failure_completion(data['failure']))):
                 return
             if gate.snapshot()['reservation'] is None:
@@ -1003,7 +1007,7 @@ class ReferenceDriver:
                 completion = self._failure_completion(data['failure'])
                 ack = dict(id=job_id, workerId=self.worker_id, nodeId=self.node_id,
                     authorityId=self.worker.authority_id, **completion)
-                if not gate.resolved(local['receipt']) and not self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, completion):
+                if not gate.resolved(local['receipt'], job_id) and not self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, completion):
                     gate.acknowledge(local['receipt'], ack)
         self.worker._phase(job_id, 'failure_delivered')
         self._save(job_id, 'awaiting_failure_acceptance', data)
