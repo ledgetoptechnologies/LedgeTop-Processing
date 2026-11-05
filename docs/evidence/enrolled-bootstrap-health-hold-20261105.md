@@ -56,24 +56,40 @@ Outer controller `ltds-phase-forward-cf8dc840f288493f`, exact ID
 `9d12304e5d4524ea940b68bd84fb803aaabb0ac3b82439f4cada0891a4dc85fb`,
 is stopped: PID0, exit1, no OOM and exact operation label independently checked.
 Its private artifact volume
-`ltds-phase-forward-artifacts-cf8dc840f288493f` remains, referenced only by
+`ltds-phase-forward-artifacts-cf8dc840f288493f` was initially retained, referenced only by
 that stopped controller. Exact inner task-label container and volume
 inventories were empty. Unowned containers and the shared builder were left
 untouched.
 
-A cold read-only journal copy is retained privately. Full cold backup-copy
-verification and outer/artifact removal require the root agent's review;
-they have not been performed at this checkpoint. This operation is not
-replayable because the disposable originals were cleaned up. No retry or
-rollback ran.
+Cold read-only journal, accepted backup receipt, baseline, TAR and synthetic
+census-key copies are retained privately. Unchanged production `validate_tar`
+again matched the complete accepted receipt:467968bytes,202files,13directories,
+SHA256 `a79f4a4f9f915f2c7a9bb0df659905f517e0a6d875c6956dcedd2a4a556f8dec`,
+`restoreAuthorized=false`. Keys were never printed.
 
-## Required diagnostic follow-up
+After reviewing that proof the root agent authorized only exact owned cleanup.
+Fresh operation label/PID0/exit1/no-OOM were verified before removing the outer,
+without force. Exact volume name/owner and zero remaining mount users were
+verified before removing only that volume, without force. Filtered operation
+container and volume inventories were empty. Private diagnostic copies remain.
+This operation was never replayed; its disposable originals were cleaned up.
+No retry or rollback ran.
 
-Persist the reviewed plan/bundle and exact configuration copies in private
-controller artifacts before dispatch. On any later failure, retain the owned
-failed app/state and bounded private state/log evidence before cleanup.
-Distinguish a delayed listener from a genuine constructor refusal. Only if
-supported, add a bounded read-only startup health wait with the original
-unchanged startup window and container incarnation. Do not retry a mutation,
-silence a permanent error, invent an expected row from candidate data or
-claim the22-phase sequence passed.
+## Diagnostic harness follow-up
+
+Capture checkpoint `6ca7ed3` persists private reviewed plan/bundle/exact configs
+before dispatch and retains owned failed apps/state on every failure. It records
+owner/image-pinned private state, bounded both-stream logs and one separately
+labeled fresh read-only health observation, without reconciling or retrying a
+mutation or changing a startup window. Three Linux mock-boundary tests passed
+in0.002seconds on frozen archive SHA256
+`1186224ec5771d55b16f75c5fa5e39527f364a404b77102d124cc61adf22c29a`.
+That is not actual log-socket transport or successful-bootstrap qualification.
+The exact owned test container was removed after PID0/exit0/no-OOM checks;
+label inventory was empty and no volume was created.
+
+The next actual full-flow qualification must distinguish a delayed listener
+from genuine constructor refusal using retained private evidence. Only if
+supported, add bounded read-only startup health observation with the original
+window/incarnation. Do not silence permanent errors, invent expected rows from
+candidate data, or claim the22-phase sequence passed.
