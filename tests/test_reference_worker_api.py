@@ -211,10 +211,11 @@ class ReferenceWorkerAPITests(unittest.TestCase):
             raw['manifest']['sha256'] = digest({k: v for k, v in raw['manifest'].items() if k != 'sha256'})
         return raw
 
-    def test_next_kinds_follow_stored_pipeline_and_fixed_node_global_head(self):
+    def test_next_kinds_follow_stored_pipeline_and_node_eligibility(self):
         for kind in ('odm', 'treedar', 'combined'):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
-                queue = Queue(directory, reference_enabled=True, node_ids=('cluster', 'main'))
+                queue = Queue(directory, reference_enabled=True, node_ids=('cluster', 'main'),
+                               treedar_node_ids=('main',))
                 try:
                     store = ReferenceStore(queue)
                     raw = self.pipeline_submission(kind)

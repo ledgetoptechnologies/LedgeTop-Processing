@@ -227,16 +227,24 @@ class Queue(Maintenance):
                 return None
             if (row['profile'] == VIEWER_PROFILE and payload['workerId'] == 'viewer-dispatch'
                     and expected_job is not None):
-                # Preserve FIFO against earlier non-Viewer engines that this
-                # node can run (for example, TreeDar on main). The dispatcher
-                # performs photo-count admission for Viewer jobs; this queue
-                # transaction protects the shared per-node engine slot.
-                earlier = db.execute(
-                    "SELECT profile FROM jobs WHERE status='queued' AND environment=? AND seq<? ORDER BY seq",
-                    (row['environment'], row['seq'])).fetchall()
-                if any(item['profile'] != VIEWER_PROFILE
-                       and item['profile'] in self.node_profiles(node_id) for item in earlier):
-                    return None
+                scheduler = getattr(self, '_reference_scheduler', None)
+                if scheduler is not None:
+                    # Recompute the first globally ordered job eligible for
+                    # this node inside this exact IMMEDIATE claim transaction.
+                    # This includes size-aware Viewer and Reference jobs.
+                    candidate = scheduler._candidate_any_row(db, node_id)
+                    if (candidate is None or candidate['id'] != row['id']
+                            or scheduler._viewer_submission(db, row['id'], row['environment']) is None):
+                        return None
+                else:
+                    # Legacy installations without ReferenceRuntime retain
+                    # their older conservative profile-only barrier.
+                    earlier = db.execute(
+                        "SELECT profile FROM jobs WHERE status='queued' AND environment=? AND seq<? ORDER BY seq",
+                        (row['environment'], row['seq'])).fetchall()
+                    if any(item['profile'] != VIEWER_PROFILE
+                           and item['profile'] in self.node_profiles(node_id) for item in earlier):
+                        return None
             # A staging job cannot start while production work is queued or
             # active anywhere in the fleet. Running work is never preempted.
             if (row['environment'] == 'staging'

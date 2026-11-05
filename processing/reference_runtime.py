@@ -7,6 +7,7 @@ bounded free text. Path/file options remain closed until a registered file
 workflow exists.
 """
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
 import math
@@ -19,6 +20,7 @@ import threading
 
 from . import reference_protocol as p
 from .options import catalog
+from .provider import probe_node
 from .reference_api import ReferenceAPI, Response
 from .reference_control import ReferenceControlAPI
 from .reference_http import create_reference_http_server
@@ -306,10 +308,34 @@ def validate_discovered_option_values(payload, snapshot, allowed):
 
 
 class _DynamicAPI:
-    def __init__(self, control, config, settings, discover):
+    def __init__(self, control, config, settings, discover, discover_capacities):
         self.control, self.config, self.settings, self.discover = control, config, settings, discover
+        self.discover_capacities = discover_capacities
+        self._worker_refresh_lock = threading.RLock()
 
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
+        worker_admission = ((method == 'GET' and path == '/ltds/worker/v1/next')
+                            or (method == 'POST' and path == '/ltds/worker/v1/claim'))
+        if worker_admission:
+            if protected_transport is not True:
+                return self.control.handle(method, path, headers, body,
+                                           protected_transport=protected_transport)
+            identity = self.control.worker._authenticate(headers)
+            if identity is not None:
+                # Keep discovery and the resulting atomic claim decision in one
+                # serialized admission turn. Partial node outages are retained
+                # per node so an eligible later node can still take work.
+                with self._worker_refresh_lock:
+                    try:
+                        options = self.discover()
+                        capacities = self.discover_capacities()
+                        self.control.worker.store.update_fleet_snapshot(capacities, options['nodes'])
+                    except Exception:
+                        return Response(503, {"error": "engine_capacity_unavailable"})
+                    return self.control.handle(method, path, headers, body,
+                                               protected_transport=protected_transport)
+            return self.control.handle(method, path, headers, body,
+                                       protected_transport=protected_transport)
         # Authenticate before engine discovery; ordinary status and worker actions
         # never depend on live catalog reads. Each admission sees a fresh snapshot.
         if path in (p.PREFIX + '/options', p.PREFIX + "/capabilities", p.PREFIX + "/jobs") and method in ("GET", "POST"):
@@ -343,7 +369,8 @@ class _DynamicAPI:
 
 
 class ReferenceRuntime:
-    def __init__(self, queue, config, settings, *, discover=None, server_factory=None):
+    def __init__(self, queue, config, settings, *, discover=None, discover_capacities=None,
+                 server_factory=None):
         """Construct services around the existing authority; never create a Queue."""
         self.queue, self.config, self.settings = queue, config, settings
         self._server_factory = server_factory or create_reference_http_server
@@ -367,8 +394,15 @@ class ReferenceRuntime:
             server_context.load_cert_chain(settings.listener["certificate"], settings.listener["privateKey"])
             worker_context = verified_client_context(settings.listener["clientCA"])
             self._server_context = server_context
+            endpoints = config.node_endpoints
+            node_limits = {node.id: {"maxInputBytes": node.max_input_bytes}
+                           for node in endpoints if node.max_input_bytes is not None}
             self.store = ReferenceStore(queue, local_max_photos=config.local_max_photos,
-                local_max_input_bytes=config.local_max_input_bytes, main_node_id="main")
+                local_max_input_bytes=config.local_max_input_bytes,
+                main_node_id=next((node.id for node in endpoints if node.id == "main"),
+                                  next((node.id for node in endpoints if node.id != "cluster"), None)),
+                node_limits=node_limits,
+                node_option_validator=self._node_options_valid)
             self._streams = threading.BoundedSemaphore(settings.stream_budget["maxConcurrent"])
             proxy = ResultProxy({node: worker["resultOrigin"] for node, worker in settings.workers.items()},
                 worker_bearers={node: worker["resultBearer"] for node, worker in settings.workers.items()},
@@ -381,11 +415,47 @@ class ReferenceRuntime:
                 options_fingerprint=placeholder, result_proxy=proxy, treedar_available=False,
                 recovery_bindings=recovery)
             discover = discover or (lambda: catalog([
-                ("local", config.local_node_url, config.local_node_token),
-                ("main", config.main_node_url, config.main_node_token)]))
-            self.api = _DynamicAPI(self.control, config, settings, discover)
+                (node.id, node.url, node.token) for node in config.node_endpoints]))
+            discover_capacities = discover_capacities or self._discover_capacities
+            self.api = _DynamicAPI(self.control, config, settings, discover, discover_capacities)
         except Exception:
             raise RuntimeConfigurationError("reference TLS runtime initialization failed") from None
+
+    def _discover_capacities(self):
+        endpoints = self.config.node_endpoints
+        with ThreadPoolExecutor(max_workers=len(endpoints)) as executor:
+            probes = list(executor.map(lambda node: probe_node(node.id, node.url, node.token), endpoints))
+        capacities = {}
+        for node, probe in zip(endpoints, probes):
+            queue_count = probe.get("taskQueueCount")
+            max_images = probe.get("maxImages")
+            valid_max_images = (max_images is None
+                or (type(max_images) is int and max_images >= 1))
+            valid_queue_count = type(queue_count) is int and queue_count >= 0
+            capacities[node.id] = {
+                # A malformed or partial probe disables only this node. Do
+                # not let it invalidate healthy nodes' complete fleet view,
+                # and never coerce an unknown task count to idle.
+                "ready": (probe.get("ready") is True and valid_max_images
+                          and valid_queue_count),
+                "maxImages": max_images if valid_max_images else None,
+                "maxInputBytes": node.max_input_bytes,
+                "taskQueueCount": queue_count if valid_queue_count else 1,
+            }
+        return capacities
+
+    def _node_options_valid(self, submission, node_snapshot):
+        options = node_snapshot.get("options")
+        if node_snapshot.get("available") is not True or type(options) is not list:
+            return False
+        selected = {"ready": True, "commonOptions": options, "nodes": [node_snapshot]}
+        try:
+            _, _, allowed = discovered_policy(selected, self.config)
+            validate_discovered_option_values(submission,
+                selected, allowed)
+            return True
+        except (p.ProtocolError, TypeError, ValueError):
+            return False
 
     @contextmanager
     def _admit_read(self, binding):

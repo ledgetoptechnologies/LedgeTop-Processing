@@ -22,7 +22,8 @@ from http.server import ThreadingHTTPServer
 from processing.app import make_handler, CoordinatorService
 from processing.reference_binary import BinaryResponse
 from processing.reference_http import create_reference_http_server
-from processing.config import Config, from_environment
+from processing.config import Config, ProcessingNode, from_environment
+from processing import reference_protocol as protocol
 from processing.prototype import Queue, REFERENCE_PROFILE, VIEWER_PROFILE
 from processing.reference_runtime import (
     ReferenceRuntime, ReferenceSettings, RuntimeConfigurationError, discovered_policy,
@@ -75,7 +76,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
             streamBudget=dict(maxConcurrent=1, maxObjectBytes=100*1024**3))
         self.path = self.root / "reference-private.json"
         self.write_config()
-        self.snapshot = dict(ready=True, commonOptions=[
+        common_options = [
             dict(name="future-quality", type="int", value=3, domain="positive int", help="Quality level"),
             dict(name="future-toggle", type="bool", value=False),
             dict(name="input-file", type="string", value=""),
@@ -83,9 +84,12 @@ class ReferenceRuntimeTests(unittest.TestCase):
             dict(name="password", type="int", value=3),
             dict(name="safe-enum", type="enum", value="high", domain=["low", "high"]),
             dict(name="free-text", type="string", value="default text", domain="Name of project", help="A bounded note"),
-            dict(name="safe-string-choice", type="string", value="first", domain='["first", "second"]')], nodes=[
-                dict(role=role, available=True, capabilitiesSha256="a"*64,
-                     engine="odm", engineVersion="synthetic-1") for role in ("local", "main")])
+            dict(name="safe-string-choice", type="string", value="first", domain='["first", "second"]')]
+        self.snapshot = dict(ready=True, commonOptions=common_options, nodes=[
+            dict(role=role, available=True, capabilitiesSha256="a"*64,
+                     engine="odm", engineVersion="synthetic-1",
+                     options=[dict(item) for item in common_options])
+                for role in ("cluster", "main")])
 
     def write_config(self):
         self.path.write_text(json.dumps(self.value))
@@ -101,10 +105,34 @@ class ReferenceRuntimeTests(unittest.TestCase):
         return (patch("processing.reference_runtime.ssl.SSLContext.load_cert_chain"),
                 patch("processing.reference_runtime.verified_client_context", return_value=client_context))
 
-    def runtime(self, queue, **kwargs):
+    def runtime(self, queue, *, config=None, discover_capacities=None, **kwargs):
+        config = config or self.config
+        capacities = discover_capacities or (lambda: {node: dict(ready=True, maxImages=None,
+            maxInputBytes=None, taskQueueCount=0) for node in config.prototype_node_ids})
         first, second = self.tls_patches()
         with first, second:
-            return ReferenceRuntime(queue, self.config, self.settings(), discover=lambda: self.snapshot, **kwargs)
+            return ReferenceRuntime(queue, config, load_reference_settings(str(self.path), config),
+                discover=lambda: self.snapshot,
+                discover_capacities=capacities, **kwargs)
+
+    def reference_submission(self, images, option=None):
+        fixture = json.loads((Path(__file__).resolve().parents[1] /
+                              "contracts/reference-v1.contract.json").read_text())["submission"]
+        raw = copy.deepcopy(fixture)
+        raw["submissionId"] = str(uuid.uuid4())
+        original = raw["manifest"]["objects"][0]
+        raw["manifest"]["objects"] = [dict(original, id=f"image-{index + 1}",
+            name=f"image-{index + 1:04}.jpg") for index in range(images)]
+        raw["manifest"].update(objectCount=images, totalBytes=images * original["byteSize"],
+            inputCounts={"images": images, "lidarObjects": 0, "points": 0})
+        raw["manifest"]["sha256"] = protocol.manifest_sha256(raw["manifest"])
+        allowed = set()
+        if option is not None:
+            name, value = option
+            raw["pipeline"]["odm"]["options"] = {name: value}
+            allowed.add(name)
+        return protocol.validate_submission(raw, environment="staging",
+            capability_fingerprint=raw["capabilityFingerprint"], allowed_odm_options=allowed)
 
     def test_disabled_default_preserves_native_queue_without_reference_profile(self):
         handler = make_handler(self.config)
@@ -164,6 +192,112 @@ class ReferenceRuntimeTests(unittest.TestCase):
         with queue._db() as db:
             tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertFalse(any(name.startswith('reference_recovery_') for name in tables))
+
+    def test_worker_next_uses_live_per_node_size_capacity_and_rechecks_at_claim(self):
+        config = replace(self.config, local_max_photos=1,
+            prototype_node_ids=('cluster', 'middle', 'main'),
+            treedar_node_ids=('main',), processing_nodes=(
+                ProcessingNode('cluster', self.config.local_node_url, self.config.local_node_token,
+                               self.config.local_max_input_bytes),
+                ProcessingNode('middle', 'http://127.0.0.1:19003', 'middle-engine-token'),
+                ProcessingNode('main', self.config.main_node_url, self.config.main_node_token)))
+        middle_worker = dict(bearer='reference-middle-' + 'd'*32, workerId='worker-middle',
+            instanceId='instance-middle', resultOrigin='https://middle.example',
+            resultBearer='read-middle-' + 'e'*32)
+        self.value['workers']['middle'] = middle_worker
+        self.write_config()
+        middle_options = dict(self.snapshot['nodes'][0], role='middle')
+        self.snapshot = dict(self.snapshot,
+            nodes=[self.snapshot['nodes'][0], middle_options, self.snapshot['nodes'][1]])
+        queue = Queue(config.prototype_state_dir, node_ids=('cluster', 'middle', 'main'),
+                      treedar_node_ids=('main',), reference_enabled=True)
+        self.addCleanup(queue.close)
+        capacity = {
+            'cluster': dict(ready=True, maxImages=1, maxInputBytes=None, taskQueueCount=0),
+            'middle': dict(ready=True, maxImages=4, maxInputBytes=None, taskQueueCount=0),
+            'main': dict(ready=True, maxImages=None, maxInputBytes=None, taskQueueCount=0),
+        }
+        runtime = self.runtime(queue, config=config, discover_capacities=lambda: dict(capacity))
+        large, _ = runtime.store.submit(self.reference_submission(3))
+        small, _ = runtime.store.submit(self.reference_submission(1))
+        cluster_token = self.value['workers']['cluster']['bearer']
+        middle_token = self.value['workers']['middle']['bearer']
+        main_token = self.value['workers']['main']['bearer']
+        prefix = '/ltds/worker/v1'
+        cluster = runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + cluster_token}, protected_transport=True)
+        middle = runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + middle_token}, protected_transport=True)
+        main = runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + main_token}, protected_transport=True)
+        self.assertEqual(cluster.status, 200)
+        self.assertEqual(cluster.body['job']['jobId'], small['jobId'])
+        self.assertEqual(middle.status, 200)
+        self.assertEqual(middle.body['job']['jobId'], large['jobId'])
+        self.assertEqual(main.status, 200)
+        self.assertIsNone(main.body['job'])
+
+        # A fresh probe that removes cluster capacity makes the stale claim
+        # fail. The node-specific queue candidate is recomputed before claim.
+        capacity['cluster'] = dict(ready=False, maxImages=None, maxInputBytes=None, taskQueueCount=0)
+        claim = runtime.api.handle('POST', prefix + '/claim',
+            {'Authorization': 'Bearer ' + cluster_token},
+            protocol.canonical_json(dict(jobId=small['jobId'], claimRequestId='stale-cluster-claim')),
+            protected_transport=True)
+        self.assertEqual(claim.status, 409)
+        self.assertIsNone(runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + cluster_token}, protected_transport=True).body['job'])
+
+    def test_worker_claim_rechecks_live_node_option_definitions_and_falls_through(self):
+        queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
+                      treedar_node_ids=('main',), reference_enabled=True)
+        self.addCleanup(queue.close)
+        capacities = {node: dict(ready=True, maxImages=None, maxInputBytes=None,
+            taskQueueCount=0) for node in ('cluster', 'main')}
+        runtime = self.runtime(queue, discover_capacities=lambda: dict(capacities))
+        job, _ = runtime.store.submit(self.reference_submission(1, ('future-toggle', True)))
+        cluster_token = self.value['workers']['cluster']['bearer']
+        main_token = self.value['workers']['main']['bearer']
+        prefix = '/ltds/worker/v1'
+        cluster = runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + cluster_token}, protected_transport=True)
+        self.assertEqual(cluster.body['job']['jobId'], job['jobId'])
+
+        self.snapshot = dict(self.snapshot, nodes=[
+            dict(node, options=[item for item in node['options'] if item['name'] != 'future-toggle'])
+            if node['role'] == 'cluster' else node for node in self.snapshot['nodes']])
+        rejected = runtime.api.handle('POST', prefix + '/claim',
+            {'Authorization': 'Bearer ' + cluster_token},
+            protocol.canonical_json(dict(jobId=job['jobId'], claimRequestId='changed-option-cluster')),
+            protected_transport=True)
+        self.assertEqual(rejected.status, 409)
+        fallback = runtime.api.handle('GET', prefix + '/next',
+            {'Authorization': 'Bearer ' + main_token}, protected_transport=True)
+        self.assertEqual(fallback.body['job']['jobId'], job['jobId'])
+
+    def test_malformed_capacity_probe_disables_only_that_node(self):
+        queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
+                      treedar_node_ids=('main',), reference_enabled=True)
+        self.addCleanup(queue.close)
+        runtime = self.runtime(queue)
+        probes = {
+            'cluster': dict(ready=False, maxImages='unavailable', taskQueueCount='unknown'),
+            # A malformed count must not be interpreted as an idle node even
+            # when the provider's top-level readiness flag says true.
+            'main': dict(ready=True, maxImages=None, taskQueueCount=True),
+        }
+        with patch('processing.reference_runtime.probe_node',
+                   side_effect=lambda node_id, *_args: probes[node_id]):
+            capacities = runtime._discover_capacities()
+        self.assertFalse(capacities['cluster']['ready'])
+        self.assertIsNone(capacities['cluster']['maxImages'])
+        self.assertEqual(capacities['cluster']['taskQueueCount'], 1)
+        self.assertFalse(capacities['main']['ready'])
+        self.assertIsNone(capacities['main']['maxImages'])
+        self.assertEqual(capacities['main']['taskQueueCount'], 1)
+        # Both records remain schema-valid, so the broken node cannot make a
+        # healthy fleet refresh fail as a whole.
+        runtime.store.update_fleet_snapshot(capacities, self.snapshot['nodes'])
 
     @unittest.skipUnless(os.name=='posix','Linux coordinator recovery authority')
     def test_schema2_authority_mismatch_fails_before_tls_services_or_listener_and_closes_queue(self):

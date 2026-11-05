@@ -333,19 +333,37 @@ class ViewerService:
                 return
             nodes = {}
             ordered_nodes = []
+            fleet_capacities = {}
             for node_config in self.node_configs:
                 node_id = node_config.id
                 snapshot = self.probe(node_id, node_config.url, node_config.token)
                 snapshot = {**snapshot, 'id': node_id,
                             'state': self.queue.get_node(node_id)['state']}
+                live_max = snapshot.get('maxImages')
+                valid_max = (live_max is None or (type(live_max) is int and live_max >= 1))
+                task_count = snapshot.get('taskQueueCount')
+                valid_task_count = type(task_count) is int and task_count >= 0
+                fleet_capacities[node_id] = {
+                    'ready': (snapshot.get('ready') is True and valid_max and valid_task_count),
+                    'maxImages': live_max if valid_max else None,
+                    'maxInputBytes': node_config.max_input_bytes,
+                    'taskQueueCount': task_count if valid_task_count else 1,
+                }
                 if node_id == 'cluster':
-                    live_max = snapshot.get('maxImages')
                     configured_max = self.config.local_max_photos
                     snapshot['maxImages'] = min(live_max, configured_max) if type(live_max) is int else configured_max
                 if node_config.max_input_bytes is not None:
                     snapshot['maxInputBytes'] = node_config.max_input_bytes
                 nodes[node_id] = snapshot
                 ordered_nodes.append(snapshot)
+            scheduler = getattr(self.queue, '_reference_scheduler', None)
+            if scheduler is not None:
+                try:
+                    scheduler.update_fleet_snapshot(fleet_capacities, self._catalog()['nodes'])
+                except Exception:
+                    # Shared cross-profile ordering cannot safely proceed with
+                    # stale, incomplete or mismatched live engine metadata.
+                    return
             for queued_job in candidates:
                 task = next((t for t in tasks if t['job_id'] == queued_job['id']), None)
                 if task is None:

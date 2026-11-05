@@ -7,11 +7,12 @@ Beau's October 27, 2026 configuration:
 | Cluster, 192.168.50.89 | Sole coordinator and photogrammetry up to 1,000 photos |
 | Main, 192.168.50.88 | Larger photogrammetry and all TreeDar work |
 
-The coordinator retains a single global execution slot across nodes and engine
-profiles. Running or held work prevents another claim. Production is selected
-before staging; running staging work is not interrupted. An ineligible or
-maintenance-blocked priority head stays queued instead of allowing lower-priority
-work to bypass it.
+The shared queue allows one active job per configured node, so distinct nodes
+can process concurrently without double-booking a node. Production is selected
+before staging; running staging work is not interrupted. Each node takes the
+oldest queued job it can process, so a large job waiting for a capable node does
+not leave a smaller eligible node idle. Maintenance and engine capacity are
+rechecked atomically when the worker claims a job.
 
 Set `PROCESSING_PROTOTYPE_NODE_IDS=cluster,main` and
 `PROCESSING_TREEDAR_NODE_IDS=main` explicitly in the deployed environment. Node
@@ -29,9 +30,11 @@ remain supported for cluster and main. All configured nodes participate in the
 fresh exact-definition options intersection, and a configured unavailable node
 closes option admission. The cluster's photo ceiling remains the lower of its
 configured `LOCAL_MAX_PHOTOS` and the node's live `/info` maximum. This dynamic
-configuration applies to the Viewer-compatible native dispatcher; the separate
-ReferenceStore worker path still needs equivalent multi-node capacity wiring
-before that path can make the same claim.
+configuration applies to both the Viewer-compatible native dispatcher and the
+ReferenceStore worker `/next`/`/claim` path. The worker path refreshes fleet
+capacity and option definitions before discovery and rechecks the selected
+node/job pair atomically at claim time. This is synthetic-tested draft code; it
+has not been deployed or accepted against the live nodes.
 
 For a synthetic main worker, pass `--node-id main --resource-policy
 main-unrestricted` to the worker or dispatcher. This omits Docker CPU, RAM and PID

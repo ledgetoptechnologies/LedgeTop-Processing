@@ -12,12 +12,14 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import threading
 import time
 import uuid
 from datetime import datetime
 
 from .maintenance import Conflict
 from . import reference_protocol as protocol
+from .prototype import PROFILE as TREEDAR_PROFILE, VIEWER_PROFILE
 
 PROFILE = "reference-pipeline-v1"
 PHASES = {
@@ -46,7 +48,7 @@ def _reason(value):
 class ReferenceStore:
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
-                 main_node_id=None):
+                 main_node_id=None, node_limits=None, node_option_validator=None):
         if PROFILE not in queue.allowed_profiles:
             raise ValueError("reference queue profile is disabled")
         for value in (max_queued_jobs, max_metadata_bytes):
@@ -60,9 +62,32 @@ class ReferenceStore:
                 raise ValueError("local node limits must be positive integers")
         self.local_max_photos = local_max_photos
         self.local_max_input_bytes = local_max_input_bytes
-        self.main_node_id = main_node_id or next((n for n in queue.node_ids if n != 'cluster'), None)
+        self.main_node_id = main_node_id or next((n for n in queue.node_ids if n == 'main'),
+                                                 next((n for n in queue.node_ids if n != 'cluster'), None))
         if self.main_node_id is not None and (self.main_node_id not in queue.node_ids or self.main_node_id == 'cluster'):
             raise ValueError("main node must be a configured node distinct from cluster")
+        if node_limits is None:
+            node_limits = {}
+        if type(node_limits) is not dict or set(node_limits) - set(queue.node_ids):
+            raise ValueError("per-node limits must match configured nodes")
+        self._configured_node_limits = {}
+        for node_id in queue.node_ids:
+            raw = node_limits.get(node_id, {})
+            if type(raw) is not dict or set(raw) - {"maxImages", "maxInputBytes"}:
+                raise ValueError("invalid per-node capacity limits")
+            images = raw.get("maxImages", local_max_photos if node_id == "cluster" else None)
+            size = raw.get("maxInputBytes", local_max_input_bytes if node_id == "cluster" else None)
+            if ((images is not None and (type(images) is not int or images < 1))
+                    or (size is not None and (type(size) is not int or size < 1))):
+                raise ValueError("per-node capacity limits must be positive integers")
+            self._configured_node_limits[node_id] = {"maxImages": images, "maxInputBytes": size}
+        if node_option_validator is not None and not callable(node_option_validator):
+            raise ValueError("node option validator must be callable")
+        self._node_option_validator = node_option_validator
+        self._capacity_lock = threading.RLock()
+        self._capacity_snapshot = {node_id: {"ready": True, "maxImages": None,
+            "maxInputBytes": None, "taskQueueCount": 0} for node_id in queue.node_ids}
+        self._node_option_snapshots = None
         database = Path(queue.path).absolute()
         if database.resolve() != database or database.is_symlink():
             raise ValueError("owned regular queue database required")
@@ -107,6 +132,9 @@ class ReferenceStore:
             """)
             # Preserve execution phase across restart. Queue's held status is an
             # overlay; it neither authorizes replay nor erases worker progress.
+        # The coordinator lease permits one runtime owner per Queue process;
+        # tests and service assembly may replace an unused store before use.
+        queue._reference_scheduler = self
 
     def _row(self, db, job_id):
         has_failure = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_worker_failures'").fetchone()
@@ -232,36 +260,182 @@ class ReferenceStore:
         if phase not in PHASES or (phase != row["phase"] and phase not in PHASES[row["phase"]]):
             raise Conflict("invalid reference phase transition")
 
+    def update_fleet_snapshot(self, capacities, node_options=None):
+        """Replace the in-memory live capacity/option view atomically.
+
+        Worker discovery calls this before /next and new /claim operations. A
+        failed or incomplete probe must not leave an older usable snapshot.
+        """
+        if type(capacities) is not dict or set(capacities) != set(self.queue.node_ids):
+            raise ValueError("capacity snapshot must cover the configured fleet")
+        checked = {}
+        for node_id, value in capacities.items():
+            if (type(value) is not dict or set(value) -
+                    {"ready", "maxImages", "maxInputBytes", "taskQueueCount"}
+                    or type(value.get("ready")) is not bool):
+                raise ValueError("invalid node capacity snapshot")
+            for name in ("maxImages", "maxInputBytes"):
+                number = value.get(name)
+                if number is not None and (type(number) is not int or number < 1):
+                    raise ValueError("invalid node capacity ceiling")
+            queued = value.get("taskQueueCount")
+            if type(queued) is not int or queued < 0:
+                raise ValueError("invalid node queue observation")
+            checked[node_id] = dict(value)
+        if node_options is not None:
+            if (type(node_options) not in (list, tuple)
+                    or {node.get("role") for node in node_options if type(node) is dict} != set(self.queue.node_ids)
+                    or len(node_options) != len(self.queue.node_ids)):
+                raise ValueError("option snapshot must cover the configured fleet")
+            options = {node["role"]: dict(node) for node in node_options}
+        else:
+            options = None
+        with self._capacity_lock:
+            self._capacity_snapshot = checked
+            self._node_option_snapshots = options
+
+    @staticmethod
+    def _minimum_limit(first, second):
+        if first is None:
+            return second
+        if second is None:
+            return first
+        return min(first, second)
+
+    def _node_fits(self, submission, node_id):
+        with self._capacity_lock:
+            capacity = dict(self._capacity_snapshot[node_id])
+            option_snapshot = (self._node_option_snapshots or {}).get(node_id)
+        if not capacity["ready"] or capacity["taskQueueCount"] != 0:
+            return False
+        limits = self._configured_node_limits[node_id]
+        max_images = self._minimum_limit(capacity["maxImages"], limits["maxImages"])
+        max_bytes = self._minimum_limit(capacity["maxInputBytes"], limits["maxInputBytes"])
+        manifest = submission["manifest"]
+        images, total_bytes = manifest["inputCounts"]["images"], manifest["totalBytes"]
+        if ((max_images is not None and images > max_images)
+                or (max_bytes is not None and total_bytes > max_bytes)):
+            return False
+        if submission["pipeline"]["treedar"]["requested"] and node_id not in self.queue.treedar_node_ids:
+            return False
+        if option_snapshot is not None:
+            if option_snapshot.get("available") is not True:
+                return False
+            if self._node_option_validator is not None:
+                try:
+                    if self._node_option_validator(submission, option_snapshot) is not True:
+                        return False
+                except Exception:
+                    return False
+        return True
+
+    def _node_has_slot(self, db, node_id):
+        if self.queue._node(db, node_id)["state"] not in ("active", "scheduled"):
+            return False
+        return db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1",
+                          (node_id,)).fetchone() is None
+
+    def _select_node(self, db, submission, profile=PROFILE):
+        for node_id in self.queue.node_ids:
+            if (profile not in self.queue.node_profiles(node_id)
+                    or not self._node_has_slot(db, node_id)
+                    or not self._node_fits(submission, node_id)):
+                continue
+            return node_id
+        return None
+
+    @staticmethod
+    def _viewer_submission(db, job_id, environment):
+        """Read the private Viewer queue metadata needed for size admission."""
+        task = db.execute("SELECT uuid,options,removed,environment,stage,phase FROM viewer_tasks WHERE job_id=?",
+                          (job_id,)).fetchone()
+        if (task is None or task["removed"] or task["environment"] != environment
+                or task["stage"] != "queued" or task["phase"] not in ("queued", "waiting_node")):
+            return None
+        files = db.execute("""SELECT COUNT(*) AS images,COALESCE(SUM(bytes),0) AS total_bytes,
+                            COALESCE(SUM(is_photo),0) AS photo_count FROM viewer_files WHERE uuid=?""",
+                           (task["uuid"],)).fetchone()
+        try:
+            raw_options = json.loads(task["options"])
+            if (type(raw_options) is not list or any(type(item) is not dict
+                    or set(item) != {"name", "value"} or type(item["name"]) is not str
+                    for item in raw_options)):
+                return None
+            options = {item["name"]: item["value"] for item in raw_options}
+            if len(options) != len(raw_options) or files["images"] != files["photo_count"]:
+                return None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return {"manifest": {"inputCounts": {"images": files["images"]},
+                             "totalBytes": files["total_bytes"]},
+                "pipeline": {"odm": {"options": options},
+                             "treedar": {"requested": False}}}
+
+    def _candidate_any_row(self, db, node_id):
+        """First globally ordered, profile-eligible job this free node can run.
+
+        Reference and native Viewer schedulers share this selector inside their
+        existing IMMEDIATE transactions. Profiles without trustworthy size
+        metadata conservatively reserve the node's queue position.
+        """
+        self.queue._known_node(node_id)
+        self.queue._refresh_nodes(db)
+        if not self._node_has_slot(db, node_id):
+            return None
+        production_pending = db.execute("SELECT 1 FROM jobs WHERE environment='production' "
+            "AND status IN ('queued','running','held') LIMIT 1").fetchone() is not None
+        environment = "production" if production_pending else "staging"
+        rows = db.execute("SELECT id,profile,environment FROM jobs WHERE status='queued' AND environment=? "
+                          "ORDER BY seq", (environment,)).fetchall()
+        for item in rows:
+            profile = item["profile"]
+            if profile not in self.queue.node_profiles(node_id):
+                continue
+            if profile == PROFILE:
+                row = self._row(db, item["id"])
+                if row["phase"] not in ("queued", "waiting_capacity"):
+                    continue
+                submission = json.loads(row["input_json"])
+                if self._select_node(db, submission, PROFILE) == node_id:
+                    return item
+                continue
+            if profile == VIEWER_PROFILE:
+                submission = self._viewer_submission(db, item["id"], item["environment"])
+                if submission is None:
+                    # Missing/corrupt private metadata must not let a later
+                    # profile bypass this job on a node that could run Viewer.
+                    return item
+                if self._select_node(db, submission, VIEWER_PROFILE) == node_id:
+                    return item
+                continue
+            if profile == TREEDAR_PROFILE and node_id not in self.queue.treedar_node_ids:
+                continue
+            # Legacy or future profiles have no shared size contract yet.
+            # Their advertised profile membership is sufficient to hold this
+            # node's place in FIFO until that contract is available.
+            return item
+        return None
+
+    def _candidate_row(self, db, node_id):
+        candidate = self._candidate_any_row(db, node_id)
+        return (self._row(db, candidate["id"])
+                if candidate is not None and candidate["profile"] == PROFILE else None)
+
     def _required_node(self, submission):
-        requires_main = (submission['pipeline']['treedar']['requested']
-            or submission['manifest']['inputCounts']['images'] > self.local_max_photos
-            or submission['manifest']['totalBytes'] > self.local_max_input_bytes)
-        return self.main_node_id if requires_main else 'cluster'
+        """Return the first configured capacity-compatible node, ignoring load."""
+        for node_id in self.queue.node_ids:
+            if (PROFILE in self.queue.node_profiles(node_id)
+                    and self._node_fits(submission, node_id)):
+                return node_id
+        return None
 
     def next_for_node(self, node_id):
         """PRIVATE worker discovery; advisory only, claim remains atomic."""
         self.queue._known_node(node_id)
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            self.queue._refresh_nodes(db)
-            if (self.queue._node(db, node_id)['state'] not in ('active', 'scheduled')
-                    or db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1",
-                                  (node_id,)).fetchone()):
-                return None
-            head = db.execute("SELECT id,profile FROM jobs WHERE status='queued' ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq LIMIT 1").fetchone()
-            if not head or head['profile'] != PROFILE or PROFILE not in self.queue.node_profiles(node_id):
-                return None
-            row = self._row(db, head['id'])
-            if (row['environment'] == 'staging'
-                    and db.execute("SELECT 1 FROM jobs WHERE environment='production' "
-                                   "AND status IN ('queued','running','held') LIMIT 1").fetchone()):
-                return None
-            submission = json.loads(row['input_json'])
-            if self._required_node(submission) != node_id:
-                return None
-            if submission['pipeline']['treedar']['requested'] and node_id not in self.queue.treedar_node_ids:
-                return None
-            return self._public(row)
+            row = self._candidate_row(db, node_id)
+            return self._public(row) if row is not None else None
 
     def claim(self, job_id, *, node_id, worker_id, worker_instance_id, claim_request_id):
         """PRIVATE worker API: atomically persist ownership and replay envelope.
@@ -285,27 +459,11 @@ class ReferenceStore:
                     raise Conflict("claim request belongs to different worker binding")
                 return self._record(row, True)
             self.queue._refresh_nodes(db)
-            if self.queue._node(db, node_id)["state"] not in ("active", "scheduled"):
-                return None
-            if db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1",
-                          (node_id,)).fetchone():
-                return None
-            head = db.execute("""SELECT id,profile FROM jobs WHERE status='queued'
-              ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END,seq LIMIT 1""").fetchone()
-            if (not head or head["id"] != job_id or head["profile"] != PROFILE
-                    or PROFILE not in self.queue.node_profiles(node_id)):
-                return None
-            if (row['environment'] == 'staging'
-                    and db.execute("SELECT 1 FROM jobs WHERE environment='production' "
-                                   "AND status IN ('queued','running','held') LIMIT 1").fetchone()):
-                return None
             if row["phase"] not in ("queued", "waiting_capacity"):
                 raise Conflict("reference phase cannot be claimed")
             submission = json.loads(row["input_json"])
-            required_node = self._required_node(submission)
-            if node_id != required_node:
-                return None
-            if submission['pipeline']['treedar']['requested'] and node_id not in self.queue.treedar_node_ids:
+            candidate = self._candidate_row(db, node_id)
+            if candidate is None or candidate["job_id"] != job_id:
                 return None
             token = secrets.token_urlsafe(32)
             self._quota(db, sum(map(len, (claim_request_id, job_id, node_id, worker_id, worker_instance_id, token))))
