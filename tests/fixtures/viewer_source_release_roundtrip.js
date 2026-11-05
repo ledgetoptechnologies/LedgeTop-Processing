@@ -3,6 +3,7 @@
 // Real application repositories/client/worker, reopened for every Python phase.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const { createRequire } = require('node:module');
 const viewerRequire = createRequire(process.env.LTDS_VIEWER_APP_ROOT + '/package.json');
 const { openDatabase } = viewerRequire('./server/database');
@@ -18,7 +19,9 @@ const config = JSON.parse(fs.readFileSync(process.env.LTDS_PAIRING_CONFIG, 'utf8
   const db = openDatabase(config.databasePath);
   try {
     const processing = new ProcessingRepository(db);
-    const sourceIntake = { outbox: new PreparedSubmissionOutbox(db) };
+    const sourceIntake = { outbox: new PreparedSubmissionOutbox(db),
+      snapshotPublicKey: crypto.createPublicKey(config.snapshotPublicKeyPem),
+      snapshotSigner: { issuerId: 'pairing-snapshot-issuer', keyId: 'pairing-snapshot-key' } };
     const outbox = new SourceReleaseOutboxV1(db);
     const storage = new StorageManager({ datasetsMount: config.datasetMount, modelsMount: config.modelsRoot,
       cacheMount: config.cacheMount, trashMount: config.trashMount, storageReserveBytes: 0, storageReservePercent: 0 });
@@ -41,6 +44,9 @@ const config = JSON.parse(fs.readFileSync(process.env.LTDS_PAIRING_CONFIG, 'utf8
       });
       const intent = outbox.getIntent(attemptId);
       assert.equal(intent.state, 'prepared');
+      assert.equal(db.prepare('SELECT status FROM viewer_source_snapshots WHERE attempt_id=?').get(attemptId).status, 'accepted');
+      const datasetId = db.prepare('SELECT dataset_id FROM viewer_source_snapshots WHERE attempt_id=?').get(attemptId).dataset_id;
+      assert.equal(processing.hasHeldSourceSnapshot(datasetId), true, 'accepted snapshots stay operationally held until terminal receipt');
       assert.ok(intent.request && intent.requestSha256);
       process.stdout.write(JSON.stringify({ lostReply: true, requestSha256: intent.requestSha256 }) + '\n');
       return;
@@ -55,6 +61,9 @@ const config = JSON.parse(fs.readFileSync(process.env.LTDS_PAIRING_CONFIG, 'utf8
     } else {
       assert.equal(result.status, 'released');
       assert.equal(intent.state, 'released');
+      assert.equal(db.prepare('SELECT status FROM viewer_source_snapshots WHERE attempt_id=?').get(attemptId).status, 'released');
+      const datasetId = db.prepare('SELECT dataset_id FROM viewer_source_snapshots WHERE attempt_id=?').get(attemptId).dataset_id;
+      assert.equal(processing.hasHeldSourceSnapshot(datasetId), false, 'only the matching terminal receipt retires the operational hold');
       assert.ok(intent.receipt && intent.receiptSha256);
       assert.equal(intent.receipt.removedObjectCount, intent.authorization.eligibleObjects.length);
       assert.equal(intent.receipt.removedBytes,
