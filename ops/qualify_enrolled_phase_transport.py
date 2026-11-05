@@ -296,9 +296,20 @@ def main(argv=None):
     parser.add_argument('--daemon',required=True);parser.add_argument('--artifact-root',required=True)
     parser.add_argument('--operation',required=True);parser.add_argument('--cli-sha256',required=True)
     parser.add_argument('--rollback',action='store_true')
+    parser.add_argument('--outer-seconds',type=int,default=900,
+        help='Qualification-only alarm,1..900 seconds; never changes application/command timeouts.')
     args=parser.parse_args(argv)
-    qualify(args.candidate_image,args.candidate_source,args.daemon,args.artifact_root,args.operation,args.cli_sha256,
-            rollback=args.rollback)
+    require(os.name=='posix' and 1<=args.outer_seconds<=900,'bounded_linux_qualification_budget_required')
+    import signal
+    require(signal.getitimer(signal.ITIMER_REAL)==(0.0,0.0),'existing_alarm_must_not_be_replaced')
+    previous=signal.getsignal(signal.SIGALRM)
+    def deadline(*_):raise RuntimeError('qualification_outer_deadline_hold')
+    signal.signal(signal.SIGALRM,deadline);signal.alarm(args.outer_seconds)
+    try:
+        qualify(args.candidate_image,args.candidate_source,args.daemon,args.artifact_root,args.operation,args.cli_sha256,
+                rollback=args.rollback)
+    finally:
+        signal.alarm(0);signal.signal(signal.SIGALRM,previous)
 
 
 def configuration_material(operation_id, authority_id, worker_host='127.0.0.1'):
