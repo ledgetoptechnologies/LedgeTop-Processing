@@ -126,6 +126,12 @@ class _NativeTransport:
 @unittest.skipUnless(os.environ.get("LTDS_VIEWER_WORKTREE"), "set LTDS_VIEWER_WORKTREE to Viewer V2 checkout")
 class ViewerResultV2RoundTripTests(unittest.TestCase):
     def test_actual_viewer_source_intake_result_copy_lost_ack_and_worker_cleanup(self):
+        self._roundtrip(source_range_v2_enabled=False)
+
+    def test_actual_viewer_range_v2_fetch_result_copy_lost_ack_and_worker_cleanup(self):
+        self._roundtrip(source_range_v2_enabled=True)
+
+    def _roundtrip(self, *, source_range_v2_enabled):
         viewer = Path(os.environ["LTDS_VIEWER_WORKTREE"]).resolve()
         viewer_app = viewer / "apps" / "viewer"
         node = os.environ.get("LTDS_NODE") or shutil.which("node")
@@ -264,6 +270,7 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                     state_path=root / "driver.sqlite", ssl_context=client_tls, output_budget=1024 * 1024,
                     transfer_ttl=240, safety_floor=1024, failure_outbox=FailureOutbox(root / "failures.sqlite"),
                     worker_instance_id="roundtrip-instance",
+                    source_range_v2_enabled=source_range_v2_enabled,
                     engine_cleanup=EngineCacheCleanup(worker, path=root / "engine-cleanup.sqlite",
                         viewer_receipt_keys=viewer_receipt_keys))
                 # NativeEngine identity and cleanup use the same synthetic local loopback daemon.
