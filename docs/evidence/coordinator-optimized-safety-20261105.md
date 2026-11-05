@@ -2,7 +2,7 @@
 
 The historical installer and updater contain safety checks in both Python functions
 and serialized Python scripts. Python `-O` removed their `assert` checks. The checks
-now call a small local `_require` function which explicitly raises `ValueError` on
+now call a small local `_require` function which explicitly raises `AssertionError` on
 failure. The accepted conditions, allowlists, fixed historical profile, and update
 activation behavior are unchanged. The helper is inside serialized `volume_census`
 and inside each of the seven embedded scripts, so it survives source extraction.

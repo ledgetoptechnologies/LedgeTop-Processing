@@ -33,7 +33,7 @@ class CoordinatorOptimizedSafetyTests(unittest.TestCase):
                               and item.name == '_require')
                 namespace = {}
                 exec(compile(ast.Module(body=[helper], type_ignores=[]), '<actual-helper>', 'exec', optimize=2), namespace)
-                with self.assertRaisesRegex(ValueError, '^coordinator_safety_condition_failed$'):
+                with self.assertRaisesRegex(AssertionError, '^coordinator_safety_condition_failed$'):
                     namespace['_require'](False)
                 namespace['_require'](True)
                 count += 1

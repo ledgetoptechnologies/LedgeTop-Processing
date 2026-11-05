@@ -128,7 +128,7 @@ def volume_census(root, *, uid=10001, offline=False):
     """
     def _require(condition):
         if not condition:
-            raise ValueError("coordinator_safety_condition_failed")
+            raise AssertionError("coordinator_safety_condition_failed")
 
     import hashlib, json, os, re, sqlite3, stat
     from pathlib import Path
@@ -298,7 +298,7 @@ def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, all
 
 TLS_CENSUS = """def _require(condition):
     if not condition:
-        raise ValueError("coordinator_safety_condition_failed")
+        raise AssertionError("coordinator_safety_condition_failed")
 
 import hashlib,json,os,stat
 from pathlib import Path
@@ -349,7 +349,7 @@ def owned_api_probe(operator):
 def backup_script():
     extra=inspect.getsource(volume_census)+'\n'+inspect.getsource(viewer_acceptance_schema)+'''def _require(condition):
     if not condition:
-        raise ValueError("coordinator_safety_condition_failed")
+        raise AssertionError("coordinator_safety_condition_failed")
 
 
 before=volume_census(source,offline=True); copied=volume_census(target,offline=True)
@@ -366,7 +366,7 @@ def copy_backup(transport,root,state):
     if destination.exists() or destination.is_symlink():raise Stopped('new_backup_destination_required')
     installer='''def _require(condition):
     if not condition:
-        raise ValueError("coordinator_safety_condition_failed")
+        raise AssertionError("coordinator_safety_condition_failed")
 
 import os,stat,sys
 from pathlib import Path

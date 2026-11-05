@@ -236,7 +236,7 @@ def check_native_environment(old, env):
 
 LOADER = """def _require(condition):
     if not condition:
-        raise ValueError("coordinator_safety_condition_failed")
+        raise AssertionError("coordinator_safety_condition_failed")
 
 import json,ssl
 from processing.config import from_environment
@@ -298,7 +298,7 @@ def prepare(root, target, revision, main_image):
 
 BACKUP = r"""def _require(condition):
     if not condition:
-        raise ValueError("coordinator_safety_condition_failed")
+        raise AssertionError("coordinator_safety_condition_failed")
 
 import hashlib,json,os,sqlite3,stat
 from pathlib import Path
@@ -359,7 +359,7 @@ def backup(root, state):
     # name lookup here; use the already-qualified numeric chown mechanism.
     make_backup = """def _require(condition):
     if not condition:
-        raise ValueError("coordinator_safety_condition_failed")
+        raise AssertionError("coordinator_safety_condition_failed")
 
 import os,stat,sys
 from pathlib import Path
@@ -536,7 +536,7 @@ finally: db.close()
 
 OFFLINE_ROLLBACK_CENSUS = """def _require(condition):
     if not condition:
-        raise ValueError("coordinator_safety_condition_failed")
+        raise AssertionError("coordinator_safety_condition_failed")
 
 import json,sqlite3,hashlib,stat
 from pathlib import Path
