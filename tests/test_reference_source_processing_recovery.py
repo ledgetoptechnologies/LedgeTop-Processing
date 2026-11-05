@@ -15,11 +15,14 @@ from processing.reference_driver import ReferenceDriver
 from processing.reference_engine_worker import ReferenceEngineWorker
 from processing.reference_failure import FailureOutbox
 from processing.reference_recovery import SOURCE_RECEIPT_PROTOCOL, ClaimRecoveryService
+from processing.reference_sender import ReferenceSender
 from processing.scratch_policy import ScratchLedger
 from processing.viewer_service import NativeEngine
 from processing.worker_outbox import WorkerOutbox
 from tests import test_reference_driver as driver_tests
 from tests import test_reference_source_fetch_recovery as fetch_tests
+from tests.test_reference_source_grant_renewal import WORKER_TOKEN, _ControlOpener
+from tests.viewer_v2_receipt_signer import SyntheticViewerCopyV2Signer
 
 GATE_ORIGIN = 'http://127.0.0.1:18080'
 
@@ -83,7 +86,8 @@ class ProcessingHarness(fetch_tests.StepHarness):
         driver.worker = ReferenceEngineWorker(self.root / 'worker.sqlite', ledger=driver.ledger,
             outbox=WorkerOutbox(self.root / 'outbox.sqlite'), engine=self.native, engine_id='engine', node_id='cluster',
             authority_id=self.queue.authority_id, coordinator_origin=GATE_ORIGIN, gate_generation=1, worker_id='worker',
-            engine_version='pinned-engine-1', allowed_odm_options={'numeric-probe'}, engine_probe=lambda _deadline: 'engine')
+            engine_version='pinned-engine-1', allowed_odm_options={'numeric-probe'}, engine_probe=lambda _deadline: 'engine',
+            viewer_receipt_keys=self.viewer_receipt_keys)
         driver.outbox, driver.failure_outbox = driver.worker.outbox, FailureOutbox(self.root / 'failures.sqlite')
         driver.allowed_environments = frozenset(('production', 'staging'))
         driver._option_definitions = {}
@@ -408,6 +412,118 @@ class StartedRecoveryTests(ProcessingHarness):
         self.execute("UPDATE nodes SET state='draining',revision=revision+1 WHERE id=?", 'cluster')
         self.step('executing')
         self.assert_started_receipt()
+
+
+class DeliveryAcrossRestartTests(ProcessingHarness):
+    """A job that outlives a coordinator restart still reaches signed acceptance.
+
+    Real delivery receipt, Queue completion, viewer transfer, signed V2 copy
+    receipt, worker verification and observation. Only the engine and the Viewer
+    signer are synthetic; the coordinator is reopened, not killed.
+    """
+    signer = SyntheticViewerCopyV2Signer()
+    viewer_receipt_keys = signer.trusted_keys
+
+    def real_driver(self):
+        driver = super().real_driver()
+        self.attach_sender(driver)
+        return driver
+
+    def attach_sender(self, driver):
+        driver.engine_cleanup = driver.cleanup_executor = None
+        driver.sender = ReferenceSender(driver.outbox, 'https://coordinator.invalid', bearer_token=WORKER_TOKEN,
+            claim_binding_provider=driver._claim_binding, opener=self.deliver)
+
+    def deliver(self, request, timeout=None):
+        return _ControlOpener(self.control).open(request, timeout=timeout)
+
+    def new_worker(self):
+        super().new_worker()
+        self.attach_sender(self.driver)
+
+    def execute_until(self, stage, limit=8):
+        for _ in range(limit):
+            if self.row()[0] == stage:
+                return
+            result = self.driver.step()
+            self.assertNotIn(result['state'], ('held',), result)
+        self.assertEqual(self.row()[0], stage)
+
+    def accept(self):
+        """The Viewer's side: take the transfer, sign the copy, post the acceptance."""
+        acceptance = self.store.ensure_viewer_transfer(self.job_id, accepted_at='2026-11-04T00:00:02.000Z')
+        transfer = self.store.claim_viewer_transfer(now=self.now[0])
+        private = self.store.get(self.job_id, private=True)
+        expected = {**private['sourceAcceptanceBinding'],
+            'resultManifestSha256': transfer['viewerResultManifest']['resultManifestSha256']}
+        envelope = self.signer.envelope(expected, acceptance, transfer['viewerResultManifest'])
+        self.store.accept(self.job_id, envelope['acceptance'], viewer_receipt=envelope['viewerReceipt'],
+            trusted_viewer_receipt_keys=self.signer.trusted_keys)
+
+    def assert_finished(self):
+        self.assertEqual(self.transport.starts(), 1)
+        job = self.store.get(self.job_id)
+        self.assertEqual((job['status'], job['phase']), ('succeeded', 'completed'))
+        self.driver._background()
+        self.driver._background()
+        self.assertTrue(self.row()[1].get('acceptanceObservationAck'))
+
+    def finished_under_a_hold(self):
+        self.to_execution_pending()
+        self.step('executing')
+        self.restart_coordinator()
+        self.transport.tasks[self.job_id] = 40
+
+    def test_control_no_restart_reaches_acceptance(self):
+        self.to_execution_pending()
+        self.step('executing')
+        self.transport.tasks[self.job_id] = 40
+        self.execute_until('awaiting_acceptance')
+        self.accept()
+        self.assert_finished()
+        self.assertEqual(self.receipts(), [])
+
+    def test_engine_finishing_under_a_restart_hold_reaches_acceptance(self):
+        self.finished_under_a_hold()
+        self.assertEqual(self.status(), ('held', 'coordinator_restart'))
+        self.execute_until('awaiting_acceptance')
+        self.assertEqual(self.status()[0], 'succeeded')
+        self.accept()
+        self.assert_finished()
+        self.assertEqual(self.receipts(), [])
+
+    def test_a_started_recovery_then_a_finish_reaches_acceptance(self):
+        self.to_execution_pending()
+        self.step('executing')
+        self.restart_coordinator()
+        self.step('executing')
+        self.assertEqual(self.status(), ('running', None))
+        self.transport.tasks[self.job_id] = 40
+        self.execute_until('awaiting_acceptance')
+        self.accept()
+        self.assert_finished()
+        self.assertEqual(len(self.receipts()), 1)
+
+    def test_restart_between_sealing_and_sending(self):
+        self.finished_under_a_hold()
+        self.step_delivering()
+        self.restart_coordinator()
+        self.execute_until('awaiting_acceptance')
+        self.accept()
+        self.assert_finished()
+
+    def step_delivering(self):
+        self.assertEqual(self.driver.step()['state'], 'delivering')
+        self.assertEqual(self.row()[0], 'delivering')
+
+    def test_restart_and_worker_death_while_awaiting_acceptance(self):
+        self.finished_under_a_hold()
+        self.execute_until('awaiting_acceptance')
+        self.restart_coordinator()
+        self.new_worker()
+        self.accept()
+        self.restart_coordinator()
+        self.assert_finished()
 
 
 class WorkerDeathTests(ProcessingHarness):

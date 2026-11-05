@@ -92,6 +92,7 @@ class RenewalHarness(unittest.TestCase):
     chunk_bytes = None
     extra_objects = 0
     harness_reserves = True
+    viewer_receipt_keys = None
 
     def setUp(self):
         if self.chunk_bytes is not None:
@@ -184,7 +185,8 @@ class RenewalHarness(unittest.TestCase):
         driver._save = self.save
         with driver._db() as db:
             db.execute('''CREATE TABLE driver_jobs(created INTEGER PRIMARY KEY AUTOINCREMENT,job TEXT UNIQUE NOT NULL,
-                claim_request TEXT UNIQUE NOT NULL,stage TEXT NOT NULL,data TEXT NOT NULL)''')
+                claim_request TEXT UNIQUE NOT NULL,stage TEXT NOT NULL,data TEXT NOT NULL,
+                background_checked REAL NOT NULL DEFAULT 0)''')
             db.execute("INSERT INTO driver_jobs(job,claim_request,stage,data) VALUES(?,?,'claimed','{}')",
                 (self.job_id, 'source-claim-renewal'))
         return driver
@@ -238,6 +240,7 @@ class RenewalHarness(unittest.TestCase):
             capability_fingerprint='a' * 64, options_fingerprint=self.case.payload['pipeline']['odm']['optionsFingerprint'],
             allowed_odm_options={'numeric-probe'}, source_spool=self.spool,
             source_attestation_keys=self.case.trusted_keys, authority_id=self.queue.authority_id,
+            viewer_receipt_keys=self.viewer_receipt_keys,
             recovery_bindings={'cluster': RecoveryNodeBinding('cluster', 'physical-cluster', self.queue.authority_id,
                 'http://127.0.0.1:18080', 1, 1000)})
         self.bind_clock()
