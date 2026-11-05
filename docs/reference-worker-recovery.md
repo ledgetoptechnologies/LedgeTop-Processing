@@ -124,6 +124,15 @@ DaemonStateLock ownership must exclude mixed old/new daemons, and host allocator
 rollback remains a controlled deployment operation. A NodeODM/TreeDar backend
 image rollback is separate from rolling back the host ledger allocator.
 
+The scratch transfer fence adds a second marker with the same boundary. The first
+fence commits `transferFenceVersion` to the ledger config in its own transaction,
+and the `transfer_fences` rows and marker both stay after that fence ends. The
+latch is one-way: once a ledger has fenced, an older image refuses it on cold
+open even when every fence has ended, so a fence prevents rollback to that image
+rather than delaying it. Only a ledger that never fenced stays old-compatible.
+There is no automatic rollback across this boundary, and nothing may clear the
+marker to create one. A future quiescent migration would need its own proof.
+
 ## Concrete authority and local evidence
 
 Construction requires the concrete ProductionParentGuard and its actual
