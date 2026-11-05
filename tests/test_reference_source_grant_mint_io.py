@@ -605,7 +605,7 @@ class RangeHooks(MintHarness):
 
 
 class WholeObjectMintIoTests(MintLifecycleCases, WholeObjectHooks, unittest.TestCase):
-    def test_uncertain_close_after_a_failed_hash_retains_the_pin(self):
+    def test_uncertain_close_with_single_byte_reads_retains_the_pin(self):
         real, failed = spool_module._close_owned_fd, []
 
         def closing(descriptor):
