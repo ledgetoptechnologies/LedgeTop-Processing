@@ -401,8 +401,9 @@ class ReferenceEngineWorker:
                 pipeline_digest=job['pipelineDigest'], result_manifest_sha256=result['resultManifestSha256'],
                 result_manifest=result, owned_prefix='jobs/' + reservation,
                 local_objects={'odm-archive': relative})
-            gate.prepare_completion(row['receipt'], dict(status='succeeded',
-                result={'resultManifestSha256': result['resultManifestSha256']}))
+            if not gate.resolved(row['receipt']):
+                gate.prepare_completion(row['receipt'], dict(status='succeeded',
+                    result={'resultManifestSha256': result['resultManifestSha256']}))
             with self._db() as db:
                 db.execute('UPDATE executions SET phase=\'awaiting_delivery\', result=?,outbox_id=? WHERE job=?',
                            (p.canonical_json(result).decode(), outbox_id, job_id))
@@ -423,7 +424,8 @@ class ReferenceEngineWorker:
             job_ack = dict(id=job_id, workerId=self.worker_id, nodeId=self.node_id,
                 authorityId=self.authority_id, status='succeeded',
                 result={'resultManifestSha256': json.loads(row['result'])['resultManifestSha256']})
-            gate.acknowledge(row['receipt'], job_ack)
+            if not gate.resolved(row['receipt']):
+                gate.acknowledge(row['receipt'], job_ack)
             self._phase(job_id, 'delivered')
 
     def apply_viewer_acceptance(self, job_id, receipts):

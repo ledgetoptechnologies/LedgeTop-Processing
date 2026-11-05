@@ -305,6 +305,13 @@ class ScratchPolicyTests(unittest.TestCase):
         descriptor,scope=self.publishable();receipt=self.control(scope_sha256=scope)
         self.assertEqual(self.ledger.publish_control_charge('r1',charge_id='control-one',scope_sha256=scope,parent_binding_sha256='c'*64,publication_descriptor=descriptor)['chargeId'],receipt['chargeId'])
 
+    def test_an_engine_terminal_is_never_read_as_a_never_started_settlement(self):
+        self.reserve();self.ledger.begin_transfer('r1');self.ledger.set_engine_state('r1','engine_started')
+        self.assertFalse(self.ledger.never_started('r1'));self.ledger.set_engine_state('r1','terminal',terminal_attested=True)
+        self.assertEqual(self.ledger.settle_unstarted('r1',transfer_ended=True),'terminal');self.assertFalse(self.ledger.never_started('r1'))
+        self.reserve(job_id='j2',reservation_id='r2');self.ledger.set_engine_state('r2','terminal',terminal_attested=True)
+        self.assertEqual(self.ledger.settle_unstarted('r2',transfer_ended=True),'terminal');self.assertFalse(self.ledger.never_started('r2'))
+
     def test_extreme_clock_still_expires_an_unfenced_lease_and_refuses_a_new_one(self):
         self.reserve();self.reserve(job_id='j2',reservation_id='r2');self.ledger.record_allocated('r2',10);self.now=float(MAX_INTEGER)-5
         with self.assertRaisesRegex(PolicyConflict,'lease deadline outside supported range'):self.reserve(job_id='j3',reservation_id='r3',ttl_seconds=5)
@@ -322,8 +329,9 @@ class ScratchPolicyTests(unittest.TestCase):
         for promise in (False,None,1):
             with self.assertRaisesRegex(PolicyConflict,'settlement must guarantee'):self.ledger.settle_unstarted('r1',transfer_ended=promise)
         self.assertEqual(self.row()[6:9],('reserved',400,0))
-        self.assertEqual(self.ledger.settle_unstarted('r1',transfer_ended=True),'terminal');self.assertEqual(self.row()[6:9],('terminal',0,0))
-        self.assertEqual(self.row()[9],500.0);self.assertEqual(self.ledger.settle_unstarted('r1',transfer_ended=True),'terminal')
+        self.assertEqual(self.ledger.settle_unstarted('r1',transfer_ended=True),'unstarted');self.assertEqual(self.row()[6:9],('terminal',0,0))
+        self.assertEqual(self.row()[9],500.0);self.assertEqual(self.ledger.settle_unstarted('r1',transfer_ended=True),'unstarted')
+        self.assertTrue(self.ledger.never_started('r1'))
         self.assertIsNone(self.ledger.settle_unstarted('never-reserved',transfer_ended=True))
         self.ledger=self.open();self.reserve(job_id='j2',reservation_id='r2',input_bytes=500)
 
