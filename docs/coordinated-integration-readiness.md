@@ -4,6 +4,46 @@ This record describes the review branch
 `codex/viewer-accepted-copy-integration-candidate-20261103`. It is not a deployment
 approval. Runtime acceptance remains incomplete.
 
+## Latest combined and native-host preparation checkpoint
+
+Processing `51cff44f019eab81ba482adf3f1f298ecd32f571` passed **485/485 selected
+Linux tests, no skips**, in 122.705 seconds across 32 modules. This combines
+actual Viewer intake/result/conversion/publication, live-description option
+policy, source-reader leases/fences, routing/recovery and the version-bound
+maintenance/supervisor/HTTP service path on one revision. The first combined
+attempt passed 477/478: the composed fixture's qualifier advertised `3.8.3`
+while replacement/ingress probes advertised `new-version`. Aligning that
+fixture resolved the failure without weakening checks. A genuine mismatch test
+now proves rollback, held service and zero ingress reopens.
+
+The successful run used frozen Viewer `2317d400` and the **old synthetic-only**
+converter identified below, one CPU/2 GiB, read-only source/dependencies, external
+networking disabled and an owned temporary disk volume. Its container and
+labeled volume were removed. It does not qualify the licensed ImageSharp 3.2.0
+binary, real photos/NAS, installed reference workers or browser rendering.
+
+The local Processing image built from this revision is
+`sha256:4fc1df3ac69e7e73fb4325872e3dff9e9dce5eae396a63a77875a33f7bce4fb4`,
+tagged `ledgetop-processing:qualification-51cff44`, with its exact revision and
+repository labels verified. Startup smoke passed as UID/GID 10001 with a
+read-only filesystem, networking disabled, 256 MiB and half a CPU: actual app
+health returned 200, the unconfigured reference route returned 404, the live
+`gltf` metadata policy worked, and the child server shut down cleanly. Reference,
+Viewer and photo execution stayed disabled. The image was not published or
+installed. The owned one-CPU/2 GiB builder was stopped after export; cache kept.
+
+Both PCs also qualified the private inactive `51cff44` source preparation below.
+That is source/dependency readiness, not activation or installed acceptance.
+Source deletion remains disabled. New durable worker acceptance-observation
+code is being developed separately and is **not** included in this checkpoint.
+
+GCP boundary: Viewer import/serialization tests pass, but a subsequent worker
+audit found all-image guards in Driver/Router/EngineWorker and staged execution
+that still reject a V2 attempt-derived `gcp_list.txt`. Safe receipt-bound GCP
+auxiliary support and captured multipart qualification remain unfinished; do not
+equate the Viewer tests with GCP-enabled native processing. The user's next
+10,000-photo test was specified without GCPs.
+
 ## Live NodeODX option compatibility checkpoint
 
 A November 5 read-only SSH check found main's direct `/info` reporting engine
@@ -83,9 +123,9 @@ See the [reproduction and evidence note](evidence/reference-source-intake-cgroup
 This qualifies that metadata-only case under the node limit; installed load,
 actual source transfers and engine execution still need qualification.
 
-The inactive `504af0e` source directories on both PCs described below predate
-these admission fixes. They must be replaced by a qualified exact candidate
-before activation; their earlier validator results do not qualify this code.
+The earlier inactive `504af0e` source directories predate these admission fixes.
+They are historical preparations only. The current inactive `51cff44`
+preparations described below include the fixes; no active service was switched.
 
 ## Controlled conversion, publication and delivery checkpoint
 
@@ -168,12 +208,14 @@ secure build-secret and provenance-compatibility patch. Old registered proofs
 must remain bound to exact durable receipts/bytes; new generation must require
 the patched binary. No licensing or security guard is bypassed.
 
-The current Processing source is now privately staged, **inactive**, on both
-PCs at `~/.local/share/ledgetop-processing-reference/dependency-candidates/504af0e/source`.
+The current Processing source is privately staged, **inactive**, on both
+PCs at `~/.local/share/ledgetop-processing-reference/dependency-candidates/51cff44/source`.
 Archive SHA-256:
-`3660f7d2b27b0d8717987bae0eb7a35ea9fca73ba3c9f6f33fdbbefb834cfc0f`.
-Each host parsed all **104** Processing/ops modules, imported the new policy and
-worker/runtime modules and passed **21/21** focused validators without skips,
+`98881a3231b4d0e39f7c111227f1f4196b9e5210510c8e34da7cc3e78917794f`;
+archive size 5,027,840 bytes.
+Each host parsed all **105** Processing/ops modules, imported the policy,
+source-reader and worker/runtime modules and passed **35/35** focused validators
+without skips (policy, protocol and source-reader custody),
 using the existing `39e0825` venv. Main uses Python 3.10.12; cluster 3.14.4.
 Preparation receipts record `workerStarted:false`. The source lives on verified
 local ext4, owned by UID 1000 in private candidate directories. No current-version
