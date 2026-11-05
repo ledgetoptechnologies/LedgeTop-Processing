@@ -8,6 +8,7 @@ import threading
 from unittest.mock import patch
 
 from processing import reference_protocol as protocol
+from processing import reference_source_intake_store as intake_store
 from processing.maintenance import Conflict
 from processing.node_gate import NodeGate
 from processing.reference_driver import ReferenceDriver
@@ -500,6 +501,162 @@ class AmbiguousEvidenceTests(ProcessingHarness):
         self.assertEqual((self.receipts(), self.transport.starts()), ([], 0))
 
 
+class PreflightTests(ProcessingHarness):
+    """A restart before the first byte: same claim, same reservation, one start."""
+
+    def assert_preflight_receipt(self, count=1, grant=False):
+        receipts = self.receipts()
+        self.assertEqual(len(receipts), count)
+        self.assertEqual((receipts[-1]['schemaVersion'], receipts[-1]['executionPhase'], receipts[-1]['engineClass'],
+            receipts[-1]['committedRanges'], receipts[-1]['grantSha256'] is not None), (3, 'awaiting_transfer', 'unstarted', 0, grant))
+        self.assertEqual(receipts[-1]['transferRequestSha256'], protocol.digest(self.row()[1]['reservation']))
+
+    def lost_reservation_reply(self):
+        self.lose_reply.add('reservation')
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertEqual((self.row()[0], self.store.get(self.job_id)['phase']), ('reservation_pending', 'awaiting_transfer'))
+
+    def test_reservation_pending_after_a_lost_reply(self):
+        self.lost_reservation_reply()
+        reservation = self.row()[1]['reservation']
+        self.restart_coordinator()
+        self.step('reservation_pending')
+        self.assert_preflight_receipt()
+        self.run_to_engine()
+        self.assertEqual(self.row()[1]['reservation'], reservation)
+
+    def test_awaiting_grant(self):
+        self.step('awaiting_grant')
+        self.restart_coordinator()
+        self.step('awaiting_grant')
+        self.assert_preflight_receipt()
+        self.run_to_engine()
+
+    def test_awaiting_grant_whose_grant_reply_was_lost_replays_the_same_grant(self):
+        self.step('awaiting_grant')
+        self.lose_reply.add('transfer-grant')
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        with self.queue._db() as db:
+            minted = db.execute('SELECT digest FROM reference_transfer_grants').fetchone()[0]
+        self.restart_coordinator()
+        self.step('awaiting_grant')
+        self.assert_preflight_receipt()
+        self.step('fetching_pending')
+        self.assertEqual(protocol.digest(self.row()[1]['grant']), minted)
+        self.run_to_engine()
+
+    def test_fetching_pending_with_awaiting_transfer_held(self):
+        self.step('awaiting_grant')
+        self.step('fetching_pending')
+        self.restart_coordinator()
+        self.step('fetching_pending')
+        self.assert_preflight_receipt(grant=True)
+        self.run_to_engine()
+
+    def test_second_restart_in_each_stage(self):
+        self.lost_reservation_reply()
+        self.restart_coordinator()
+        self.step('reservation_pending')
+        self.restart_coordinator()
+        self.step('reservation_pending')
+        self.step('awaiting_grant')
+        self.restart_coordinator()
+        self.step('awaiting_grant')
+        self.restart_coordinator()
+        self.step('awaiting_grant')
+        self.step('fetching_pending')
+        self.restart_coordinator()
+        self.step('fetching_pending')
+        self.restart_coordinator()
+        self.step('fetching_pending')
+        self.assert_preflight_receipt(6, grant=True)
+        self.assertEqual(self.row()[1]['sourceRecovery'], {'attempts': 0, 'pending': None})
+        self.run_to_engine()
+
+    def test_worker_death_after_the_intent_and_after_the_commit(self):
+        self.step('awaiting_grant')
+        self.restart_coordinator()
+        self.down.add('recover')
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        request = self.row()[1]['sourceRecovery']['pending']['request']
+        self.assertIsNone(request['grantSha256'])
+        self.new_worker()
+        self.down.clear()
+        self.lose_reply.add('recover')
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertEqual(self.status(), ('running', None))
+        self.new_worker()
+        self.run_to_engine()
+        self.assertEqual([item['requestId'] for item in self.receipts()], [request['requestId']])
+
+    def test_no_reservation_stays_held_for_an_operator(self):
+        self.down.add('reservation')
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.down.clear()
+        self.assertEqual(self.store.get(self.job_id)['phase'], 'queued')
+        self.restart_coordinator()
+        self.assert_stays_held('source_recovery_claim_unreserved')
+
+    def test_worker_ahead_in_fetching_with_awaiting_transfer_stays_held(self):
+        self.to_fetching()
+        self.execute("UPDATE reference_jobs SET phase='awaiting_transfer' WHERE job_id=?", self.job_id)
+        self.restart_coordinator()
+        for _ in range(3):
+            self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'source_fetch_held'})
+        self.assertEqual((self.receipts(), self.transport.starts()), ([], 0))
+
+    def test_lapsed_reservation_stays_held(self):
+        self.step('awaiting_grant')
+        self.step('fetching_pending')
+        self.now[0] = fetch_tests.stamp(self.row()[1]['reservation']['expiresAt']) + 1
+        self.restart_coordinator()
+        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'reservation_expired'})
+        self.assertEqual((self.receipts(), self.transport.starts()), ([], 0))
+
+    def test_occupied_gate_and_live_task_stay_held(self):
+        self.step('awaiting_grant')
+        self.restart_coordinator()
+        self.transport.tasks[self.job_id] = 20
+        self.assert_stays_held('source_recovery_engine_task_present')
+        del self.transport.tasks[self.job_id]
+        with NodeGate('engine') as gate:
+            gate.reserve('cluster', GATE_ORIGIN, self.queue.authority_id, 1, 'b' * 32)
+        self.assert_stays_held('source_recovery_gate_occupied')
+
+    def closure(self, **changes):
+        with self.queue._db() as db:
+            return self.store._source_preflight_closure(db, self.job_id, **changes)
+
+    def test_closure_control_and_each_refusal(self):
+        self.step('awaiting_grant')
+        self.assertIsNone(self.closure()['grantSha256'])
+        with self.assertRaisesRegex(Conflict, 'reservation expired'):
+            self.closure(clock=lambda: fetch_tests.stamp(self.row()[1]['reservation']['expiresAt']))
+        intake_store._ensure_source_range_schema(self.queue)
+        self.assertIsNone(self.closure()['grantSha256'])
+        self.execute('INSERT INTO reference_source_range_usage VALUES(?,1,?,1,1,1)', self.job_id, 'r')
+        with self.assertRaisesRegex(Conflict, 'already began'):
+            self.closure()
+        self.execute('DELETE FROM reference_source_range_usage WHERE job_id=?', self.job_id)
+        self.store.source_readers().fence(self.job_id, 1, 'preflight-release')
+        with self.assertRaises(Conflict):
+            self.closure()
+
+    def test_closure_refuses_a_missing_receipt(self):
+        self.step('awaiting_grant')
+        self.execute('DELETE FROM reference_source_object_receipts WHERE rowid=(SELECT MIN(rowid) FROM reference_source_object_receipts)')
+        with self.assertRaisesRegex(Conflict, 'closure changed'):
+            self.closure()
+
+    def test_refused_closure_is_ineligible_and_held(self):
+        self.step('awaiting_grant')
+        self.restart_coordinator()
+        self.execute('DELETE FROM reference_source_object_receipts WHERE rowid=(SELECT MIN(rowid) FROM reference_source_object_receipts)')
+        for _ in range(2):
+            self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'source_recovery_ineligible'})
+        self.assertEqual((self.receipts(), self.transport.starts()), ([], 0))
+
+
 class ProcessingWireTests(fetch_tests.RecoveryHarness):
     def complete(self, count=None):
         first = fetch_tests.validate_source_grant(self.first_grant, job=self.claim, clock=lambda: self.now[0])
@@ -558,6 +715,10 @@ class ProcessingWireTests(fetch_tests.RecoveryHarness):
     def test_schema_3_is_refused_in_fetching(self):
         self.restart_coordinator()
         self.assert_refused(self.body(schemaVersion=3, executionPhase='processing', engineClass='unstarted'))
+
+    def test_a_null_grant_is_refused_outside_awaiting_transfer(self):
+        self.complete()
+        self.assert_refused(self.unstarted(grantSha256=None))
 
     def test_started_is_not_a_class_yet(self):
         self.complete()

@@ -35,7 +35,7 @@ SOURCE_REQUEST_FIELDS=('schemaVersion','requestId','coordinatorEpoch','expectedN
 # Schema 3 resumes a claim whose engine never started, past the fetch. Schema 2
 # stays the fetch wire, and each phase takes exactly one of the two.
 SOURCE_UNSTARTED_REQUEST_FIELDS=SOURCE_REQUEST_FIELDS+('executionPhase','engineClass')
-SOURCE_UNSTARTED_PHASES=('processing',)
+SOURCE_UNSTARTED_PHASES=('awaiting_transfer','processing')
 SOURCE_ENGINE_CLASSES=('unstarted',)
 # Starting an already claimed job on a draining node matches a run with no restart.
 # Drop 'draining' here to make such a job wait for an operator instead.
@@ -188,6 +188,7 @@ class ClaimRecoveryService:
         freeze=db.execute('SELECT phase FROM coordinator_freeze_state WHERE singleton=1').fetchone()
         if freeze is not None and freeze['phase']!='open':return None
         try:
+            if phase=='awaiting_transfer':return self.store._source_preflight_closure(db,job_id)
             closure=self.store._source_fetch_closure(db,job_id)
             if phase=='processing' and not self._source_fetch_complete(row,closure):return None
             return closure
@@ -241,7 +242,10 @@ class ClaimRecoveryService:
         p._uuid(value['requestId'],'recovery request');p._uuid(value['coordinatorEpoch'],'startup epoch')
         for key in ('expectedNodeRevision','renewalSequence','committedRanges','committedBytes'):
             p._integer(value[key],key,allow_zero=True)
-        for key in ('transferRequestSha256','sourceClosureSha256','grantSha256','workerEvidenceSha256'):p._hash(value[key],key)
+        for key in ('transferRequestSha256','sourceClosureSha256','workerEvidenceSha256'):p._hash(value[key],key)
+        # A worker before its grant has none to name, and only then.
+        if not (unstarted and value['executionPhase']=='awaiting_transfer' and value['grantSha256'] is None):
+            p._hash(value['grantSha256'],'grantSha256')
         claim=value['claimBinding'];p._closed(claim,SOURCE_CLAIM_FIELDS,'original claim binding')
         for key in ('jobId','authorityId'):p._uuid(claim[key],key)
         for key in ('generation','inputBytes'):p._integer(claim[key],key)
@@ -259,7 +263,7 @@ class ClaimRecoveryService:
         charged before a GET the coordinator may never see, so they are not sent.
         """
         sequence=request['renewalSequence'];latest=source['renewalSequence'];acked=latest-int(source['renewalPending'])
-        known=(request['grantSha256']==source['grantSha256'] and sequence==acked
+        known=(request['grantSha256'] is None and sequence==0 or request['grantSha256']==source['grantSha256'] and sequence==acked
             or request['grantSha256']==source['predecessorGrantSha256'] and not source['renewalPending'] and sequence==latest-1)
         if (not known or request['committedRanges']>source['requestsAdmitted']
                 or request['committedBytes']>source['bytesAdmitted']):raise Conflict('worker source state exceeds the coordinator')

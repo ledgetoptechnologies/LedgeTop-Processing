@@ -339,6 +339,57 @@ class ReferenceSourceIntakeMethods:
                    (job_id,row['submission_id'],row['generation'],row['environment'],row['derived_manifest_sha'])):
             raise Conflict('source renewal retention receipts changed')
 
+    def _source_custody_open(self, db, row, job_id):
+        """Accepted, retained custody with no fence or release against this attempt."""
+        self._source_reader_unfenced(db, job_id, row['generation'])
+        if (db.execute("SELECT 1 FROM sqlite_master WHERE name='source_releases'").fetchone()
+                and db.execute('SELECT 1 FROM source_releases WHERE job_id=? LIMIT 1', (job_id,)).fetchone()):
+            raise Conflict('source release recorded')
+        if (row['source_state'], row['derived_state']) != ('accepted', 'accepted'):
+            raise Conflict('source custody not accepted')
+        self._source_retention_bound(row, job_id)
+
+    def _source_preflight_closure(self, db, job_id, *, clock=time.time):
+        """The closure of a transfer that has not begun, or Conflict.
+
+        Nothing has been served, so there are no renewals and no range usage. With
+        no grant the reservation must still be live; minting re-verifies the bytes.
+        A grant, even one the worker never heard about, takes the full closure.
+        """
+        row = self._row(db, job_id)
+        generation = row['generation']
+        # These tables first appear at a mint, so a preflight read must not need them.
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='reference_source_range_usage'").fetchone():
+            if db.execute('SELECT 1 FROM reference_source_grant_renewals WHERE job_id=? LIMIT 1', (job_id,)).fetchone():
+                raise Conflict('source transfer already renewed')
+            ranges = self._source_range_ledger(db, job_id, generation)
+            if ranges['usage'] is not None or ranges['totals'] != [0, 0, 0] or ranges['objects']:
+                raise Conflict('source transfer already began')
+        stored = db.execute('SELECT digest FROM reference_transfer_grants WHERE job_id=?', (job_id,)).fetchone()
+        if stored is not None:
+            return self._source_fetch_closure(db, job_id)
+        self._source_custody_open(db, row, job_id)
+        transfer = json.loads(row['transfer_json'])
+        if datetime.fromisoformat(transfer['expiresAt'].replace('Z', '+00:00')).timestamp() <= clock():
+            raise Conflict('source reservation expired')
+        objects = {item['id']: item for name in ('source_manifest_json', 'derived_manifest_json')
+                   for item in json.loads(row[name])['objects']}
+        receipts = [dict(item) for item in db.execute('''SELECT generation,object_id,byte_size,sha256,mount_id,
+            storage_key,receipt_json FROM reference_source_object_receipts WHERE job_id=? ORDER BY object_id''', (job_id,))]
+        if {item['object_id'] for item in receipts} != set(objects) or len(receipts) != len(objects):
+            raise Conflict('source custody closure changed')
+        for receipt in receipts:
+            item, body = objects[receipt['object_id']], json.loads(receipt['receipt_json'])
+            if ((receipt['generation'], receipt['byte_size'], receipt['sha256']) != (generation, item['byteSize'], item['sha256'])
+                    or (body.get('jobId'), body.get('generation'), body.get('objectId'), body.get('sha256')) !=
+                       (job_id, generation, item['id'], item['sha256'])):
+                raise Conflict('source custody binding changed')
+        return {'closureSha256': protocol.digest(dict(transfer=row['transfer_json'], grant=None,
+                    source=row['source_manifest_sha'], derived=row['derived_manifest_sha'],
+                    retention=[row['source_receipt_sha'], row['derived_receipt_sha']], receipts=receipts)),
+                'grantSha256': None, 'predecessorGrantSha256': None, 'renewalSequence': 0, 'renewalPending': False,
+                'requestsAdmitted': 0, 'bytesAdmitted': 0, 'attemptsAdmitted': 0, 'objectCount': len(objects)}
+
     def _source_fetch_closure(self, db, job_id):
         """The exact persisted transfer a restarted coordinator may resume, or Conflict.
 
@@ -350,13 +401,7 @@ class ReferenceSourceIntakeMethods:
         from .source_range_transfer import MAX_RENEWAL_SEQUENCE, validate_source_grant
         row = self._row(db, job_id)
         generation = row['generation']
-        self._source_reader_unfenced(db, job_id, generation)
-        if (db.execute("SELECT 1 FROM sqlite_master WHERE name='source_releases'").fetchone()
-                and db.execute('SELECT 1 FROM source_releases WHERE job_id=? LIMIT 1', (job_id,)).fetchone()):
-            raise Conflict('source release recorded')
-        if (row['source_state'], row['derived_state']) != ('accepted', 'accepted'):
-            raise Conflict('source custody not accepted')
-        self._source_retention_bound(row, job_id)
+        self._source_custody_open(db, row, job_id)
         stored = db.execute('SELECT grant_json,digest FROM reference_transfer_grants WHERE job_id=?', (job_id,)).fetchone()
         if stored is None:
             raise Conflict('source grant unavailable')

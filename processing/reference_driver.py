@@ -45,8 +45,13 @@ PREFIX = '/ltds/worker/v1'
 SOURCE_RECOVERY_ATTEMPTS = 8
 # Worker stage -> coordinator phases it can resume from. Any other pairing means
 # the worker is ahead of the coordinator, whose history was lost, so it stays held.
-SOURCE_RECOVERY_PHASES = {'fetching_pending': ('fetching',), 'fetching': ('fetching',),
+SOURCE_RECOVERY_PHASES = {'reservation_pending': ('awaiting_transfer',), 'awaiting_grant': ('awaiting_transfer',),
+    'fetching_pending': ('awaiting_transfer', 'fetching'), 'fetching': ('fetching',),
     'processing_pending': ('fetching', 'processing'), 'execution_pending': ('processing',)}
+# A claim the coordinator holds with no reservation has nothing to bind, so it waits
+# for an operator. Add these to reservation_pending above to change that, along
+# with a coordinator state for a job with no transfer.
+SOURCE_UNRESERVED_PHASES = ('queued', 'waiting_capacity')
 # Consecutive bad engine reads before they are reported; a good read resets both.
 ENGINE_TASK_MISSING_READS = 10
 ENGINE_SUSPECT_SECONDS = 1800
@@ -1245,6 +1250,18 @@ class ReferenceDriver:
             (state['status'], state['heldReason']) == ('held', 'coordinator_restart')
             or (data.get('sourceRecovery') or {}).get('pending') is not None)
 
+    def _source_refused(self, job_id, stage, data):
+        """A control call got 409 with no GET to gate: resume it if a restart held it."""
+        if data['reservation'].get('protocol') != 'source-range-v2':
+            return
+        state = self._claim_state(job_id, data['claim'])
+        if state is None:
+            return
+        if self._restart_recoverable(state, data, stage):
+            self._recover_source_fetch(job_id, stage, data)
+        elif (state['heldReason'], state['executionPhase'] in SOURCE_UNRESERVED_PHASES) == ('coordinator_restart', True):
+            raise DriverHeld('source_recovery_claim_unreserved')
+
     def _source_recovery_journal(self, data):
         from .reference_recovery import ClaimRecoveryService
         journal = data.get('sourceRecovery', {'attempts': 0, 'pending': None})
@@ -1263,7 +1280,7 @@ class ReferenceDriver:
                 raise DriverHeld('source_recovery_journal_invalid') from None
         return journal
 
-    def _source_unstarted_proof(self, job_id, data):
+    def _source_unstarted_proof(self, job_id, data, phase):
         """Local proof that no engine was ever told, or a hold; never an adoption.
 
         Any execution row, in any phase, is a start this path must not judge, and
@@ -1279,11 +1296,16 @@ class ReferenceDriver:
         else:
             raise DriverHeld('source_recovery_execution_exists')
         reservation = data['reservation']['reservationId']
+        fenced = self.ledger.transfer_fenced(reservation)
+        if not fenced and self._lease_lapsed(data):
+            raise DriverHeld('reservation_expired')
         with self.ledger._transaction() as db:
             current = self.ledger._reservation(db, reservation)
             state, allocated = current['state'], current['allocated']
-        if (state != 'reserved' or allocated != data['claim']['submission']['manifest']['totalBytes']
-                or not self.ledger.transfer_fenced(reservation) or self.ledger.result_registered(reservation)):
+        # Before the transfer nothing is fenced or written; after it, all of it is.
+        expected = (False, 0) if phase == 'awaiting_transfer' else (True, data['claim']['submission']['manifest']['totalBytes'])
+        if (state != 'reserved' or (fenced, allocated) != expected or self.ledger.result_registered(reservation)
+                or (phase == 'awaiting_transfer' and data.get('inputPaths'))):
             raise DriverHeld('source_recovery_ledger_changed')
         with NodeGate(self.worker.engine_id) as gate:
             if gate.snapshot()['reservation'] is not None:
@@ -1338,7 +1360,7 @@ class ReferenceDriver:
         running = state['claim']['status'] == 'running' and state['claim']['heldReason'] is None
         phase = state['claim']['executionPhase']
         # Checked before any POST, a replay included: the intent proves nothing now.
-        proof = self._source_unstarted_proof(job_id, data) if phase != 'fetching' and state['eligible'] else None
+        proof = self._source_unstarted_proof(job_id, data, phase) if phase != 'fetching' and state['eligible'] else None
 
         def settle(request):
             status, receipt = self._request('POST', suffix, request, claim_token=token)
@@ -1382,11 +1404,14 @@ class ReferenceDriver:
             raise DriverHeld('reservation_expired')
         if journal['attempts'] >= SOURCE_RECOVERY_ATTEMPTS:
             raise DriverHeld('source_recovery_attempts_exhausted')
-        checked = validate_source_grant(data['grant'], job=claim, clock=self.clock,
-                                        allow_expired=True, past_reservation=True)
-        ranges, committed = self.source_range_client.committed_progress(checked.identity)
+        ranges = committed = 0
+        grant_sha = None
+        if 'grant' in data:
+            checked = validate_source_grant(data['grant'], job=claim, clock=self.clock,
+                                            allow_expired=True, past_reservation=True)
+            ranges, committed = self.source_range_client.committed_progress(checked.identity)
+            grant_sha = p.digest(data['grant'])
         sequence = data.get('sourceRenewalSequence', 0)
-        grant_sha = p.digest(data['grant'])
         evidence = dict(schemaVersion=1, reservationId=reservation, transferFenced=fenced,
             grantSha256=grant_sha, renewalSequence=sequence, committedRanges=ranges, committedBytes=committed,
             inputObjects=len(data.get('inputPaths', {})), **(proof or {}))
@@ -1633,6 +1658,7 @@ class ReferenceDriver:
             self._clear_watch(job_id, 'reservation_pending', data)
             status, public = self._request('POST', suffix + '/reservation', {'claimToken': token, 'transferRequest': request})
             if status == 409:
+                self._source_refused(job_id, 'reservation_pending', data)
                 return {'state': 'reservation_pending', 'jobId': job_id}
             claim.update(public)
             self._save(job_id, 'awaiting_grant', data)
@@ -1640,6 +1666,7 @@ class ReferenceDriver:
         if stage == 'awaiting_grant':
             status, grant = self._request('GET', suffix + '/transfer-grant', claim_token=token)
             if status == 409:
+                self._source_refused(job_id, 'awaiting_grant', data)
                 return {'state': 'awaiting_grant', 'jobId': job_id}
             if (claim.get('transferRequest') or {}).get('protocol') == 'source-range-v2':
                 if self.source_range_client is None:
@@ -1657,12 +1684,7 @@ class ReferenceDriver:
             phase = 'fetching' if stage == 'fetching_pending' else 'processing'
             status, public = self._request('POST', suffix + '/phase', {'claimToken': token, 'phase': phase})
             if status == 409:
-                # A hold with no GET to gate: every object arrived, or the reply to
-                # an earlier /phase was lost and the coordinator is already fetching.
-                if (claim.get('transferRequest') or {}).get('protocol') == 'source-range-v2':
-                    state = self._claim_state(job_id, claim)
-                    if state is not None and self._restart_recoverable(state, data, stage):
-                        self._recover_source_fetch(job_id, stage, data)
+                self._source_refused(job_id, stage, data)
                 return {'state': stage, 'jobId': job_id}
             claim.update(public)
             self._save(job_id, 'fetching' if phase == 'fetching' else 'execution_pending', data)
