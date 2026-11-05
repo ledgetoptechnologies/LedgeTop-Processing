@@ -2,6 +2,7 @@
 import hashlib
 import hmac
 import json
+import secrets
 import time
 import uuid
 from datetime import datetime, timezone
@@ -459,6 +460,14 @@ class ReferenceSourceIntakeMethods:
                         raise Conflict('pipeline source object is no longer retained')
             except (KeyError, TypeError, ValueError):
                 raise Conflict('source transfer grant could not be validated') from None
+            # Rehashing the full source closure can take substantial time on a
+            # large NAS dataset. The initial reservation-expiry check does not
+            # authorize returning a grant that expired during that verification.
+            after_verification = time.time() if clock is None else clock()
+            if isinstance(after_verification, bool) or not isinstance(after_verification, (int, float)):
+                raise Conflict('invalid source grant clock')
+            if expiry <= after_verification:
+                raise Conflict('worker reservation expired during source verification')
             encoded = _json(grant)
             digest = protocol.digest(grant)
             token_sha = hashlib.sha256(grant['token'].encode('ascii')).hexdigest()

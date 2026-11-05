@@ -19,8 +19,10 @@ class ReferenceControlAPI:
             source_spool=source_spool, source_attestation_keys=source_attestation_keys,
             authority_id=authority_id)
         self.worker = ReferenceWorkerAPI(store, DeliveryReceiver(store), bearer_workers=worker_bearers,
-            recovery_bindings=recovery_bindings)
+            recovery_bindings=recovery_bindings, source_spool=source_spool)
 
     def handle(self, method, path, headers, body=b'', *, protected_transport=False):
-        api = self.worker if isinstance(path, str) and path.startswith(WORKER_PREFIX + '/') else self.viewer
+        from .reference_transfer import OBJECT_PREFIX
+        api = self.worker if (isinstance(path, str) and
+            (path.startswith(WORKER_PREFIX + '/') or path.startswith(OBJECT_PREFIX))) else self.viewer
         return api.handle(method, path, headers, body, protected_transport=protected_transport)

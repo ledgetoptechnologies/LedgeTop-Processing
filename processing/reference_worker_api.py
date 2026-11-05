@@ -12,14 +12,39 @@ from types import MappingProxyType
 from . import reference_protocol as protocol
 from .maintenance import Conflict
 from .reference_api import Response
-from .reference_transfer import validate_grant
+from .reference_transfer import OBJECT_PREFIX, TransferError, validate_grant
 
 
 PREFIX = "/ltds/worker/v1"
 
 
+class _SourceBrokerStream:
+    """Small owned reader adapter for the HTTP binary response boundary."""
+    def __init__(self, reader, *, byte_size):
+        self.reader = reader
+        self.byte_size = byte_size
+        self.remaining = byte_size
+        self.closed = False
+
+    def chunks(self):
+        while self.remaining:
+            chunk = self.reader.read(min(64 * 1024, self.remaining))
+            if not isinstance(chunk, bytes) or not chunk or len(chunk) > self.remaining:
+                raise OSError("source stream changed during delivery")
+            self.remaining -= len(chunk)
+            yield chunk
+        if self.reader.read(1):
+            raise OSError("source stream exceeded its receipt")
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            self.reader.close()
+
+
 class ReferenceWorkerAPI:
-    def __init__(self, store, receiver, *, bearer_workers, recovery_bindings=None):
+    def __init__(self, store, receiver, *, bearer_workers, recovery_bindings=None,
+                 source_spool=None):
         if type(bearer_workers) is not dict or not bearer_workers:
             raise ValueError("explicit private worker bearer configuration required")
         workers = {}
@@ -33,6 +58,7 @@ class ReferenceWorkerAPI:
             protocol._slug(identity["worker_instance_id"], "worker instance ID")
             workers[token] = MappingProxyType(dict(identity))
         self.store, self.receiver = store, receiver
+        self.source_spool = source_spool
         from .reference_failure import FailureReceiver
         self.failure_receiver = FailureReceiver(store)
         from .reference_terminal import TerminalService
@@ -84,6 +110,10 @@ class ReferenceWorkerAPI:
         if job["status"] != "running" or job["phase"] != "awaiting_transfer":
             raise Conflict("worker cannot fetch in this execution state")
         grant = self.store.private_transfer_grant(job_id)
+        if grant is None and job.get("sourceIntakeVersion") == 2:
+            if self.source_spool is None:
+                raise Conflict("source broker is unavailable")
+            grant = self.store.mint_source_transfer_grant(job_id, source_spool=self.source_spool)
         if grant is None:
             raise Conflict("transfer grant not ready")
         try:
@@ -95,6 +125,32 @@ class ReferenceWorkerAPI:
         except ValueError:
             raise Conflict("persisted transfer grant is unavailable") from None
         return grant
+
+    def _source_object(self, path, headers):
+        match = re.fullmatch(re.escape(OBJECT_PREFIX) + r"([A-Za-z0-9][A-Za-z0-9_-]{0,127})", path)
+        if match is None or self.source_spool is None:
+            return self._error(404, "not_found")
+        authorization = self._header(headers, "Authorization")
+        if authorization is None or not authorization.startswith("Bearer "):
+            return self._error(401, "source_grant_required")
+        token = authorization[7:]
+        if not token.isascii() or not 32 <= len(token) <= 4096:
+            return self._error(401, "source_grant_required")
+        if self._header(headers, "Range") is not None:
+            return self._error(400, "range_not_supported")
+        try:
+            reader, receipt = self.store.source_object_for_grant(token, match[1],
+                source_spool=self.source_spool)
+            from .reference_binary import BinaryResponse
+            stream = _SourceBrokerStream(reader, byte_size=receipt["byteSize"])
+            return BinaryResponse(stream=stream, status=200, headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(receipt["byteSize"]),
+                "Cache-Control": "no-store"})
+        except (Conflict, TransferError):
+            return self._error(409, "source_grant_unavailable")
+        except Exception:
+            return self._error(503, "source_storage_unavailable")
 
     def _next(self, identity):
         job = self.store.next_for_node(identity['node_id'])
@@ -125,6 +181,10 @@ class ReferenceWorkerAPI:
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
         if protected_transport is not True:
             return self._error(503, "protected_transport_required")
+        if isinstance(path, str) and path.startswith(OBJECT_PREFIX):
+            if method != "GET" or body:
+                return self._error(405, "method_not_allowed")
+            return self._source_object(path, headers)
         identity = self._authenticate(headers)
         if identity is None:
             return self._error(401, "unauthorized")

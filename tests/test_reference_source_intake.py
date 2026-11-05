@@ -3,10 +3,14 @@ import base64
 import hashlib
 import json
 import io
+import http.client
 import os
 from pathlib import Path
+import ssl
 import tempfile
 import unittest
+import threading
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from processing import reference_protocol as p
@@ -15,6 +19,8 @@ from processing.reference_source_intake_canonical import pipeline_digest
 from processing.reference_source_intake import validate_source_intake
 from processing.prototype import Queue
 from processing.reference_api import ReferenceAPI
+from processing.reference_control import ReferenceControlAPI
+from processing.reference_http import create_reference_http_server
 from processing.reference_store import PROFILE, ReferenceStore
 from processing.source_spool import SourceSpool
 from processing.maintenance import Conflict
@@ -337,6 +343,132 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                     if queue is not None:queue.close()
             finally:
                 self.mount_patch.stop()
+
+
+    def test_source_broker_grant_download_is_claim_scoped_and_receipt_verified(self):
+        from processing.reference_transfer import OBJECT_PREFIX
+        worker_token="synthetic-worker-token-012345"
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/"spool";root.mkdir(mode=0o700)
+            marker=root/".ltds-source-spool-id";marker.write_text("a"*64,encoding="ascii")
+            if os.name!="nt":marker.chmod(0o600)
+            mount_patch=patch("processing.source_spool.os.path.ismount",return_value=True);mount_patch.start()
+            try:
+                spool=SourceSpool(root,mount_id="a"*64,safety_floor_bytes=0,max_object_bytes=1024,chunk_bytes=3)
+                queue=Queue(directory);queue.allowed_profiles.add(PROFILE)
+                try:
+                    self.authority_id=queue.authority_id
+                    self.payload["pipeline"]["odm"]["options"]={"numeric-probe":1e-7}
+                    store=ReferenceStore(queue)
+                    control=ReferenceControlAPI(store,viewer_bearers={"synthetic-staging-token":"staging"},
+                        worker_bearers={worker_token:dict(node_id="cluster",worker_id="worker",
+                            worker_instance_id="instance")},capability_fingerprint="a"*64,
+                        options_fingerprint=self.payload["pipeline"]["odm"]["optionsFingerprint"],
+                        allowed_odm_options={"numeric-probe"},source_spool=spool,
+                        source_attestation_keys=self.trusted_keys,authority_id=queue.authority_id)
+                    signed=self.validate(allowed_odm_options={"numeric-probe"})
+                    request=copy.deepcopy(self.payload);request["sourceAttestation"]=signed["sourceAttestation"]
+                    viewer_headers={"Authorization":"Bearer synthetic-staging-token"}
+                    posted=control.handle("POST","/ltds/v2/jobs",viewer_headers,p.canonical_json(request),
+                        protected_transport=True)
+                    self.assertEqual(posted.status,201,posted.body);job=posted.body
+                    bodies={IMAGE_ID:b"abc",GCP_ID:b"id,lat,lon\n1,2,3\n","gcp_"+ATTEMPT:b"1,2,3\n"}
+                    all_objects=self.payload["sourceManifest"]["objects"]+self.payload["derivedManifest"]["objects"]
+                    for object_id,body in bodies.items():
+                        item=next(value for value in all_objects if value["id"]==object_id)
+                        received=control.viewer.stream_source_object(
+                            f"/ltds/v2/jobs/{job['jobId']}/source/{object_id}?generation=1",
+                            {**viewer_headers,"Content-SHA256":item["sha256"]},io.BytesIO(body),len(body),
+                            protected_transport=True)
+                        self.assertEqual(received.status,201,received.body)
+                    completion={"generation":1,"sourceManifestSha256":self.payload["sourceManifest"]["sha256"],
+                        "derivedManifestSha256":self.payload["derivedManifest"]["sha256"],
+                        "pipelineManifestSha256":self.payload["manifest"]["sha256"]}
+                    completed=control.handle("POST",f"/ltds/v2/jobs/{job['jobId']}/source/complete",
+                        viewer_headers,p.canonical_json(completion),protected_transport=True)
+                    self.assertEqual(completed.status,201,completed.body)
+                    claim=control.handle("POST","/ltds/worker/v1/claim",{"Authorization":"Bearer "+worker_token},
+                        p.canonical_json({"jobId":job["jobId"],"claimRequestId":"source-claim-1"}),
+                        protected_transport=True)
+                    self.assertEqual(claim.status,200,claim.body)
+                    claim_token=claim.body["claimToken"]
+                    expires=(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat(timespec="milliseconds").replace("+00:00","Z")
+                    reservation={"reservationId":"source-reservation-1","generation":claim.body["generation"],
+                        "expiresAt":expires,"manifestSha256":job["manifestSha256"],
+                        "byteBudget":self.payload["manifest"]["totalBytes"],"nonce":"source-nonce-1"}
+                    reserved=control.handle("POST",f"/ltds/worker/v1/jobs/{job['jobId']}/reservation",
+                        {"Authorization":"Bearer "+worker_token},p.canonical_json({"claimToken":claim_token,
+                            "transferRequest":reservation}),protected_transport=True)
+                    self.assertEqual(reserved.status,200,reserved.body)
+                    expiry_time=datetime.fromisoformat(expires.replace("Z","+00:00")).timestamp()
+                    grant_clock=iter([datetime.now(timezone.utc).timestamp(),expiry_time+1])
+                    with self.assertRaisesRegex(Conflict,"expired during source verification"):
+                        store.mint_source_transfer_grant(job["jobId"],source_spool=spool,
+                            clock=lambda:next(grant_clock))
+                    self.assertIsNone(store.private_transfer_grant(job["jobId"]))
+                    granted=control.handle("GET",f"/ltds/worker/v1/jobs/{job['jobId']}/transfer-grant",
+                        {"Authorization":"Bearer "+worker_token,"X-Claim-Token":claim_token},
+                        protected_transport=True)
+                    self.assertEqual(granted.status,200,granted.body)
+                    grant=granted.body
+                    self.assertEqual(set(grant["objectIds"]),{IMAGE_ID,"gcp_"+ATTEMPT})
+                    phase=control.handle("POST",f"/ltds/worker/v1/jobs/{job['jobId']}/phase",
+                        {"Authorization":"Bearer "+worker_token},p.canonical_json({"claimToken":claim_token,
+                            "phase":"fetching"}),protected_transport=True)
+                    self.assertEqual(phase.status,200,phase.body)
+                    from cryptography import x509
+                    from cryptography.hazmat.primitives import hashes,serialization
+                    from cryptography.hazmat.primitives.asymmetric import rsa
+                    from cryptography.x509.oid import NameOID
+                    import ipaddress
+                    tls_key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+                    subject=x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,"127.0.0.1")])
+                    now=datetime.now(timezone.utc).replace(tzinfo=None)
+                    certificate=(x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
+                        .public_key(tls_key.public_key()).serial_number(x509.random_serial_number())
+                        .not_valid_before(now-timedelta(minutes=1)).not_valid_after(now+timedelta(minutes=10))
+                        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                            critical=False).sign(tls_key,hashes.SHA256()))
+                    cert_path=Path(directory)/"broker-cert.pem";key_path=Path(directory)/"broker-key.pem"
+                    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+                    key_path.write_bytes(tls_key.private_bytes(serialization.Encoding.PEM,
+                        serialization.PrivateFormat.TraditionalOpenSSL,serialization.NoEncryption()))
+                    server_tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);server_tls.load_cert_chain(cert_path,key_path)
+                    client_tls=ssl.create_default_context(cafile=str(cert_path))
+                    server=create_reference_http_server(control,ssl_context=server_tls,request_timeout=2)
+                    thread=threading.Thread(target=server.serve_forever,kwargs={"poll_interval":0.02},daemon=True)
+                    thread.start()
+                    try:
+                        def get(path,token):
+                            connection=http.client.HTTPSConnection(*server.server_address,timeout=3,context=client_tls)
+                            connection.request("GET",path,headers={"Authorization":"Bearer "+token,
+                                "Accept-Encoding":"identity"})
+                            response=connection.getresponse();data=response.read();status=response.status
+                            headers=dict(response.getheaders());connection.close()
+                            return status,data,headers
+                        status,data,headers=get(OBJECT_PREFIX+IMAGE_ID,grant["token"])
+                        self.assertEqual((status,data),(200,b"abc"))
+                        self.assertEqual(headers["Content-Length"],"3")
+                        self.assertEqual(headers["Content-Type"],"application/octet-stream")
+                        from processing.reference_transfer import BrokerClient,validate_grant
+                        private_job=store.get(job["jobId"],private=True)
+                        verified_grant=validate_grant(grant,job=private_job)
+                        worker_scratch=Path(directory)/"worker-scratch";worker_scratch.mkdir(mode=0o700)
+                        downloaded=BrokerClient(f"https://127.0.0.1:{server.server_address[1]}",
+                            ssl_context=client_tls).download_object(verified_grant,IMAGE_ID,
+                                worker_scratch/"image.input")
+                        self.assertEqual(downloaded.read_bytes(),b"abc")
+                        self.assertEqual(get(OBJECT_PREFIX+IMAGE_ID,"x"*48)[0],409)
+                        self.assertEqual(get(OBJECT_PREFIX+GCP_ID,grant["token"])[0],409)
+                        expired=datetime.fromisoformat(grant["expiresAt"].replace("Z","+00:00")).timestamp()+1
+                        with patch("processing.reference_source_intake_store.time.time",return_value=expired):
+                            self.assertEqual(get(OBJECT_PREFIX+IMAGE_ID,grant["token"])[0],409)
+                    finally:
+                        server.shutdown();server.server_close();thread.join(2)
+                finally:
+                    queue.close()
+            finally:
+                mount_patch.stop()
 
 
 if __name__ == "__main__":
