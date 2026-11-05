@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from . import reference_protocol as p
 from .node_gate import NodeGate, GateError
+from .scratch_policy import LeaseLapsed
 from .engine_ingress_guard import local_engine_identity
 from . import reference_native_archive as native_archive
 
@@ -256,6 +257,11 @@ class ReferenceEngineWorker:
         if source_binding is not None:
             identity['sourceAcceptanceBinding'] = source_binding
         encoded = p.canonical_json(identity).decode()
+        try:
+            # Nothing below may commit for a lease that set_engine_state would refuse.
+            self.ledger.claim_engine_lease(reservation_id)
+        except LeaseLapsed:
+            raise WorkerHeld('reservation_expired') from None
         with NodeGate(self.engine_id) as gate:
             with self._db() as db:
                 old = db.execute('SELECT * FROM executions WHERE job=?', (job['jobId'],)).fetchone()

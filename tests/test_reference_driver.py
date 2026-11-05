@@ -21,7 +21,7 @@ from processing.node_gate import NodeGate
 from processing.prototype import Queue
 from processing.reference_control import ReferenceControlAPI
 from processing.reference_driver import ReferenceDriver, DriverHeld, DriverWait
-from processing.reference_engine_worker import ReferenceEngineWorker
+from processing.reference_engine_worker import ReferenceEngineWorker, WorkerHeld
 from processing.reference_failure import FailureOutbox
 from processing.reference_protocol import manifest_sha256, validate_submission
 from processing.reference_store import ReferenceStore
@@ -346,7 +346,7 @@ class ReferenceDriverTests(unittest.TestCase):
             return self.download(grant, object_id, destination)
         with patch.object(self.broker, 'download_object', side_effect=download):
             self.advance(job, 'processing_pending')
-        self.assertEqual(events, ['fence', 'byte', 'fence', 'byte'])
+        self.assertEqual(events[:4], ['fence', 'byte', 'fence', 'byte'])
 
     def test_source_range_fetch_fences_before_any_byte(self):
         self.driver = self.make_driver(source_range_v2_enabled=True,
@@ -359,32 +359,182 @@ class ReferenceDriverTests(unittest.TestCase):
             return Path(destination)
         with patch.object(self.driver.source_range_client, 'download_object', side_effect=download):
             self.advance(job, 'processing_pending')
-        self.assertEqual(events, ['fence', 'byte', 'fence', 'byte'])
+        self.assertEqual(events[:4], ['fence', 'byte', 'fence', 'byte'])
+
+    def data(self, job):
+        with self.driver._db() as db:
+            row = db.execute('SELECT stage,data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+        return row[0], json.loads(row[1])
+
+    def lease(self, job):
+        with self.ledger._transaction() as db:
+            return dict(self.ledger._reservation(db, self.data(job)[1]['reservation']['reservationId']))
+
+    def past_lease(self):
+        self.ledger.clock = lambda: time.time() + 10**6
+
+    def end_job(self, job):
+        self.queue.operator(job['jobId'], 'hold', dict(note='synthetic'))
+        self.queue.operator(job['jobId'], 'resolve', dict(note='synthetic', workerStopped=True))
+
+    def assert_unstarted_terminal(self, job, reason, result):
+        self.assertEqual(result, {'state': 'unstarted_terminal', 'jobId': job['jobId'], 'reason': reason})
+        stage, data = self.data(job)
+        self.assertEqual(stage, 'completed')
+        self.assertEqual(data['unstartedOutcome']['reason'], reason)
+        self.assertEqual(data['unstartedOutcome']['terminalStatus'], self.store.get(job['jobId'], private=True)['status'])
+        self.assertEqual(self.lease(job)['remaining'], 0)
 
     def assert_expired_lease_writes_nothing(self, job, client):
         self.advance(job, 'fetching')
-        with self.driver._db() as db:
-            reservation = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])['reservation']['reservationId']
-        self.ledger.clock = lambda: time.time() + 10**6
+        reservation = self.data(job)[1]['reservation']['reservationId']
+        self.past_lease()
         with patch.object(client, 'download_object') as download:
-            result = self.driver.step()
-        self.assertEqual(result, {'state': 'retry_wait', 'reason': 'driver_step_unavailable'})
+            results = [self.driver.step(), self.driver.step()]
+            self.assertEqual(results, [{'state': 'held', 'reason': 'reservation_expired'}] * 2)
+            stage, data = self.data(job)
+            self.assertEqual((stage, data['unstartedHold']), ('fetching', 'reservation_expired'))
+            self.assertNotIn('fetchAttempts', data)
+            self.assertEqual(list((self.scratch / 'jobs' / reservation).iterdir()), [])
+            self.assertEqual(self.lease(job)['state'], 'expired')
+            self.end_job(job)
+            self.assert_unstarted_terminal(job, 'reservation_expired', self.driver.step())
         download.assert_not_called()
-        with self.driver._db() as db:
-            row = db.execute('SELECT stage,data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
-        self.assertEqual(row[0], 'fetching')
-        self.assertNotIn('fetchAttempts', json.loads(row[1]))
-        self.assertEqual(list((self.scratch / 'jobs' / reservation).iterdir()), [])
-        with self.ledger._transaction() as db:
-            self.assertEqual(self.ledger._reservation(db, reservation)['state'], 'expired')
+        self.assertEqual(self.lease(job)['state'], 'expired')
+        second = self.submit(contents=(b'next-photo',))
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        self.assertEqual(self.store.get(second['jobId'], private=True)['status'], 'queued')
 
-    def test_whole_object_lease_expired_before_first_byte_writes_nothing_and_retries(self):
+    def test_whole_object_lease_expired_before_first_byte_is_a_named_durable_hold(self):
         self.assert_expired_lease_writes_nothing(self.submit(contents=(b'unwritten-photo',)), self.broker)
 
-    def test_source_range_lease_expired_before_first_byte_writes_nothing_and_retries(self):
+    def test_source_range_lease_expired_before_first_byte_is_a_named_durable_hold(self):
         self.driver = self.make_driver(source_range_v2_enabled=True,
             state_path=self.root / 'driver-source-range-expired.sqlite')
         self.assert_expired_lease_writes_nothing(self.submit(contents=(b'unwritten-photo',)), self.driver.source_range_client)
+
+    def assert_started_past_lease(self, job):
+        self.assertEqual(self.data(job)[0], 'executing')
+        row = self.lease(job)
+        self.assertEqual(row['state'], 'engine_started')
+        self.assertGreater(row['allocated'], 0)
+        self.assertIn(('initialize', job['jobId']), self.transport.calls)
+        with NodeGate('engine') as gate:
+            self.assertEqual(gate.snapshot()['reservation']['job']['id'], job['jobId'])
+
+    def test_actual_whole_object_transfer_longer_than_lease_starts_its_engine(self):
+        job = self.submit(contents=(b'first-photo', b'second-photo'))
+        self.advance(job, 'fetching')
+        def slow(grant, object_id, destination):
+            self.past_lease()
+            return self.download(grant, object_id, destination)
+        with patch.object(self.broker, 'download_object', side_effect=slow):
+            self.advance(job, 'executing')
+        self.assert_started_past_lease(job)
+
+    def test_actual_source_range_transfer_longer_than_lease_starts_its_engine(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-long.sqlite')
+        job = self.submit(contents=(b'v2-first-photo', b'v2-second-photo'))
+        self.advance(job, 'fetching')
+        def slow(*, grant, object_id, destination, grant_provider=None):
+            self.past_lease()
+            Path(destination).write_bytes(self.contents[object_id])
+            return Path(destination)
+        with patch.object(self.driver.source_range_client, 'download_object', side_effect=slow):
+            self.advance(job, 'executing')
+        self.assert_started_past_lease(job)
+
+    def test_lease_lapsing_between_transfer_and_prepare_still_commits_and_starts(self):
+        job = self.submit()
+        self.advance(job, 'execution_pending')
+        self.past_lease()
+        self.advance(job, 'executing')
+        self.assert_started_past_lease(job)
+        with self.worker._db() as db:
+            self.assertNotEqual(db.execute('SELECT phase FROM executions WHERE job=?', (job['jobId'],)).fetchone()[0], 'prepared')
+
+    def test_unfenced_lapsed_lease_refuses_before_gate_and_prepared_commit(self):
+        job = self.submit()
+        with patch.object(self.ledger, 'begin_transfer'):
+            self.advance(job, 'execution_pending')
+        self.past_lease()
+        data = self.data(job)[1]
+        with self.assertRaisesRegex(WorkerHeld, 'reservation_expired'):
+            self.worker.start(data['claim'], reservation_id=data['reservation']['reservationId'], input_paths=data['inputPaths'])
+        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'reservation_expired'})
+        with NodeGate('engine') as gate:
+            self.assertIsNone(gate.snapshot()['reservation'])
+        with self.worker._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM executions').fetchone()[0], 0)
+        self.assertNotIn(('initialize', job['jobId']), self.transport.calls)
+
+    def test_crash_after_prepared_keeps_capacity_then_ends_on_the_coordinator_word(self):
+        job = self.submit()
+        self.advance(job, 'execution_pending')
+        self.past_lease()
+        with patch.object(self.ledger, 'set_engine_state', side_effect=OSError('synthetic crash')):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        with self.worker._db() as db:
+            self.assertEqual(db.execute('SELECT phase FROM executions WHERE job=?', (job['jobId'],)).fetchone()[0], 'prepared')
+        results = [self.driver.step(), self.driver.step()]
+        self.assertEqual(results[-1], {'state': 'held', 'reason': 'engine_reconciliation_required'})
+        kept = self.lease(job)
+        self.assertEqual(kept['state'], 'reserved')
+        self.assertGreater(kept['remaining'], 0)
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId'])['state'], 'held')
+        self.assertEqual(self.lease(job), kept)
+        self.end_job(job)
+        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+        self.assertNotIn(('initialize', job['jobId']), self.transport.calls)
+        with NodeGate('engine') as gate:
+            self.assertEqual(gate.snapshot()['reservation']['job']['id'], job['jobId'])
+
+    def test_fetch_budget_exhaustion_keeps_fence_until_job_ends_then_frees_the_node(self):
+        job = self.submit(contents=(b'never-arrives',))
+        self.advance(job, 'fetching')
+        with patch.object(self.broker, 'download_object', side_effect=OSError('synthetic')):
+            for _ in range(3):
+                self.assertEqual(self.driver.step()['state'], 'retry_wait')
+            self.past_lease()
+            self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'worker_fetch_attempt_budget_exhausted'})
+            kept = self.lease(job)
+            self.assertEqual((kept['state'], kept['allocated']), ('reserved', 0))
+            self.assertGreater(kept['remaining'], 0)
+            self.assertEqual(self.data(job)[1]['unstartedHold'], 'worker_fetch_attempt_budget_exhausted')
+            self.end_job(job)
+            self.assert_unstarted_terminal(job, 'worker_fetch_attempt_budget_exhausted', self.driver.step())
+        self.assertEqual(self.lease(job)['state'], 'terminal')
+
+    def test_operator_ends_a_claim_cancelled_between_transfer_and_start(self):
+        job = self.submit()
+        self.advance(job, 'processing_pending')
+        self.past_lease()
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']),
+            {'state': 'held', 'reason': 'unstarted_claim_requires_reconciliation'})
+        self.assertEqual(self.lease(job)['state'], 'reserved')
+        self.end_job(job)
+        self.assertEqual(self.driver.step()['state'], 'processing_pending')
+        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+
+    def test_reconciliation_never_touches_a_started_engine_or_runs_beside_a_step(self):
+        job = self.submit()
+        self.advance(job, 'executing')
+        before = self.lease(job)
+        self.end_job(job)
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'held', 'reason': 'engine_reconciliation_required'})
+        self.assertEqual(self.lease(job), before)
+        self.assertEqual(self.data(job)[0], 'executing')
+        self.assertEqual(self.driver.reconcile_unstarted('unknown'), {'state': 'held', 'reason': 'unstarted_reconciliation_unavailable'})
+        with self.driver._lock:
+            self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'busy'})
+
+    def test_a_completed_row_never_leaves_a_fence_behind(self):
+        job = self.submit()
+        self.advance(job, 'processing_pending')
+        stage, data = self.data(job)
+        self.driver._save(job['jobId'], 'completed', data)
+        self.assertEqual((self.lease(job)['state'], self.lease(job)['remaining']), ('terminal', 0))
 
     def test_expired_source_grant_is_durably_renewed_and_ack_replays_without_new_grant(self):
         from processing.source_range_transfer import SourceRenewalUnavailable
