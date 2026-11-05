@@ -449,6 +449,49 @@ class ReferenceDriverTests(unittest.TestCase):
             self.advance(job, 'executing')
         self.assert_started_past_lease(job)
 
+    def test_source_grant_renewed_past_its_lease_starts_on_the_fenced_reservation(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-renewed-start.sqlite')
+        client = self.driver.source_range_client
+        job = self.submit(contents=(b'renewed-first-photo', b'renewed-second-photo'))
+        self.advance(job, 'fetching')
+        grants, renewals, acknowledgements = [], [], []
+
+        def elapse():
+            # The scratch lease, the grant and the reservation all pass, and
+            # the worker's own clock with them, while the first object arrives.
+            self.past_lease()
+            self.driver.clock = client.clock = lambda: time.time() + 10**6
+
+        def slow(*, grant, object_id, destination, grant_provider=None):
+            grants.append(grant.token)
+            if len(grants) == 1:
+                elapse()
+            Path(destination).write_bytes(self.contents[object_id])
+            return Path(destination)
+
+        def renew(request):
+            renewals.append(request)
+            expiry = datetime.fromtimestamp(self.driver.clock() + 3600, timezone.utc)
+            return 200, {'protocol': 'source-range-v2-renewal', 'renewalId': request['renewalId'],
+                'sequence': request['sequence'], 'previousGrantSha256': request['previousGrantSha256'],
+                'grant': dict(request['previousGrant'], token='renewed-past-lease',
+                    expiresAt=expiry.isoformat(timespec='milliseconds').replace('+00:00', 'Z'))}
+
+        def acknowledge(request):
+            acknowledgements.append(request)
+            return 200, {'protocol': 'source-range-v2-renewal-ack', 'renewalId': request['renewalId'],
+                'sequence': request['sequence'], 'grantSha256': request['grantSha256']}
+
+        with patch.object(client, 'download_object', side_effect=slow), \
+             patch.object(client, 'renew_grant', side_effect=renew), \
+             patch.object(client, 'acknowledge_grant_renewal', side_effect=acknowledge):
+            self.advance(job, 'executing')
+        self.assertEqual(grants[1], 'renewed-past-lease')
+        self.assertEqual((len(renewals), len(acknowledgements)), (1, 1))
+        self.assertEqual(self.data(job)[1]['sourceRenewalSequence'], 1)
+        self.assert_started_past_lease(job)
+
     def test_lease_lapsing_between_transfer_and_prepare_still_commits_and_starts(self):
         job = self.submit()
         self.advance(job, 'execution_pending')
