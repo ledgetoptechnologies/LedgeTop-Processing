@@ -6,13 +6,59 @@ approval. Runtime acceptance remains incomplete.
 
 ## Latest combined and native-host preparation checkpoint
 
+Processing `18e37ac` passed **126/126 focused Linux integration tests, no skips**,
+in 68.948 seconds across ten modules. This includes actual Viewer whole/range
+photo and GCP intake/result roundtrips and controlled conversion/publication,
+source operation/read/intake/spool tests, generic node inventory/caps/runtime and
+the closed release-contract vectors. Thus the new source-operation and inventory
+patches are paired with actual Viewer code; this is not a repeat of the complete
+582-test selection. The same frozen Viewer/old synthetic-only converter and
+simulated photogrammetry boundaries apply. The one-CPU/2 GiB container and owned
+temporary volume were removed.
+
+Ordinary inventory now has configured per-node photo caps, generic ordered IDs
+and append-only physical/worker binding history. Removed/rebound nodes with
+unclosed execution/result/maintenance/reader ownership are refused. Retained
+inventory revisions are quota-accounted. Isolated qualification passed 85/85
+Linux tests. This does not qualify arbitrary-host provisioning or live multi-PC
+acceptance. Claude is separately porting the revised staging eligibility rule;
+the current global production/staging barrier is not claimed compliant.
+
 Source `8f64e18` adds shared upload/receipt/completion/audit operation pins,
 audit exclusion, stable hash identity, uncertain descriptor-close retention and
 correct capacity/mount/conflict HTTP responses. Its isolated predecessor passed
 53/53 Linux tests; the final additive activity index has schema smoke evidence.
-The integrated full pipeline has **not yet been rerun** with this patch. Source
+The focused paired selection above now covers this patch; the complete
+582-test selection has not yet been repeated with it. Source
 release/deletion, the approved verified-ready plus 24-hour timer and Viewer hold
 retirement remain unimplemented; no source bytes are deleted by these pins.
+
+The release contract and positive/13 signed negative vectors are reviewable in
+`contracts/source-release-v1.md` and its fixture. The Python validator's two tests
+passed and Viewer owner confirmed the exact ready-proof wire. Actual server-owned
+physical output-inventory proof, release backend, durable 24-hour timing and Viewer
+hold retirement remain under implementation. Contract agreement is not deletion
+authority or a ready-status event substitute.
+
+## Fresh installed metadata checkpoint (November 5)
+
+A read-only cluster Docker inspection reports container
+`525ca6e24ad3b9e57e2a3be36567471c10745a4aaa8ebc03c7f2d2f215dfb977`, image
+`sha256:7fae9385fb5ca829783fe05eef2fdb1983abf4d491b2b9f795e55b617a5a0004`,
+revision label `693cb7eca32295da959a4f42399f317577ef8a8a`, running under the
+existing prototype container name. Labels are metadata, not independent binary
+source attestation. Historical e2ccf48 installation records are not the current
+container identity. The default private `reference-worker.json` path is absent
+on both PCs; this does not establish absence of every inactive candidate config.
+No activation was performed in this check.
+
+The historical coordinator updater is pinned to older pilot identities and a
+12-terminal-job census. Its closed table/path/budget rules do not support the
+current V2 journals. Current-V2 census compatibility and an admission/mutation/I/O
+freeze are being implemented separately; node drains alone cannot guarantee a
+stable checkpoint while Viewer uploads continue. Unknown schemas remain refused.
+
+## Earlier qualification checkpoints
 
 Processing `3cfcf46` passed **582/582 selected Linux tests, no skips**, in
 193.601 seconds across 36 modules. This repeats the complete 542-test scope with
