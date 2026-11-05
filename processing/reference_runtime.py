@@ -609,12 +609,12 @@ class ReferenceRuntime:
         self._source_release_stop.clear()
         if self._source_timer_thread is None or not self._source_timer_thread.is_alive():
             self._source_timer_thread=threading.Thread(target=self._source_timer_loop,
-                name='processing-source-retention-clock',daemon=True)
+                name='processing-source-retention-clock',daemon=False)
             self._source_timer_thread.start()
         if self._source_release_thread is not None and self._source_release_thread.is_alive():
             return
         self._source_release_thread=threading.Thread(target=self._source_release_loop,
-            name='processing-source-release',daemon=True)
+            name='processing-source-release',daemon=False)
         self._source_release_thread.start()
 
     def _source_release_loop(self):
@@ -628,6 +628,17 @@ class ReferenceRuntime:
             self._source_release.checkpoint_timers()
             if self._source_release_stop.wait(30):
                 return
+
+    def drain_source_release(self):
+        """Actual service shutdown cannot abandon its source I/O authority.
+
+        The ordinary close remains bounded/refusable for an operator who can
+        cancel maintenance. Once the owning service exits, it must instead stay
+        alive until these same threads join, keeping Queue and source leases.
+        """
+        self._source_release_stop.set()
+        for thread in (self._source_timer_thread,self._source_release_thread):
+            if thread is not None:thread.join()
 
     def close(self):
         # Do not stop HTTP/delivery first: an unresponsive NAS operation still

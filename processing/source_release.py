@@ -623,6 +623,11 @@ class SourceReleaseService:
                     effect_id=str(uuid.uuid4())
                     if self.stop_requested() or self.store.queue._coordinator_freeze.status()['phase']!='open':raise ReleaseStopped()
                     with readers._db() as db:
+                        # The admitted batch token may finish existing work
+                        # during drain, but cannot authorize a NEW effect after
+                        # maintenance intent. Linearize this check and intent
+                        # write in the same BEGIN IMMEDIATE transaction.
+                        if self.store.queue._coordinator_freeze._row(db)['phase']!='open':raise ReleaseStopped()
                         authorize(db)
                         current=db.execute('SELECT phase,physical_json FROM source_release_objects WHERE release_id=? AND object_kind=? AND object_id=?',
                             (auth['releaseId'],item['object_kind'],item['object_id'])).fetchone()

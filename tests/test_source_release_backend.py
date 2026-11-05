@@ -75,6 +75,47 @@ def crash_release(directory,boundary):
     raise AssertionError('synthetic crash boundary was not reached')
 
 
+def stopped_service_release(directory):
+    """Real service/SIGTERM lifecycle; only its NAS rename is synthetic-blocked."""
+    import signal
+    from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
+    from types import SimpleNamespace
+    from processing.app import CoordinatorService
+    from processing.source_release_filesystem import SourceReleaseFilesystem
+    temporary=SimpleNamespace(name=directory,cleanup=lambda:None)
+    with patch('tests.test_reference_acceptance_observed.tempfile.TemporaryDirectory',return_value=temporary):
+        case=SourceReleaseBackendTests('runTest');case.setUp()
+    case.ready_for_physical_phase()
+    with case.queue._db() as db:db.execute('UPDATE source_releases SET clock_ns=?',(time.monotonic_ns(),))
+    runtime,_=case._runtime();stop=threading.Event();root=Path(directory)
+    signal.signal(signal.SIGTERM,lambda *_:stop.set())
+    class Handler(BaseHTTPRequestHandler):
+        viewer_service=None
+        reference_listener=runtime
+        prototype_queue=case.queue
+    native=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    original=SourceReleaseFilesystem._rename_owned
+    def blocked(instance,*args):
+        (root/'blocked.json').write_bytes(p.canonical_json(dict(
+            mainLease=str(case.queue._lock.name),sourceLease=str(case.store.source_readers().lock_path))))
+        while not (root/'allow-rename').exists():time.sleep(0.01)
+        return original(instance,*args)
+    drain=runtime.drain_source_release
+    def draining():
+        (root/'draining').write_text('source shutdown barrier')
+        drain()
+    runtime.drain_source_release=draining
+    with patch.object(SourceReleaseFilesystem,'_rename_owned',autospec=True,side_effect=blocked):
+        outcome=CoordinatorService(native,Handler).run(stop)
+    if outcome!=0:raise AssertionError('actual service failed clean shutdown')
+    if runtime._source_release_thread is not None or runtime._source_timer_thread is not None:
+        raise AssertionError('source threads were not joined')
+    if not case.queue._lock.closed or not runtime._source_readers._closed:
+        raise AssertionError('original leases not closed after drain')
+    case.tearDown();case.doCleanups()
+    (root/'clean-exit').write_text('joined and released')
+
+
 @unittest.skipUnless(sys.platform.startswith('linux'),'real Linux nofollow/noreplace/process lease')
 class SourceReleaseBackendTests(unittest.TestCase):
     def setUp(self):
@@ -309,6 +350,63 @@ class SourceReleaseBackendTests(unittest.TestCase):
         change('resume',healthy=True)
         self.service.run_io_batch()
         self.assertEqual(self.lookup()['state'],'released')
+
+    def test_freeze_between_status_read_and_new_effect_transaction_stops_rename(self):
+        from processing.source_release_filesystem import SourceReleaseFilesystem
+        self.ready_for_physical_phase();self.service.run_once()
+        gate=self.queue._coordinator_freeze;original=gate.status;plan=str(uuid.uuid4());raced=[]
+        def status():
+            result=original();caller=sys._getframe(1)
+            if caller.f_code.co_name=='effect' and caller.f_locals.get('kind')=='rename' and not raced:
+                raced.append(True)
+                gate.transition(dict(requestId=str(uuid.uuid4()),planId=plan,action='intent',
+                    expectedRevision=result['revision'],startupId=self.queue.startup_id),owner_secret='synthetic-race-owner')
+            return result  # Deliberately return the stale open snapshot.
+        with patch.object(gate,'status',new=status),\
+                patch.object(SourceReleaseFilesystem,'_rename_owned') as rename,\
+                patch('processing.source_release_filesystem.os.unlink') as unlink:
+            self.service.run_io_batch();rename.assert_not_called();unlink.assert_not_called()
+        self.assertEqual(raced,[True]);self.assertEqual(original()['operations'],0)
+        with self.queue._db() as db:
+            rows=db.execute('SELECT phase,physical_json FROM source_release_objects ORDER BY object_kind,object_id').fetchall()
+            self.assertEqual(rows[0]['phase'],'quarantining')
+            self.assertNotIn('effectIntent',json.loads(rows[0]['physical_json']))
+        for obj in self.auth['eligibleObjects']:
+            self.assertTrue((self.spool.root/self.spool.storage_key(self.auth['jobId'],1,obj['id'])).exists())
+
+    def test_actual_service_sigterm_retains_process_and_both_leases_until_io_drains(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            child=subprocess.Popen([sys.executable,'-B','-c',
+                'from tests.test_source_release_backend import stopped_service_release; import sys; stopped_service_release(sys.argv[1])',
+                directory],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            try:
+                deadline=time.monotonic()+10
+                while not (root/'blocked.json').exists() and child.poll() is None and time.monotonic()<deadline:time.sleep(0.01)
+                self.assertTrue((root/'blocked.json').exists(),'child never reached owned synthetic rename')
+                leases=json.loads((root/'blocked.json').read_text())
+                child.terminate()  # SIGTERM uses the real service stop Event.
+                deadline=time.monotonic()+3
+                while not (root/'draining').exists() and child.poll() is None and time.monotonic()<deadline:time.sleep(0.01)
+                self.assertTrue((root/'draining').exists())
+                time.sleep(1.3)  # Exceed the old bounded close/refusal boundary.
+                self.assertIsNone(child.poll(),'service abandoned its active source I/O')
+                for lease in leases.values():
+                    with open(lease,'a+b') as competitor:
+                        with self.assertRaises(BlockingIOError):fcntl.flock(competitor,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                (root/'allow-rename').write_text('unblock owned synthetic I/O')
+                stdout,stderr=child.communicate(timeout=10)
+                self.assertEqual(child.returncode,0,stderr)
+                self.assertTrue((root/'clean-exit').exists())
+                for lease in leases.values():
+                    with open(lease,'a+b') as competitor:
+                        fcntl.flock(competitor,fcntl.LOCK_EX|fcntl.LOCK_NB);fcntl.flock(competitor,fcntl.LOCK_UN)
+            finally:
+                (root/'allow-rename').touch()
+                if child.poll() is None:
+                    try:child.communicate(timeout=10)
+                    except subprocess.TimeoutExpired:child.kill();child.communicate(timeout=5)
 
     def test_batch_reuses_one_real_operation_and_bounded_release_pin_journal(self):
         self.ready_for_physical_phase();self.service.run_once()

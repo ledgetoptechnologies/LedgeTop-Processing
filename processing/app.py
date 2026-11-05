@@ -461,6 +461,12 @@ class CoordinatorService:
                         listener.shutdown()
                     except BaseException:
                         self._failed('listener_drain_failed', stop)
+            runtime = self.handler.reference_listener
+            if runtime is not None and hasattr(runtime, 'drain_source_release'):
+                # Ingress is stopped. A final process shutdown has no caller
+                # left to catch a bounded Runtime.close refusal: keep both
+                # leases alive until already-issued source I/O safely joins.
+                runtime.drain_source_release()
             self._close_server(self.server, self._native_thread if native_started else None, stop)
             runtime = self.handler.reference_listener
             if runtime is not None:

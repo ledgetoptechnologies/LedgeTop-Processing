@@ -100,6 +100,27 @@ This proves bounded inventory/per-target work; it does not claim a 50 GB physica
 transfer or full 10,000-object SQL deletion throughput benchmark.
 
 This remains a review checkpoint, not deployment or enablement evidence.
+Independent followup review found two additional lifecycle boundaries. Both are
+fixed and qualified by the expanded **99/99 Linux tests, no skips, 46.054 seconds**
+(the previous module list plus `tests.test_service`; same bounded runner and
+verified owned-container removal). Every NEW filesystem effect checks the
+maintenance phase inside the SAME BEGIN IMMEDIATE transaction that records its
+prepared intent. The stale-open-snapshot regression commits maintenance intent
+between the earlier read and that transaction, and proves no rename/unlink or
+new effect intent starts. Already-issued outcome recording and pin retirement
+still drain normally.
+
+The actual CoordinatorService shutdown first stops ingress on both listeners,
+then joins the existing source I/O/timer threads without abandoning them, before
+closing Runtime/Queue authority. These threads are non-daemon. Ordinary bounded
+Runtime.close refusal remains available for a caller that can cancel/resume its
+maintenance attempt. A real child process runs CoordinatorService, blocks an
+owned synthetic rename, receives SIGTERM, remains alive beyond the old one-second
+close boundary and refuses competing main/source flocks. After the test releases
+the I/O barrier, it joins both threads, closes both leases and exits cleanly.
+This is local Linux lifecycle proof with a synthetic reference listener/NAS
+barrier, not a production service restart or live NAS qualification.
+
 Frozen startup/updater census must explicitly
 recognize the three source-release journal schemas before automated updates of
 an installation containing these journals; unknown schemas remain blocked.
