@@ -24,6 +24,7 @@ from .viewer_result_manifest import derive_viewer_result_manifest, validate_view
 from .prototype import PROFILE as TREEDAR_PROFILE, VIEWER_PROFILE
 from .reference_source_intake_canonical import pipeline_digest as v2_pipeline_digest
 from .reference_source_intake_store import ReferenceSourceIntakeMethods
+from .reference_worker_hold import HOLD_REASONS, stored_record
 
 PROFILE = "reference-pipeline-v1"
 PHASES = {
@@ -227,7 +228,9 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         result = json.loads(row["result_json"]) if row["result_json"] else None
         grant = json.loads(row['private_grant_json']) if row['private_grant_json'] else None
         recovering = row["status"] == "held" and row["held_reason"] == "coordinator_restart"
-        phase, status, error = ('held' if recovering else row['phase']), row['status'], ('coordinator_restart' if recovering else row['error'])
+        # A resolved hold keeps its code: a claim alone never advances the phase.
+        worker_hold = row['status'] in ('held', 'failed') and row['error'] in HOLD_REASONS
+        phase, status, error = ('held' if recovering or worker_hold else row['phase']), row['status'], ('coordinator_restart' if recovering else row['error'])
         source_receiving = row['source_state'] is not None and (
             row['source_state'] != 'accepted' or row['derived_state'] != 'accepted')
         source_held = row['source_state'] == 'held' or row['derived_state'] == 'held'
@@ -276,6 +279,11 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             elif not recovering and source_receiving:
                 result_record.update(queueReason='source_receiving',
                     queueMessage='Waiting for durable source and derived input receipts.')
+        record = stored_record(row)
+        if record is not None:
+            result_record.update(queueReason=record['reasonCode'],
+                queueMessage='Waiting for operator resolution of a worker hold.',
+                holdObservation=record['observation'], holdEngineStatusCode=record['engineStatusCode'])
         return result_record
 
     def _record(self, row, private):

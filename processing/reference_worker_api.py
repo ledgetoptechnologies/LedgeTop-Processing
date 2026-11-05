@@ -294,9 +294,18 @@ class ReferenceWorkerAPI:
                 protocol._closed(payload, ("jobId", "claimRequestId"), "claim")
                 protocol._slug(payload["jobId"], "job ID")
                 protocol._slug(payload["claimRequestId"], "claim request ID")
-                claim = self.store.claim(payload["jobId"], **identity,
-                                         claim_request_id=payload["claimRequestId"])
+                try:
+                    claim = self.store.claim(payload["jobId"], **identity,
+                                             claim_request_id=payload["claimRequestId"])
+                except Conflict:
+                    claim = None
                 if claim is None:
+                    # 200 because the driver cannot read a 409 body. Lets a
+                    # driver drop an unstarted row instead of starving the node.
+                    from .reference_worker_hold import claim_dropped
+                    status = claim_dropped(self.store, payload["jobId"], payload["claimRequestId"])
+                    if status is not None:
+                        return Response(200, {"jobId": payload["jobId"], "status": status, "claimState": "dropped"})
                     return self._error(409, "claim_unavailable")
                 return Response(200, claim)
             if method == "POST" and path == PREFIX + "/results":
@@ -355,6 +364,14 @@ class ReferenceWorkerAPI:
                 self._owned_job(observation[1], identity, claim_token)
                 return Response(200, self.store.observe_worker_acceptance(observation[1],
                     protocol.decode_submission(body), identity=identity, claim_token=claim_token))
+            hold = re.fullmatch(re.escape(PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/hold", path) if type(path) is str else None
+            if method == 'POST' and hold:
+                claim_token = self._header(headers, 'X-Claim-Token')
+                if claim_token is None or not 1 <= len(claim_token) <= 128:
+                    return self._error(401, 'claim_authentication_required')
+                from .reference_worker_hold import report
+                return Response(200, report(self.store, hold[1], protocol.decode_submission(body),
+                    identity=identity, claim_token=claim_token))
             match = re.fullmatch(re.escape(PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(transfer-grant|acceptance|terminal-acceptance|claim-state)", path) if type(path) is str else None
             if method == "GET" and match:
                 claim_token = self._header(headers, "X-Claim-Token")

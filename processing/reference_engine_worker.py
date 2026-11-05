@@ -265,6 +265,14 @@ class ReferenceEngineWorker:
                     # Already committed processing may be polled; pending intent
                     # means an unknown HTTP outcome and never permits a retry.
                     return old['phase']
+                # Same lease test as set_engine_state, before the gate is taken.
+                with self.ledger._transaction() as lease:
+                    now = self.ledger._now(lease)
+                    self.ledger._expire(lease, now)
+                    current = self.ledger._reservation(lease, reservation_id)
+                    expired = current['state'] == 'expired' or (current['state'] == 'reserved' and current['expires'] <= now)
+                if expired:
+                    raise WorkerHeld('reservation_expired')
                 receipt = secrets.token_hex(16)
                 gate.reserve(self.node_id, self.origin, self.authority_id, self.gate_generation, receipt)
                 gate.bind(receipt, dict(id=job['jobId'], workerId=self.worker_id,
@@ -287,6 +295,28 @@ class ReferenceEngineWorker:
             self.engine.action('commit', job['jobId'])
             self._phase(job['jobId'], 'processing')
             return 'processing'
+
+    def task_observation(self, job_id):
+        """Read-only: ('present', info), ('missing', None) or ('unreachable', None).
+
+        A failed task read is 'missing' only when the engine answers /task/list
+        without the task, so an engine replying 200 {error} reads like a 404.
+        """
+        try:
+            info = self.engine.read('/task/' + job_id + '/info', missing=True)
+        except Exception:
+            try:
+                tasks = self.engine.read('/task/list')
+            except Exception:
+                return 'unreachable', None
+            if type(tasks) is not list or any(type(task) is not dict or task.get('uuid') == job_id for task in tasks):
+                return 'unreachable', None
+            return 'missing', None
+        if info is None:
+            return 'missing', None
+        if type(info) is not dict or info.get('uuid') != job_id or type(info.get('status')) is not dict:
+            return 'unreachable', None
+        return 'present', info
 
     def poll(self, job_id):
         """Read-only engine reconciliation; terminal files stay until Viewer ACK."""
