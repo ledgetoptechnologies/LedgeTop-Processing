@@ -71,6 +71,7 @@ async function main() {
     }
     const options = { 'numeric-probe': 1e-7 };
     const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id, options,
+      ...(config.withGcp ? { gcpHeightSource: 'ellipsoidal' } : {}),
       capabilityFingerprint: config.capabilityFingerprint });
     const localJob = processing.claimJob(owner);
     assert.equal(localJob.attempt_id, attempt.id);
@@ -92,6 +93,13 @@ async function main() {
     if (config.withGcp) {
       const snapshot = processing.getAttemptGcpSnapshot(attempt.id);
       assert.ok(snapshot?.content?.length);
+      const evidence = processing.getAttemptGcpEvidence(attempt.id);
+      assert.equal(evidence.schemaVersion, 3);
+      assert.equal(evidence.coordinateContract.heightSource, 'ellipsoidal');
+      assert.equal(evidence.coordinateContract.outputVerticalSystem, 'ellipsoidal height');
+      assert.match(evidence.coordinateContract.verticalSystem, /NAVD88/);
+      assert.equal(evidence.correspondences[0].elevationM, 10 * 1200 / 3937);
+      assert.equal(evidence.correspondences[0].ellipsoidalHeightM, 11 * 1200 / 3937);
       manifest.objects.push({ id: `gcp_${attempt.id}`, name: 'gcp_list.txt', byteSize: snapshot.content.length,
         sha256: snapshot.sha256, kind: 'auxiliary', mediaType: 'text/plain' });
       manifest.objectCount = manifest.objects.length;

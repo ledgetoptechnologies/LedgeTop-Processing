@@ -451,13 +451,13 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                     self.assertIn(b'photo.jpg', captured_uploads[1]['body'])
                     self.assertNotIn(b'control.csv', captured_uploads[1]['body'])
                     gcp_lines = captured_uploads[1]['body'].decode('utf-8').strip().splitlines()
-                    # Compound CRS accepted by the installed NodeODX parser.
-                    # Actual geoid transformation is a separate runtime gate.
-                    self.assertEqual(gcp_lines[0], 'EPSG:6349')
+                    # Explicitly selected retained ellipsoidal height, not the
+                    # raw CSV's distinct NAVD88 source elevation.
+                    self.assertEqual(gcp_lines[0], 'EPSG:6319')
                     self.assertEqual(len(gcp_lines), 2)
                     correspondence = gcp_lines[1].split()
                     self.assertEqual(correspondence[:2], ['-88.1', '44.5'])
-                    self.assertAlmostEqual(float(correspondence[2]), 10 * 1200 / 3937, places=7)
+                    self.assertAlmostEqual(float(correspondence[2]), 11 * 1200 / 3937, places=7)
                     self.assertEqual(correspondence[3:], ['25', '75', 'photo.jpg'])
                     self.assertEqual(current['submission']['manifest']['inputCounts']['images'], 1)
                     self.assertEqual(len(current['submission']['manifest']['objects']), 2)
