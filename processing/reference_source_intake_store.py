@@ -348,6 +348,7 @@ class ReferenceSourceIntakeMethods:
         if (row['source_state'], row['derived_state']) != ('accepted', 'accepted'):
             raise Conflict('source custody not accepted')
         self._source_retention_bound(row, job_id)
+        self._source_accepted_custody(db, row, job_id)
 
     def _source_preflight_closure(self, db, job_id, *, clock=time.time):
         """The closure of a transfer that has not begun, or Conflict.
@@ -372,23 +373,42 @@ class ReferenceSourceIntakeMethods:
         transfer = json.loads(row['transfer_json'])
         if datetime.fromisoformat(transfer['expiresAt'].replace('Z', '+00:00')).timestamp() <= clock():
             raise Conflict('source reservation expired')
-        objects = {item['id']: item for name in ('source_manifest_json', 'derived_manifest_json')
-                   for item in json.loads(row[name])['objects']}
         receipts = [dict(item) for item in db.execute('''SELECT generation,object_id,byte_size,sha256,mount_id,
             storage_key,receipt_json FROM reference_source_object_receipts WHERE job_id=? ORDER BY object_id''', (job_id,))]
-        if {item['object_id'] for item in receipts} != set(objects) or len(receipts) != len(objects):
-            raise Conflict('source custody closure changed')
-        for receipt in receipts:
-            item, body = objects[receipt['object_id']], json.loads(receipt['receipt_json'])
-            if ((receipt['generation'], receipt['byte_size'], receipt['sha256']) != (generation, item['byteSize'], item['sha256'])
-                    or (body.get('jobId'), body.get('generation'), body.get('objectId'), body.get('sha256')) !=
-                       (job_id, generation, item['id'], item['sha256'])):
-                raise Conflict('source custody binding changed')
         return {'closureSha256': protocol.digest(dict(transfer=row['transfer_json'], grant=None,
                     source=row['source_manifest_sha'], derived=row['derived_manifest_sha'],
                     retention=[row['source_receipt_sha'], row['derived_receipt_sha']], receipts=receipts)),
                 'grantSha256': None, 'predecessorGrantSha256': None, 'renewalSequence': 0, 'renewalPending': False,
-                'requestsAdmitted': 0, 'bytesAdmitted': 0, 'attemptsAdmitted': 0, 'objectCount': len(objects)}
+                'requestsAdmitted': 0, 'bytesAdmitted': 0, 'attemptsAdmitted': 0, 'objectCount': len(receipts)}
+
+    def _source_accepted_custody(self, db, row, job_id):
+        """Every retained object against the accepted manifests, granted or not.
+
+        Stored SHA fields prove nothing alone, so each manifest is recomputed from
+        its JSON and tied to the signed proof and retention receipts. A receipt
+        must be the exact spool receipt for its manifest entry, which covers the
+        raw inputs a grant excludes. Metadata only: no NAS read happens here.
+        """
+        from .source_spool import SourceSpool
+        manifests = (('source', json.loads(row['source_manifest_json']), row['source_manifest_sha']),
+                     ('derived', json.loads(row['derived_manifest_json']), row['derived_manifest_sha']))
+        for _kind, manifest, accepted in manifests:
+            if manifest.get('sha256') != accepted or protocol.manifest_sha256(manifest) != accepted:
+                raise Conflict('source manifest differs from accepted custody')
+        self._source_acceptance_binding(row)
+        receipts = [dict(item) for item in db.execute('''SELECT generation,object_id,object_kind,byte_size,sha256,
+            mount_id,storage_key,receipt_json FROM reference_source_object_receipts WHERE job_id=?''', (job_id,))]
+        self._source_completion_ack(row, receipts)
+        if len({item['mount_id'] for item in receipts}) != 1:
+            raise Conflict('source custody storage identity changed')
+        objects = {item['id']: item for _kind, manifest, _sha in manifests for item in manifest['objects']}
+        for receipt in receipts:
+            item = objects[receipt['object_id']]
+            expected = dict(schemaVersion=1, jobId=job_id, generation=row['generation'], objectId=item['id'],
+                storageKey=SourceSpool.storage_key(job_id, row['generation'], item['id']), byteSize=item['byteSize'],
+                sha256=item['sha256'], mountId=receipt['mount_id'])
+            if receipt['storage_key'] != expected['storageKey'] or receipt['receipt_json'] != _json(expected):
+                raise Conflict('source custody receipt changed')
 
     def _source_fetch_closure(self, db, job_id):
         """The exact persisted transfer a restarted coordinator may resume, or Conflict.

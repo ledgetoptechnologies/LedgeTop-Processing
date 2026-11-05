@@ -4,6 +4,7 @@ Real step(), recovery, routed v2 coordinator, fenced ledger, journal, node gate 
 ReferenceEngineWorker. Only NativeEngine's transport is synthetic, so every start
 is counted at the edge. Ambiguous local state stays held and is never adopted.
 """
+import json
 import threading
 from unittest.mock import patch
 
@@ -651,10 +652,49 @@ class PreflightTests(ProcessingHarness):
         with self.assertRaises(Conflict):
             self.closure()
 
+    def raw_input(self):
+        with self.queue._db() as db:
+            manifest = json.loads(db.execute('SELECT source_manifest_json FROM reference_source_intakes').fetchone()[0])
+        pipeline = {item['id'] for item in self.row()[1]['claim']['submission']['manifest']['objects']}
+        return next(item['id'] for item in manifest['objects'] if item['id'] not in pipeline)
+
+    def test_closure_checks_an_excluded_raw_receipt_with_no_grant_yet(self):
+        self.step('awaiting_grant')
+        for assignment, values in (('byte_size=byte_size+1', ()), ('sha256=?', ('f' * 64,)),
+                ('storage_key=?', ('moved/elsewhere.blob',)), ('generation=generation+1', ())):
+            with self.queue._db() as db:
+                original = tuple(db.execute('''SELECT byte_size,sha256,storage_key,generation
+                    FROM reference_source_object_receipts WHERE object_id=?''', (self.raw_input(),)).fetchone())
+            self.execute(f'UPDATE reference_source_object_receipts SET {assignment} WHERE object_id=?', *values, self.raw_input())
+            with self.assertRaises(Conflict):
+                self.closure()
+            self.execute('''UPDATE reference_source_object_receipts SET byte_size=?,sha256=?,storage_key=?,generation=?
+                WHERE object_id=?''', *original, self.raw_input())
+            self.assertIsNone(self.closure()['grantSha256'])
+
+    def test_closure_checks_a_receipt_body_with_no_grant_yet(self):
+        self.step('awaiting_grant')
+        with self.queue._db() as db:
+            body = json.loads(db.execute('SELECT receipt_json FROM reference_source_object_receipts WHERE object_id=?',
+                (self.raw_input(),)).fetchone()[0])
+        self.execute('UPDATE reference_source_object_receipts SET receipt_json=? WHERE object_id=?',
+            json.dumps(dict(body, byteSize=1)), self.raw_input())
+        with self.assertRaises(Conflict):
+            self.closure()
+
+    def test_closure_checks_manifest_content_with_no_grant_yet(self):
+        self.step('awaiting_grant')
+        with self.queue._db() as db:
+            manifest = json.loads(db.execute('SELECT source_manifest_json FROM reference_source_intakes').fetchone()[0])
+        manifest['objects'][0]['byteSize'] += 1
+        self.execute('UPDATE reference_source_intakes SET source_manifest_json=? WHERE job_id=?', json.dumps(manifest), self.job_id)
+        with self.assertRaisesRegex(Conflict, 'accepted custody'):
+            self.closure()
+
     def test_closure_refuses_a_missing_receipt(self):
         self.step('awaiting_grant')
         self.execute('DELETE FROM reference_source_object_receipts WHERE rowid=(SELECT MIN(rowid) FROM reference_source_object_receipts)')
-        with self.assertRaisesRegex(Conflict, 'closure changed'):
+        with self.assertRaises(Conflict):
             self.closure()
 
     def test_refused_closure_is_ineligible_and_held(self):
