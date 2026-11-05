@@ -98,7 +98,7 @@ class ArchiveCustodyTests(unittest.TestCase):
             self.validate(archive(self.files,mutation=pax))
 
     def test_pax_times_and_long_utf8_names_are_bounded_and_content_verified(self):
-        name='viewer-tasks/'+'x'*130+'ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â©.jpg';value=self.files.pop('viewer-tasks/input.jpg');self.files[name]=value
+        name='viewer-tasks/'+'x'*130+'ÃƒÆ’Ã†â€™Ãƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬Â ÃƒÂ¢Ã¢â€šÂ¬Ã¢â€žÂ¢ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â©.jpg';value=self.files.pop('viewer-tasks/input.jpg');self.files[name]=value
         self.baseline['files'][path_id(name)]=self.baseline['files'].pop(path_id('viewer-tasks/input.jpg'))
         def times(item):item.pax_headers['mtime']='1770000000.123456'
         self.assertEqual(self.validate(archive(self.files,mutation=times))['fileCount'],4)
@@ -111,6 +111,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import stat
 import uuid
 from unittest.mock import patch
 from tests import test_coordinator_predecessor_census as old_fixture
@@ -191,7 +192,7 @@ class CustodyOrchestrationTests(unittest.TestCase):
             startedAt='2026-11-05T00:00:00Z',pid=123),
             holder=dict(settings=self.settings,pid=1,startTime='999',mainDescriptor=5,leaseDescriptor=6,
                         mainIdentity=main_key,leaseIdentity=external),
-            physical=dict(operationBinding=operation,state=dict(main=main_key)),custody=None,
+            physical=dict(operationBinding=operation,state=dict(main=main_key)),custody=None,gate=None,
             writers=[dict(containerId='d'*64,running=False,pid=0,finishedAt='2026-11-05T00:00:00Z')])
 
     def intent(self,action):
@@ -264,8 +265,57 @@ class CustodyOrchestrationTests(unittest.TestCase):
             with self.assertRaisesRegex(c.CustodyHeld,'disk_floor'):self.ops.backup(baseline,intent,dispatch=self.dispatch(intent))
         self.assertEqual(self.docker.calls,0)
 
+    def test_final_boundary_carries_explicit_current_frozen_gate_and_independent_owner(self):
+        baseline=self.ops.capture(self.intent('capture-full-custody'))
+        startup=str(uuid.uuid4());plan=str(uuid.uuid4());physical=self.boundary['physical']
+        self.boundary.update(role='final',holder=None,gate=dict(ownerSha256='a'*64,snapshot=dict(
+            authorityId=self.fixture.authority,startupId=startup,revision=3,planId=plan,
+            phase='frozen',operations=0,reservedControlBytes=3000)))
+        physical['sourceBindingSha256']='f'*64
+        custody=dict(protocol='ltds-runtime-source-custody-v1',status='verified',authorityId=self.fixture.authority,
+            startupId=startup,sourceReadersPresent=True,sessionVerified=True,leaseVerified=True,journalMatches=True,bindingSha256='f'*64)
+        self.boundary['custody']=custody
+        self.assertEqual(self.ops._boundary('final',None,self.holder_id)['gate']['snapshot']['planId'],plan)
+        self.boundary['gate']['snapshot']['operations']=1
+        with self.assertRaisesRegex(c.CustodyHeld,'current_frozen_gate'):self.ops._boundary('final',None,self.holder_id)
+        self.boundary['gate']['snapshot']['operations']=0
+        self.boundary['gate']['ownerSha256']='b'*64
+        binding=dict(operationBinding=physical['operationBinding'],sourceCustody=custody,
+                     ownerSha256='a'*64,planId=plan,currentStartupId=startup)
+        with self.assertRaisesRegex(c.CustodyHeld,'custody_or_gate_changed'):
+            self.ops.projection(baseline,self.intent('verify-final-readiness'),phase='final-frozen',binding=binding,final_id=self.holder_id)
+        self.assertEqual(self.tracker.calls,1)
+
     def test_corrupt_private_reference_and_directory_alias_fail_closed(self):
         reference=self.ops.capture(self.intent('capture-full-custody'));bad=dict(reference,sha256='0'*64)
         with self.assertRaisesRegex(c.CustodyHeld,'reference_changed'):self.ops.artifacts.load(bad,'baseline')
         path=self.directory/reference['name'];path.chmod(0o644)
         with self.assertRaisesRegex(c.CustodyHeld,'private_bounded'):self.ops.artifacts.load(reference,'baseline')
+
+
+@unittest.skipUnless(os.name=='posix','private original descriptor durability barriers')
+class CustodyArtifactDurabilityTests(unittest.TestCase):
+    def test_exact_existing_bytes_retry_file_and_pinned_directory_barriers(self):
+        for fail_directory in (False,True):
+            with self.subTest(fail_directory=fail_directory),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);root.chmod(0o700);operation=str(uuid.uuid4());plan='a'*64
+                artifacts=c.PrivateArtifacts(root,operation,plan)
+                intent=dict(operationId=operation,planSha256=plan,intentId=str(uuid.uuid4()))
+                fsync=os.fsync;calls=[]
+                def first(fd):
+                    directory=stat.S_ISDIR(os.fstat(fd).st_mode)
+                    if directory==fail_directory:raise OSError('synthetic failed durability barrier')
+                    fsync(fd)
+                with patch.object(os,'fsync',side_effect=first):
+                    with self.assertRaises(OSError):artifacts.retain('baseline',intent,None,{'full':'synthetic'})
+                path=root/artifacts.name('baseline',intent,None)
+                self.assertTrue(path.is_file());original=path.read_bytes()
+                def retry(fd):
+                    info=os.fstat(fd)
+                    calls.append('directory' if stat.S_ISDIR(info.st_mode) else 'file')
+                    if stat.S_ISDIR(info.st_mode):self.assertEqual((info.st_dev,info.st_ino),artifacts.identity)
+                    else:self.assertEqual(info.st_ino,path.stat().st_ino)
+                    fsync(fd)
+                with patch.object(os,'fsync',side_effect=retry):reference=artifacts.retain('baseline',intent,None,{'full':'synthetic'})
+                self.assertEqual(calls,['file','directory']);self.assertEqual(path.read_bytes(),original)
+                self.assertEqual(reference['sha256'],hashlib.sha256(original).hexdigest())

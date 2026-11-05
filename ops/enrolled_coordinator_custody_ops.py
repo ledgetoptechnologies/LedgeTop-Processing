@@ -243,6 +243,27 @@ class PrivateArtifacts:
             finally:os.close(fd)
         finally:os.close(directory)
 
+    def barrier(self,name,raw):
+        """Exact bytes are not a durability receipt; retry both original barriers."""
+        directory=self.directory()
+        try:
+            before=os.stat(name,dir_fd=directory,follow_symlinks=False)
+            require(stat.S_ISREG(before.st_mode) and before.st_uid==os.geteuid() and before.st_nlink==1 and
+                    stat.S_IMODE(before.st_mode)==0o600 and before.st_size==len(raw),'private_barrier_artifact_required')
+            fd=os.open(name,os.O_RDWR|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=directory)
+            try:
+                require(census._same(os.fstat(fd))==census._same(before),'barrier_artifact_identity_changed')
+                cursor=0
+                while cursor<len(raw):
+                    chunk=os.pread(fd,min(65536,len(raw)-cursor),cursor)
+                    require(chunk==raw[cursor:cursor+len(chunk)] and chunk,'barrier_artifact_bytes_changed');cursor+=len(chunk)
+                os.fsync(fd);os.fsync(directory)
+                require(census._same(os.fstat(fd))==census._same(os.stat(name,dir_fd=directory,follow_symlinks=False))==
+                        census._same(before),'barrier_artifact_changed')
+                self.check()
+            finally:os.close(fd)
+        finally:os.close(directory)
+
     def retain(self,kind,intent,dispatch,body):
         self.check();name=self.name(kind,intent,dispatch)
         document=dict(schemaVersion=1,kind=kind,operationId=self.operation_id,planSha256=self.plan_sha256,
@@ -255,11 +276,8 @@ class PrivateArtifacts:
                 cursor=0
                 while cursor<len(raw):
                     count=os.write(fd,raw[cursor:cursor+65536]);require(count>0,'artifact_write_outcome_unknown');cursor+=count
-                os.fsync(fd)
             finally:os.close(fd)
-            directory=self.directory()
-            try:os.fsync(directory)
-            finally:os.close(directory)
+        self.barrier(name,raw)
         require(self.read(name,16*1048576)==raw,'retained_custody_artifact_unverified')
         return dict(name=name,sha256=hashlib.sha256(raw).hexdigest(),bytes=len(raw),kind=kind)
 
@@ -322,7 +340,7 @@ class CustodyOps:
     def _boundary(self,role,context,owner_id):
         require(type(owner_id) is str and re.fullmatch('[a-f0-9]{64}',owner_id),'exact_boundary_container_required')
         value=self.boundary_check(role,context)
-        require(type(value) is dict and set(value)=={'schemaVersion','role','container','holder','physical','custody','writers'} and
+        require(type(value) is dict and set(value)=={'schemaVersion','role','container','holder','physical','custody','writers','gate'} and
                 value['schemaVersion']==1 and value['role']==role,'closed_original_boundary_required')
         container=value['container'];physical=value['physical'];operation=physical['operationBinding']
         require(container['id']==owner_id and re.fullmatch(r'sha256:[a-f0-9]{64}',container['imageId']) and
@@ -334,6 +352,7 @@ class CustodyOps:
                 all(row['running'] is False and row['pid']==0 and type(row['finishedAt']) is str for row in value['writers']),
                 'all_other_writers_must_be_stopped')
         if role=='holder':
+            require(value['gate'] is None,'holder_is_not_a_gate_authority')
             held=value['holder']
             require(type(held) is dict and held.get('settings')==self.settings and held.get('pid')==1 and
                     type(held.get('startTime')) is str and held['startTime'].isdigit() and
@@ -343,9 +362,24 @@ class CustodyOps:
                     type(held.get('leaseDescriptor')) is int and held['leaseDescriptor']>=3,
                     'actual_original_holder_descriptors_required')
         else:
+            gate=value['gate']
+            require(type(gate) is dict and set(gate)=={'snapshot','ownerSha256'} and
+                    type(gate['ownerSha256']) is str and re.fullmatch('[a-f0-9]{64}',gate['ownerSha256']),
+                    'independent_frozen_gate_owner_required')
+            snapshot=gate['snapshot']
+            require(type(snapshot) is dict and set(snapshot)=={'authorityId','startupId','revision','planId','phase','operations','reservedControlBytes'} and
+                    snapshot['authorityId']==self.settings['authorityId'] and snapshot['phase']=='frozen' and
+                    type(snapshot['revision']) is int and snapshot['revision']==3 and
+                    type(snapshot['operations']) is int and snapshot['operations']==0 and
+                    type(snapshot['reservedControlBytes']) is int and 2048<=snapshot['reservedControlBytes']<=4096 and
+                    type(snapshot['planId']) is str and str(uuid.UUID(snapshot['planId']))==snapshot['planId'] and
+                    type(snapshot['startupId']) is str and str(uuid.UUID(snapshot['startupId']))==snapshot['startupId'],
+                    'authenticated_current_frozen_gate_required')
             observed=value['custody']
             require(value['holder'] is None and type(observed) is dict and observed.get('status')=='verified' and
-                    observed.get('leaseVerified') is True and observed.get('sessionVerified') is True and
+                    observed.get('protocol')=='ltds-runtime-source-custody-v1' and
+                    observed.get('authorityId')==snapshot['authorityId'] and observed.get('startupId')==snapshot['startupId'] and
+                    all(observed.get(name) is True for name in ('sourceReadersPresent','leaseVerified','sessionVerified','journalMatches')) and
                     observed.get('bindingSha256')==physical.get('sourceBindingSha256'),
                     'actual_frozen_final_source_owner_required')
         return value
@@ -470,7 +504,11 @@ class CustodyOps:
                 'independent_projection_physical_binding_changed')
         require(binding['operationBinding']==original['body']['boundaryAfter']['physical']['operationBinding'],
                 'original_projection_authority_changed')
-        if role=='final':require(before['custody']==binding['sourceCustody'],'actual_final_custody_changed')
+        if role=='final':
+            require(before['custody']==binding['sourceCustody'] and
+                    before['gate']['ownerSha256']==binding['ownerSha256'] and
+                    before['gate']['snapshot']['planId']==binding['planId'] and
+                    before['gate']['snapshot']['startupId']==binding['currentStartupId'],'actual_final_custody_or_gate_changed')
         request=dict(kind='projection',root=self.settings['stateRoot'],keyHex=self.key.hex(),
             schema=base64.b64encode(self.schema).decode(),policy=base64.b64encode(self.policy).decode(),
             policySha256=self.policy_sha,baseline=baseline,baselineSha256=digest(baseline),phase=phase,binding=binding,
@@ -525,6 +563,9 @@ class CustodyOps:
         role='final' if phase=='final-frozen' else 'holder';owner=final_id if role=='final' else self.holder_id
         before=self._boundary(role,context,owner)
         require(digest(before)==digest(body['boundaryAfter']),'current_projection_boundary_changed')
+        if role=='final':require(before['gate']['ownerSha256']==binding['ownerSha256'] and
+            before['gate']['snapshot']['planId']==binding['planId'] and before['gate']['snapshot']['startupId']==binding['currentStartupId'],
+            'current_final_gate_binding_changed')
         original=self.artifacts.load(baseline_reference,'baseline');baseline=original['body']['baseline']
         import base64
         request=dict(kind='projection',root=self.settings['stateRoot'],keyHex=self.key.hex(),

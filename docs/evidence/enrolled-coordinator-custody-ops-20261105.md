@@ -109,3 +109,27 @@ UID/GID10001, --init and128MiB task tmpfs. It exited0 and auto-removed; the exac
 `ltds.task=cutover-custody-ops` container inventory was empty. Real census child
 PIDs were communicated/waited/reaped in the test fixture. Production subprocess
 and remote retirement ownership remains the reviewed tracked transport seam.
+
+
+## Durability and explicit Gate followup
+
+Every success path now reopens/revalidates the exact artifact descriptor and
+fsyncs both that file and the original pinned directory, including exact-existing
+retry. Seeing matching bytes after a failed earlier fsync is not accepted as a
+durability acknowledgement. Fault tests fail each barrier separately, then prove
+retry performs the file AND exact directory barriers before returning a ref.
+
+Boundary schema is explicitly eight fields, adding `gate`. Holder proof has
+`gate=null`. Final proof has `gate={snapshot:<authenticated native GET>,
+ownerSha256:<independently derived configured operator-token SHA>}`. No owner
+field is invented in the public snapshot and expected ownership is never read
+from SQL. The module requires current authority/startup, frozen revision3, zero
+active operations, exact plan and expected owner binding. Actual stored owner/
+epoch rows remain checked by generated-policy projection, not the credential
+hash alone.
+
+17/17 focused Linux cases passed, no skips, in2.828 seconds. The new final-boundary
+case uses the documented synthetic owner boundary and proves active operation/
+wrong owner refusal; actual Docker/authenticated status remains shared harness
+qualification. The bounded1CPU/768MiB readonly network-none runner exited0,
+auto-removed, and exact task-label inventory was empty.
