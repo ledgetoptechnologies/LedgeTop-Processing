@@ -147,7 +147,14 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
         self.assertTrue(os.access(converter, os.X_OK), f"qualification requested but converter is not executable: {converter}")
         self._roundtrip(source_range_v2_enabled=False, controlled_conversion=True)
 
-    def _roundtrip(self, *, source_range_v2_enabled, controlled_conversion=False, with_gcp=False):
+    def test_actual_viewer_signed_source_release_after_verified_publication(self):
+        if os.environ.get("LTDS_RUN_CONTROLLED_CONVERSION_QUALIFICATION") != "1":
+            self.skipTest("controlled converter qualification is not enabled")
+        self._roundtrip(source_range_v2_enabled=False, controlled_conversion=True,
+                        source_release_qualification=True)
+
+    def _roundtrip(self, *, source_range_v2_enabled, controlled_conversion=False, with_gcp=False,
+                   source_release_qualification=False):
         requested = os.environ.get("LTDS_RUN_CONTROLLED_CONVERSION_QUALIFICATION") == "1"
         viewer_root = os.environ.get("LTDS_VIEWER_WORKTREE")
         if not viewer_root:
@@ -176,6 +183,7 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
             source_key = Ed25519PrivateKey.generate()
             snapshot_key = Ed25519PrivateKey.generate()
             viewer_copy_key = Ed25519PrivateKey.generate()
+            release_key = Ed25519PrivateKey.generate() if source_release_qualification else None
             trusted_source_keys = [{"environment": "staging", "issuerId": "pairing-source-issuer",
                 "keyId": "pairing-source-key", "principalId": "viewer-staging",
                 "publicKeyPem": _pem_public(source_key)}]
@@ -184,6 +192,8 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
             accepted = {"committed": False, "drop_count": 0}
             accepted_copy_requests, accepted_copy_responses = [], []
             source_drops = {"post": 0, "put": 0, "complete": 0}
+            release_requests, release_responses = [], []
+            release_drop = {"count": 0}
             stored_path = root / "models"
 
             queue = Queue(queue_dir, reference_enabled=True)
@@ -268,13 +278,30 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                 result_origin = f"https://127.0.0.1:{result_server.server_address[1]}"
                 proxy = ResultProxy({"cluster": result_origin}, worker_bearers={"cluster": RESULT_BEARER},
                                     ssl_context=client_tls, admit_read=lambda _binding: nullcontext())
+                release_service = None
+                if source_release_qualification:
+                    from processing.source_release import SourceReleaseService, ReleaseSettings
+                    qualification = dict(mountId=spool.mount_id, renameNoReplace=True, directoryFsync=True)
+                    for prefix, identity in (("root", spool._root_identity), ("mount", spool._mount_identity)):
+                        qualification[prefix + "Device"] = str(identity[0])
+                        qualification[prefix + "Inode"] = str(identity[1])
+                    release_settings = ReleaseSettings(dict(enabled=True,
+                        trustedKeys=[dict(environment="staging", issuerId="pairing-release-issuer",
+                            keyId="pairing-release-key", principalId="viewer-staging", publicKeyPem=_pem_public(release_key))],
+                        principalBindings=[dict(environment="staging", principalId="viewer-staging",
+                            bearerSha256=hashlib.sha256(BEARER.encode()).hexdigest())],
+                        filesystemQualification=qualification), viewer_bearers={BEARER: "staging"}, spool=spool)
+                    release_clock = [1_000_000_000]
+                    release_service = SourceReleaseService(store, spool, release_settings,
+                        monotonic_ns=lambda: release_clock[0])
                 api = ReferenceControlAPI(store, viewer_bearers={BEARER: "staging"},
                     worker_bearers={WORKER_BEARER: dict(node_id="cluster", worker_id="roundtrip-worker",
                         worker_instance_id="roundtrip-instance")},
                     capability_fingerprint=CAPABILITY_FINGERPRINT, options_fingerprint=OPTIONS_FINGERPRINT,
                     allowed_odm_options={"numeric-probe"}, result_proxy=proxy,
                     viewer_receipt_keys=viewer_receipt_keys, source_spool=spool,
-                    source_attestation_keys=trusted_source_keys, authority_id=queue.authority_id)
+                    source_attestation_keys=trusted_source_keys, authority_id=queue.authority_id,
+                    source_release_service=release_service)
                 original_handle = api.handle
                 def track_acceptance(method, route, headers, body=b"", **kwargs):
                     response = original_handle(method, route, headers, body, **kwargs)
@@ -282,6 +309,9 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                         accepted["committed"] = True
                         accepted_copy_requests.append(bytes(body))
                         accepted_copy_responses.append(response.body)
+                    if "/source/releases" in route:
+                        release_responses.append((method, route, response.status))
+                        if method == "POST": release_requests.append(bytes(body))
                     return response
                 api.handle = track_acceptance
                 server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -293,6 +323,15 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                 original_reply = handler._reply
                 def lose_first_acceptance_reply(request_handler, response):
                     route = request_handler.path.split("?", 1)[0]
+                    if (source_release_qualification and request_handler.command == "POST"
+                            and route.endswith("/source/releases") and response.status in (200, 201)
+                            and release_drop["count"] == 0):
+                        release_drop["count"] += 1
+                        request_handler.close_connection = True
+                        try: request_handler.connection.shutdown(socket.SHUT_RDWR)
+                        except OSError: pass
+                        request_handler.connection.close()
+                        return
                     drop = ("post" if request_handler.command == "POST" and route == "/ltds/v2/jobs"
                             and response.status in (200, 201) else
                             "complete" if request_handler.command == "POST" and route.endswith("/source/complete")
@@ -356,6 +395,9 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                 if controlled_conversion:
                     config["obj2TilesBin"] = os.environ["LTDS_OBJ2TILES_BIN"]
                     config["controlledConversionQualification"] = True
+                if source_release_qualification:
+                    config.update(releasePrivateKeyPem=_pem_private(release_key),
+                                  releasePublicKeyPem=_pem_public(release_key))
                 for directory in (config["datasetMount"], config["cacheMount"], config["trashMount"]):
                     Path(directory).mkdir(parents=True, exist_ok=True)
                 config_path = root / "pairing-config.json"
@@ -478,6 +520,10 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                     self.assertTrue(qualified["invalidTokenRejected"])
                     self.assertTrue(qualified["revokedTokenRejected"])
                     self.assertTrue(qualified["privateObjRejected"])
+                if source_release_qualification:
+                    self._qualify_source_release(root, config, config_path, environment, node, viewer_app,
+                        store, spool, release_service, release_clock, release_requests, release_responses,
+                        release_drop, state)
                 self.assertEqual(accepted["drop_count"], 1)
                 if with_gcp:
                     self.assertEqual(hashlib.sha256((root / 'control.csv').read_bytes()).hexdigest(), raw_csv['sha256'])
@@ -496,6 +542,53 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                     engine_patch.stop()
                 mount_patch.stop(); gate_patch.stop(); queue.close()
                 self.assertTrue(all(not thread.is_alive() for thread in threads), "loopback listener leaked")
+
+    def _qualify_source_release(self, root, config, config_path, environment, node, viewer_app,
+                                store, spool, service, clock, requests, responses, drops, state):
+        def viewer(phase):
+            config["sourceReleasePhase"] = phase
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            completed = subprocess.run([node, str(Path(__file__).parent / "fixtures" /
+                "viewer_source_release_roundtrip.js")], cwd=viewer_app, env=environment,
+                capture_output=True, text=True, timeout=45, check=False)
+            self.assertEqual(completed.returncode, 0,
+                f"Viewer source-release {phase} failed: {completed.stderr[-3500:]} {completed.stdout[-1000:]}")
+            return json.loads(completed.stdout.strip().splitlines()[-1])
+
+        before = {p.relative_to(root / "models").as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                  for p in (root / "models").rglob("*") if p.is_file()}
+        self.assertTrue(before)
+        first = viewer("lost-post")
+        self.assertTrue(first["lostReply"])
+        resumed = viewer("resume")
+        self.assertEqual(resumed["state"], "waiting_policy")
+        self.assertEqual(first["requestSha256"], resumed["requestSha256"])
+        self.assertEqual(drops["count"], 1)
+        self.assertEqual(len(requests), 1, "restart must find the committed authorization without another POST")
+        auth = json.loads(requests[0])["authorization"]
+        self.assertGreater(len(auth["eligibleObjects"]), 0)
+        paths = [spool.root / spool.storage_key(auth["jobId"], auth["generation"], obj["id"])
+                 for obj in auth["eligibleObjects"]]
+        self.assertTrue(all(path.is_file() for path in paths))
+        service.run_once()
+        self.assertTrue(all(path.is_file() for path in paths), "no source copy may be removed before policy age")
+        # The injected monotonic clock is only a synthetic test dependency.
+        # Exercise every normal <=300-second credit checkpoint, never edit the journal age.
+        for _ in range(288):
+            clock[0] += 300_000_000_000
+            service.checkpoint_timers()
+        for _ in range(len(paths) + 6): service.run_once()
+        terminal = viewer("terminal")
+        self.assertEqual(terminal["state"], "released")
+        replay = viewer("terminal-replay")
+        self.assertEqual(replay["receiptSha256"], terminal["receiptSha256"])
+        self.assertEqual(len(requests), 1)
+        self.assertEqual([status for method, _, status in responses if method == "GET"], [404, 200, 200])
+        self.assertFalse(any(path.exists() for path in paths))
+        after = {p.relative_to(root / "models").as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                 for p in (root / "models").rglob("*") if p.is_file()}
+        self.assertEqual(after, before, "source retirement must preserve every accepted Viewer model byte")
+        self.assertEqual((root / "photo.jpg").read_bytes(), SOURCE_BYTES)
 
 
 if __name__ == "__main__": unittest.main()
