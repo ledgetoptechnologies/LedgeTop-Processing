@@ -876,6 +876,13 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             row = self._row(db, job_id)
             if not row["result_json"] or row["phase"] not in ("awaiting_acceptance", "completed"):
                 raise Conflict("result is not ready for acceptance")
+            submission = json.loads(row['input_json'])
+            source_v2 = 'sourceIntakeVersion' in submission or row['source_state'] is not None
+            if source_v2:
+                if (type(submission.get('sourceIntakeVersion')) is not int
+                        or submission['sourceIntakeVersion'] != 2 or row['source_state'] is None
+                        or viewer_receipt is None):
+                    raise Conflict('V2 result acceptance requires its signed source-bound copy receipt')
             result = json.loads(row["result_json"])
             transfer = db.execute('SELECT receipt_id,viewer_manifest_json FROM reference_viewer_transfers WHERE job_id=?',
                                   (job_id,)).fetchone()
@@ -898,14 +905,22 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             identities = {checked['receiptId'], checked['storageReceiptId']}
             viewer_checked = None
             if viewer_receipt is not None:
-                from .viewer_acceptance_receipt import verify_viewer_acceptance_receipt
                 expected = dict(jobId=job_id, generation=row['generation'], environment=row['environment'],
                     inputManifestSha256=row['manifest_sha'], pipelineDigest=row['pipeline_digest'],
                     resultManifestSha256=accepted_manifest['resultManifestSha256'])
                 try:
-                    verified = verify_viewer_acceptance_receipt(viewer_receipt,
-                        trusted_keys=trusted_viewer_receipt_keys, expected=expected,
-                        result_manifest=accepted_manifest, accepted_object_ids=checked['acceptedObjectIds'])
+                    if source_v2:
+                        from .viewer_copy_receipt_v2 import verify_viewer_copy_receipt_v2
+                        expected = {**self._source_acceptance_binding(row),
+                                    'resultManifestSha256': accepted_manifest['resultManifestSha256']}
+                        verified = verify_viewer_copy_receipt_v2(viewer_receipt,
+                            trusted_keys=trusted_viewer_receipt_keys, expected=expected,
+                            result_manifest=accepted_manifest, acceptance=checked)
+                    else:
+                        from .viewer_acceptance_receipt import verify_viewer_acceptance_receipt
+                        verified = verify_viewer_acceptance_receipt(viewer_receipt,
+                            trusted_keys=trusted_viewer_receipt_keys, expected=expected,
+                            result_manifest=accepted_manifest, accepted_object_ids=checked['acceptedObjectIds'])
                 except (TypeError, ValueError):
                     raise Conflict('Viewer accepted-copy signature or binding is invalid') from None
                 viewer_checked = verified.receipt
@@ -966,8 +981,11 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             if transfer and transfer['receipt_id'] == checked['receiptId']:
                 db.execute('UPDATE reference_viewer_transfers SET completed_at=COALESCE(completed_at,CURRENT_TIMESTAMP),'
                            'lease_token=NULL,lease_until=NULL,last_error=NULL WHERE job_id=?', (job_id,))
-            return {"job": self._public(self._row(db, job_id)), "created": old is None,
-                    "fullyAccepted": fully, "acceptedObjectIds": sorted(accepted)}
+            response = {"job": self._public(self._row(db, job_id)), "created": old is None,
+                        "fullyAccepted": fully, "acceptedObjectIds": sorted(accepted)}
+            if source_v2:
+                response['viewerReceipt'] = viewer_checked
+            return response
 
     def ensure_viewer_transfer(self, job_id, *, accepted_at=None):
         """Durably create one stable Viewer acceptance request for a sealed result."""
