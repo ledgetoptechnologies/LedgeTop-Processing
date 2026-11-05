@@ -207,7 +207,12 @@ class SourceSpoolTests(unittest.TestCase):
         outside.write_bytes(b"secret")
         key = self.spool.storage_key(JOB_ID, 1, OBJECT_ID)
         target = self.root / key
-        target.parent.mkdir(parents=True, mode=0o700)
+        # Each ancestor must be private so this fixture reaches the symlink
+        # check instead of stopping at mkdir(parents=True)'s 0755 intermediate.
+        directory = self.root
+        for part in target.parent.relative_to(self.root).parts:
+            directory = directory / part
+            directory.mkdir(mode=0o700)
         try:
             target.symlink_to(outside)
         except (OSError, NotImplementedError):
