@@ -6,6 +6,24 @@ approval. Runtime acceptance remains incomplete.
 
 ## Latest combined and native-host preparation checkpoint
 
+Processing `65ecd4e` passed **112/112 selected Linux tests, no skips**, in
+96.263 seconds across nine modules. This includes all eight actual Viewer/Python
+paired cases (whole/range/GCP, signed source replay, provider admission, controlled
+conversion/publication, and three production attempts across two configured node
+slots) plus the staging matrix, Viewer service/tasks, multi-node intake and
+ReferenceStore. Viewer source is exact `6718d1b`, with the licensed ImageSharp
+3.2.0 converter described below. The one-CPU/2 GiB owned runner and volume exited
+and were removed. Real engine execution, installed hosts and NAS durability
+remain outside this synthetic qualification.
+
+Claude's revised staging fence is integrated as `514a5b2` plus `95e0c41`:
+production runs first on an eligible node; running production occupies its own
+node, held production blocks staging globally, and queued production permits
+staging on an otherwise eligible idle node only when configured photo count or
+engine capability proves that production cannot use it. Input byte caps and
+scratch capacity remain admission guards, not staging-priority bypass evidence.
+Claims recompute the shared rule transactionally. No live service changed.
+
 The licensed ImageSharp 3.2.0 converter from exact Viewer `6718d1b` now builds
 successfully. Paired converter/Viewer integration passed **6/6 tests, no skips**
 in 67.585 seconds, including actual conversion, verified derivatives,
@@ -50,8 +68,8 @@ one-CPU/2 GiB runner and its ownership-verified temporary volume were removed.
 This is not installed updater acceptance: restoring the actual predecessor's
 external authority lease and qualifying its current schema/census remain open.
 The predecessor authority lease/census upgrade path, source-release
-backend/timer/executor, Viewer readiness inventory/outbox/hold retirement and
-Claude's revised staging fence remain on separate work branches. They are not
+backend/timer/executor and Viewer readiness inventory/outbox/hold retirement
+remain on separate work branches. They are not
 included in the 682-test checkpoint. Installed NAS custody, real-photo/real-LiDAR
 and multi-PC acceptance remain open.
 
@@ -73,6 +91,11 @@ passed **9/9, no skips**, in 0.512 seconds, including exact installed-mode
 acceptance without chmod and unsafe-mode rejection. Its owned runner and volume
 were removed. No installed permission was changed. Current-schema census,
 frozen backup/rollback and actual cutover acceptance remain enablement gates.
+The full installed-layout check also found the original state root mode `0755`
+and main lock mode `0644` (both owner 10001, database `0600`). Enrolled legacy
+state-root compatibility remains under review; the external-directory fix alone
+does not qualify that full predecessor layout. Private source-spool and reader
+directory requirements remain unchanged.
 
 Processing `18e37ac` passed **126/126 focused Linux integration tests, no skips**,
 in 68.948 seconds across ten modules. This includes actual Viewer whole/range
@@ -89,8 +112,8 @@ and append-only physical/worker binding history. Removed/rebound nodes with
 unclosed execution/result/maintenance/reader ownership are refused. Retained
 inventory revisions are quota-accounted. Isolated qualification passed 85/85
 Linux tests. This does not qualify arbitrary-host provisioning or live multi-PC
-acceptance. Claude is separately porting the revised staging eligibility rule;
-the current global production/staging barrier is not claimed compliant.
+acceptance. The newer revised staging eligibility rule is integrated and covered
+by the latest 112-test paired/scheduling checkpoint above.
 
 Source `8f64e18` adds shared upload/receipt/completion/audit operation pins,
 audit exclusion, stable hash identity, uncertain descriptor-close retention and
