@@ -26,6 +26,9 @@ Closed authorization fields:
   `activationId`, `sourceSnapshotId`, `workerObservationId`.
 * ASCII slugs: `issuerId`, `keyId`, `principalId`, `coordinatorAuthorityId`, `jobId`.
   `providerTaskId` must equal `jobId`; the actual private V2 job ID is a UUID.
+  This is the preassigned V2 coordinator intake identity for every pipeline,
+  including TreeDar-only. It does not require a native NodeODM task. The nullable
+  generic/V1 diagnostic field does not replace the immutable V2 binding.
 * `generation`: positive safe integer. `environment`: production or staging.
 * Lowercase hex64: `preparedEnvelopeSha256`, `sourceSnapshotSha256`,
   `inputManifestSha256`, `pipelineDigest`, `resultManifestSha256`,
@@ -80,6 +83,22 @@ durable object removal and required directory fsync/tombstones; exact retries re
 stored bytes. Receipt is an authenticated TLS acknowledgement, not a new standalone
 signature or generic result-cleanup authority. Viewer must durably verify/store
 this exact binding before retiring only its matching operational source hold.
+
+`preservedClosureSha256` hashes the canonical array of every raw-source and
+attempt-derived object whose original accepted manifest declares
+`retentionClass:"permanent_viewer_hold"`. Use the same closed object records and
+ASCII `(objectKind,id)` order as `eligibleObjects`; include raw GCP CSVs. The
+empty closure is the canonical array `[]`, never null or an omitted value.
+Viewer derives this expected closure from its immutable accepted source/derived
+manifests pinned by the authorization and receipts, not a current mutable file
+listing or changed retention flag. Before minting the terminal receipt, Processing
+must physically reverify this preserved closure as well as prove all authorized
+removals. Missing or changed permanent objects hold completion. This is evidence
+at release completion, not a claim of immunity to future storage failure.
+
+The receipt's removed count and bytes must exactly equal the signed eligible
+closure. Neither the preserved digest nor a ready status permits retiring a
+permanent GCP hold, deleting Viewer originals/results, or releasing another attempt.
 
 Vectors: `fixtures/source-release-v1-vectors.json`. Its deterministic private seed
 is synthetic test material only. Positive validator evidence is not proof that
