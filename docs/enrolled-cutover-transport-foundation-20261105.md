@@ -96,6 +96,9 @@ retains private bounded start/result/exit records. Retirement requires matching
 records and absence of the actual PID/start identity; an exit marker while that
 PID remains live is insufficient. These records establish helper lifecycle,
 not whether an operator mutation occurred. The journal still verifies effects.
+The internal result calls this predicate `bodySucceeded`; it never invents an
+OS exit code from an in-process completion marker. Actual PID/start absence
+independently proves descriptor retirement, including after a lost local reply.
 
 The expanded foundation suite passed 25/25 Linux cases in 3.370 seconds without
 skips, under one CPU/768 MiB/network-none/UID10001/read-only worktree. Actual

@@ -421,6 +421,7 @@ class RemoteExecLifecycleTests(unittest.TestCase):
             _,error=self.child.communicate(timeout=3);self.assertEqual(self.child.returncode,0,error.decode())
             result=executor.inspect('a'*64,self.settings['requestId'],source,maximum=4096)
             self.assertEqual(result['result'],{'bounded':True});self.assertTrue(result['process']['retired'])
+            self.assertTrue(result['bodySucceeded']);self.assertNotIn('scriptExitCode',result)
             before=docker.calls
             with self.assertRaises(t.TransportHeld):executor.dispatch('a'*64,self.settings['requestId'],source,maximum=4096)
             self.assertEqual(docker.calls,before)

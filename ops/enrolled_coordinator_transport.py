@@ -500,11 +500,11 @@ class TrackedExec:
         envelope = dict(schemaVersion=1, protocol='ltds-cutover-exec-v1', operationId=self.operation_id,
                         requestId=request_id, containerId=identifier, sourceSha256=settings['sourceSha256'],
                         process=dict(pid=value['pid'], startTicks=value['start'], retired=True),
-                        scriptExitCode=0 if value['success'] else 1, result=value['result'])
+                        bodySucceeded=value['success'], result=value['result'])
         retired = dict(intentId=str(uuid.uuid5(uuid.UUID(request_id), 'remote-retired')), request=intent)
         # Retain only result digest; full client metadata never enters the
         # controller lifecycle artifact or an exception.
-        self.proofs.retain(retired, dict(process=envelope['process'], scriptExitCode=envelope['scriptExitCode'],
+        self.proofs.retain(retired, dict(process=envelope['process'], bodySucceeded=envelope['bodySucceeded'],
                                         resultSha256=digest(value['result'])))
         require(allow_failed or value['success'], 'remote_script_failed_after_retirement')
         return envelope
