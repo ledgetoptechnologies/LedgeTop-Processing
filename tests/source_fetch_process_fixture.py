@@ -2,10 +2,12 @@
 
 ``coordinator`` serves the real Queue, store and control API over verified TLS.
 ``worker`` runs real ReferenceDriver.step() against it, one step per stdin line,
-with the real journal, fenced ledger, range client and HTTP request path. Each is
-killed with SIGKILL by the test, so only what reached disk survives. The worker
-is built without __init__ because a real engine and gate are absent: a call into
-either fails loudly, and nothing up to execution_pending makes one.
+with the real journal, fenced ledger, range client, HTTP request path, node gate
+and ReferenceEngineWorker. Each is killed with SIGKILL by the test, so only what
+reached disk survives. The one stand-in is the engine: FileEngine answers from a
+log that outlives both processes, so starts are counted across deaths. Its status
+stays 20, so the run ends at executing with no archive. The driver is built
+without __init__, which would demand a BrokerClient that a v2 fetch never uses.
 """
 import json
 import os
@@ -15,13 +17,14 @@ import ssl
 import sys
 import threading
 import time
-from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.request import HTTPSHandler, ProxyHandler, build_opener
 
 from processing.prototype import Queue
 from processing.reference_control import ReferenceControlAPI
 from processing.reference_driver import ReferenceDriver, _NoRedirects
+from processing.reference_engine_worker import ReferenceEngineWorker
+from processing.reference_failure import FailureOutbox
 from processing.reference_http import create_reference_http_server
 from processing.reference_recovery import RecoveryNodeBinding
 from processing.reference_store import PROFILE, ReferenceStore
@@ -29,9 +32,54 @@ from processing.reference_tls import verified_client_context
 from processing.scratch_policy import ScratchLedger
 from processing.source_range_transfer import SourceRangeClient
 from processing.source_spool import SourceSpool
+from processing.viewer_service import NativeEngine
+from processing.worker_outbox import WorkerOutbox
 
 WORKER_TOKEN = 'synthetic-worker-token-012345'
 CLAIM_REQUEST = 'source-claim-process'
+GATE_ORIGIN = 'http://127.0.0.1:18080'
+ENGINE_LOG = 'engine-calls.log'
+
+
+class FileEngine(NativeEngine):
+    """Records each call before it can die, so a killed process cannot lose a start."""
+
+    def __init__(self, root, die_during):
+        super().__init__('http://127.0.0.1:3001')
+        self.log, self.die_during = Path(root) / ENGINE_LOG, die_during
+
+    def call(self, name):
+        with self.log.open('a') as stream:
+            stream.write(name + '\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        if name == self.die_during:
+            os.kill(os.getpid(), signal.SIGKILL)
+
+    def started(self):
+        return self.log.exists() and 'initialize' in self.log.read_text().split()
+
+    def initialize(self, task):
+        self.task = task['engine_uuid']
+        self.call('initialize')
+
+    def upload(self, job, item):
+        self.call('upload')
+
+    def action(self, action, job):
+        self.call(action)
+
+    def read(self, route, **_kwargs):
+        if route == '/info':
+            return {'engine': 'odx', 'engineVersion': 'pinned-engine-1', 'version': 'wrapper', 'taskQueueCount': 0, 'maxImages': None}
+        if route == '/options':
+            return [dict(name='numeric-probe', type='float', value=1, help='Numeric setting.')]
+        job = json.loads(Path(self.log.parent / 'process-config.json').read_text())['jobId']
+        if route == '/task/list':
+            return [{'uuid': job}] if self.started() else []
+        if not self.started():
+            raise OSError('synthetic missing task')
+        return {'uuid': job, 'status': {'code': 20}}
 
 
 def coordinator(config):
@@ -65,8 +113,14 @@ def build_worker(config):
     driver._active_step = driver._active_job = None
     driver._lock, driver.clock = threading.Lock(), time.time
     driver.node_id, driver.worker_id, driver.worker_instance_id = 'cluster', 'worker', 'instance'
-    driver.worker = SimpleNamespace(authority_id=config['authorityId'])
     driver.ledger = ScratchLedger(root / 'ledger.sqlite', root / 'scratch', capacity_probe=lambda _: 10**9, safety_floor_bytes=0)
+    driver.worker = ReferenceEngineWorker(root / 'worker.sqlite', ledger=driver.ledger,
+        outbox=WorkerOutbox(root / 'outbox.sqlite'), engine=FileEngine(root, os.environ.get('SOURCE_ENGINE_DIE')),
+        engine_id='engine', node_id='cluster', authority_id=config['authorityId'], coordinator_origin=GATE_ORIGIN,
+        gate_generation=1, worker_id='worker', engine_version='pinned-engine-1', allowed_odm_options={'numeric-probe'},
+        engine_probe=lambda _deadline: 'engine')
+    driver.outbox, driver.failure_outbox = driver.worker.outbox, FailureOutbox(root / 'failures.sqlite')
+    driver.allowed_environments, driver._option_definitions = frozenset(('production', 'staging')), {}
     driver.source_range_v2_enabled, driver.output_budget, driver.transfer_ttl = True, 10000, 300
     driver._open = build_opener(ProxyHandler({}), _NoRedirects(), HTTPSHandler(context=context)).open
     driver.source_range_client = SourceRangeClient(origin, root / 'worker-ledger.sqlite', ssl_context=context,
@@ -85,15 +139,17 @@ def build_worker(config):
 
 
 def die_around_recovery(driver, moment):
-    """SIGKILL this process just before the recovery POST leaves or just after it returns."""
+    """SIGKILL this process around a recovery POST, or once /phase committed processing."""
     real = driver._request
 
-    def request(method, suffix, *args, **kwargs):
+    def request(method, suffix, payload=None, **kwargs):
         recovering = method == 'POST' and suffix.endswith('/recover')
         if recovering and moment == 'before_post':
             os.kill(os.getpid(), signal.SIGKILL)
-        reply = real(method, suffix, *args, **kwargs)
+        reply = real(method, suffix, payload, **kwargs)
         if recovering and moment == 'after_post':
+            os.kill(os.getpid(), signal.SIGKILL)
+        if moment == 'after_processing_phase' and suffix.endswith('/phase') and payload['phase'] == 'processing':
             os.kill(os.getpid(), signal.SIGKILL)
         return reply
 
@@ -101,6 +157,7 @@ def die_around_recovery(driver, moment):
 
 
 def worker(config):
+    patch('processing.node_gate.canonical_gate_path', return_value=Path(config['root']) / 'gate').start()
     driver = build_worker(config)
     if os.environ.get('SOURCE_FETCH_DIE'):
         die_around_recovery(driver, os.environ['SOURCE_FETCH_DIE'])
