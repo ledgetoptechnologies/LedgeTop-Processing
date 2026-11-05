@@ -231,7 +231,15 @@ or `getfacl`; ACL tooling is unnecessary for the ownership scheme above.
    `ops/systemd/user/ledgetop-processing-reference-worker.service` for `bkoltz`
    on each host. Its `current/source` working path must resolve to one reviewed,
    immutable source version; its private config path must resolve to the host's
-   exact worker profile. Configure fixed loopback engine origins, observed
+   exact worker profile. Prepare a private `venv` beside that version's `source`
+   directory, installing the exact `requirements.txt` pins into it. The unit
+   executes `current/venv/bin/python`; it must not assume the host's system
+   interpreter has the pinned dependencies, install them during service startup,
+   or change the operating system's Python packages. Verify imports and exact
+   resolved dependency versions using that interpreter before enabling the unit.
+   The existing main Python 3.10 uses pinned pycparser 2.23; Python 3.11 and newer
+   use 3.12, whose package metadata requires Python 3.11. Cryptography, cffi and
+   rfc8785 remain pinned across both profiles. Configure fixed loopback engine origins, observed
    engine-version pins, exact gate identity and generation, separate HTTPS
    coordinator/broker origins, private result readers, explicit allowed
    environments and conservative scratch/output budgets. Serve worker results

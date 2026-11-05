@@ -1,9 +1,9 @@
-# Runtime dependency for the fixture-only source-retention-v2 Ed25519 verifier.
-# Keep the exact version pinned; activation still requires the reviewed key
-# registry, rollback anchor, storage authority and production integration.
+# Runtime dependencies for signed source/result proofs and V2 canonical hashes.
+# Installing these pins alone does not enable admission or processing.
 cryptography==50.0.2
 cffi==2.1.1
-pycparser==3.12
+pycparser==2.23; python_version < '3.11'
+pycparser==3.12; python_version >= '3.11'
 # V2 source-intake pipeline hashes must match Viewer's ECMAScript/JCS encoding.
 # Do not replace the existing V1 digest function or reinterpret persisted jobs.
 rfc8785==0.1.4

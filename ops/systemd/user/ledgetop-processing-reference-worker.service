@@ -6,7 +6,7 @@ StartLimitBurst=20
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/share/ledgetop-processing-reference/current/source
-ExecStart=/usr/bin/python3 -B -m ops.reference_worker_daemon --config %h/.config/ledgetop-processing/reference-worker.json
+ExecStart=%h/.local/share/ledgetop-processing-reference/current/venv/bin/python -B -m ops.reference_worker_daemon --config %h/.config/ledgetop-processing/reference-worker.json
 Restart=on-failure
 RestartSec=15s
 TimeoutStartSec=30s

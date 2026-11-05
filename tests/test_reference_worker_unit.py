@@ -12,7 +12,7 @@ class ReferenceWorkerUnitTests(unittest.TestCase):
     def test_unit_has_single_persistent_state_config_and_owned_daemon(self):
         text = UNIT.read_text(encoding='utf-8')
         self.assertIn('WorkingDirectory=%h/.local/share/ledgetop-processing-reference/current/source', text)
-        self.assertIn('ExecStart=/usr/bin/python3 -B -m ops.reference_worker_daemon --config %h/.config/ledgetop-processing/reference-worker.json', text)
+        self.assertIn('ExecStart=%h/.local/share/ledgetop-processing-reference/current/venv/bin/python -B -m ops.reference_worker_daemon --config %h/.config/ledgetop-processing/reference-worker.json', text)
         self.assertIn('UMask=0077', text)
         self.assertIn('NoNewPrivileges=yes', text)
         self.assertNotIn('ExecStartPre=', text)
