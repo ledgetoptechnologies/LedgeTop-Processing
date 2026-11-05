@@ -12,6 +12,7 @@ from processing.node_gate import NodeGate
 from processing.prototype import Queue
 from processing.reference_control import ReferenceControlAPI
 from processing.reference_driver import DriverWait
+from processing.reference_engine_worker import WorkerHeld
 from processing.reference_store import ReferenceStore
 from processing.reference_worker_api import ReferenceWorkerAPI
 from processing.viewer_service import EngineUnavailable
@@ -68,6 +69,15 @@ class WorkerHoldTests(unittest.TestCase):
         with self.queue._db() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued' AND id=?", (job['jobId'],)).fetchone()[0], 0)
 
+    def assert_observing(self, job, code, observation=None):
+        """Visible, but the job is exactly as it was: no hold, no error, retry intact."""
+        record = self.public(job)
+        self.assertEqual((record['status'], record['error'], record['queueReason']), ('running', None, code))
+        self.assertEqual(record['holdObservation'], observation)
+        with self.queue._db() as db:
+            self.assertIsNone(db.execute('SELECT held_reason FROM jobs WHERE id=?', (job['jobId'],)).fetchone()[0])
+        self.assertNotIn('hold', self.row(job)[1])
+
     def row(self, job):
         with self.driver._db() as db:
             row = db.execute('SELECT stage,data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
@@ -105,20 +115,28 @@ class WorkerHoldTests(unittest.TestCase):
         self.assert_public_held(job, 'engine_init_uncertain')
         self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
 
-    def test_lost_task_holds_after_bounded_not_found_reads_and_a_good_read_resets(self):
+    def test_lost_task_is_observed_after_bounded_reads_never_held_and_a_good_read_resets(self):
         job = self.executing()
         saved = self.transport.tasks.pop(job['jobId'])
         results = self.steps(MISSING_READS - 1)
         self.assertEqual({item['state'] for item in results}, {'retry_wait'})
-        self.assertEqual(self.public(job)['status'], 'running')
+        self.assertNotIn('queueReason', self.public(job))
         self.transport.tasks[job['jobId']] = saved
         self.assertEqual(self.driver.step()['state'], 'executing')
         self.assertNotIn('suspect', self.row(job)[1])
         del self.transport.tasks[job['jobId']]
         self.steps(MISSING_READS - 1)
-        self.assertEqual(self.public(job)['status'], 'running')
-        self.assertEqual(self.driver.step()['state'], 'held')
-        self.assert_public_held(job, 'engine_task_missing')
+        self.assertNotIn('queueReason', self.public(job))
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assert_observing(job, 'engine_task_missing', 'engine_task_missing')
+        self.steps(MISSING_READS)
+        self.now[0] += SUSPECT_SECONDS
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assert_observing(job, 'engine_task_missing', 'engine_task_missing')
+        self.transport.tasks[job['jobId']] = saved
+        self.assertEqual(self.driver.step()['state'], 'executing')
+        self.assertNotIn('queueReason', self.public(job))
+        self.assertNotIn('watch', self.row(job)[1])
 
     def test_http_404_counts_as_not_found_and_failed_list_counts_as_unreachable(self):
         job = self.executing()
@@ -127,14 +145,14 @@ class WorkerHoldTests(unittest.TestCase):
         self.engine_down()
         self.assertEqual(self.worker.task_observation(job['jobId']), ('unreachable', None))
 
-    def test_lost_node_holds_after_elapsed_time_not_on_short_outage(self):
+    def test_lost_node_is_observed_after_elapsed_time_not_on_short_outage(self):
         job = self.executing()
         self.engine_down()
         for _ in range(MISSING_READS + 2):
             self.assertEqual(self.driver.step()['state'], 'retry_wait')
         self.now[0] += SUSPECT_SECONDS - 1
         self.assertEqual(self.driver.step()['state'], 'retry_wait')
-        self.assertEqual(self.public(job)['status'], 'running')
+        self.assertNotIn('queueReason', self.public(job))
         self.engine_up()
         self.assertEqual(self.driver.step()['state'], 'executing')
         self.engine_down()
@@ -142,30 +160,115 @@ class WorkerHoldTests(unittest.TestCase):
         self.now[0] += SUSPECT_SECONDS - 1
         self.assertEqual(self.driver.step()['state'], 'retry_wait')
         self.now[0] += 1
-        self.assertEqual(self.driver.step()['state'], 'held')
-        self.assert_public_held(job, 'node_lost')
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assert_observing(job, 'node_lost', 'engine_unreachable')
 
-    def test_reappearing_task_is_reported_read_only_and_never_released(self):
-        job = self.executing()
+    def long_outage(self, job):
         self.engine_down()
         self.driver.step()
         self.now[0] += SUSPECT_SECONDS
         self.driver.step()
-        self.assertEqual(self.driver.step()['observation'], 'engine_unreachable')
-        self.assertEqual(self.public(job)['holdObservation'], 'engine_unreachable')
+
+    def assert_recovered(self, job):
+        """Exact bound task finished: ordinary poll and outbox, nothing re-run."""
+        self.assertEqual(self.row(job)[0], 'awaiting_acceptance')
+        self.assertEqual(self.outbox_rows(), 1)
+        self.assertNotIn('hold', self.row(job)[1])
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
+        self.assertEqual(self.store.get(job['jobId'], private=True)['status'], 'succeeded')
+        self.assertIsNotNone(self.public(job)['resultManifestSha256'])
+        self.assertNotIn('queueReason', self.public(job))
+
+    def test_task_finishing_during_a_long_outage_delivers_through_the_ordinary_outbox(self):
+        job = self.executing()
+        self.long_outage(job)
+        self.assert_observing(job, 'node_lost', 'engine_unreachable')
         self.engine_up()
+        self.transport.tasks[job['jobId']] = 40
+        self.advance(job, 'awaiting_acceptance')
+        self.assert_recovered(job)
+
+    def test_outage_over_a_coordinator_restart_delivers_under_the_restart_authority(self):
+        job = self.executing()
+        self.restart_coordinator()
+        self.long_outage(job)
+        with self.queue._db() as db:
+            held = db.execute('SELECT held_reason FROM jobs').fetchone()[0]
+            error = db.execute('SELECT error FROM reference_jobs').fetchone()[0]
+        self.assertEqual((held, error), ('coordinator_restart', None))
+        record = self.public(job)
+        self.assertEqual((record['status'], record['error'], record['queueReason']), ('held', 'coordinator_restart', 'node_lost'))
+        self.engine_up()
+        self.transport.tasks[job['jobId']] = 40
+        self.advance(job, 'awaiting_acceptance')
+        self.assert_recovered(job)
+
+    def test_reappearing_task_with_another_identity_is_never_adopted(self):
+        job = self.executing()
+        self.long_outage(job)
+        self.transport.tasks[job['jobId']] = 40
+        def other(route, **kwargs):
+            if route.startswith('/task/') and route != '/task/list':
+                return {'uuid': str(uuid.uuid4()), 'status': {'code': 40}}
+            return self.transport.read(route, **kwargs)
+        self.native.read.side_effect = other
+        self.assertEqual({item['state'] for item in self.steps(3)}, {'retry_wait'})
+        self.assert_observing(job, 'node_lost', 'engine_unreachable')
+        self.assertEqual(self.outbox_rows(), 0)
+        self.assertFalse(any(call[0] == 'download' for call in self.transport.calls))
+
+    def test_ambiguous_init_is_never_retried_or_adopted_when_a_finished_task_appears(self):
+        job = self.submit()
+        self.transport.fail_initialize = True
+        self.advance(job, 'execution_pending')
+        self.steps(3)
+        self.assert_public_held(job, 'engine_init_uncertain')
+        self.transport.fail_initialize = False
         self.transport.calls.clear()
         self.transport.tasks[job['jobId']] = 40
-        result = self.driver.step()
-        self.assertEqual((result['state'], result['observation'], result['engineStatusCode'], result['holdReport']),
-            ('held', 'engine_task_present', 40, 'acknowledged'))
-        self.assert_public_held(job, 'node_lost')
-        record = self.public(job)
-        self.assertEqual((record['holdObservation'], record['holdEngineStatusCode']), ('engine_task_present', 40))
-        self.steps(3)
+        results = self.steps(3)
+        self.assertEqual((results[-1]['state'], results[-1]['observation'], results[-1]['engineStatusCode']),
+            ('held', 'engine_task_present', 40))
         self.assertEqual({call[0] for call in self.transport.calls}, {'read'})
-        self.assertEqual(self.row(job)[0], 'executing')
         self.assertEqual(self.outbox_rows(), 0)
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], 'initialize_pending')
+        self.assert_public_held(job, 'engine_init_uncertain')
+
+    def test_refused_start_is_observed_and_retried_as_before(self):
+        job = self.submit()
+        self.advance(job, 'execution_pending')
+        real = self.worker.start
+        def refuse(*args, **kwargs):
+            raise WorkerHeld('job metadata integrity changed')
+        self.worker.start = refuse
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assert_observing(job, 'engine_start_refused')
+        self.worker.start = real
+        self.advance(job, 'executing')
+        self.driver.step()
+        self.assertNotIn('queueReason', self.public(job))
+
+    def test_exhausted_fetch_budget_stays_retryable_and_visible(self):
+        job = self.fetching()
+        with self.driver._db() as db:
+            row = json.loads(db.execute('SELECT data FROM driver_jobs').fetchone()[0])
+            row['fetchAttempts'] = {obj['id']: 3 for obj in row['claim']['submission']['manifest']['objects']}
+            db.execute('UPDATE driver_jobs SET data=?', (json.dumps(row),))
+        result = self.driver.step()
+        self.assertEqual((result['state'], result['observing']), ('held', 'source_transfer_unavailable'))
+        self.assert_observing(job, 'source_transfer_unavailable')
+
+    def test_refusal_message_without_a_lapsed_ledger_lease_is_not_a_hold(self):
+        job = self.fetching()
+        real = self.ledger.prepare_job_directory
+        def refuse(*args):
+            raise driver_module.PolicyConflict('allocation outside reservation')
+        self.ledger.prepare_job_directory = refuse
+        self.assertEqual(self.driver.step()['reason'], 'worker_reconciliation_required')
+        self.assert_observing(job, 'worker_reconciliation_required')
+        self.ledger.prepare_job_directory = real
+        self.steps(3)
+        self.assertNotIn('queueReason', self.public(job))
 
     def outbox_rows(self):
         with closing(sqlite3.connect(self.root / 'outbox.sqlite')) as db:
@@ -231,17 +334,20 @@ class WorkerHoldTests(unittest.TestCase):
         self.assertEqual(self.driver.step()['state'], 'claim_pending')
         self.assertEqual(self.row(first)[0], 'claim_pending')
 
-    def test_scratch_shortage_waits_bounded_then_holds_and_a_pass_resets(self):
+    def test_scratch_shortage_waits_bounded_then_shows_and_a_pass_clears(self):
         self.ledger.probe = lambda root: 0
         job = self.submit()
         results = self.steps(4)
         self.assertEqual(results[-1], {'state': 'retry_wait', 'jobId': job['jobId'], 'reason': 'scratch_capacity_unavailable'})
         self.assertEqual(self.public(job)['status'], 'running')
         self.now[0] += SCRATCH_SECONDS
-        self.assertEqual(self.driver.step()['state'], 'held')
-        self.assert_public_held(job, 'scratch_capacity_unavailable')
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assert_observing(job, 'scratch_capacity_unavailable')
+        self.ledger.probe = lambda root: 10**9
+        self.advance(job, 'awaiting_grant')
+        self.assertNotIn('queueReason', self.public(job))
 
-    def test_scratch_recovering_inside_the_bound_continues_without_a_hold(self):
+    def test_scratch_recovering_inside_the_bound_continues_unreported(self):
         self.ledger.probe = lambda root: 0
         job = self.submit()
         self.steps(4)
@@ -319,8 +425,9 @@ class WorkerHoldTests(unittest.TestCase):
         self.assertEqual(self.post_hold(job, dict(request, generation=request['generation'] + 1)).status, 409)
         self.assertEqual(self.post_hold(job, dict(request, claimRequestId='driver-stale')).status, 409)
         self.assertEqual(self.post_hold(job, dict(request, holdId=str(uuid.uuid4()))).status, 409)
-        self.assertEqual(self.post_hold(job, dict(request, sequence=request['sequence'] + 1,
-            reasonCode='node_lost')).status, 409)
+        for reason in ('node_lost', 'engine_init_uncertain', None):
+            self.assertEqual(self.post_hold(job, dict(request, sequence=request['sequence'] + 1,
+                reasonCode=reason)).status, 409)
         other = ReferenceWorkerAPI(self.store, None, bearer_workers={
             OTHER: dict(node_id='cluster', worker_id='other', worker_instance_id='other-instance')})
         self.assertEqual(self.post_hold(job, request, bearer=OTHER, api=other).status, 409)
@@ -353,8 +460,38 @@ class WorkerHoldTests(unittest.TestCase):
         self.driver.step()
         self.assertEqual(self.driver.step()['holdReport'], 'refused')
         with self.queue._db() as db:
-            self.assertEqual(db.execute('SELECT held_reason FROM jobs').fetchone()[0], 'operator')
+            self.assertEqual(tuple(db.execute('SELECT held_reason,json_extract(result,"$.operatorAction") FROM jobs').fetchone()),
+                ('operator', 'hold'))
+            self.assertIsNone(db.execute('SELECT error FROM reference_jobs').fetchone()[0])
         self.assertEqual(self.public(job)['status'], 'held')
+
+    def test_observation_never_touches_an_operator_hold(self):
+        job = self.executing()
+        self.queue.operator(job['jobId'], 'hold', dict(note='synthetic'))
+        self.long_outage(job)
+        with self.queue._db() as db:
+            self.assertEqual(tuple(db.execute('SELECT status,held_reason FROM jobs').fetchone()), ('held', 'operator'))
+            self.assertIsNone(db.execute('SELECT error FROM reference_jobs').fetchone()[0])
+        self.assertNotIn('queueReason', self.public(job))
+
+    def test_delayed_older_report_cannot_replace_a_newer_one(self):
+        job = self.executing()
+        self.long_outage(job)
+        self.engine_up()
+        del self.transport.tasks[job['jobId']]
+        self.steps(MISSING_READS)
+        self.assert_observing(job, 'engine_task_missing', 'engine_task_missing')
+        first, second = self.posts[0], self.posts[-1]
+        self.assertGreater(second['sequence'], first['sequence'])
+        self.assertEqual(self.post_hold(job, first).status, 409)
+        self.assertEqual(self.post_hold(job, second).status, 200)
+        self.assert_observing(job, 'engine_task_missing', 'engine_task_missing')
+
+    def restart_coordinator(self):
+        self.queue.close()
+        self.queue = Queue(self.root / 'queue', reference_enabled=True)
+        self.store = ReferenceStore(self.queue)
+        self.api = self.rebuild_api()
 
     def rebuild_api(self):
         return ReferenceControlAPI(self.store, viewer_bearers={VIEWER: 'staging'},
@@ -362,43 +499,109 @@ class WorkerHoldTests(unittest.TestCase):
             capability_fingerprint=self.fixture['capabilities']['capabilityFingerprint'],
             options_fingerprint=self.fixture['capabilities']['engines']['odm']['optionsFingerprint'])
 
-    def test_hold_survives_coordinator_restart_and_replaces_a_restart_hold(self):
+    def test_hold_survives_restart_and_a_report_never_replaces_a_restart_hold(self):
         job = self.fetching()
-        self.queue.close()
-        self.queue = Queue(self.root / 'queue', reference_enabled=True)
-        self.store = ReferenceStore(self.queue)
-        self.api = self.rebuild_api()
+        self.restart_coordinator()
         self.assertEqual(self.public(job)['error'], 'coordinator_restart')
         self.expire_reservation()
         self.steps(2)
+        with self.queue._db() as db:
+            self.assertEqual(tuple(db.execute('SELECT status,held_reason FROM jobs').fetchone()), ('held', 'coordinator_restart'))
+            self.assertIsNone(db.execute('SELECT error FROM reference_jobs').fetchone()[0])
+        record = self.public(job)
+        self.assertEqual((record['error'], record['queueReason']), ('coordinator_restart', 'reservation_expired'))
+        self.restart_coordinator()
+        self.assertEqual(self.public(job)['queueReason'], 'reservation_expired')
+
+    def test_escalated_hold_survives_coordinator_restart(self):
+        job = self.fetching()
+        self.expire_reservation()
+        self.steps(2)
         self.assert_public_held(job, 'reservation_expired')
-        self.queue.close()
-        self.queue = Queue(self.root / 'queue', reference_enabled=True)
-        self.store = ReferenceStore(self.queue)
-        self.api = self.rebuild_api()
+        self.restart_coordinator()
         self.assert_public_held(job, 'reservation_expired')
 
+    def uncertain_init(self):
+        job = self.submit()
+        self.transport.fail_initialize = True
+        self.advance(job, 'execution_pending')
+        self.steps(3)
+        self.assert_public_held(job, 'engine_init_uncertain')
+        return job
+
+    def assert_fence_retained(self, job):
+        result = self.driver.step()
+        self.assertEqual((result['state'], result['reconciliation'], result['terminalStatus'], result['holdReport']),
+            ('held', 'physical_reservation_retained', 'failed', 'acknowledged'))
+        record = self.public(job)
+        self.assertEqual((record['status'], record['queueReason']), ('failed', 'physical_reservation_retained'))
+        with NodeGate('engine') as gate:
+            self.assertEqual(gate.snapshot()['reservation']['job']['id'], job['jobId'])
+        self.assertNotEqual(self.row(job)[0], 'completed')
+
     def test_operator_resolution_fails_the_job_without_requeue_or_deletion(self):
-        job = self.executing()
-        self.engine_down()
-        self.driver.step()
-        self.now[0] += SUSPECT_SECONDS
-        self.driver.step()
-        self.assert_public_held(job, 'node_lost')
+        job = self.uncertain_init()
         self.queue.operator(job['jobId'], 'resolve', dict(note='synthetic', workerStopped=True))
         record = self.public(job)
-        self.assertEqual((record['status'], record['phase'], record['error']), ('failed', 'held', 'node_lost'))
+        self.assertEqual((record['status'], record['phase'], record['error']), ('failed', 'held', 'engine_init_uncertain'))
         self.assertIsNone(self.store.next_for_node('cluster'))
         response = self.api.handle('POST', '/ltds/worker/v1/claim', {'Authorization': 'Bearer ' + TOKEN},
             json.dumps(dict(jobId=job['jobId'], claimRequestId='driver-after-resolution')).encode(), protected_transport=True)
         self.assertEqual(response.body, dict(jobId=job['jobId'], status='failed', claimState='dropped'))
-        self.engine_up()
-        self.assertEqual(self.driver.step()['state'], 'held')
-        self.assertEqual(self.row(job)[0], 'executing')
-        self.assertIn(job['jobId'], self.transport.tasks)
-        self.assertEqual(self.worker._row(job['jobId'])['phase'], 'processing')
+
+    def test_operator_terminal_keeps_a_live_fence_and_says_so_until_the_gate_is_resolved(self):
+        job = self.uncertain_init()
+        second = self.submit()
+        self.queue.operator(job['jobId'], 'resolve', dict(note='synthetic', workerStopped=True))
+        self.assert_fence_retained(job)
+        self.assert_fence_retained(job)
+        self.assertEqual(self.store.get(second['jobId'], private=True)['status'], 'queued')
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], 'initialize_pending')
         with NodeGate('engine') as gate:
-            self.assertIsNotNone(gate.snapshot()['reservation'])
+            state = gate.snapshot()
+            gate.resolve(state['reservation']['receiptId'], state['generation'], old_worker_stopped=True,
+                coordinator_resolved=True, note='synthetic')
+        self.worker.gate_generation += 1
+        result = self.driver.step()
+        self.assertEqual((result['state'], result['terminalStatus']), ('operator_terminal', 'failed'))
+        self.assertEqual(self.row(job)[0], 'completed')
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], 'initialize_pending')
+        self.transport.fail_initialize = False
+        self.advance(second, 'claimed')
+        self.assertEqual(self.public(second)['status'], 'running')
+        self.assertEqual(self.public(job)['status'], 'failed')
+
+    def test_operator_terminal_without_a_fence_frees_the_node(self):
+        job, second = self.fetching(), self.submit()
+        self.expire_reservation()
+        self.steps(2)
+        self.assert_public_held(job, 'reservation_expired')
+        self.queue.operator(job['jobId'], 'resolve', dict(note='synthetic', workerStopped=True))
+        self.assertEqual(self.driver.step()['state'], 'operator_terminal')
+        self.advance(second, 'claimed')
+        self.assertEqual(self.public(job)['status'], 'failed')
+
+    def test_operator_ending_an_observed_job_is_noticed_and_the_fence_kept(self):
+        job = self.executing()
+        self.long_outage(job)
+        self.queue.operator(job['jobId'], 'hold', dict(note='synthetic'))
+        self.queue.operator(job['jobId'], 'resolve', dict(note='synthetic', workerStopped=True))
+        self.assert_fence_retained(job)
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], 'processing')
+
+    def test_terminal_word_with_another_binding_ends_nothing(self):
+        job = self.fetching()
+        self.expire_reservation()
+        self.steps(2)
+        self.queue.operator(job['jobId'], 'resolve', dict(note='synthetic', workerStopped=True))
+        real = self.driver._request
+        def tampered(method, suffix, payload=None, *, claim_token=None):
+            status, value = real(method, suffix, payload, claim_token=claim_token)
+            return status, dict(value, generation=value['generation'] + 1) if suffix.endswith('/claim-state') else value
+        self.driver._request = tampered
+        self.steps(2)
+        self.assertEqual(self.row(job)[0], 'fetching')
+        self.assertIn('hold', self.row(job)[1])
 
 
 if __name__ == '__main__':

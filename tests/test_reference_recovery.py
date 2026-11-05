@@ -76,6 +76,25 @@ class RecoveryTests(unittest.TestCase):
             for key in ('status','held_reason','updated_at'):job.pop(key)
         return ref,claim,grants,jobs
 
+    def report(self,reason,sequence,hold_id):
+        job=self.store.get(self.job['jobId'],private=True)
+        return self.call('POST','hold',dict(schemaVersion=1,protocol='ltds-worker-hold-v1',holdId=hold_id,sequence=sequence,
+            coordinatorAuthorityId=self.queue.authority_id,jobId=job['jobId'],generation=job['generation'],environment=job['environment'],
+            inputManifestSha256=job['manifestSha256'],pipelineDigest=job['pipelineDigest'],claimRequestId='original-claim',
+            reasonCode=reason,observation=None,engineStatusCode=None))
+
+    def test_worker_reports_leave_restart_recovery_eligible(self):
+        hold_id=str(uuid.uuid4())
+        for sequence,reason in enumerate(('node_lost','engine_task_missing','reservation_expired')):
+            self.assertEqual(self.report(reason,sequence,hold_id).status,200)
+            state=self.state()
+            self.assertTrue(state['eligible'])
+            self.assertEqual((state['claim']['status'],state['claim']['heldReason']),('held','coordinator_restart'))
+        with self.queue._db() as db:self.assertIsNone(db.execute('SELECT error FROM reference_jobs').fetchone()[0])
+        response=self.call('POST','recover',self.request())
+        self.assertEqual(response.status,200)
+        self.assertEqual(self.state()['claim']['status'],'running')
+
     def test_exact_original_claim_resumes_without_requeue_or_input_changes(self):
         before=self.facts();request=self.request();old_token=self.claim['claimToken']
         response=self.call('POST','recover',request);self.assertEqual(response.status,200,response.body)
