@@ -92,10 +92,14 @@ acceptance without chmod and unsafe-mode rejection. Its owned runner and volume
 were removed. No installed permission was changed. Current-schema census,
 frozen backup/rollback and actual cutover acceptance remain enablement gates.
 The full installed-layout check also found the original state root mode `0755`
-and main lock mode `0644` (both owner 10001, database `0600`). Enrolled legacy
-state-root compatibility remains under review; the external-directory fix alone
-does not qualify that full predecessor layout. Private source-spool and reader
-directory requirements remain unchanged.
+and main lock mode `0644` (both owner 10001, database `0600`). Follow-up
+`427b3e0` permits this exact legacy root only with the existing required marker,
+private database and actual enrolled external lease. Unenrolled/public or
+foreign-writable roots remain refused; private source-spool and reader directory
+requirements are unchanged. Integrated authority/freeze/runtime/source-reader/
+prototype/HTTP/role regression passed **117/117 Linux tests, no skips**, in
+19.807 seconds; the owned runner and volume were removed. This is synthetic
+compatibility evidence, not installed replacement or hot-journal recovery.
 
 Processing `18e37ac` passed **126/126 focused Linux integration tests, no skips**,
 in 68.948 seconds across ten modules. This includes actual Viewer whole/range
@@ -860,7 +864,11 @@ are not operational.
 6. **TreeDar and future engines:** genuine LAS/LAZ admission and the complete
    typed output closure still need real runtime qualification. TreeDar stays on
    main; Gaussian splats remain disabled. Jobs on one host must not overlap
-   between engines.
+   between engines. Source release additionally requires authoritative Viewer
+   registration and usable-output verification of every required TreeDar role;
+   merely hashing retained accepted raw objects is insufficient. Until that
+   mapping is qualified, retain the source holds and refuse a TreeDar-ready
+   cleanup proof rather than ignore the missing registrations.
 7. **Viewer experience:** Ops #406 at `bf5c1dbbb5fb49213e429f131c40ad7403628147`
    independently passed 52 workspace behavior/brand/control tests plus 14
    hierarchy migration/API/permission tests, no skips. These verify customer
