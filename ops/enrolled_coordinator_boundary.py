@@ -36,8 +36,9 @@ class BoundaryProbe:
 
     def host(self):
         path=Path(self.bundle['host']['dockerBinary']);before=path.lstat()
+        readonly_mount=bool(os.statvfs(path).f_flag&os.ST_RDONLY)
         require(path.resolve()==path and stat.S_ISREG(before.st_mode) and before.st_nlink==1
-                and before.st_uid in (0,os.geteuid()) and not before.st_mode&0o022
+                and before.st_uid in (0,os.geteuid()) and (not before.st_mode&0o022 or readonly_mount)
                 and not os.access(path,os.W_OK) and before.st_size<=256*1024*1024,
                 'reviewed_readonly_docker_binary_required')
         fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
