@@ -463,8 +463,10 @@ def configuration_material(operation_id, authority_id, worker_host='127.0.0.1'):
     common = dict(schemaVersion=2,listener=dict(host='0.0.0.0',port=8443,
         certificate='/run/phase-tls/fixture-cert.pem',
         privateKey='/run/phase-tls/fixture-key.pem',clientCA='/run/phase-tls/fixture-cert.pem'),
-        viewerBearers=dict(production=credentials['PROCESSING_VIEWER_TOKEN'],
-                          staging=credentials['PROCESSING_VIEWER_STAGING_TOKEN']),
+        # Native compatibility credentials must be preserved, but the V2
+        # runtime deliberately rejects reusing any legacy credential.
+        viewerBearers={environment:'synthetic-v2-viewer-'+environment+'-'+secrets.token_hex(24)
+                       for environment in ('production','staging')},
         workers=workers,streamBudget=dict(maxConcurrent=1,maxObjectBytes=1048576),
         recoveryBindings={node:dict(engineId='fixture-engine-'+node,authorityId=authority_id,
             coordinatorOrigin='http://127.0.0.1:8080',gateGeneration=1,outputBudget=1048576)
