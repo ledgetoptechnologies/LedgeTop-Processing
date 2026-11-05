@@ -544,6 +544,26 @@ class SourceRangeTransferCandidateTests(unittest.TestCase):
                 build_source_transfer_request(job, reservation_id='reserve-v2',
                     expires_at=invalid_expiry, nonce='nonce-v2')
 
+    def test_viewer_canonical_dataset_uuid_needs_no_signed_manifest_rewrite(self):
+        dataset_id = '00000000-0000-4000-8000-0000000000af'
+        manifest = dict(self.manifest, id=dataset_id)
+        manifest['sha256'] = p.manifest_sha256(manifest)
+        expected_version = 'dataset:' + dataset_id + ':' + manifest['sha256']
+        self.assertEqual(source_version_for_manifest(manifest), expected_version)
+        job = dict(jobId='job-uuid',generation=1,environment='staging',
+            manifestSha256=manifest['sha256'],submission={'manifest':manifest})
+        request = build_source_transfer_request(job,reservation_id='uuid-reservation',
+            expires_at='2035-01-01T00:00:00.000Z',nonce='uuid-nonce')
+        self.assertEqual(request['sourceVersion'],expected_version)
+        job['transferRequest'] = request
+        checked = validate_source_grant(dict(request,jobId=job['jobId'],environment='staging',
+            token='synthetic-uuid-source-token'),job=job)
+        self.assertEqual(checked.identity.source_version,expected_version)
+        self.assertEqual(manifest['id'],dataset_id)
+        for invalid in (dataset_id.upper(),'{'+dataset_id+'}','manifest-uuid','../'+dataset_id):
+            with self.subTest(invalid=invalid),self.assertRaises(TransferError):
+                source_version_for_manifest(dict(manifest,id=invalid))
+
     def test_second_process_transfer_is_rejected_while_object_lock_is_held(self):
         entered, release = threading.Event(), threading.Event()
         grant = self.grant()

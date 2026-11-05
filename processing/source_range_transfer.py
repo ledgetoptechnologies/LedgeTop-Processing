@@ -57,11 +57,21 @@ def source_version_for_manifest(manifest):
     dataset_prefix = "dataset-"
     manifest_id = manifest.get("id")
     digest = manifest.get("sha256")
-    if (type(manifest_id) is not str or not manifest_id.startswith(dataset_prefix)
-            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", manifest_id[len(dataset_prefix):])
-            or type(digest) is not str or not re.fullmatch(r"[a-f0-9]{64}", digest)):
+    if (type(manifest_id) is not str or type(digest) is not str
+            or not re.fullmatch(r"[a-f0-9]{64}", digest)):
         raise TransferError("invalid source manifest identity")
-    return f"dataset:{manifest_id[len(dataset_prefix):]}:{digest}"
+    if manifest_id.startswith(dataset_prefix):
+        dataset_id = manifest_id[len(dataset_prefix):]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", dataset_id):
+            raise TransferError("invalid source manifest identity")
+    else:
+        # Viewer V2 freezes the dataset's canonical UUID directly in manifest.id.
+        # Preserve existing prefixed identities; never rewrite a signed manifest.
+        try:
+            dataset_id = p._uuid(manifest_id, 'dataset ID')
+        except ValueError:
+            raise TransferError("invalid source manifest identity") from None
+    return f"dataset:{dataset_id}:{digest}"
 
 
 def build_source_transfer_request(job, *, reservation_id, expires_at, nonce, clock=time.time):

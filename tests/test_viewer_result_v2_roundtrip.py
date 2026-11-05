@@ -301,11 +301,23 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                 self.assertEqual(setup.returncode, 0, setup.stderr[-3000:])
                 state = json.loads(setup.stdout.strip().splitlines()[-1])
                 self.assertEqual(len(store.list(private=True)), 1)
+                # Preserve the deliberately secret-free production step DTO,
+                # but retain its exception as test-only synthetic diagnostics.
+                step_errors = []
+                original_step = driver._step
+                def observe_step():
+                    try:
+                        return original_step()
+                    except Exception as error:
+                        step_errors.append(error)
+                        raise
+                driver._step = observe_step
                 for _ in range(40):
                     step = driver.step()
                     current = store.get(state["providerTaskId"], private=True)
                     if current["status"] == "succeeded" and current["phase"] == "awaiting_acceptance": break
-                    self.assertNotIn(step["state"], ("held", "retry_wait"), f"worker did not advance: {step}")
+                    if step["state"] in ("held", "retry_wait"):
+                        raise AssertionError(f"worker did not advance: {step}") from (step_errors[-1] if step_errors else None)
                 else: self.fail("worker did not durably deliver synthetic result metadata")
                 self.assertEqual(transport.calls.count(("initialize", state["providerTaskId"])), 1)
                 execution_identity = json.loads(worker._row(state["providerTaskId"])["identity"])
