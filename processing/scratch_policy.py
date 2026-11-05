@@ -406,6 +406,11 @@ class ScratchLedger:
         return row["state"] == "terminal" and db.execute(
             "SELECT 1 FROM unstarted_settlements WHERE reservation=?", (row["id"],)).fetchone() is not None
 
+    def transfer_fenced(self, reservation_id):
+        """Whether begin_transfer or claim_engine_lease durably fenced this reservation."""
+        with self._transaction() as db:
+            return db.execute('SELECT 1 FROM transfer_fences WHERE reservation=?', (reservation_id,)).fetchone() is not None
+
     def unstarted_settled(self, reservation_id):
         """Whether settle_unstarted ended this reservation, now or on an earlier call."""
         with self._transaction() as db:
