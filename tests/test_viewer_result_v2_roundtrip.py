@@ -328,7 +328,9 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                 self.assertEqual(driver_result["state"], "completed")
                 self.assertTrue(any(call[0] == "remove" and call[1] == state["providerTaskId"] for call in transport.calls))
                 self.assertTrue(any(path.is_file() for path in stored_path.rglob("*.bin")), "worker cleanup must not remove Viewer copy")
-                self.assertEqual(accepted["drop_count"], 1, "accepted-copy retry must not duplicate engine task execution")
+                self.assertEqual(accepted["drop_count"], 1)
+                self.assertEqual(transport.calls.count(("initialize", state["providerTaskId"])), 1,
+                                 "accepted-copy retry and cleanup must not duplicate engine task execution")
             finally:
                 for server in servers:
                     server.shutdown(); server.server_close()
