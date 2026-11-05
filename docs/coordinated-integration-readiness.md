@@ -4,6 +4,37 @@ This record describes the review branch
 `codex/viewer-accepted-copy-integration-candidate-20261103`. It is not a deployment
 approval. Runtime acceptance remains incomplete.
 
+## Large source submission admission checkpoint
+
+Processing `187f542` integrates the V2-only 16 MiB runtime decoder and a single
+nonblocking admission slot for exact HTTP `POST /ltds/v2/jobs`. The HTTP layer
+already allowed the larger envelope, but runtime decoding previously retained
+the 4 MiB V1 default. A valid signed 10,000-photo metadata body of 9,222,511
+bytes exposed that mismatch. V1 remains limited to 4 MiB; V2 requests over
+16 MiB remain rejected.
+
+The intake slot is acquired before reading the large body and held through the
+response. A competing source admission receives `429`, `Retry-After: 2` and a
+closed connection with its body unread. This bounds metadata parsing rather
+than changing job execution: different physical nodes may still process one
+job each. Capability GETs, worker routes, source PUTs and result delivery are
+outside this slot.
+
+The integrated HTTP/scale/runtime/API/option-policy suite passed **93/93 Linux
+tests** in 13.917 seconds with one CPU/1 GiB, read-only source, network disabled
+and a bounded temporary filesystem. Real TLS exercised incomplete-body timeout,
+validation failure, busy admission, responsive GET, valid submission and exact
+replay. One queued/source-receiving job stored both 10,000-entry manifests and
+a 50,000,000,000-byte reservation, with no uploaded source bytes or object
+receipts. Capacity and physical-mount checks were injected, so this is neither
+a NAS nor 50 GB transfer qualification. Peak server-only RSS was 156,876,800
+bytes. The separate server-only **256 MiB / 0.5 CPU cgroup** experiment is still
+pending; RSS margin alone does not prove it will avoid OOM under installed load.
+
+The inactive `504af0e` source directories on both PCs described below predate
+these admission fixes. They must be replaced by a qualified exact candidate
+before activation; their earlier validator results do not qualify this code.
+
 ## Controlled conversion, publication and delivery checkpoint
 
 Processing `0327d45bdc83eea4b4a663806b555e2987a291e9` with frozen Viewer
