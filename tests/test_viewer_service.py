@@ -351,11 +351,18 @@ class ViewerServiceTests(unittest.TestCase):
                 {'role': 'main', 'configured': True, 'available': True, 'options': OPTIONS},
             ],
         }
+        def validate_node_options(submission, node):
+            if node.get('available') is not True:
+                return False
+            definitions = {option['name']: option for option in node.get('options', [])}
+            requested = submission['pipeline']['odm']['options']
+            return all(name in definitions
+                and type(value) is type(definitions[name].get('value'))
+                for name, value in requested.items())
+
         ReferenceStore(self.queue, local_max_photos=1000,
             local_max_input_bytes=20 * 1024**3, main_node_id='main',
-            node_option_validator=lambda _submission, node: node.get('available') is True
-                and {option['name'] for option in node.get('options', [])}
-                >= {'pc-ept'})
+            node_option_validator=validate_node_options)
         self.unavailable.add('cluster')
 
         self.service.tick()
