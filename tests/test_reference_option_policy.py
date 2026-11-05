@@ -17,6 +17,40 @@ CATALOG = [
 
 
 class SharedOptionPolicyTests(unittest.TestCase):
+    def test_live_nodeodx_output_help_does_not_hide_typed_output_flags(self):
+        # Read-only main-node /options metadata, NodeODX 3.8.5. No client data.
+        catalog = [
+            dict(name='gltf', type='bool', domain='', value='false',
+                 help='Generate single file Binary glTF (GLB) textured models. Default: %(default)s'),
+            dict(name='pc-ept', type='bool', domain='', value='false',
+                 help='Export the georeferenced point cloud in Entwine Point Tile (EPT) format. Default: %(default)s'),
+            dict(name='3d-tiles', type='bool', domain='', value='false',
+                 help='Generate OGC 3D Tiles outputs. Default: %(default)s'),
+            dict(name='use-exif', type='bool', domain='', value='false',
+                 help='Use EXIF information for georeferencing when a GCP File exists.'),
+            dict(name='texturing-single-material', type='bool', domain='', value='false',
+                 help='Generate OBJs with a single material and texture file.'),
+        ]
+        definitions = safe_option_definitions(catalog)
+        self.assertEqual(set(definitions), {item['name'] for item in catalog})
+        snapshot = dict(ready=True, commonOptions=catalog, nodes=[dict(role='main', available=True)])
+        _, _, allowed = discovered_policy(snapshot, SimpleNamespace(local_max_photos=1000,
+                                                                    local_max_input_bytes=1024))
+        values = {name: True for name in definitions}
+        validate_option_values(values, definitions)
+        validate_discovered_option_values({'pipeline': {'odm': {'options': values}}}, snapshot, allowed)
+        for value in ('true', '/private/file', 'https://example.com', 1):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_option_values({'gltf': value}, definitions)
+
+    def test_unsafe_option_names_remain_blocked_for_scalar_types(self):
+        for kind in ('bool', 'int', 'float', 'string', 'enum'):
+            with self.subTest(kind=kind):
+                self.assertEqual(safe_option_definitions([
+                    dict(name=name, type=kind, help='Ordinary setting')
+                    for name in ('gcp', 'boundary', 'project-path', 'access-token', 'external-command')
+                ]), {})
+
     def test_runtime_and_worker_agree_on_fresh_enum_string_alias_and_domains(self):
         snapshot=dict(ready=True,commonOptions=CATALOG,nodes=[dict(role='cluster',available=True)])
         _,_,allowed=discovered_policy(snapshot,SimpleNamespace(local_max_photos=1000,local_max_input_bytes=1024))

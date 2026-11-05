@@ -4,6 +4,32 @@ This record describes the review branch
 `codex/viewer-accepted-copy-integration-candidate-20261103`. It is not a deployment
 approval. Runtime acceptance remains incomplete.
 
+## Live NodeODX option compatibility checkpoint
+
+A November 5 read-only SSH check found main's direct `/info` reporting engine
+`odx`, engine version `3.8.5`, API `2.4.0`, `maxImages:null` and queue count zero.
+This is a point-in-time backend observation, not reference-worker readiness.
+Cluster's running candidate command still configures `--max-images 1000`;
+its unauthenticated `/info` did not return usable engine metadata, so no fresh
+authenticated cluster discovery claim is made here.
+
+Main's actual `/options` exposed a compatibility bug that abbreviated synthetic
+help strings missed: the global unsafe-word scan rejected boolean `gltf` because
+its help describes a "single file" output. The shared policy now restricts option
+names for all scalar types and retains semantic help/domain restrictions for
+string/enum inputs; strictly typed booleans/numbers do not become path inputs
+because their help mentions a file. Known path, credential and command names
+remain blocked, as do unsafe text choices and incorrectly typed supplied values.
+No per-option output allowlist was hardcoded.
+
+The actual main catalog has 80 definitions. After the fix, 77 are accepted,
+including required `pc-ept`, `gltf` and `3d-tiles`; `boundary`, `cameras` and
+`sm-cluster` remain excluded. A local read-only catalog probe validated the
+three required boolean values using the changed policy. **132/132** focused
+Linux policy/runtime/driver/native-stage/protocol/API tests passed in 9.831
+seconds, plus **5/5** local policy tests. No engine job or container mutation
+was performed. Inactive PC source preparations still need this fix before use.
+
 ## Combined regression after intake fixes
 
 Processing `be412f366d53368208ccc5f6df65d207d2ee982a` with frozen Viewer

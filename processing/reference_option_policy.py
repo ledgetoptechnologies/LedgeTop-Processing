@@ -131,9 +131,14 @@ def safe_option_definitions(catalog):
             supported = supported and bool(choices) and len(choices) <= 1000 and all(_safe_text(value) for value in choices)
         if kind in ('string', 'enum'):
             description = json.dumps(definition.get('domain', ''), ensure_ascii=False) + ' ' + str(definition.get('help', ''))
-            supported = supported and not (name in _FILE_OPTIONS or _UNSAFE.search(description))
+            supported = supported and not _UNSAFE.search(description)
+        # Help text describes the output too: NodeODX's boolean `gltf` says
+        # "single file", while numeric matcher options mention filenames.
+        # Those words do not turn a strictly typed scalar into a path input.
+        # Restrict option names for every type, and retain the stronger text
+        # and domain checks above for options that can accept arbitrary text.
         if (not p.valid_odm_option_name(name) or not supported
-                or _UNSAFE.search(p.canonical_json(definition).decode('utf-8'))):
+                or name in _FILE_OPTIONS or _UNSAFE.search(name)):
             continue
         if name in selected:
             raise ValueError('duplicate ODM definition')
