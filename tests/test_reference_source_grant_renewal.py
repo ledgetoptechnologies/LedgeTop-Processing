@@ -491,6 +491,12 @@ class SourceGrantRenewalTests(RenewalHarness):
         self.renew()
         self.assertEqual([(row['sequence'], row['acked']) for row in self.journal()], [(1, 1)])
 
+    def test_drain_starting_during_verification_does_not_refuse_the_claim(self):
+        self.after_lease()
+        with self.during_verification(lambda: self.execute("UPDATE nodes SET state='draining' WHERE id=?", 'cluster')):
+            self.renew_directly()
+        self.assertEqual(len(self.journal()), 1)
+
     def test_draining_node_lets_an_existing_claim_finish(self):
         self.after_lease()
         self.execute("UPDATE nodes SET state='draining' WHERE id=?", 'cluster')
