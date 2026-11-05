@@ -33,8 +33,8 @@ works through the original stopped container's retained read-only mount. Verifie
 cleanup removes only the known stopped helper, without force or volume removal,
 and retains the service-owned files for the final recipe.
 
-The writer's initial local Linux tests passed four actual synthetic-directory
-cases plus three command/recipe cases. Subsequent source/package and cleanup
-wiring changes are compile-checked but await their affected Linux suite and
-actual Docker qualification. This is not installed/configuration activation
+The exact `80a66e6` writer checkpoint passed four actual synthetic-directory
+cases plus three command/recipe cases on Linux (7/7). These checks exercise the
+exclusive writer and explicit CLI, rather than the complete Docker staging
+lifecycle. Actual Docker qualification remains pending. This is not installed/configuration activation
 evidence. TrueNAS permissions and client data were not changed.

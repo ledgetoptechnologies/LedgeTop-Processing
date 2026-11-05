@@ -289,6 +289,8 @@ print(json.dumps(dict(rootIdentity=[s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_gi
             return dict(phase='created',containerId=item['Id'])
         if record['phase']=='created':return dict(phase='created',containerId=item['Id'])
         require(item['State']['Running'] is False and item['State']['Pid']==0 and item['State']['ExitCode']==0
+                and type(item['State'].get('StartedAt')) is str and not item['State']['StartedAt'].startswith('0001-')
+                and type(item['State'].get('FinishedAt')) is str and not item['State']['FinishedAt'].startswith('0001-')
                 and item['State'].get('OOMKilled') is False and not item['State'].get('Error'),
                 'config_writer_not_verified_terminal')
         original,source=self._original();require(source==record['configRoot'],'original_config_root_changed')
