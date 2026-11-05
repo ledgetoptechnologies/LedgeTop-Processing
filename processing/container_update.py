@@ -173,8 +173,22 @@ class ComposeNode:
         tasks = self.node.json('GET', '/task/list')
         if (not isinstance(info, dict) or info.get('engine') != self.expected_engine
                 or type(info.get('taskQueueCount')) is not int or info['taskQueueCount'] != 0
-                or tasks != []):
+                or type(tasks) is not list):
             return False
+        if self.worker_mode=='reference':
+            if len(tasks)>128:return False
+            seen=set()
+            for task in tasks:
+                identifier=task.get('uuid') if type(task) is dict else None
+                try:
+                    import uuid
+                    if type(identifier) is not str or str(uuid.UUID(identifier))!=identifier or identifier in seen:return False
+                except ValueError:return False
+                seen.add(identifier)
+                current=self.node.json('GET','/task/'+identifier+'/info')
+                if (type(current) is not dict or current.get('uuid')!=identifier or type(current.get('status')) is not dict
+                        or type(current['status'].get('code')) is not int or current['status']['code'] not in (30,40,50)):return False
+        elif tasks!=[]:return False
         # Unfinished uploads are not necessarily registered tasks. Never remove
         # them automatically. The explicitly verified fixed layout is shared by
         # the supported NodeODX and NodeODM deployments.
@@ -293,13 +307,18 @@ def wait_healthy(adapter, image, seconds):
 
 def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
             health_seconds=30, poll_seconds=3, *, expected_plan_id=None, expected_target=None,defer_finish=False,
-            on_reserved=None):
+            on_reserved=None,reference_handover=None):
     path = root / 'update.json'
     if type(defer_finish) is not bool:
         raise UpdateError('explicit completion policy required')
     if on_reserved is not None and not callable(on_reserved):
         raise UpdateError('trusted reservation callback required')
-    reviewed_worker_mode(getattr(adapter, 'worker_mode', None))
+    reference=getattr(adapter,'worker_mode',None)=='reference'
+    if reference:
+        from ops.reference_worker_handover import ReferenceWorkerHandover
+        if not isinstance(reference_handover,ReferenceWorkerHandover):
+            raise UpdateError('reference_worker_handover_unimplemented')
+    else:reviewed_worker_mode(getattr(adapter, 'worker_mode', None))
     if path.exists() or path.is_symlink():
         raise UpdateError('existing update receipt; never replay an uncertain update')
     deadline = time.monotonic() + wait_seconds
@@ -311,6 +330,7 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
         if node['state'] not in ('scheduled', 'draining'):
             return {'status': 'not_eligible', 'nodeState': node['state']}
         target_version = exact_engine_version(node.get('targetEngineVersion'))
+        if reference:reference_handover.authorize_plan(node_id,node,adapter)
         due = datetime.fromisoformat(node['notBefore'].replace('Z', '+00:00')) <= datetime.now(timezone.utc)
         if node['state'] == 'draining' and due and adapter.idle():
             jobs = coordinator.json('GET', '/v1/prototype/jobs')['jobs']
@@ -331,6 +351,8 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
     receipt = {'stage': 'begin_pending', 'nodeId': node_id, 'planId': node['planId'],
                'oldImage': old, 'targetImage': target, 'targetEngineVersion': target_version,
                'oldEngineVersion': old_version, 'startedAt': datetime.now(timezone.utc).isoformat()}
+    if reference:
+        receipt.update(workerMode='reference',referenceWorkerManifestSha256=reference_handover._manifest_sha)
     save(path, receipt)
     # Both the queue fence and private intent exist before any container mutation.
     begun = operator.json('POST', '/v1/prototype/nodes/' + node_id + '/begin',
@@ -351,6 +373,9 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
         receipt.update(stage='reserved_ready',reservationCallbackCompleted=True)
         save(path,receipt)
     try:
+        if reference:
+            if reference_handover._gate_owner is None:raise UpdateError('reference_worker_stop_not_proven')
+            reference_handover.before_replace(reference_handover._gate_owner)
         receipt['stage'] = 'replace_pending'
         save(path, receipt)
         adapter.replace(target)
@@ -420,13 +445,18 @@ def finalize_deferred(coordinator,operator,node_id,root,*,expected_plan_id,expec
     health and owned reopened ingress. Replays reconcile only this final CAS.
     """
     receipt=deferred_receipt(root,node_id,expected_plan_id=expected_plan_id,expected_target=expected_target)
-    if (type(result) is not dict or set(result)!={'healthy','image','previousImage','composePinUpdateRequired','persistentComposePin','ingress','engineVersion'}
+    fields={'healthy','image','previousImage','composePinUpdateRequired','persistentComposePin','ingress','engineVersion'}
+    if receipt.get('workerMode')=='reference':fields.add('workerHandoverSha256')
+    if (type(result) is not dict or set(result)!=fields
             or result.get('healthy') is not True or result.get('image')!=expected_target
             or result.get('previousImage')!=receipt['oldImage'] or result.get('composePinUpdateRequired') is not False
             or result.get('persistentComposePin')!=expected_target or result.get('ingress')!='open'):
         raise UpdateError('verified managed finalization proof required')
     if result.get('engineVersion') != receipt['targetEngineVersion']:
         raise UpdateError('target engine version changed before finalization')
+    if receipt.get('workerMode')=='reference' and (type(result.get('workerHandoverSha256')) is not str
+            or not re.fullmatch(r'[a-f0-9]{64}',result['workerHandoverSha256'])):
+        raise UpdateError('worker handover completion proof required')
     if receipt.get('finishResult') is not None and receipt['finishResult']!=result:
         raise UpdateError('final completion cannot change')
     node=coordinator.json('GET','/v1/prototype/nodes/'+node_id)['node']

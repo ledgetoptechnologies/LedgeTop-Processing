@@ -2,9 +2,10 @@
 
 Foreground automation only: stage an immutable image first, schedule a plan,
 then supervise `run` until its bounded wait ends. No moving-tag pulls, OS updates,
-process termination or automatic uncertain-operation replay.
+forced process termination or automatic uncertain-operation replay.
 """
 import argparse
+import base64
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
@@ -17,7 +18,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from processing.container_update import (ComposeNode,execute,lock,UpdateError,deferred_receipt,
-                                         finalize_deferred,finish_matches,exact_engine_version,reviewed_worker_mode)
+                                         finalize_deferred,finish_matches,exact_engine_version,reviewed_worker_mode,wait_healthy)
 from processing.node_gate import NodeGate, GateBusy, GateError as NodeGateError
 from processing.odx_smoke_worker import Client, SmokeError
 from ops.node_ingress import Ingress, GateError, locked, save
@@ -102,8 +103,12 @@ def owned_open_proof(ingress,state):
     return dict(state='open',containerId=identifier,oldWorkersDrained=True)
 
 
-def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,*,already_finished=False):
-    reviewed_worker_mode(settings.get('workerMode'))
+def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,*,already_finished=False,worker_handover=None):
+    if settings.get('workerMode')=='reference':
+        from ops.reference_worker_handover import ReferenceWorkerHandover
+        if not isinstance(worker_handover,ReferenceWorkerHandover):raise UpdateError('reference_worker_handover_unimplemented')
+        worker_handover.verify_ready(require_idle=not already_finished)
+    else:reviewed_worker_mode(settings.get('workerMode'))
     version = exact_engine_version(state.get('targetEngineVersion'))
     adapter.bind_engine_version(version)
     current_node = api.json('GET','/v1/prototype/nodes/'+settings['nodeId'])['node']
@@ -141,11 +146,13 @@ def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,dr
             or not (adapter.serving(state['targetImage']) if already_finished else adapter.healthy(state['targetImage']))):
         raise GateError('final pinned backend verification changed')
     sync_compose(root)
+    if worker_handover is not None:worker_handover.verify_ready(require_idle=not already_finished)
     state.update(stage='finish_pending',openedIngress=proof)
     save(receipt/'managed-update.json',state)
     result=dict(healthy=True,image=state['targetImage'],previousImage=private['oldImage'],
         engineVersion=version,
         composePinUpdateRequired=False,persistentComposePin=state['targetImage'],ingress='open')
+    if worker_handover is not None:result['workerHandoverSha256']=worker_handover.public_receipt_sha256()
     result=finalize_deferred(api,operator,settings['nodeId'],receipt,expected_plan_id=state['planId'],
         expected_target=state['targetImage'],result=result)
     state.update(stage='completed',persistentComposePin=state['targetImage'],result=result)
@@ -153,9 +160,158 @@ def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,dr
     return result
 
 
+@contextmanager
+def worker_factory_gate_yield(gate,handover,deadline):
+    """Only yield this owned empty gate behind the still-closed queue/ingress."""
+    handover._gate(gate)
+    gate.__exit__(None,None,None)
+    try:yield
+    finally:
+        while True:
+            handover.guard()
+            try:gate.__enter__();break
+            except GateBusy:
+                if time.monotonic()>=deadline:raise GateError('worker factory gate reacquisition unavailable')
+                time.sleep(min(0.2,max(0,deadline-time.monotonic())))
+        handover._gate(gate)
+
+
+def run_reference(root,api,operator,receipt,wait_seconds,drain_seconds,*,expected_plan_id,expected_target):
+    """Use the same planned update, physical gate and deferred finalization."""
+    from ops.reference_worker_handover import ReferenceWorkerHandover,WorkerHandoverHeld,WorkerHandoverUncertain,private_bytes
+    settings=json.loads((root/'maintenance.json').read_text());node_id=settings['nodeId']
+    if settings.get('workerMode')!='reference':raise GateError('reference worker mode required')
+    if (expected_plan_id is None)!=(expected_target is None):raise GateError('frozen plan and target required together')
+    ingress=Ingress(root/'ingress');adapter=ComposeNode(adapter_args(root,settings,ingress),receipt)
+    deadline=time.monotonic()+wait_seconds
+    def worker_deadline():return time.monotonic()+min(30,max(1,drain_seconds))
+    state={};allow_failed=False
+    def fence(node):
+        if expected_plan_id is not None and (node.get('planId'),node.get('targetImage'))!=(expected_plan_id,expected_target):
+            raise GateError('expected maintenance plan or target changed')
+    def guard():
+        node=api.json('GET','/v1/prototype/nodes/'+node_id)['node'];fence(node)
+        config=json.loads(private_bytes(Path(settings['referenceWorker']['configPath'])))
+        if (config['nodeId']!=node_id or config['gateCoordinatorOrigin'].rstrip('/')!=api.origin
+                or api.json('GET','/v1/prototype/authority')!={'authorityId':config['authorityId']}):
+            raise GateError('worker coordinator binding changed')
+        if (node.get('planId'),node.get('targetImage'),node.get('targetEngineVersion'))!=(
+                state.get('planId'),state.get('targetImage'),state.get('targetEngineVersion')):
+            raise GateError('reference maintenance plan changed')
+        expected_states=('updating','failed') if allow_failed else ('updating',)
+        if node.get('state') not in expected_states:raise GateError('reference node is no longer updating')
+        reserved=state.get('reservedRevision')
+        if reserved is not None:
+            revision=reserved+(1 if node['state']=='failed' else 0)
+            if node.get('revision')!=revision:raise GateError('reference maintenance revision changed')
+        closed=json.loads((ingress.root/'state.json').read_text())
+        if state.get('stage') in ('ingress_open_pending','finish_pending'):
+            owned_open_proof(ingress,state)
+            return
+        if (closed.get('state')!='closed' or closed.get('containerId')!=state.get('closedIngress',{}).get('containerId')
+                or ingress.inspect().get('Id')!=closed.get('containerId')
+                or set(closed.get('oldWorkers',[])) & ingress.workers(ingress.inspect())):
+            raise GateError('reference ingress is not provably closed')
+    with lock(receipt),locked(root/'ingress'),ReferenceWorkerHandover(settings['referenceWorker'],receipt,guard=guard) as handover:
+        managed=receipt/'managed-update.json';node=api.json('GET','/v1/prototype/nodes/'+node_id)['node'];fence(node)
+        binding=operation_binding(api,settings,ingress,adapter.args)
+        binding['referenceWorkerManifestSha256']=handover._manifest_sha
+        if managed.exists():
+            state.update(json.loads(managed.read_text()))
+            if state.get('binding')!=binding:raise GateError('reference managed binding changed')
+            if state.get('stage')=='failed_rolled_back':
+                allow_failed=True;guard()
+                if handover.state is None or handover.state.get('stage')!='rolled_back':raise GateError('worker rollback receipt unavailable')
+                old=json.loads(base64.b64decode(handover.state['oldConfig']))
+                handover.ready(expected_sha=handover.state['oldConfigSha256'],activation=old['maintenanceReadiness']['activation'],require_idle=False)
+                return state['result']
+            private=deferred_receipt(receipt,node_id,expected_plan_id=state['planId'],expected_target=state['targetImage'])
+            final=dict(healthy=True,image=state['targetImage'],previousImage=private['oldImage'],engineVersion=state['targetEngineVersion'],
+                composePinUpdateRequired=False,persistentComposePin=state['targetImage'],ingress='open',
+                workerHandoverSha256=handover.public_receipt_sha256()) if handover.state and handover.state.get('stage')=='worker_ready' else None
+            if final is not None and finish_matches(node,private,final):
+                return finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,
+                    already_finished=True,worker_handover=handover)
+            if state.get('stage') in ('ingress_open_pending','finish_pending','completed'):
+                # Never replay an uncertain reload or mutate worker/engine here.
+                with idle_host_gate(api,node_id,adapter.args.docker_engine_id,deadline) as gate:
+                    handover._gate(gate)
+                    return finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,worker_handover=handover)
+            if state.get('stage') not in ('ingress_closed','update_returned','compose_pin_pending','compose_pinned'):
+                raise GateError('reference operation requires inspection')
+            guard()
+            if state['stage']=='ingress_closed':state['stage']='update_returned';save(managed,state)
+        else:
+            if (receipt/'update.json').exists():raise GateError('unbound reference update receipt')
+            while True:
+                node=api.json('GET','/v1/prototype/nodes/'+node_id)['node'];fence(node)
+                if node['state'] not in ('scheduled','draining'):return dict(status='not_eligible',nodeState=node['state'])
+                exact_engine_version(node.get('targetEngineVersion'))
+                if node['state']=='draining' and datetime.fromisoformat(node['notBefore'].replace('Z','+00:00'))<=datetime.now(timezone.utc):break
+                if time.monotonic()>=deadline:return dict(status='waiting',nodeState=node['state'])
+                time.sleep(min(1,max(0,deadline-time.monotonic())))
+            item=adapter.inspect();backend=json.loads(ingress.docker(['inspect',ingress.config['backendName']]))[0]
+            source=json.loads((root/'compose.json').read_text())
+            if backend['Id']!=item['Id'] or source['services'][settings['service']]['image']!=item['Image']:
+                raise GateError('reference backend or Compose binding changed')
+            state.update(stage='waiting_for_jobs',planId=node['planId'],targetImage=node['targetImage'],
+                targetEngineVersion=node['targetEngineVersion'],oldImage=item['Image'],binding=binding,
+                composeBaseSha256=compose_base(source,settings['service']))
+            save(managed,state)
+        with idle_host_gate(api,node_id,adapter.args.docker_engine_id,deadline) as gate:
+            handover.authorize_plan(node_id,state,adapter)
+            if not (receipt/'update.json').exists():
+                def close_and_stop(reserved):
+                    current=api.json('GET','/v1/prototype/nodes/'+node_id)['node'];fence(current)
+                    if (current.get('state')!='updating' or current.get('revision')!=reserved['reservedRevision']
+                            or current.get('planId')!=state['planId'] or current.get('targetEngineVersion')!=state['targetEngineVersion']):
+                        raise GateError('reference reservation changed')
+                    state.update(stage='ingress_close_pending',reservedRevision=reserved['reservedRevision']);save(managed,state)
+                    closed=ingress.change(True,seconds=drain_seconds)
+                    if closed.get('state')!='closed' or closed.get('oldWorkersDrained') is not True:raise GateError('reference ingress drain unavailable')
+                    state.update(stage='ingress_closed',closedIngress=closed);save(managed,state)
+                    handover.stop_old(gate,state,worker_deadline())
+                result=execute(api,operator,adapter,node_id,receipt,wait_seconds=max(0,deadline-time.monotonic()),health_seconds=30,
+                    expected_plan_id=state['planId'],expected_target=state['targetImage'],defer_finish=True,
+                    on_reserved=close_and_stop,reference_handover=handover)
+                state.update(stage='update_returned',result=result);save(managed,state)
+                if result['status']!='succeeded':
+                    allow_failed=True;guard();handover.restore_old_config(gate)
+                    with worker_factory_gate_yield(gate,handover,worker_deadline()):handover.start_old(worker_deadline())
+                    value=dict(result,workerRestored=True,ingress='closed')
+                    state.update(stage='failed_rolled_back',result=value);save(managed,state);return value
+            private=deferred_receipt(receipt,node_id,expected_plan_id=state['planId'],expected_target=state['targetImage'])
+            adapter.bind_engine_version(state['targetEngineVersion'])
+            if not adapter.healthy(state['targetImage']):raise GateError('qualified reference engine health changed')
+            guard()
+            if handover.state is None:raise GateError('reference worker stop evidence missing')
+            handover._gate_owner=gate
+            if handover.state['stage']=='worker_stopped':handover.pin_new(gate)
+            handover.reconcile_pin()
+            try:
+                with worker_factory_gate_yield(gate,handover,worker_deadline()):handover.start_new(worker_deadline())
+                return finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,worker_handover=handover)
+            except WorkerHandoverUncertain:raise
+            except (WorkerHandoverHeld,GateError,UpdateError):
+                if state.get('stage') in ('ingress_open_pending','finish_pending','completed'):raise
+                handover.stop_new(worker_deadline());handover.restore_old_config(gate)
+                adapter.bind_engine_version(private['oldEngineVersion']);adapter.replace(private['oldImage'])
+                if not wait_healthy(adapter,private['oldImage'],30):raise GateError('worker handover rollback engine unavailable')
+                with worker_factory_gate_yield(gate,handover,worker_deadline()):handover.start_old(worker_deadline())
+                result=dict(healthy=False,rollbackHealthy=True,restoredImage=private['oldImage'],workerRestored=True)
+                operator.json('POST','/v1/prototype/nodes/'+node_id+'/finish',dict(planId=state['planId'],updateToken=private['updateToken'],status='failed',result=result))
+                private.update(stage='completed',status='failed',engineQualifiedResult=private['result'],result=result)
+                save(receipt/'update.json',private)
+                value=dict(status='failed',nodeId=node_id,ingress='closed',**result)
+                state.update(stage='failed_rolled_back',result=value);save(managed,state);return value
+
+
 def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_plan_id=None,expected_target=None):
     settings = json.loads((root / 'maintenance.json').read_text())
     node_id = settings['nodeId']
+    if settings.get('workerMode')=='reference' and 'referenceWorker' in settings:
+        return run_reference(root,api,operator,receipt,wait_seconds,drain_seconds,
+            expected_plan_id=expected_plan_id,expected_target=expected_target)
     reviewed_worker_mode(settings.get('workerMode'))
     if (expected_plan_id is None)!=(expected_target is None):
         raise GateError('frozen plan and target must be supplied together')

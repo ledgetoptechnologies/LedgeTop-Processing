@@ -6,6 +6,7 @@ Startup creates no credentials, gate handover, firewall rules or engine containe
 Versioned per-job routing is optional; TreeDar composition is main-host only.
 """
 import argparse
+import hashlib
 import ipaddress
 import os
 from pathlib import Path
@@ -41,7 +42,7 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
 OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion',
-                      'executionRouting','viewerReceiptKeys','sourceRangeV2Enabled'))
+                      'executionRouting','viewerReceiptKeys','sourceRangeV2Enabled','maintenanceReadiness'))
 TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
 TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
 _STATE_OWNERS = {}
@@ -197,6 +198,8 @@ class WorkerService:
         self._lock = threading.Lock()
         self._state, self._reason = 'starting', None
         self._driver_thread = self._server_thread = None
+        readiness=getattr(server,'worker_readiness_api',None)
+        if readiness is not None:readiness.service=self
 
     def _failed(self, reason, stop):
         with self._lock:
@@ -368,6 +371,12 @@ def load_config(path):
             raise ValueError('signed Viewer copy proof pins required for cleanup')
         for field in ('caFile','serverCertFile','serverKeyFile'):
             _file(config[field], private=field == 'serverKeyFile')
+        if 'maintenanceReadiness' in config:
+            from processing.reference_worker_readiness import validate_settings
+            readiness=validate_settings(config['maintenanceReadiness'])
+            if readiness['bearer'] in (config['workerBearer'],config['resultReadBearer'],config['engineToken']):
+                raise ValueError('separate maintenance read credential required')
+            config['_loadedConfigSha256']=hashlib.sha256(raw).hexdigest()
         return config
     except Exception:
         raise ValueError('invalid private worker configuration') from None
@@ -400,6 +409,12 @@ def _build_worker(config,owner,resources):
     routing = _execution_routing(config)
     root, scratch = _directory(config['stateRoot']), _directory(config['scratchRoot'])
     owner.check(root)
+    if 'maintenanceReadiness' in config:
+        from processing.reference_worker_readiness import validate_settings,source_digest
+        readiness=validate_settings(config['maintenanceReadiness'])
+        if (Path(readiness['sourceRoot'])!=Path(__file__).resolve().parents[1]
+                or source_digest(readiness['sourceRoot'])!=readiness['sourceSha256']):
+            raise ValueError('installed worker source pin differs')
     with NodeGate(config['engineId']) as gate:
         state = gate.snapshot()
         if (state['nodeId'], state['authorityId'], state['coordinatorOrigin'], state['generation']) != (
@@ -487,9 +502,16 @@ def _build_worker(config,owner,resources):
         reader_session=session), bearer_readers={config['resultReadBearer']: dict(
         node_id=config['nodeId'], worker_id=config['workerId'], environments=tuple(permitted),
         share_policy=lambda metadata: config['shareResults'] is True and metadata['environment'] in permitted)})
+    readiness_api=None
+    if 'maintenanceReadiness' in config:
+        from processing.reference_worker_readiness import WorkerReadinessAPI
+        readiness_api=WorkerReadinessAPI(result_api,settings=config['maintenanceReadiness'],
+            config_sha256=config['_loadedConfigSha256'],driver=driver,owner=owner,reader_session=session)
+        result_api=readiness_api
     server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_tls.load_cert_chain(config['serverCertFile'], config['serverKeyFile'])
     server = create_reference_http_server(result_api, config['listenHost'], config['listenPort'], ssl_context=server_tls)
+    server.worker_readiness_api=readiness_api
     original_close = server.server_close
     resources['serverClose']=original_close
     server.daemon_threads = False

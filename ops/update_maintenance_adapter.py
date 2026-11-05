@@ -262,7 +262,11 @@ class UpdateMaintenanceAdapter:
     def schedule(self,request):
         with self._operation():
             settings=read_json(self.root/'maintenance.json')
-            reviewed_worker_mode(settings.get('workerMode'))
+            if settings.get('workerMode')=='reference' and 'referenceWorker' in settings:
+                from ops.reference_worker_handover import ReferenceWorkerHandover
+                check=ReferenceWorkerHandover(settings['referenceWorker'],self.receipt_root,guard=lambda:None)
+                check._config()  # Read-only reviewed manifest/source/config check.
+            else:reviewed_worker_mode(settings.get('workerMode'))
             request=self._request(request,'schedule');row=self._schedule_row(request)
             if row:
                 if row['request']!=canonical(request):raise MaintenanceAdapterHeld('schedule_cycle_already_bound')
@@ -373,7 +377,12 @@ class UpdateMaintenanceAdapter:
         settings,ingress,adapter=self._context(root)
         expected=dict(healthy=True,image=request['localImageId'],previousImage=request['previousImageId'],
             composePinUpdateRequired=False,persistentComposePin=request['localImageId'],ingress='open',engineVersion=request['targetEngineVersion'])
-        if (state.get('binding')!=managed.operation_binding(self.api,settings,ingress,adapter.args)
+        expected_binding=managed.operation_binding(self.api,settings,ingress,adapter.args)
+        if settings.get('workerMode')=='reference':
+            from ops.reference_worker_handover import readonly_handover_sha256
+            expected['workerHandoverSha256']=readonly_handover_sha256(settings['referenceWorker'],root)
+            expected_binding['referenceWorkerManifestSha256']=digest(settings['referenceWorker'])
+        if (state.get('binding')!=expected_binding
                 or state.get('planId')!=request['plan']['planId'] or state.get('targetImage')!=request['localImageId']
                 or state.get('oldImage')!=request['previousImageId'] or state.get('persistentComposePin')!=request['localImageId']
                 or state.get('targetEngineVersion')!=request['targetEngineVersion']
