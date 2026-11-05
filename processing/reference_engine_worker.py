@@ -159,23 +159,65 @@ class ReferenceEngineWorker:
             job = self.log_metadata(job_id)
             if (job['generation'], job['environment'], job['attemptId']) != (generation, environment, attempt_id):
                 raise WorkerHeld('execution_logs_binding_mismatch')
+            phase = self._row(job_id)['phase']
+            if phase in logs.ENGINE_PRESTART_PHASES:
+                return logs.validate(logs.idle(job, after, 'pending'), job, after, limit)
             self._verify_local_engine()
-            info = self.engine.read('/task/' + job_id + '/info', limit=64 * 1024)
+            finished = phase in logs.ENGINE_FINISHED_PHASES
+            info = self._log_task(job_id)
+            if info is None:
+                if not finished:
+                    raise WorkerHeld('engine_task_missing')
+                return logs.validate(logs.idle(job, after, 'expired'), job, after, limit)
             if type(info) is not dict or info.get('uuid') != job_id:
                 raise WorkerHeld('execution_logs_unavailable')
-            output, has_more = self.engine.output_page(job_id, line=after, limit=limit)
-            if (type(output) is not list or any(type(line) is not str for line in output)
-                    or type(has_more) is not bool or len(output) > limit
-                    or len(p.canonical_json(output)) > logs.MAX_LOG_BYTES):
-                raise WorkerHeld('execution_logs_unavailable')
+            status = info.get('status')
+            code = status.get('code') if type(status) is dict else None
+            # Info precedes output, so a terminal state means this read is final.
+            state = 'complete' if finished or code in (30, 40, 50) else 'pending' if code == 10 else 'open'
+
+            def read(line, count):
+                output, more = self.engine.output_page(job_id, line=line, limit=count)
+                if (type(output) is not list or any(type(text) is not str for text in output)
+                        or type(more) is not bool or len(output) > count):
+                    raise WorkerHeld('execution_logs_unavailable')
+                return output, more
+            if not after:
+                output, has_more = read(0, limit)
+            else:
+                # Reading from the line before the cursor makes one engine read
+                # the witness: nothing there proves the output is now shorter.
+                # A line there shows only length, never that this is the same run.
+                output, has_more = read(after - 1, min(limit + 1, 200))
+                if not output:
+                    self._verify_local_engine()
+                    return logs.validate(logs.page(job, [], after, state=state, continuity='reset'), job, after, limit)
+                output = output[1:]
+                if not output and has_more:
+                    # An oversized witness ended the read; resume past it.
+                    output, has_more = read(after, limit)
             self._verify_local_engine()
             lines = []
-            for text in output[:limit]:
-                candidate = lines + [dict(level='info', message=text[:4000])]
-                if logs.encoded_size(logs.page(job, candidate, after, has_more or len(output) > len(candidate))) > logs.MAX_LOG_BYTES:
+            for text in output:
+                candidate = lines + [dict(level='info', message=logs.message(text))]
+                more = has_more or len(output) > len(candidate)
+                if logs.encoded_size(logs.page(job, candidate, after, more, state=state)) > logs.MAX_LOG_BYTES:
                     break
                 lines = candidate
-            return logs.validate(logs.page(job, lines, after, has_more or len(output) > len(lines)), job, after, limit)
+            more = has_more or len(output) > len(lines)
+            return logs.validate(logs.page(job, lines, after, more, state=state), job, after, limit)
+
+    def _log_task(self, job_id):
+        """Task info, or None only when the engine proves the task is absent."""
+        try:
+            return self.engine.read('/task/' + job_id + '/info', limit=64 * 1024, missing=True)
+        except Exception:
+            # NodeODM can answer a missing task with 200 {error}, which reads as
+            # a failure here. Only a good listing without the task proves absence.
+            tasks = self.engine.read('/task/list')
+            if type(tasks) is not list or any(type(task) is not dict or task.get('uuid') == job_id for task in tasks):
+                raise WorkerHeld('execution_logs_unavailable') from None
+            return None
 
     def _verify_local_engine(self):
         try:

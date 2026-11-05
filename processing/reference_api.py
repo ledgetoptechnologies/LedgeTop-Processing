@@ -139,14 +139,18 @@ class ReferenceAPI:
                     return self._error(404, 'not_found')
                 if generation != job['generation']:
                     return self._error(409, 'log_binding_mismatch')
-                if job['nodeId'] is None and job['status'] == 'queued':
-                    return Response(200, logs.page(job, [], after))
+                finished = job['status'] in logs.TERMINAL_JOB_STATUSES
+                if job['nodeId'] is None or job['phase'] in logs.PRE_ENGINE_JOB_PHASES:
+                    return Response(200, logs.idle(job, after, 'expired' if finished else 'pending'))
                 if self.result_proxy is None:
-                    return self._error(503, 'execution_logs_unavailable')
+                    return Response(503, logs.unavailable('not_configured'))
                 try:
                     return Response(200, self.result_proxy.logs(job, after=after, limit=limit))
-                except Exception:
-                    return self._error(503, 'execution_logs_unavailable')
+                except Exception as error:
+                    cause = getattr(error, 'reason', 'worker_unavailable')
+                    if finished and cause in ('engine_task_missing', 'execution_unverified'):
+                        return Response(200, logs.idle(job, after, 'expired'))
+                    return Response(503, logs.unavailable(cause))
             if method == "POST" and path == "/ltds/v2/jobs":
                 if (self.source_spool is None or self.source_attestation_keys is None
                         or not self.authority_id):

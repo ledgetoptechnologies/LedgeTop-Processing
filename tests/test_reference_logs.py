@@ -87,8 +87,7 @@ class ExecutionLogTests(ResultsFixture, unittest.TestCase):
         with patch.object(self.engine, 'read', return_value={'uuid': 'different-task'}), self.assertRaises(WorkerHeld):
             self.read_logs()
         self.output = ['x' * (logs.MAX_LOG_BYTES + 1)]
-        with self.assertRaises(WorkerHeld):
-            self.read_logs()
+        self.assertEqual(self.read_logs()['lines'], [{'level': 'info', 'message': '[line omitted: %d bytes]' % (logs.MAX_LOG_BYTES + 1)}])
         with patch.object(self.worker, '_row', side_effect=WorkerHeld('unknown')):
             self.assertEqual(self.request().status, 409)
         self.assertEqual(self.active_pins(), 0)
@@ -161,7 +160,7 @@ class PublicLogTests(unittest.TestCase):
         path = '/jobs/' + job['jobId'] + '/logs?generation=1&after=3&limit=2'
         response = self.request('GET', path)
         self.assertEqual(response.status, 200)
-        self.assertEqual(response.body, logs.page(job, [], 3))
+        self.assertEqual(response.body, logs.page(job, [], 3, state='pending', continuity='reset'))
         self.assertEqual(self.request('GET', path, token=api_tests.PRODUCTION).status, 404)
         self.assertEqual(self.request('GET', path.replace('generation=1','generation=2')).status, 409)
         self.assertEqual(self.request('GET', path+'&after=0').status, 400)
@@ -179,7 +178,7 @@ class PublicLogTests(unittest.TestCase):
         proxy.logs.side_effect = OSError('private bearer and engine URL')
         response = self.request('GET', path, api=api)
         self.assertEqual(response.status, 503)
-        self.assertEqual(response.body, {'error':'execution_logs_unavailable'})
+        self.assertEqual(response.body, {'error':'execution_logs_unavailable','state':'unavailable','reason':'worker_unavailable'})
 
 
 class LogProxyValidationTests(unittest.TestCase):
@@ -223,10 +222,18 @@ class NativeOutputPrefixTests(unittest.TestCase):
             self.assertTrue(0<len(page)<200)
             self.assertEqual(page,moderate[:len(page)])
         for raw in (b'["first",]',b'["first"]garbage',b'["first",3]',b'["first", "broken\\q"]',
-                    b'["first"',b'{"error":"secret"}',b'["\\ud800"]',b'["'+b'x'*(logs.MAX_LOG_BYTES+1)+b'"]',
-                    b'["first","second","third"malformed'):
+                    b'["first"',b'{"error":"secret"}',b'["first","second","third"malformed'):
             with self.subTest(raw=raw[:30]), io.BytesIO(raw) as response, self.assertRaises((ValueError,UnicodeError)):
                 logs.read_output_prefix(response,2)
+        with io.BytesIO(b'["\\ud800"]') as response:
+            self.assertEqual(logs.read_output_prefix(response,2),(['\ud800'],False))
+        with io.BytesIO(b'["a","'+b'x'*(logs.MAX_LOG_BYTES+1)+b'"]') as response:
+            self.assertEqual(logs.read_output_prefix(response,1),(['a'],True))
+        with io.BytesIO(b'["a","'+b'x'*(logs.MAX_LOG_BYTES+1)+b'"]') as response:
+            page,more=logs.read_output_prefix(response,2)
+            self.assertEqual((page[0],more),('a',True))
+            self.assertRegex(page[1],r'^\[line omitted: over \d+ bytes\]$')
+            self.assertLess(response.tell(),logs.MAX_LOG_BYTES)
 
     def test_native_actual_http_huge_remaining_tail_advances_without_buffering_tail(self):
         from processing.viewer_service import NativeEngine
@@ -279,7 +286,7 @@ class NativeOutputPrefixTests(unittest.TestCase):
         engine=NativeEngine('http://127.0.0.1:3001')
         target=engine.origin+'/task/persisted-job/output?line=0'
         for raw,success in ((b'["a","b","c",'+b'"long",'*100000+b'"end"]',True),
-                (b'["a", false]',False),(b'["'+b'x'*(logs.MAX_LOG_BYTES+1)+b'"]',False)):
+                (b'["a", false]',False),(b'["'+b'x'*(logs.MAX_LOG_BYTES+1)+b'"]',None)):
             response=Response(raw,url=target,headers={'Content-Type':'application/json'})
             from unittest.mock import Mock
             opener=Mock()
@@ -287,6 +294,9 @@ class NativeOutputPrefixTests(unittest.TestCase):
             with patch('processing.viewer_service.build_opener',return_value=opener):
                 if success:
                     self.assertEqual(engine.output_page('persisted-job',line=0,limit=2),(['a','b'],True))
+                    self.assertLess(sum(response.read_sizes),logs.MAX_LOG_BYTES)
+                elif success is None:
+                    self.assertEqual(engine.output_page('persisted-job',line=0,limit=2),([logs.omitted(logs.MAX_LINE_BYTES,over=True)],True))
                     self.assertLess(sum(response.read_sizes),logs.MAX_LOG_BYTES)
                 else:
                     with self.assertRaises(EngineUnavailable):

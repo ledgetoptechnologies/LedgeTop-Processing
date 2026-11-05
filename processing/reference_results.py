@@ -193,8 +193,8 @@ class ReferenceResults:
             if self.reader_session is not None:
                 self.reader_session.check()
             return self.worker.log_metadata(job_id)
-        except Exception:
-            raise ResultUnavailable() from None
+        except Exception as error:
+            raise self._log_failure(error, 'execution_unverified') from None
 
     def logs(self, job_id, **binding):
         try:
@@ -204,8 +204,15 @@ class ReferenceResults:
                 if self.reader_session is not None:
                     self.reader_session.check()
                 return self.worker.read_logs(job_id, **binding)
-        except Exception:
-            raise ResultUnavailable() from None
+        except Exception as error:
+            raise self._log_failure(error, 'worker_unavailable') from None
+
+    @staticmethod
+    def _log_failure(error, default):
+        from . import reference_logs as logs
+        failure = ResultUnavailable()
+        failure.code = logs.reason(error, default)
+        return failure
 
     def _load(self, job_id):
         protocol._slug(job_id, "job ID")

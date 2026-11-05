@@ -27,10 +27,32 @@ coordinator or Viewer uses it.
 The candidate coordinator exposes authenticated
 `GET /ltds/v1/jobs/{jobId}/logs?generation={n}&after={cursor}&limit={1..200}`
 through its existing assigned-worker result reader and read credential. Pages
-bind the environment, job, attempt, generation and assigned node; an unassigned
-queued job returns an empty bound page. An assigned job whose local execution
-or engine task cannot be verified returns unavailable, rather than empty output.
+bind the environment, job, attempt, generation and assigned node. A 200 page
+adds `state` and `continuity` to `lines`, `nextCursor` and `hasMore`:
+
+| `state` | Meaning |
+| --- | --- |
+| `pending` | Not started: unassigned, before the engine, or queued in it. Empty. |
+| `open` | The engine task exists and its output may grow. |
+| `complete` | The engine finished, failed or cancelled; output is final. |
+| `expired` | The job finished and its engine task or execution is gone. Empty; stop polling. |
+
+Any other outcome is 503 with
+`{"error":"execution_logs_unavailable","state":"unavailable","reason":r}`, never
+an empty page. `r` is one of `engine_unavailable`, `engine_identity`,
+`engine_task_missing`, `execution_unverified`, `not_configured`, `not_shared`,
+`unsupported` or `worker_unavailable`. 400, 401, 404 and 409 are unchanged.
 TreeDar output remains unavailable until a corresponding adapter is implemented.
+
+`continuity` never promises continuity. It is `unverified` on every normal page;
+`reset` when a positive cursor is past the current output, or there is no output
+yet (`lines` is empty, `nextCursor` is 0 and the client restarts there, discarding
+what it shows); `unknown` on `expired` pages, with the cursor unchanged. A reset
+proves only that the output is shorter than the cursor. NodeODM output is an
+in-memory array and the page carries no run or epoch identity, so a restart whose
+rerun has already regrown past the cursor between two polls is not detected, and
+that client silently misses the rerun's earlier lines. Log text is diagnostic and
+is not evidence of what one run did.
 
 ODM output uses the existing loopback NativeEngine adapter, with a bounded JSON
 string-array prefix reader because NodeODM returns every line after its cursor.
@@ -38,9 +60,17 @@ The reader validates a page plus one lookahead line and closes the remaining
 response; it does not buffer the entire log tail. EOF pages require a closed
 array and clean EOF. Both the consumed prefix and public JSON page are bounded
 to 256 KiB; pages can contain fewer than the requested limit to preserve that
-bound. An individually oversized line or malformed prefix remains unavailable.
+bound, and positive-cursor pages at most 199 lines because one read includes the
+line before the cursor. A line over 32 KiB becomes one
+`[line omitted: ...]` placeholder and ends its page, and invalid text is replaced,
+so the cursor always advances past it; only a malformed array stays unavailable.
 `nextCursor` advances by the number of returned lines and `hasMore` reflects
-validated lookahead; each displayed message is bounded to 4,000 characters.
+validated lookahead. Each message is sanitized and then cut to 4,000 characters,
+one engine line to one message: terminal escapes and control characters removed;
+credentials in headers, URLs, assignments, JSON and command flags replaced by
+`[redacted]`; absolute host paths by `[path]`; `<` by `‹`. This is recognition by
+shape: an unusual or multi-line secret can still pass, so engine output stays
+private to authorized readers. Logs never gate job completion.
 Reads verify the current physical engine and persisted engine task identity
 under the existing node gate, perform no engine mutation, and drain before an
 owned reader session closes. These candidate tests do not qualify installed

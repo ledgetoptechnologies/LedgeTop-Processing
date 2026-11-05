@@ -190,8 +190,14 @@ class ResultProxy:
             try:
                 response = self._open(request, timeout=self.timeout)
             except HTTPError as error:
+                try:
+                    raw = error.read(1024)
+                except Exception:
+                    raw = b''
                 error.close()
-                raise ValueError('worker unavailable') from None
+                failure = ValueError('worker unavailable')
+                failure.reason = logs.worker_reason(error.code, raw)
+                raise failure from None
             if (response.status != 200 or response.geturl() != url
                     or response.headers.get('Content-Encoding', 'identity').lower() != 'identity'
                     or response.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json'):
@@ -201,8 +207,10 @@ class ResultProxy:
                 raise ValueError('oversized log response')
             value = protocol.decode_submission(raw)
             return logs.validate(value, job, after, limit)
-        except Exception:
-            raise ResultProxyError('worker execution logs unavailable') from None
+        except Exception as error:
+            failure = ResultProxyError('worker execution logs unavailable')
+            failure.reason = getattr(error, 'reason', 'worker_unavailable')
+            raise failure from None
         finally:
             close_failed = False
             if response is not None:
