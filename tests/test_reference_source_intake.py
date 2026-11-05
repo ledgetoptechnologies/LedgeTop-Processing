@@ -126,7 +126,8 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
             p.canonical_json(request), protected_transport=True)
         self.assertEqual(posted.status, 201, posted.body)
         job = posted.body
-        bodies = {IMAGE_ID: b"abc", GCP_ID: b"id,lat,lon\n1,2,3\n", "gcp_" + ATTEMPT: b"1,2,3\n"}
+        bodies = {IMAGE_ID: b"abc", GCP_ID: b"id,lat,lon\n1,2,3\n", "gcp_" + ATTEMPT: b"1,2,3\n",
+                  **getattr(self, "extra_bodies", {})}
         all_objects = self.payload["sourceManifest"]["objects"] + self.payload["derivedManifest"]["objects"]
         for object_id, body in bodies.items():
             item = next(value for value in all_objects if value["id"] == object_id)
