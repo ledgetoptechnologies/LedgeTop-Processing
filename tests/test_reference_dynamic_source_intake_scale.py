@@ -13,6 +13,7 @@ import http.client
 import ipaddress
 import json
 import os
+import queue as queue_module
 from pathlib import Path
 try:
     import resource
@@ -166,14 +167,23 @@ def _server_main(config_path: Path):
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.minimum_version = ssl.TLSVersion.TLSv1_2
     tls.load_cert_chain(config_data["certificate"], config_data["privateKey"])
-    server = create_reference_http_server(api, host="127.0.0.1", port=0,
-        ssl_context=tls, request_timeout=2)
+    cgroup_root = Path("/sys/fs/cgroup")
+    def read_cgroup(name):
+        try:
+            return (cgroup_root / name).read_text(encoding="ascii").strip()
+        except OSError:
+            return None
+    server = create_reference_http_server(api, host=config_data.get("listenHost", "127.0.0.1"),
+        port=int(config_data.get("listenPort", 0)), ssl_context=tls,
+        request_timeout=float(config_data.get("requestTimeout", 2)))
     thread = threading.Thread(target=server.serve_forever,
         kwargs={"poll_interval": 0.05}, daemon=True, name="metadata-scale-http")
     thread.start()
     public_info = {"port": server.server_address[1], "authorityId": queue.authority_id,
         "capabilityFingerprint": capability_fingerprint,
-        "optionsFingerprint": options_fingerprint}
+        "optionsFingerprint": options_fingerprint,
+        "cgroup": {"memoryMax": read_cgroup("memory.max"), "cpuMax": read_cgroup("cpu.max"),
+            "memoryEventsAtStart": read_cgroup("memory.events")}}
     print(json.dumps({"ready": public_info}), flush=True)
     try:
         for line in sys.stdin:
@@ -205,6 +215,11 @@ def _server_main(config_path: Path):
                 result = {"serverPid": os.getpid(),
                     "serverPeakRssBytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
                     "serverCurrentRssBytes": rss_current,
+                    "cgroup": {"memoryMax": read_cgroup("memory.max"),
+                        "memoryPeak": read_cgroup("memory.peak"),
+                        "memoryCurrent": read_cgroup("memory.current"),
+                        "memoryEvents": read_cgroup("memory.events"),
+                        "cpuMax": read_cgroup("cpu.max")},
                     "requestHandlers": requests, "streamedPutCount": len(streamed_puts),
                     "capacityChecks": capacity_checks, "queueRows": queued_jobs,
                     "phase": row["phase"] if row else None,
@@ -519,7 +534,275 @@ class DynamicSourceIntakeScaleTests(unittest.TestCase):
         return response.status
 
 
+def _external_cgroup_profile():
+    """Keep the synthetic producer on the host and constrain only the API container."""
+    helper = ReferenceSourceIntakeTests()
+    helper.setUp()
+    source_root = Path(__file__).resolve().parents[1]
+    image = os.environ.get("LTDS_PROCESSING_TEST_IMAGE", "ledgetop-processing:integration-8ff9a72")
+    port_probe = socket.socket()
+    port_probe.bind(("127.0.0.1", 0))
+    port = port_probe.getsockname()[1]
+    port_probe.close()
+    container_name = "ltds-source-intake-cgroup-20261105"
+    process = None
+    output_queue = queue_module.Queue()
+    output_reader = None
+    slow_thread = None
+    slow_outcome = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="ltds-source-cgroup-host-") as directory:
+            root = Path(directory)
+            private_key_path, certificate_path = _write_tls_material(root)
+            config_path = root / "server.json"
+            server_config = {"stateRoot": "/tmp/reference-source-cgroup-state",
+                "certificate": "/fixture/scale-cert.pem", "privateKey": "/fixture/scale-key.pem",
+                "mountId": "f" * 64, "sourceKeys": helper.trusted_keys,
+                "listenHost": "0.0.0.0", "listenPort": port, "requestTimeout": 2}
+            config_path.write_text(json.dumps(server_config), encoding="utf-8")
+            if os.name != "nt":
+                config_path.chmod(0o600)
+            fixture_mount = ("type=bind,source=" + root.as_posix() + ",target=/fixture,readonly")
+            source_mount = ("type=bind,source=" + source_root.as_posix() + ",target=/processing,readonly")
+            command = ["docker", "run", "--rm", "-i", "--name", container_name,
+                "--cpus=0.5", "--memory=256m", "--memory-swap=256m", "--pids-limit=32",
+                "--tmpfs", "/tmp:rw,size=64m,noexec,nosuid", "-p",
+                f"127.0.0.1:{port}:{port}", "--mount", source_mount, "--mount", fixture_mount,
+                "-w", "/processing", "-e", "PYTHONPATH=/processing", image, "python",
+                "tests/test_reference_dynamic_source_intake_scale.py", "--server", "/fixture/server.json"]
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, bufsize=1)
+
+            def collect_output():
+                for line in process.stdout:
+                    output_queue.put(line)
+                output_queue.put(None)
+
+            output_reader = threading.Thread(target=collect_output, name="cgroup-docker-output")
+            output_reader.start()
+
+            def next_json_line(timeout=15):
+                try:
+                    line = output_queue.get(timeout=timeout)
+                except queue_module.Empty:
+                    raise TimeoutError("cgroup server did not report before deadline") from None
+                if line is None:
+                    errors = process.stderr.read() if process.stderr else ""
+                    raise RuntimeError("cgroup server exited early: " + errors[-2000:])
+                try:
+                    return json.loads(line)
+                except json.JSONDecodeError:
+                    raise RuntimeError("unexpected cgroup server output") from None
+
+            ready_message = next_json_line()
+            ready = ready_message["ready"]
+            if int(ready["port"]) != port:
+                raise AssertionError("server listened on an unexpected port")
+            if ready["cgroup"]["memoryMax"] != str(256 * 1024**2):
+                raise AssertionError("server container does not have the requested 256 MiB cgroup")
+            if ready["cgroup"]["cpuMax"].split()[0] != "50000":
+                raise AssertionError("server container does not have the requested 0.5 CPU quota")
+
+            tls_context = ssl.create_default_context(cafile=str(certificate_path))
+            def connect():
+                return http.client.HTTPSConnection("127.0.0.1", port,
+                    context=tls_context, timeout=20)
+
+            unauthenticated = connect()
+            unauthorized_status, _, _ = _json_response(unauthenticated, "POST", "/ltds/v2/jobs",
+                body=b"not-json")
+            unauthenticated.close()
+            if unauthorized_status != 401:
+                raise AssertionError("unauthenticated V2 request was not rejected before parsing")
+
+            fixture = DynamicSourceIntakeScaleTests()
+            payload = fixture._new_payload(helper, authority_id=ready["authorityId"],
+                capability_fingerprint=ready["capabilityFingerprint"],
+                options_fingerprint=ready["optionsFingerprint"],
+                names=lambda i: f"DJI_{i:05d}_" + "X" * 230 + ".JPG")
+            signed_body = protocol.canonical_json(payload)
+            if len(signed_body) <= protocol.MAX_BODY_BYTES or len(signed_body) > V2_SOURCE_INTAKE_BYTES:
+                raise AssertionError("synthetic signed body is outside the configured V2 budget")
+            if payload["sourceManifest"]["totalBytes"] != DECLARED_PHOTO_BYTES:
+                raise AssertionError("synthetic payload does not declare the expected 50 GB")
+
+            legacy = {key: payload[key] for key in (
+                "schemaVersion", "submissionId", "manifest", "pipeline", "capabilityFingerprint")}
+            legacy_status = DynamicSourceIntakeScaleTests._content_length_only(
+                connect(), "/ltds/v1/jobs", len(protocol.canonical_json(legacy)), bearer=VIEWER_BEARER)
+            if legacy_status != 413:
+                raise AssertionError("legacy V1 path did not keep its four MiB cap")
+
+            def slow_incomplete_request():
+                slow = connect()
+                try:
+                    slow.putrequest("POST", "/ltds/v2/jobs")
+                    slow.putheader("Content-Type", "application/json")
+                    slow.putheader("Authorization", "Bearer " + VIEWER_BEARER)
+                    slow.putheader("Content-Length", str(len(signed_body)))
+                    slow.endheaders()
+                    slow.send(b"{")
+                    response = slow.getresponse()
+                    slow_outcome.append((response.status, response.read(1024)))
+                except Exception as exc:
+                    slow_outcome.append(exc)
+                finally:
+                    slow.close()
+
+            slow_thread = threading.Thread(target=slow_incomplete_request,
+                name="cgroup-incomplete-source-post")
+            slow_thread.start()
+            deadline = time.monotonic() + 3
+            occupied = False
+            while time.monotonic() < deadline:
+                process.stdin.write("SLOT\n")
+                process.stdin.flush()
+                occupied = next_json_line(timeout=3)["sourceSlotOccupied"]
+                if occupied:
+                    break
+                time.sleep(0.02)
+            if not occupied:
+                raise AssertionError("first V2 source POST did not acquire the intake slot")
+
+            busy_connection = connect()
+            busy_connection.putrequest("POST", "/ltds/v2/jobs")
+            busy_connection.putheader("Content-Type", "application/json")
+            busy_connection.putheader("Authorization", "Bearer " + VIEWER_BEARER)
+            busy_connection.putheader("Content-Length", str(len(signed_body)))
+            busy_connection.endheaders()
+            busy = busy_connection.getresponse()
+            busy_status, retry_after, connection_close = (busy.status,
+                busy.getheader("Retry-After"), busy.getheader("Connection"))
+            busy.read(1024)
+            busy_connection.close()
+            if (busy_status, retry_after, connection_close) != (429, "2", "close"):
+                raise AssertionError("concurrent V2 source request was not rejected safely")
+
+            capabilities = connect()
+            capability_status, _, _ = _json_response(capabilities, "GET", "/ltds/v2/capabilities",
+                bearer=VIEWER_BEARER)
+            capabilities.close()
+            if capability_status != 200:
+                raise AssertionError("ordinary GET was blocked by source intake backpressure")
+
+            slow_thread.join(timeout=5)
+            if slow_thread.is_alive() or len(slow_outcome) != 1 or not isinstance(slow_outcome[0], tuple):
+                raise AssertionError("incomplete-body request did not exit cleanly")
+            if slow_outcome[0][0] != 408:
+                raise AssertionError("incomplete-body request did not return a bounded timeout")
+
+            invalid = connect()
+            invalid_status, _, _ = _json_response(invalid, "POST", "/ltds/v2/jobs",
+                body=b"not-json", bearer=VIEWER_BEARER)
+            invalid.close()
+            if invalid_status != 400:
+                raise AssertionError("malformed authenticated request did not return 400")
+
+            submit = connect()
+            submit_status, submit_body, submit_ms = _json_response(submit, "POST", "/ltds/v2/jobs",
+                body=signed_body, bearer=VIEWER_BEARER)
+            submit_response = json.loads(submit_body)
+            submit.close()
+            if submit_status != 201:
+                raise AssertionError("signed synthetic V2 submission failed: " + str(submit_response))
+
+            replay = connect()
+            replay_status, replay_body, replay_ms = _json_response(replay, "POST", "/ltds/v2/jobs",
+                body=signed_body, bearer=VIEWER_BEARER)
+            replay_response = json.loads(replay_body)
+            replay.close()
+            if replay_status != 200 or replay_response.get("jobId") != submit_response.get("jobId"):
+                raise AssertionError("same signed submission did not replay one job")
+
+            oversized = connect()
+            oversized_status = DynamicSourceIntakeScaleTests._content_length_only(
+                oversized, "/ltds/v2/jobs", V2_SOURCE_INTAKE_BYTES + 1, bearer=VIEWER_BEARER)
+            oversized.close()
+            if oversized_status != 413:
+                raise AssertionError("V2 HTTP path did not reject a body over 16 MiB")
+
+            process.stdin.write("METRICS\n")
+            process.stdin.flush()
+            metrics = next_json_line(timeout=10)["metrics"]
+            if metrics["queueRows"] != 1 or metrics["phase"] != "queued" or metrics["queueStatus"] != "queued":
+                raise AssertionError("expected exactly one queued, non-processing job")
+            if (metrics["sourceManifestObjectCount"], metrics["engineManifestObjectCount"],
+                    metrics["reservedBytes"], metrics["objectReceiptRows"], metrics["streamedPutCount"]) != (
+                    MAX_NAMES, MAX_NAMES, DECLARED_PHOTO_BYTES, 0, 0):
+                raise AssertionError("metadata-only source reservation/receipt boundary was violated")
+            if metrics["cgroup"]["memoryMax"] != str(256 * 1024**2):
+                raise AssertionError("cgroup memory limit changed during the test")
+            memory_peak = int(metrics["cgroup"]["memoryPeak"])
+            memory_events_start = dict(line.split() for line in ready["cgroup"]["memoryEventsAtStart"].splitlines())
+            memory_events_end = dict(line.split() for line in metrics["cgroup"]["memoryEvents"].splitlines())
+            oom_delta = {name: int(memory_events_end.get(name, "0")) - int(value)
+                for name, value in memory_events_start.items() if name in ("oom", "oom_kill", "max")}
+            if memory_peak > 256 * 1024**2 or any(oom_delta.get(name, 0) for name in ("oom", "oom_kill")):
+                raise AssertionError("server cgroup exceeded its memory cap or incurred an OOM event")
+
+            print("SOURCE_INTAKE_CGROUP_PROFILE " + json.dumps({
+                "producerLocation": "Windows host outside server cgroup",
+                "serverContainer": container_name, "serverContainerImage": image,
+                "cgroup": metrics["cgroup"], "oomEventDelta": oom_delta,
+                "serverProcessPeakRssBytes": metrics["serverPeakRssBytes"],
+                "serverProcessCurrentRssBytes": metrics["serverCurrentRssBytes"],
+                "bodyBytes": len(signed_body), "declaredPhotoCount": MAX_NAMES,
+                "declaredPhotoBytes": DECLARED_PHOTO_BYTES, "actualPhotoBytesCreatedOrUploaded": 0,
+                "acceptedStatus": submit_status, "replayStatus": replay_status,
+                "submitHandlerMilliseconds": metrics["requestHandlers"][2]["handlerMilliseconds"],
+                "submitClientMilliseconds": round(submit_ms, 3),
+                "replayClientMilliseconds": round(replay_ms, 3),
+                "busyResponse": {"status": busy_status, "retryAfter": retry_after,
+                    "connection": connection_close},
+                "incompleteBodyStatus": slow_outcome[0][0], "ordinaryGetStatus": capability_status,
+                "invalidJsonStatus": invalid_status, "legacyOversizeStatus": legacy_status,
+                "v2OversizeStatus": oversized_status, "queueStatus": metrics["queueStatus"],
+                "queueRows": metrics["queueRows"], "sourceManifestObjects": metrics["sourceManifestObjectCount"],
+                "engineManifestObjects": metrics["engineManifestObjectCount"],
+                "sourceObjectReceipts": metrics["objectReceiptRows"], "streamedPuts": metrics["streamedPutCount"],
+                "syntheticCapacityBytes": SYNTHETIC_AVAILABLE_BYTES,
+                "physicalMountProbe": "disabled; no NAS access"}, sort_keys=True), flush=True)
+
+        process.stdin.write("STOP\n")
+        process.stdin.flush()
+        if process.wait(timeout=15) != 0:
+            errors = process.stderr.read() if process.stderr else ""
+            raise RuntimeError("server container exited unsuccessfully: " + errors[-2000:])
+        return 0
+    finally:
+        if slow_thread is not None and slow_thread.is_alive():
+            slow_thread.join(timeout=5)
+        if process is not None and process.poll() is None:
+            try:
+                process.stdin.write("STOP\n")
+                process.stdin.flush()
+            except (OSError, BrokenPipeError):
+                pass
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                subprocess.run(["docker", "stop", container_name],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                process.wait(timeout=10)
+        if process is not None:
+            if process.stdin:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+            if process.stdout:
+                process.stdout.close()
+            if process.stderr:
+                process.stderr.close()
+        if output_reader is not None:
+            output_reader.join(timeout=3)
+            if output_reader.is_alive():
+                raise AssertionError("task-owned docker output reader did not exit")
+
+
 if __name__ == "__main__" and len(sys.argv) == 3 and sys.argv[1] == "--server":
     raise SystemExit(_server_main(Path(sys.argv[2])))
 elif __name__ == "__main__":
+    if len(sys.argv) == 2 and sys.argv[1] == "--profile-cgroup":
+        raise SystemExit(_external_cgroup_profile())
     unittest.main()
