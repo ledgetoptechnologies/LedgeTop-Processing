@@ -16,18 +16,20 @@ not be added together or described as a complete suite.
 | --- | --- | --- |
 | Production/staging queue and ordered per-node routing | Actual Viewer/Python synthetic pairings; 332-test integrated selection | Installed source intake and concurrent two-node jobs |
 | Durable result return and selective cleanup | Signed ready proof, real Viewer process death/recovery, synthetic 24-hour timer and preserved raw GCP/originals | Installed credentials, NAS durability and actual return to Viewer |
-| Coordinator/worker maintenance | Frozen restart, authority/source-reader checks and bounded transport primitives | Concrete cutover driver, independently pinned startup policy, real worker update/drain/resume |
+| Coordinator/worker maintenance | Independently generated startup policy, crash-safe cutover journal and 121-test combined qualification | Concrete cutover transport, real worker update/drain/resume |
 | Long transfer after coordinator outage | Existing range/resume contracts | Claude's expired source-grant renewal and scratch-settlement corrections; not integrated |
-| Viewer GCP workflow | Exact `36f26839` peer-reported 125 passing cases across two bounded runs | Operations frontend build/typecheck and rendered acceptance; Viewer image alone cannot compile `GcpWorkspace.tsx` |
+| Viewer GCP workflow | Exact `36f26839` peer-reported 125 passing cases across two bounded runs and successful Operations production build | Introduced response-union type errors and unrelated workspace diagnostics remain; rendered acceptance still needed |
 | TreeDar and Gaussian splats | Genuine-LiDAR validation/scaffolding | Typed usable TreeDar output registration and real processing; Gaussian remains disabled |
 | Customer/project/task workspace | Historical #406 behavior and hierarchy tests | Current owner/release reconciliation and rendered/deployed acceptance |
 
-The cutover journal at isolated commits `57514af`/`f98c693`/`7843b39` has a
-reviewed recovery defect: a crash after persisting an intent but before its
-effect can strand the operation even when inspection proves no effect. The
-pending intent blocks both advancement and rollback. A supported, durably
-recorded not-applied reconciliation path is required before live cutover;
-unknown effects must continue to hold. These commits are not yet integrated.
+The selected cutover journal/projection/policy commits are now integrated at
+`2778a89`, with independent review. The pre-dispatch recovery, stale rejection
+after rearm and pre-write completion defects found during review are fixed.
+**121/121 Linux tests passed in 10.762 seconds**, no skips, against the combined
+branch, including actual child deaths and normal runtime/custody phases. Unknown
+daemon effects stay held; proven pre-dispatch no-effect recovery is explicit.
+See `evidence/integrated-cutover-policy-20261105.md`. Concrete transport and
+installed acceptance remain separate gates.
 
 A fresh read-only installed metadata probe still passes with 202 files, seven
 archive/intent pairs and 90,778 metadata bytes; its process exited. It does not
