@@ -154,7 +154,7 @@ class FetchRecoveryPathTests(RecoveryHarness):
         self.down.clear()
         self.assertIsNone(self.admit())
         self.assertEqual(self.receipts()[0]['requestId'], request['requestId'])
-        self.assertEqual(self.attempts(), 1)
+        self.assertEqual(self.attempts(), 0)
         self.assertIsNone(self.data['sourceRecovery']['pending'])
 
     def test_recovery_reply_lost_after_commit_replays_one_receipt(self):
@@ -166,7 +166,7 @@ class FetchRecoveryPathTests(RecoveryHarness):
         self.crash_worker()
         self.assertIsNotNone(self.data['sourceRecovery']['pending'])
         self.assertIsNone(self.admit())
-        self.assertEqual((len(self.receipts()), self.attempts()), (1, 1))
+        self.assertEqual((len(self.receipts()), self.attempts()), (1, 0))
         self.assertIsNone(self.data['sourceRecovery']['pending'])
 
     def test_second_restart_after_a_lost_reply_retires_the_old_intent(self):
@@ -179,7 +179,7 @@ class FetchRecoveryPathTests(RecoveryHarness):
         self.assertEqual(self.status(), ('held', 'coordinator_restart'))
         self.assertIsNone(self.admit())
         self.assertEqual(self.status(), ('running', None))
-        self.assertEqual((len(self.receipts()), self.attempts()), (2, 2))
+        self.assertEqual((len(self.receipts()), self.attempts()), (2, 0))
         self.assertNotEqual(self.receipts()[-1]['requestId'], old)
 
     def test_an_old_receipt_cannot_clear_a_later_restart(self):
@@ -198,7 +198,7 @@ class FetchRecoveryPathTests(RecoveryHarness):
         self.restart_coordinator()
         self.assertEqual(self.status(), ('held', 'coordinator_restart'))
         self.assertIsNone(self.admit())
-        self.assertEqual((len(self.receipts()), self.attempts()), (2, 2))
+        self.assertEqual((len(self.receipts()), self.attempts()), (2, 0))
 
     def test_range_served_but_never_committed_is_replayed_not_recharged(self):
         first = validate_source_grant(self.first_grant, job=self.claim, clock=lambda: self.now[0])
@@ -220,7 +220,7 @@ class FetchRecoveryPathTests(RecoveryHarness):
         self.down.clear()
         self.assertIsNone(self.admit())
         self.assertEqual(self.receipts()[0]['requestId'], request['requestId'])
-        self.assertEqual(self.attempts(), 1)
+        self.assertEqual(self.attempts(), 0)
 
     def test_intent_is_durable_before_the_post(self):
         self.restart_coordinator()
@@ -267,7 +267,7 @@ class RecoveryAttemptTests(RecoveryHarness):
         self.assertEqual(len({str(self.data['sourceRecovery']['pending'])}), 1)
         self.down.clear()
         self.assertIsNone(self.admit())
-        self.assertEqual(self.attempts(), 1)
+        self.assertEqual(self.attempts(), 0)
 
     def test_state_outage_spends_no_attempt(self):
         self.restart_coordinator()
@@ -277,10 +277,13 @@ class RecoveryAttemptTests(RecoveryHarness):
                 self.admit()
         self.assertEqual(self.attempts(), 0)
 
-    def test_eight_logical_attempts_then_a_hold_that_keeps_everything(self):
-        for _ in range(SOURCE_RECOVERY_ATTEMPTS):
+    def test_eight_unresolved_attempts_then_a_hold_that_keeps_everything(self):
+        self.down.add('recover')
+        for attempt in range(1, SOURCE_RECOVERY_ATTEMPTS + 1):
             self.restart_coordinator()
-            self.assertIsNone(self.admit())
+            with self.assertRaises(DriverWait):
+                self.admit()
+            self.assertEqual(self.attempts(), attempt)
         self.restart_coordinator()
         before = self.rows()
         sent = len(self.requests)
@@ -290,6 +293,54 @@ class RecoveryAttemptTests(RecoveryHarness):
         self.assertEqual(self.rows(), before)
         self.assertNotIn(('POST', 'recover'), self.requests[sent:])
         self.assertEqual(self.status(), ('held', 'coordinator_restart'))
+        self.assertEqual(self.attempts(), SOURCE_RECOVERY_ATTEMPTS)
+        self.assertEqual(self.receipts(), [])
+
+    def test_a_refusal_without_a_receipt_clears_no_attempt(self):
+        self.restart_coordinator()
+        self.lose_reply.add('recover')
+        with self.assertRaises(DriverWait):
+            self.admit()
+        self.assertEqual((self.attempts(), self.status()), (1, ('running', None)))
+        real = self.driver._request
+        self.driver._request = lambda method, suffix, *args, **kwargs: (
+            (409, None) if method == 'POST' else real(method, suffix, *args, **kwargs))
+        self.assertIsNone(self.admit())
+        self.assertEqual((self.attempts(), self.data['sourceRecovery']['pending']), (1, None))
+
+    def test_a_receipt_that_differs_clears_no_attempt(self):
+        self.restart_coordinator()
+        self.down.add('recover')
+        with self.assertRaises(DriverWait):
+            self.admit()
+        self.down.clear()
+        real = self.driver._request
+
+        def changed(method, suffix, *args, **kwargs):
+            status, body = real(method, suffix, *args, **kwargs)
+            return (status, dict(body, grantSha256='0' * 64)) if method == 'POST' else (status, body)
+        self.driver._request = changed
+        with self.assertRaisesRegex(DriverHeld, 'source_recovery_receipt_changed'):
+            self.admit()
+        self.assertEqual(self.attempts(), 1)
+        self.assertIsNotNone(self.data['sourceRecovery']['pending'])
+
+    def test_full_metadata_quota_refuses_the_receipt_and_deletes_no_history(self):
+        self.restart_coordinator()
+        self.assertIsNone(self.admit())
+        kept = self.receipts()
+        self.restart_coordinator()
+
+        def full(_db, _extra=0):
+            raise Conflict('reference metadata quota reached')
+        with patch.object(self.store, '_quota', side_effect=full):
+            for _ in range(3):
+                with self.assertRaisesRegex(DriverWait, 'source_recovery_refused'):
+                    self.admit()
+        self.assertEqual(self.receipts(), kept)
+        self.assertEqual((self.attempts(), self.status()), (1, ('held', 'coordinator_restart')))
+        self.assertIsNone(self.admit())
+        self.assertEqual((len(self.receipts()), self.attempts()), (2, 0))
 
     def test_tampered_local_journal_holds(self):
         self.restart_coordinator()
@@ -559,7 +610,7 @@ class RecoveryMaintenanceTests(RecoveryHarness):
         self.schedule('active')
         self.assertIsNone(self.admit())
         self.assertNotEqual(self.receipts()[0]['requestId'], old)
-        self.assertEqual(self.attempts(), 2)
+        self.assertEqual(self.attempts(), 0)
 
     def test_changed_closure_retires_the_pending_intent(self):
         self.restart_coordinator()
@@ -576,7 +627,7 @@ class RecoveryMaintenanceTests(RecoveryHarness):
         with patch.object(self.store, '_source_fetch_closure', side_effect=moved):
             self.assertIsNone(self.admit())
         self.assertNotEqual(self.receipts()[0]['requestId'], old)
-        self.assertEqual(self.attempts(), 2)
+        self.assertEqual(self.attempts(), 0)
 
     def test_refused_post_keeps_the_exact_intent_and_its_attempt(self):
         self.restart_coordinator()
@@ -590,7 +641,7 @@ class RecoveryMaintenanceTests(RecoveryHarness):
         self.assertEqual(self.status(), ('held', 'coordinator_restart'))
         self.driver._request = real
         self.assertIsNone(self.admit())
-        self.assertEqual(self.attempts(), 1)
+        self.assertEqual(self.attempts(), 0)
 
     def predecessor_census(self):
         from ops import coordinator_predecessor_census as census
@@ -671,6 +722,7 @@ class StepThroughRecoveryTests(RecoveryHarness):
     the coordinator. Gate, engine and TLS are absent: nothing here reaches them.
     """
     harness_reserves = False
+    extra_objects = 10
 
     def start_transfer(self):
         self.now = [time.time()]
@@ -688,7 +740,7 @@ class StepThroughRecoveryTests(RecoveryHarness):
         driver.ledger, driver._lock, driver._bearer = self.ledger, threading.Lock(), WORKER_TOKEN
         driver._state_owner = driver.execution_router = driver.combined_preparation = None
         driver._combined_preparation_initial = driver._active_step = driver._active_job = None
-        driver.source_range_v2_enabled, driver.output_budget, driver.transfer_ttl = True, 1000, 300
+        driver.source_range_v2_enabled, driver.output_budget, driver.transfer_ttl = True, 10000, 300
         self.client.renewal_headers = driver._source_renewal_headers
         _, claim = self.worker_request('POST', '/claim', {'jobId': self.job_id, 'claimRequestId': 'source-claim-renewal'})
         driver._save(self.job_id, 'claimed', {'claim': claim})
@@ -708,6 +760,10 @@ class StepThroughRecoveryTests(RecoveryHarness):
             self.step(state)
         return self.row()[1]['reservation']
 
+    def finish_fetch(self):
+        while self.row()[0] == 'fetching':
+            self.assertIn(self.driver.step()['state'], ('fetching', 'processing_pending'))
+
     def fenced(self, reservation):
         with self.ledger._transaction() as db:
             row = self.ledger._reservation(db, reservation['reservationId'])
@@ -725,7 +781,7 @@ class StepThroughRecoveryTests(RecoveryHarness):
         self.assertEqual(protocol.digest(json.loads(wire)), digest)
         self.assertEqual(self.status(), ('running', None))
         self.assertEqual(self.fenced(reservation), ('reserved', True, 1))
-        self.assertEqual(self.row()[1]['sourceRecovery'], {'attempts': 1, 'pending': None})
+        self.assertEqual(self.row()[1]['sourceRecovery'], {'attempts': 0, 'pending': None})
 
     def test_mid_fetch_restart_past_the_lease_resumes_the_drivers_own_reservation(self):
         reservation = self.to_fetching()
@@ -741,20 +797,39 @@ class StepThroughRecoveryTests(RecoveryHarness):
         _stage, data = self.row()
         self.assertEqual(len(data['inputPaths']), 2)
         self.assertGreater(self.receipts()[0]['committedBytes'], 0)
-        self.step('processing_pending')
+        self.finish_fetch()
         self.step('execution_pending')
         for relative in self.row()[1]['inputPaths'].values():
             self.assertTrue((self.root / 'scratch' / relative).is_file())
 
     def test_restart_after_the_last_object_resumes_with_no_get_left(self):
         reservation = self.to_fetching()
-        self.step('fetching')
-        self.step('fetching')
-        self.step('processing_pending')
+        self.finish_fetch()
         self.restart_coordinator()
         self.step('processing_pending')
         self.assert_bound(reservation, 'processing_pending')
         self.step('execution_pending')
+
+    def test_nine_restarts_of_one_claim_all_recover_and_reset_no_budget(self):
+        reservation = self.to_fetching()
+        claim = self.row()[1]['claim']['claimToken']
+        grant = self.row()[1]['grant']
+        spent = []
+        for restart in range(1, SOURCE_RECOVERY_ATTEMPTS + 2):
+            self.restart_coordinator()
+            self.step('fetching')
+            _stage, data = self.row()
+            self.assertEqual(data['sourceRecovery'], {'attempts': 0, 'pending': None})
+            self.assertEqual((len(self.receipts()), len(data['inputPaths'])), (restart, restart))
+            self.assertEqual((data['claim']['claimToken'], data['grant'], data['reservation']), (claim, grant, reservation))
+            spent.append(self.usage())
+        self.assertEqual(self.status(), ('running', None))
+        self.assertEqual(self.fenced(reservation), ('reserved', True, 1))
+        self.assertEqual(self.row()[0], 'fetching')
+        for before, after in zip(spent, spent[1:]):
+            self.assertTrue(all(new > old for old, new in zip(before, after)), (before, after))
+        self.assertEqual(len({receipt['coordinatorEpoch'] for receipt in self.receipts()}), 9)
+        self.assertEqual({receipt['transferRequestSha256'] for receipt in self.receipts()}, {protocol.digest(reservation)})
 
     def test_a_reservation_that_is_not_the_posted_one_is_held_and_reported(self):
         reservation = self.to_fetching()
