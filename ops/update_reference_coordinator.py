@@ -126,7 +126,7 @@ def volume_census(root, *, uid=10001, offline=False):
     Job/receipt contents never leave this function. Only the two system node
     rows are retained privately to prove exact operation-owned CAS transitions.
     """
-    import hashlib, json, os, sqlite3, stat
+    import hashlib, json, os, re, sqlite3, stat
     from pathlib import Path
     root=Path(root)
     root_info=root.lstat()
@@ -135,7 +135,8 @@ def volume_census(root, *, uid=10001, offline=False):
     def sha(value):return hashlib.sha256(encode(value)).hexdigest()
     allowed={'jobs','sqlite_sequence','coordinator_identity','nodes','viewer_tasks','viewer_files','viewer_incarnations',
         'reference_jobs','reference_acceptances','reference_outbox','reference_claims','reference_worker_receipts',
-        'reference_transfer_grants','reference_worker_failures','reference_terminal_acceptances','owned_maintenance_schedules'}
+        'reference_transfer_grants','reference_worker_failures','reference_terminal_acceptances',
+        'reference_viewer_receipts','reference_viewer_transfers','owned_maintenance_schedules'}
     files=[]
     for path in sorted(root.rglob('*')):
         relative=path.relative_to(root).as_posix();info=path.lstat()
@@ -166,6 +167,37 @@ def volume_census(root, *, uid=10001, offline=False):
         objects=[list(row) for row in db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")]
         names={row[1] for row in objects if row[0]=='table'}
         assert not names-allowed and {'jobs','coordinator_identity','nodes','reference_jobs','viewer_tasks'}<=names
+        viewer_tables={'reference_viewer_receipts','reference_viewer_transfers'}
+        present_viewer_tables=viewer_tables & names
+        assert not present_viewer_tables or present_viewer_tables==viewer_tables
+        if present_viewer_tables:
+            normalize=lambda rows:[[ *row[:3], re.sub(r'\s+',' ',row[3]).strip() if row[3] is not None else None] for row in rows]
+            assert normalize([row for row in objects if row[2] in viewer_tables])==normalize(viewer_acceptance_schema())
+            # Only immutable, fully accepted results may cross the maintenance
+            # fence. Pending uploads, partial acceptance, active leases, and
+            # receipts detached from a succeeded job keep the node held.
+            invalid_acceptances=db.execute('''SELECT COUNT(*) FROM reference_acceptances a
+                LEFT JOIN reference_jobs r ON r.job_id=a.job_id
+                LEFT JOIN jobs j ON j.id=a.job_id
+                WHERE COALESCE(r.phase,'')!='completed' OR COALESCE(j.status,'')!='succeeded' ''').fetchone()[0]
+            invalid_reference_jobs=db.execute('''SELECT COUNT(*) FROM reference_jobs r
+                LEFT JOIN jobs j ON j.id=r.job_id
+                WHERE COALESCE(r.phase,'')!='completed' OR COALESCE(j.status,'')!='succeeded'
+                  OR NOT EXISTS (SELECT 1 FROM reference_acceptances a WHERE a.job_id=r.job_id) ''').fetchone()[0]
+            invalid_receipts=db.execute('''SELECT COUNT(*) FROM reference_viewer_receipts v
+                LEFT JOIN reference_acceptances a ON a.receipt_id=v.acceptance_receipt_id
+                LEFT JOIN reference_jobs r ON r.job_id=v.job_id
+                LEFT JOIN jobs j ON j.id=v.job_id
+                WHERE a.receipt_id IS NULL OR a.job_id!=v.job_id
+                  OR COALESCE(r.phase,'')!='completed' OR COALESCE(j.status,'')!='succeeded' ''').fetchone()[0]
+            invalid_transfers=db.execute('''SELECT COUNT(*) FROM reference_viewer_transfers t
+                LEFT JOIN reference_jobs r ON r.job_id=t.job_id
+                LEFT JOIN jobs j ON j.id=t.job_id
+                WHERE t.completed_at IS NULL OR t.lease_token IS NOT NULL OR t.lease_until IS NOT NULL
+                  OR COALESCE(r.phase,'')!='completed' OR COALESCE(j.status,'')!='succeeded'
+                  OR NOT EXISTS (SELECT 1 FROM reference_viewer_receipts v
+                    WHERE v.job_id=t.job_id AND v.acceptance_receipt_id=t.receipt_id) ''').fetchone()[0]
+            assert invalid_reference_jobs==0 and invalid_acceptances==0 and invalid_receipts==0 and invalid_transfers==0
         assert not any(row[0] in ('trigger','view') for row in objects)
         assert all(row[0]!='index' or row[1].startswith('sqlite_autoindex_') or row[1]=='viewer_engine_uuid' for row in objects)
         tables={}
@@ -181,7 +213,9 @@ def volume_census(root, *, uid=10001, offline=False):
         active=db.execute("SELECT COUNT(*) FROM jobs WHERE status NOT IN ('succeeded','failed')").fetchone()[0]
         assert active==0
         for name in names:
-            if name.startswith(('reference_','viewer_')) or name=='owned_maintenance_schedules':assert tables[name]['count']==0
+            if ((name.startswith(('reference_','viewer_')) or name=='owned_maintenance_schedules')
+                    and name not in (viewer_tables | {'reference_acceptances','reference_jobs'} if present_viewer_tables else set())):
+                assert tables[name]['count']==0
         node_columns=[row[1] for row in db.execute('PRAGMA table_info(nodes)')]
         nodes={row[0]:dict(zip(node_columns,row)) for row in db.execute('SELECT * FROM nodes ORDER BY id')}
         return dict(authorityId=authority,schema=objects,tables=tables,files=files,nodeRows=nodes,
@@ -200,12 +234,34 @@ def owned_schema():
     finally:db.close()
 
 
+def viewer_acceptance_schema():
+    """Exact additive schema tolerated when an older binary is rolled back."""
+    import sqlite3
+    db=sqlite3.connect(':memory:')
+    try:
+        db.executescript('''
+            CREATE TABLE reference_viewer_receipts (
+              receipt_id TEXT PRIMARY KEY, storage_receipt_id TEXT NOT NULL UNIQUE,
+              acceptance_receipt_id TEXT NOT NULL UNIQUE REFERENCES reference_acceptances(receipt_id),
+              job_id TEXT NOT NULL REFERENCES reference_jobs(job_id), digest TEXT NOT NULL,
+              receipt_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE reference_viewer_transfers (
+              job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id),
+              receipt_id TEXT UNIQUE NOT NULL, acceptance_json TEXT NOT NULL,
+              viewer_manifest_json TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+              next_attempt REAL NOT NULL DEFAULT 0, lease_token TEXT, lease_until REAL,
+              last_error TEXT, completed_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+        ''')
+        return [list(row) for row in db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")]
+    finally:db.close()
+
+
 def normalized_schema(rows):
     return [[*row[:3],re.sub(r'\s+',' ',row[3]).strip() if row[3] is not None else None] for row in rows]
 
 
-def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False):
-    """Only one reviewed empty additive table can cross the old-binary fence."""
+def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, allow_viewer_acceptance=False):
+    """Only exact reviewed additive schemas can cross the old-binary fence."""
     a,b=json.loads(canonical(observed)),json.loads(canonical(baseline))
     for value in (a,b):
         if value['authorityId']!=AUTHORITY or value['sqliteQuickCheck']!='ok':raise Stopped('census_authority_or_integrity_changed')
@@ -215,6 +271,18 @@ def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False):
                 or a['tables']['owned_maintenance_schedules']['count']!=0):raise Stopped('unreviewed_owned_schema_or_receipts')
         a['schema']=[row for row in a['schema'] if row[2]!='owned_maintenance_schedules']
         a['tables'].pop('owned_maintenance_schedules')
+    viewer_tables={'reference_viewer_receipts','reference_viewer_transfers'}
+    present_before=viewer_tables & b['tables'].keys()
+    present_after=viewer_tables & a['tables'].keys()
+    if present_before and present_before!=viewer_tables or present_after and present_after!=viewer_tables:
+        raise Stopped('partial_viewer_acceptance_schema')
+    if allow_viewer_acceptance and not present_before and present_after==viewer_tables:
+        additions=[row for row in a['schema'] if row[2] in viewer_tables]
+        if (normalized_schema(additions)!=normalized_schema(viewer_acceptance_schema())
+                or any(a['tables'][name]['count']!=0 for name in viewer_tables)):
+            raise Stopped('unreviewed_viewer_acceptance_schema_or_receipts')
+        a['schema']=[row for row in a['schema'] if row[2] not in viewer_tables]
+        for name in viewer_tables:a['tables'].pop(name)
     for value in (a,b):
         # SQLite page layout changes during our own maintenance; all logical
         # bytes remain bound separately, while the raw file hash is retained.
@@ -271,7 +339,7 @@ def owned_api_probe(operator):
 
 
 def backup_script():
-    extra=inspect.getsource(volume_census)+'''
+    extra=inspect.getsource(volume_census)+'\n'+inspect.getsource(viewer_acceptance_schema)+'''
 before=volume_census(source,offline=True); copied=volume_census(target,offline=True)
 assert copied.pop('rootMode')==0o700
 comparison=dict(before);comparison.pop('rootMode');assert comparison==copied
@@ -337,7 +405,7 @@ class ReferenceCoordinatorUpdate:
             raise Stopped('immutable_checkpoint_identity_changed')
 
     def census(self,state,*,offline=False,container=None):
-        code=inspect.getsource(volume_census)+'\nimport json\nprint(json.dumps(volume_census('+repr('/source' if offline else '/prototype-state')+',offline='+repr(offline)+')))'
+        code=inspect.getsource(volume_census)+'\n'+inspect.getsource(viewer_acceptance_schema)+'\nimport json\nprint(json.dumps(volume_census('+repr('/source' if offline else '/prototype-state')+',offline='+repr(offline)+')))'
         if offline:
             if self.t.docker('ps','--filter','volume='+VOLUME,'--format','{{.ID}}').strip():raise Stopped('offline_volume_has_owner')
             raw=self.t.docker('run','--rm','--pull=never','--network','none','--read-only','--user','10001:10001',
@@ -505,7 +573,7 @@ class ReferenceCoordinatorUpdate:
                 self.activity(state,api)
                 observed=self.census(state,container=state.get('newContainerId') or OLD_ID)
                 self.node_census(state,observed)
-                compatible(observed,state['drained'],allow_owned=True)
+                compatible(observed,state['drained'],allow_owned=True,allow_viewer_acceptance=True)
             current=api.json('GET','/v1/prototype/nodes/'+identifier)['node']
             if current['planId']!=plan['planId'] or current['targetImage']!=state['engineImages'][identifier]:raise Stopped('cannot_reopen_peer_plan')
             intent=plan.get('cancelIntent')
@@ -571,7 +639,7 @@ class ReferenceCoordinatorUpdate:
                 self.save(state,'started',replacementStarted=True)
                 self.t.health(api,container_id=identifier);self.t.sole_owner(identifier)
                 self.check(state,gates);self.activity(state,api);self.plans(state,api)
-                compatible(self.census(state,container=identifier),drained,allow_owned=True)
+                compatible(self.census(state,container=identifier),drained,allow_owned=True,allow_viewer_acceptance=True)
                 verified=self.t.verify_reference();verified.update(owned_api_probe(operator))
                 self.save(state,'verified',verification=verified)
                 self.reopen(state,gates,api,operator)
@@ -600,7 +668,7 @@ class ReferenceCoordinatorUpdate:
         self.check(state,gates);self.original(state)
         _env,api,operator=self.t.local_clients();self.t.health(api,container_id=OLD_ID)
         self.t.sole_owner(OLD_ID);self.activity(state,api)
-        compatible(self.census(state,container=OLD_ID),state['drained'],allow_owned=True)
+        compatible(self.census(state,container=OLD_ID),state['drained'],allow_owned=True,allow_viewer_acceptance=True)
         self.t.verify_reference()
         state.pop('newContainerId',None)
         self.reopen(state,gates,api,operator)
@@ -622,11 +690,11 @@ class ReferenceCoordinatorUpdate:
                 return self.finish_rollback(state,gates)
             if item is not None and item['State']['Running']:
                 _env,api,_operator=self.t.local_clients();self.activity(state,api)
-                compatible(self.census(state,container=item['Id']),state['drained'],allow_owned=True)
+                compatible(self.census(state,container=item['Id']),state['drained'],allow_owned=True,allow_viewer_acceptance=True)
                 self.save(state,'rollback_stop_pending')
                 self.mutation(state,gates,'stop','--time','-1',item['Id'],timeout=60)
                 if self.t.inspected(item['Id'])['State']['Running']:raise Stopped('candidate_not_confirmed_stopped')
-            try:compatible(self.census(state,offline=True),state['drained'],allow_owned=True)
+            try:compatible(self.census(state,offline=True),state['drained'],allow_owned=True,allow_viewer_acceptance=True)
             except Exception:
                 if item is not None:self.retain(state,gates,item)
                 raise Stopped('offline_rollback_refused') from None

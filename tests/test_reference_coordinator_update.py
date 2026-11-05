@@ -150,6 +150,10 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
                             db.execute('''CREATE TABLE IF NOT EXISTS owned_maintenance_schedules (
                                 request_id TEXT PRIMARY KEY,node_id TEXT NOT NULL,authority_id TEXT NOT NULL,
                                 request_sha256 TEXT NOT NULL,request_json TEXT NOT NULL,receipt_json TEXT NOT NULL)''')
+                            names={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                            if 'reference_viewer_receipts' not in names:
+                                for row in module.viewer_acceptance_schema():
+                                    if row[0]=='table':db.execute(row[3])
                 else:raise AssertionError(args)
                 if self.loss==action:self.loss=None;raise OSError('synthetic lost mutation response')
                 return result
@@ -314,10 +318,65 @@ class ReferenceCoordinatorUpdateTests(unittest.TestCase):
     def test_real_terminal_service_empty_schema_is_hashed_and_preserved(self):
         baseline=module.volume_census(self.volume,uid=os.geteuid())
         self.assertEqual(baseline['tables']['reference_terminal_acceptances']['count'],0)
+        self.assertEqual(baseline['tables']['reference_viewer_receipts']['count'],0)
+        self.assertEqual(baseline['tables']['reference_viewer_transfers']['count'],0)
         names=[row[1] for row in baseline['schema'] if row[2]=='reference_terminal_acceptances']
         self.assertEqual(len(names),4)  # Table plus three actual UNIQUE indexes.
         self.assertIn('reference_terminal_acceptances',names)
         self.assertEqual(self.activate()['phase'],'completed')
+
+    def test_viewer_acceptance_schema_addition_is_exact_and_empty_for_old_binary(self):
+        observed=module.volume_census(self.volume,uid=os.geteuid())
+        baseline=copy.deepcopy(observed)
+        viewer_tables={'reference_viewer_receipts','reference_viewer_transfers'}
+        baseline['schema']=[row for row in baseline['schema'] if row[2] not in viewer_tables]
+        for name in viewer_tables:baseline['tables'].pop(name)
+        with self.assertRaises(module.Stopped):module.compatible(observed,baseline)
+        module.compatible(observed,baseline,allow_viewer_acceptance=True)
+        nonempty=copy.deepcopy(observed)
+        nonempty['tables']['reference_viewer_receipts']['count']=1
+        with self.assertRaises(module.Stopped):module.compatible(nonempty,baseline,allow_viewer_acceptance=True)
+
+    def test_upgrade_and_rollback_preserve_empty_viewer_schema_added_by_candidate(self):
+        with self.queue._db() as db:
+            db.execute('DROP TABLE reference_viewer_transfers')
+            db.execute('DROP TABLE reference_viewer_receipts')
+        operation=self.root/'legacy-schema-operation';operation.mkdir(mode=0o700)
+        updater=module.ReferenceCoordinatorUpdate(operation,gate_factory=self.gates,transport=self.transport,cluster_probe=lambda state:None)
+        self.updater=updater
+        self.state=updater.prepare(TARGET,SOURCE,MAIN)
+        self.assertNotIn('reference_viewer_receipts',self.state['baseline']['tables'])
+        self.transport.loss='start'
+        with self.assertRaises(OSError):updater.activate(self.state)
+        self.assertEqual(updater.rollback(self.state)['phase'],'rolled_back')
+        names={row[1] for row in module.volume_census(self.volume,uid=os.geteuid())['schema'] if row[0]=='table'}
+        self.assertTrue({'reference_viewer_receipts','reference_viewer_transfers'}<=names)
+
+    def test_terminal_viewer_receipt_survives_census_but_pending_transfer_blocks_it(self):
+        with self.queue._db() as db:
+            job_id=db.execute("SELECT id FROM jobs WHERE status='succeeded' ORDER BY seq LIMIT 1").fetchone()[0]
+        with self.queue._db() as db:
+            db.execute('''INSERT INTO reference_jobs
+                (job_id,submission_id,request_digest,environment,input_json,manifest_sha,pipeline_digest,phase)
+                VALUES(?,?,?,?,?,?,?,'completed')''',
+                (job_id,'synthetic-terminal-submission','a'*64,'staging','{}','b'*64,'c'*64))
+            db.execute('INSERT INTO reference_acceptances(receipt_id,job_id,digest,receipt_json) VALUES(?,?,?,?)',
+                ('synthetic-acceptance',job_id,'d'*64,'{}'))
+            db.execute('''INSERT INTO reference_viewer_receipts
+                (receipt_id,storage_receipt_id,acceptance_receipt_id,job_id,digest,receipt_json)
+                VALUES(?,?,?,?,?,?)''',
+                ('synthetic-viewer-receipt','synthetic-storage-receipt','synthetic-acceptance',job_id,'e'*64,'{}'))
+            db.execute('''INSERT INTO reference_viewer_transfers
+                (job_id,receipt_id,acceptance_json,viewer_manifest_json,completed_at)
+                VALUES(?,?,?,?,CURRENT_TIMESTAMP)''',
+                (job_id,'synthetic-acceptance','{}','{}'))
+        census=module.volume_census(self.volume,uid=os.geteuid())
+        self.assertEqual(census['tables']['reference_viewer_receipts']['count'],1)
+        self.assertEqual(census['tables']['reference_viewer_transfers']['count'],1)
+        module.compatible(census,census,allow_owned=True,allow_viewer_acceptance=True)
+        with self.queue._db() as db:
+            db.execute('UPDATE reference_viewer_transfers SET completed_at=NULL WHERE job_id=?',(job_id,))
+        with self.assertRaises(AssertionError):module.volume_census(self.volume,uid=os.geteuid())
 
     def test_terminal_receipt_refuses_fresh_prepare_before_any_drain(self):
         self.terminal_receipt_row()
