@@ -282,7 +282,8 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                 if source_release_qualification:
                     from processing.source_release import SourceReleaseService, ReleaseSettings
                     qualification = dict(mountId=spool.mount_id, renameNoReplace=True, directoryFsync=True)
-                    for prefix, identity in (("root", spool._root_identity), ("mount", spool._mount_identity)):
+                    for prefix, identity in (("root", spool._root_identity), ("mount", spool._mount_identity),
+                                             ("marker", spool._marker_identity)):
                         qualification[prefix + "Device"] = str(identity[0])
                         qualification[prefix + "Inode"] = str(identity[1])
                     release_settings = ReleaseSettings(dict(enabled=True,
