@@ -374,7 +374,15 @@ class ViewerService:
                     self.store.update(task['uuid'], phase='waiting_node', error=decision['reason'])
                     continue
                 node_id = decision['nodeId']
-                self._check_options(task['options'])
+                shared_scheduler = getattr(self.queue, '_reference_scheduler', None)
+                if (shared_scheduler is None
+                        or getattr(shared_scheduler, '_node_option_validator', None) is None):
+                    # Legacy Viewer-only deployments validate against the
+                    # fleet-wide catalog. With the shared scheduler, options
+                    # are checked against this node's fresh snapshot both
+                    # during selection and inside the atomic queue claim; a
+                    # different unavailable node must not block fallback.
+                    self._check_options(task['options'])
                 job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': node_id,
                                        'profiles': [VIEWER_PROFILE], 'expectedJobId': task['job_id']})
                 if not job:

@@ -20,6 +20,7 @@ from processing.maintenance import Conflict
 from processing.config import ProcessingNode
 from processing.odx_smoke_worker import SmokeError
 from processing.prototype import PROFILE, VIEWER_PROFILE, Queue
+from processing.reference_store import ReferenceStore
 from processing.viewer_service import EngineUnavailable, ViewerService
 
 
@@ -334,6 +335,34 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertTrue(self.engines['main'].calls)
         self.busy['cluster'] = 0
         self.assertEqual(self.fleet.max_active, 1)
+
+    def test_unavailable_small_node_falls_back_when_fleet_catalog_is_closed(self):
+        identifier = self.submit(options=REQUEST_OPTIONS)
+        self.service.close()
+        self.queue.close()
+        self.queue = Queue(self.root / 'state', node_ids=('cluster', 'main'),
+            treedar_node_ids=('main',), viewer_enabled=True, reference_enabled=True)
+        self.service = ViewerService(self.queue, self.config, engines=self.engines, probe=self.probe)
+        self.service._catalog = lambda: {
+            'ready': False,
+            'commonOptions': [],
+            'nodes': [
+                {'role': 'cluster', 'configured': True, 'available': False, 'options': []},
+                {'role': 'main', 'configured': True, 'available': True, 'options': OPTIONS},
+            ],
+        }
+        ReferenceStore(self.queue, local_max_photos=1000,
+            local_max_input_bytes=20 * 1024**3, main_node_id='main',
+            node_option_validator=lambda _submission, node: node.get('available') is True
+                and {option['name'] for option in node.get('options', [])}
+                >= {'pc-ept'})
+        self.unavailable.add('cluster')
+
+        self.service.tick()
+
+        self.assertEqual(self.task(identifier)['node_id'], 'main')
+        self.assertTrue(self.engines['main'].calls)
+        self.assertFalse(self.engines['cluster'].calls)
 
     def test_large_job_waits_for_main_without_overflow_to_small_node(self):
         self.config.local_max_photos = 1
