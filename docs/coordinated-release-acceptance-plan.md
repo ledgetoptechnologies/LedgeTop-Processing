@@ -120,6 +120,14 @@ offering it. Updater/release inventories still hardcode main/cluster and must be
 made config-driven before claiming automatic maintenance for a future third
 node. Container updates remain in scope; OS updates stay deferred.
 
+The worker also pins its configured engine version. `ReferenceDriver._ready`
+refuses claims when `/info.engineVersion` differs from that pin; it refreshes
+allowed options only after that check. A container upgrade must therefore pair
+its qualified version with the worker's existing idle pin-migration/config
+handover before reopening the node. Merely swapping an image and reopening the
+queue is insufficient. Preserve old result provenance and pending outboxes;
+never weaken the version check to make an update appear successful.
+
 After the photo milestone, qualify genuine LAS/LAZ TreeDar input and typed outputs
 on main using the same per-host reservation and durable handoff. Keep Gaussian
 splats disabled while exposing only its agreed future scaffold. Finish NAS source
