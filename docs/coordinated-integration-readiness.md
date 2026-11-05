@@ -4,6 +4,13 @@ This record describes the review branch
 `codex/viewer-accepted-copy-integration-candidate-20261103`. It is not a deployment
 approval. Runtime acceptance remains incomplete.
 
+Identity follow-up `572cf56` integrates duplicate-origin/daemon-ID checks and
+requires daemon bindings for multi-node startup. It preserves schema-v3/v4
+result-delivery configuration while requiring their recovery bindings too.
+The 121-test Linux node-role/runtime/driver/daemon-routing/updater suite passed
+without skips. A node-local live identity probe and physical-host binding
+remain missing.
+
 ## Integrated source
 
 Code commit `c7aa1ce66e91b3b3c985ed3d5789d7527f21402f` combines:
@@ -45,7 +52,8 @@ are not operational.
    IDs; verify the local identity before mutation. Docker Engine ID identifies
    a daemon, not a physical PC. Establish a host binding and enforce a single
    reservation per physical host before enabling concurrent dispatch. The
-   identity changes being developed on #365 are not in `c7aa1ce`.
+   configured identity checks are integrated in `572cf56`; they do not provide
+   live daemon verification or physical-host attestation.
 2. **NAS source custody:** implement the authenticated source producer, immutable
    source generation/manifest, physical capacity reservation, writer/purge fence,
    independently verified custody, recovery and explicit source release. Ops
