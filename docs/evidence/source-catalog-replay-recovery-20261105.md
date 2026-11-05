@@ -38,6 +38,20 @@ It creates no new queue job, byte reservation, source receipt, claim or executio
 The matching Viewer fix is separately committed as
 `5caf5d88886e0db0b9e6e0139f3dabd4231e59e2`; its exact LF source export SHA-256 is
 `f7747efa3cb4c6279d0f779ea72b6bebe0530b73ef95facbbf0ede4653ff0ba0`.
-Paired qualification of that new Viewer export remains pending. This backend
+The first paired run of that exact Viewer export executed eight cases in
+70.310 seconds: six passed, including controlled conversion/publication and
+two-node custody, while both whole/range GCP resume cases failed. The actual
+repository returns a retained GCP snapshot string, whereas the new resume helper
+required a Buffer; the Viewer owner is correcting canonical UTF-8 normalization
+without relaxing hash or size verification. This is a candidate regression, not
+a fixture permission failure. The owned runner and volume were removed.
+
+Viewer follow-up `960dd930` also introduced an unsupported V2 submission lookup
+URL. The existing backend lookup remains `/ltds/v1/jobs/by-submission/{id}` and
+returns the complete V2 binding for a V2 job. The owner is correcting that route
+and retaining exact binding validation. No new V2 lookup route is planned.
+
+The corrected Viewer candidate still needs paired qualification. This backend
 result alone does not prove Viewer outbox recovery, real engines, installed
-services, NAS durability or large photo transfer/processing.
+services, NAS durability or large photo transfer/processing. No installed service
+was changed by these tests.
