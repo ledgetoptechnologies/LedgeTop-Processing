@@ -423,14 +423,16 @@ class ReferenceRuntime:
             self._server_context = server_context
             endpoints = config.node_endpoints
             node_limits = {node.id: {"maxImages": node_image_limit(node, config.local_max_photos),
-                                    "maxInputBytes": node.max_input_bytes}
+                                    **({"maxInputBytes": node.max_input_bytes}
+                                       if node.max_input_bytes is not None else {})}
                            for node in endpoints}
             self.store = ReferenceStore(queue, local_max_photos=config.local_max_photos,
                 local_max_input_bytes=config.local_max_input_bytes,
-                main_node_id=next((node.id for node in endpoints if node.id == "main"),
-                                  next((node.id for node in endpoints if node.id != "cluster"), None)),
+                main_node_id=next((node.id for node in endpoints if node.id == "main"), None),
                 node_limits=node_limits,
                 node_option_validator=self._node_options_valid)
+            from .node_inventory import pin_reference_inventory
+            pin_reference_inventory(self.store, config, settings)
             self.source_reconciliation=self.store.reconcile_source_spool(settings.source_spool)
             if settings.source_spool is not None:
                 self._source_readers = self.store.source_readers()

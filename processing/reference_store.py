@@ -68,8 +68,7 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                 raise ValueError("local node limits must be positive integers")
         self.local_max_photos = local_max_photos
         self.local_max_input_bytes = local_max_input_bytes
-        self.main_node_id = main_node_id or next((n for n in queue.node_ids if n == 'main'),
-                                                 next((n for n in queue.node_ids if n != 'cluster'), None))
+        self.main_node_id = main_node_id or next((n for n in queue.node_ids if n == 'main'), None)
         if self.main_node_id is not None and (self.main_node_id not in queue.node_ids or self.main_node_id == 'cluster'):
             raise ValueError("main node must be a configured node distinct from cluster")
         if node_limits is None:

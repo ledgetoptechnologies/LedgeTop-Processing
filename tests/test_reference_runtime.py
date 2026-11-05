@@ -438,6 +438,45 @@ class ReferenceRuntimeTests(unittest.TestCase):
             {'Authorization': 'Bearer ' + middle_token}, protected_transport=True).body['job']['jobId'],
             small['jobId'])
 
+    def test_configured_photo_caps_reach_shared_scheduler_with_null_override(self):
+        config = replace(self.config, local_max_photos=1, processing_nodes=(
+            ProcessingNode('cluster', self.config.local_node_url, max_images=None),
+            ProcessingNode('main', self.config.main_node_url, max_images=2)))
+        queue = Queue(config.prototype_state_dir, node_ids=('cluster', 'main'),
+                      treedar_node_ids=('main',), reference_enabled=True)
+        self.addCleanup(queue.close)
+        capacity = {node: dict(ready=True, maxImages=None, maxInputBytes=None, taskQueueCount=0)
+                    for node in ('cluster', 'main')}
+        runtime = self.runtime(queue, config=config, discover_capacities=lambda: dict(capacity))
+        job, _ = runtime.store.submit(self.reference_submission(3))
+        prefix = '/ltds/worker/v1/next'
+        def next_for(node):
+            return runtime.api.handle('GET', prefix,
+                {'Authorization': 'Bearer ' + self.value['workers'][node]['bearer']},
+                protected_transport=True)
+        self.assertIsNone(next_for('main').body['job'])
+        self.assertEqual(next_for('cluster').body['job']['jobId'], job['jobId'])
+        capacity['cluster']['maxImages'] = 2
+        self.assertIsNone(next_for('cluster').body['job'])
+
+    def test_ordinary_runtime_starts_with_only_configured_generic_node(self):
+        config = replace(self.config, local_node_url='', main_node_url='',
+            prototype_node_ids=('mapping',), treedar_node_ids=('mapping',),
+            processing_nodes=(ProcessingNode('mapping', 'http://mapping.invalid:3000', max_images=4),))
+        self.value['workers'] = {'mapping': dict(self.value['workers']['cluster'],
+            workerId='worker-mapping', instanceId='instance-mapping')}
+        self.snapshot = dict(self.snapshot, nodes=[dict(self.snapshot['nodes'][0], role='mapping')])
+        queue = Queue(config.prototype_state_dir, node_ids=('mapping',), reference_enabled=True)
+        self.addCleanup(queue.close)
+        runtime = self.runtime(queue, config=config)
+        self.assertIsNone(runtime.store.main_node_id)
+        job, _ = runtime.store.submit(self.reference_submission(3))
+        response = runtime.api.handle('GET', '/ltds/worker/v1/next',
+            {'Authorization': 'Bearer ' + self.value['workers']['mapping']['bearer']},
+            protected_transport=True)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body['job']['jobId'], job['jobId'])
+
     def test_partial_engine_outage_still_admits_and_queues_work_for_healthy_node(self):
         queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
                       treedar_node_ids=('main',), reference_enabled=True)
