@@ -15,9 +15,9 @@ this identity follow-up (`572cf56`, documentation head `08e4e9d`): 20/20
 passed with no skips. The earlier 20/20 result below applied to code `c7aa1ce`.
 
 Local image `ledgetop-processing:integration-8422a47` was built from repository
-head `8422a47` (code `572cf56`) with the pinned Dockerfile/dependencies. Image
-configuration ID is
-`sha256:34f984e8d4463cc442c6dedf8739ce5cf6e4a24569a9e06329425ee85ee7f39f`.
+head `8422a47` (code `572cf56`) with the pinned Dockerfile/dependencies. Local
+image ID reported by Docker inspection is
+`sha256:e616f6f4393dddc0a5536b0551a1cf54313f309de5537f9efe633ff58241c881`.
 A bounded container with no external network and a read-only root filesystem
 started the app and returned HTTP 200 from `/healthz` as UID 10001; cryptography
 50.0.2 loaded. The child process and container exited. This checks basic image
