@@ -8,7 +8,6 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 import hashlib
-import math
 import os
 from pathlib import Path
 import re
@@ -33,7 +32,7 @@ from .reference_failure import FailureOutbox, make_failure
 from .reference_terminal import validate_terminal_acceptance
 from .reference_engine_cleanup import EngineCacheCleanup
 from .options import _validate_options
-from .reference_runtime import _UNSAFE
+from .reference_option_policy import safe_option_definitions, validate_option_values
 from .reference_execution import ExecutionRouter, RouteConflict
 from .treedar_engine import TreeDarHeld
 
@@ -520,17 +519,13 @@ class ReferenceDriver:
                 or checked['pipelineDigest'] != job['pipelineDigest']
                 or (kind == 'odm' and any(obj['kind'] != 'image' for obj in submission['manifest']['objects']))):
             raise DriverHeld('unsupported_worker_submission')
-        for name, value in raw['pipeline']['odm']['options'].items():
-            definition = self._option_definitions.get(name)
-            if definition is None:
-                raise DriverHeld('engine_option_no_longer_available')
-            kind = definition['type']
-            valid = ((kind in ('bool', 'boolean') and type(value) is bool)
-                     or (kind in ('int', 'integer') and type(value) is int and abs(value) <= p.MAX_SAFE_INTEGER)
-                     or (kind in ('float', 'double', 'number') and type(value) in (int, float)
-                         and abs(value) <= p.MAX_SAFE_INTEGER and math.isfinite(value)))
-            if not valid:
-                raise DriverHeld('engine_option_type_mismatch')
+        values = raw['pipeline']['odm']['options']
+        if set(values) - self._option_definitions.keys():
+            raise DriverHeld('engine_option_no_longer_available')
+        try:
+            validate_option_values(values, self._option_definitions)
+        except (TypeError, ValueError, OverflowError):
+            raise DriverHeld('engine_option_type_mismatch') from None
         if self._combined_policy is not None and self._pipeline_kind(submission)!='combined':raise DriverHeld('combined_prepare_profile_only')
         if self._combined_policy is not None:
             from .reference_pipeline import _submission
@@ -613,13 +608,7 @@ class ReferenceDriver:
         definitions = _validate_options(self.worker.engine.read('/options', limit=262144))
         if self.worker.engine.token and self.worker.engine.token in p.canonical_json(definitions).decode():
             raise DriverHeld('invalid_engine_option_catalog')
-        selected = {}
-        for option in definitions:
-            name = option['name']
-            if (p.valid_odm_option_name(name)
-                    and option.get('type') in ('bool','boolean','int','integer','float','double','number')
-                    and not _UNSAFE.search(p.canonical_json(option).decode())):
-                selected[name] = option
+        selected = safe_option_definitions(definitions)
         self._option_definitions = selected
         self.worker.allowed_options = frozenset(selected)
 

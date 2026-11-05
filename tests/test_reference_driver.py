@@ -214,8 +214,10 @@ class ReferenceDriverTests(unittest.TestCase):
         Path(destination).write_bytes(content)
         return Path(destination)
 
-    def submit(self, *, environment='staging', contents=(b'arbitrary-photo-data',)):
+    def submit(self, *, environment='staging', contents=(b'arbitrary-photo-data',), options=None):
         raw = copy.deepcopy(self.fixture['submission'])
+        if options is not None:
+            raw['pipeline']['odm']['options'] = options
         raw['submissionId'] = str(uuid.uuid4())
         raw['manifest']['id'] = 'dataset-' + raw['submissionId']
         objects = []
@@ -227,7 +229,8 @@ class ReferenceDriverTests(unittest.TestCase):
         raw['manifest'].update(objects=objects, objectCount=len(objects), totalBytes=sum(map(len, contents)),
             inputCounts=dict(images=len(objects), lidarObjects=0, points=0))
         raw['manifest']['sha256'] = manifest_sha256(raw['manifest'])
-        normalized = validate_submission(raw, environment=environment, capability_fingerprint=raw['capabilityFingerprint'])
+        normalized = validate_submission(raw, environment=environment, capability_fingerprint=raw['capabilityFingerprint'],
+            allowed_odm_options=set(raw['pipeline']['odm']['options']))
         return self.store.submit(normalized)[0]
 
     def supply_grants(self):
@@ -613,6 +616,33 @@ class ReferenceDriverTests(unittest.TestCase):
         changed['submission']['pipeline']['odm']['options']['scale'] = 2e-7
         with self.assertRaises(DriverHeld):
             self.driver._validate_job(changed)
+
+    def test_fresh_enum_text_and_numeric_domains_reach_native_initialization(self):
+        from tests.test_reference_option_policy import CATALOG
+        self.transport.options=copy.deepcopy(CATALOG)
+        values={'pc-quality':'high','feature-quality':'ultra','label':'Survey A','resolution':0.5,'count':2,'3d-tiles':True}
+        job=self.submit(options=values)
+        self.advance(job,'awaiting_acceptance')
+        sent=self.native.initialize.call_args.args[0]['options']
+        self.assertEqual({item['name']:item['value'] for item in sent},values)
+
+    def test_fresh_changed_unsafe_or_out_of_domain_options_hold_before_mutation(self):
+        from tests.test_reference_option_policy import CATALOG
+        self.transport.options=copy.deepcopy(CATALOG)
+        self.driver._ready()
+        raw=copy.deepcopy(self.fixture['submission'])
+        raw['pipeline']['odm']['options']={'pc-quality':'high','resolution':0.5}
+        normalized=validate_submission(raw,environment='staging',capability_fingerprint=raw['capabilityFingerprint'],
+            allowed_odm_options=self.worker.allowed_options)
+        job=dict(submission=normalized,environment='staging',nodeId='cluster',manifestSha256=normalized['manifestSha256'],pipelineDigest=normalized['pipelineDigest'])
+        self.driver._validate_job(job)
+        for catalog in ([dict(name='pc-quality',type='enum',domain=['low'])],
+                [dict(name='pc-quality',type='string',help='External command')],
+                [dict(name='pc-quality',type='enum',domain=['high']),dict(name='resolution',type='float',domain={'min':1})]):
+            self.transport.options=catalog
+            self.driver._refresh_options()
+            with self.assertRaises(ValueError):self.driver._validate_job(job)
+        self.assertFalse(any(call[0] in ('initialize','upload','commit') for call in self.transport.calls))
 
     def test_v2_large_manifest_reaches_worker_validation_without_raising_v1_limit(self):
         from processing import reference_protocol as protocol

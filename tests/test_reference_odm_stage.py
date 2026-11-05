@@ -273,6 +273,24 @@ class NativeODMStageTests(unittest.TestCase):
             self.stage._options(intent)
         self.assertEqual(self.counts()['initialize'], 0)
 
+    def test_fresh_enum_text_and_domains_are_checked_before_native_mutation(self):
+        from tests.test_reference_option_policy import CATALOG
+        dispatch=self.fixture._dispatch
+        catalog=copy.deepcopy(CATALOG)
+        self.fixture._dispatch=lambda method,path,headers,body:(200,catalog,False) if path=='/options' else dispatch(method,path,headers,body)
+        values={'pc-quality':'high','feature-quality':'ultra','label':'Survey A','resolution':0.5,'count':2,'3d-tiles':True}
+        intent={'stage':{'options':{'options':values}}}
+        self.stage._options(intent)
+        for changes in ({'pc-quality':'unknown'},{'resolution':0},{'count':True},{'label':'/private'}):
+            with self.subTest(changes=changes),self.assertRaises(NativeStageHeld):
+                self.stage._options({'stage':{'options':{'options':{**values,**changes}}}})
+        catalog[0]['domain']=['low']
+        with self.assertRaises(NativeStageHeld):self.stage._options(intent)
+        catalog[0]=dict(name='pc-quality',type='string',help='External script command')
+        with self.assertRaises(NativeStageHeld):self.stage._options(intent)
+        self.assertEqual(self.counts()['initialize'],0)
+        self.assertEqual(self.counts()['commit'],0)
+
     def test_active_backend_queue_is_refused_before_initialization(self):
         dispatch=self.fixture._dispatch
         def active(method,path,headers,body):

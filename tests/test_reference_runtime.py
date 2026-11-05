@@ -706,6 +706,30 @@ class ReferenceRuntimeTests(unittest.TestCase):
         admitted = runtime.api.handle('POST', '/ltds/v1/jobs', headers, json.dumps(raw).encode(), protected_transport=True)
         self.assertEqual(admitted.status, 201, admitted.body)
 
+    def test_alias_catalog_advertises_canonical_types_and_exact_matching_fingerprint(self):
+        aliases=[dict(name='alias-toggle',type='boolean'),dict(name='alias-count',type='integer',domain={'min':1}),
+            dict(name='alias-double',type='double'),dict(name='alias-number',type='number')]
+        self.snapshot['commonOptions'].extend(aliases)
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True)
+        self.addCleanup(queue.close)
+        runtime=self.runtime(queue)
+        headers={'Authorization':'Bearer '+self.value['viewerBearers']['staging']}
+        listed=runtime.api.handle('GET','/ltds/v1/options',headers,protected_transport=True)
+        self.assertEqual(listed.status,200)
+        definitions={item['name']:item for item in listed.body['options']}
+        self.assertEqual({item['name']:definitions[item['name']]['type'] for item in aliases},
+            {'alias-toggle':'bool','alias-count':'int','alias-double':'float','alias-number':'float'})
+        self.assertEqual(listed.body['optionsFingerprint'],protocol.digest(dict(protocol='reference-options-v1',definitions=listed.body['options'])))
+        capabilities=runtime.api.handle('GET','/ltds/v2/capabilities',headers,protected_transport=True)
+        self.assertEqual(capabilities.body['engines']['odm']['optionsFingerprint'],listed.body['optionsFingerprint'])
+        raw=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())['submission']
+        raw['capabilityFingerprint']=listed.body['capabilityFingerprint']
+        raw['pipeline']['odm'].update(optionsFingerprint=listed.body['optionsFingerprint'],
+            options={'alias-toggle':True,'alias-count':1,'alias-double':0.5,'alias-number':2})
+        admitted=runtime.api.handle('POST','/ltds/v1/jobs',headers,json.dumps(raw).encode(),protected_transport=True)
+        self.assertEqual(admitted.status,201,admitted.body)
+        self.assertEqual([item['type'] for item in aliases],['boolean','integer','double','number'])
+
     def test_enum_values_are_checked_against_fresh_engine_choices(self):
         _, _, allowed = discovered_policy(self.snapshot, self.config)
         payload = {"pipeline": {"odm": {"options": {"safe-enum": "high"}}}}

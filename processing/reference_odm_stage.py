@@ -8,7 +8,6 @@ from contextlib import contextmanager,closing
 from dataclasses import asdict,dataclass
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import re
@@ -25,7 +24,7 @@ from .scratch_policy import ScratchLedger
 from .update_registry import _run
 from .viewer_service import NativeEngine
 from .options import _validate_options
-from .reference_runtime import _UNSAFE
+from .reference_option_policy import safe_option_definitions, validate_option_values
 
 
 class NativeStageHeld(ValueError):pass
@@ -313,14 +312,7 @@ class NativeODMStage:
     def _options(self,intent):
         try:
             catalog=_validate_options(self.engine.read('/options',limit=262144))
-            definitions={o['name']:o for o in catalog if p.valid_odm_option_name(o['name'])
-                and o.get('type') in ('bool','boolean','int','integer','float','double','number')
-                and not _UNSAFE.search(p.canonical_json(o).decode())}
-            for name,value in intent['stage']['options']['options'].items():
-                kind=definitions[name]['type']
-                if not ((kind in ('bool','boolean') and type(value) is bool)
-                        or (kind in ('int','integer') and type(value) is int and abs(value)<=p.MAX_SAFE_INTEGER)
-                        or (kind in ('float','double','number') and type(value) in (int,float) and abs(value)<=p.MAX_SAFE_INTEGER and math.isfinite(value))):raise ValueError()
+            validate_option_values(intent['stage']['options']['options'],safe_option_definitions(catalog))
         except Exception:raise NativeStageHeld('current_native_options_required') from None
 
     def _admit(self,job):

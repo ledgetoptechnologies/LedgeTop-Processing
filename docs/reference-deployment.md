@@ -2,6 +2,15 @@
 
 ## Candidate V2 source intake and pull-only result return
 
+Reference admission, the execution driver and native ODM stages share the same
+fresh option policy. Safe enum choices and bounded strings follow the current
+engine definitions, alongside exact boolean/numeric types and numeric domains.
+Worker type aliases are advertised as canonical `bool`/`int`/`float` types; the
+public options fingerprint covers those exact advertised definitions.
+Removed definitions, changed choices/domains and unsafe file/path/credential
+options are rejected before engine mutation; no option names are hardcoded into
+the allowlist.
+
 For the coordinated V2 Viewer path, use runtime schema 6 with an explicit
 `"viewerAcceptance": {}`. This selects Viewer-driven result download and signed
 copy acknowledgement without constructing the legacy background push sender.
