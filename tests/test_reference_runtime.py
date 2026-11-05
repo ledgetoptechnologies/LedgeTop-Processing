@@ -67,7 +67,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
             if os.name != "nt":
                 path.chmod(0o600)
             paths[name] = str(path)
-        self.value = dict(schemaVersion=1, listener=dict(host="127.0.0.1", port=19443, **paths),
+        self.value = dict(schemaVersion=2, listener=dict(host="127.0.0.1", port=19443, **paths),
             viewerBearers={"staging": "reference-staging-" + "c"*32},
             workers={node: dict(bearer="reference-" + node + "-" + "d"*32,
                 workerId="worker-" + node, instanceId="instance-" + node,
@@ -75,6 +75,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
                 resultBearer="read-" + node + "-" + "e"*32) for node in ("cluster", "main")},
             streamBudget=dict(maxConcurrent=1, maxObjectBytes=100*1024**3))
         self.path = self.root / "reference-private.json"
+        self.value = self.recovery_config()
         self.write_config()
         common_options = [
             dict(name="future-quality", type="int", value=3, domain="positive int", help="Quality level"),
@@ -107,13 +108,30 @@ class ReferenceRuntimeTests(unittest.TestCase):
 
     def runtime(self, queue, *, config=None, discover_capacities=None, **kwargs):
         config = config or self.config
+        # Bind the synthetic multi-node runtime to this queue's persisted
+        # authority, as an operator-provisioned runtime config must.
+        self.value = self.recovery_config(queue.authority_id, config=config)
+        self.write_config()
         capacities = discover_capacities or (lambda: {node: dict(ready=True, maxImages=None,
             maxInputBytes=None, taskQueueCount=0) for node in config.prototype_node_ids})
         first, second = self.tls_patches()
         with first, second:
+            if os.name == "nt":
+                # Recovery execution is POSIX-only; Windows tests still cover
+                # the validated daemon binding and scheduler path.
+                with patch("processing.reference_recovery.ClaimRecoveryService", return_value=object()):
+                    return ReferenceRuntime(queue, config, load_reference_settings(str(self.path), config),
+                        discover=lambda: self.snapshot,
+                        discover_capacities=capacities, **kwargs)
             return ReferenceRuntime(queue, config, load_reference_settings(str(self.path), config),
                 discover=lambda: self.snapshot,
                 discover_capacities=capacities, **kwargs)
+
+    def make_configured_handler(self, config):
+        if os.name == "nt":
+            with patch("processing.reference_recovery.ClaimRecoveryService", return_value=object()):
+                return make_handler(config)
+        return make_handler(config)
 
     def reference_submission(self, images, option=None):
         fixture = json.loads((Path(__file__).resolve().parents[1] /
@@ -142,22 +160,29 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertNotIn(REFERENCE_PROFILE, handler.prototype_queue.allowed_profiles)
         self.assertIn(VIEWER_PROFILE, handler.prototype_queue.allowed_profiles)
 
-    def recovery_config(self,authority='11111111-1111-4111-8111-111111111111'):
+    def recovery_config(self,authority='11111111-1111-4111-8111-111111111111',config=None):
+        config=config or self.config
         value=copy.deepcopy(self.value);value['schemaVersion']=2
         value['recoveryBindings']={node:dict(engineId='physical-'+node,authorityId=authority,
             coordinatorOrigin='http://127.0.0.1:18080',gateGeneration=1,outputBudget=1000)
-            for node in self.config.prototype_node_ids}
+            for node in config.prototype_node_ids}
         return value
 
     def test_schema2_loads_closed_frozen_bindings_and_legacy_settings_default_is_none(self):
-        legacy=self.settings();self.assertIsNone(legacy.recovery_bindings)
-        self.assertIsNone(ReferenceSettings(legacy.listener,legacy.viewer_bearers,legacy.workers,legacy.stream_budget).recovery_bindings)
+        legacy=copy.deepcopy(self.value);legacy['schemaVersion']=1;legacy.pop('recoveryBindings');self.value=legacy;self.write_config()
+        with self.assertRaises(RuntimeConfigurationError):self.settings()
         self.value=self.recovery_config();self.write_config();loaded=self.settings()
         self.assertEqual(set(loaded.recovery_bindings),{'cluster','main'})
         self.assertTrue(all(type(value) is RecoveryNodeBinding for value in loaded.recovery_bindings.values()))
         self.assertEqual(loaded.recovery_bindings['main'].engine_id,'physical-main')
         self.value['recoveryBindings']['main']['outputBudget']=2
         self.assertEqual(loaded.recovery_bindings['main'].output_budget,1000)
+
+    def test_schema2_rejects_duplicate_engine_ids_and_accepts_unique_daemon_bindings(self):
+        self.value=self.recovery_config();self.write_config()
+        self.assertEqual(set(self.settings().recovery_bindings),{'cluster','main'})
+        self.value['recoveryBindings']['main']['engineId']='physical-cluster';self.write_config()
+        with self.assertRaises(RuntimeConfigurationError):self.settings()
 
     def test_schema2_configuration_rejects_unknown_missing_coverage_versions_and_types(self):
         original=self.recovery_config()
@@ -186,12 +211,11 @@ class ReferenceRuntimeTests(unittest.TestCase):
             with self.assertRaises(RuntimeConfigurationError):make_handler(config)
         self.assertFalse(Path(config.prototype_state_dir).exists())
 
-    def test_legacy_runtime_does_not_create_recovery_tables(self):
+    def test_multi_node_runtime_refuses_legacy_unbound_settings(self):
+        self.value=copy.deepcopy(self.value);self.value['schemaVersion']=1;self.value.pop('recoveryBindings');self.write_config()
         queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(queue.close)
-        runtime=self.runtime(queue);self.assertIsNone(runtime.control.worker.recovery)
-        with queue._db() as db:
-            tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertFalse(any(name.startswith('reference_recovery_') for name in tables))
+        with self.assertRaises(RuntimeConfigurationError):
+            ReferenceRuntime(queue,self.config,self.settings())
 
     def test_worker_next_uses_live_per_node_size_capacity_and_rechecks_at_claim(self):
         config = replace(self.config, local_max_photos=1,
@@ -372,7 +396,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
         queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);authority=queue.authority_id;queue.close()
         self.value=self.recovery_config(authority);self.write_config();config=replace(self.config,reference_config_path=str(self.path))
         first,second=self.tls_patches()
-        with first,second:handler=make_handler(config)
+        with first,second:handler=self.make_configured_handler(config)
         self.addCleanup(handler.prototype_queue.close);self.addCleanup(handler.viewer_service.close)
         runtime=handler.reference_listener
         self.assertIsNone(runtime._server);self.assertIsNone(runtime._thread);self.assertIsNone(handler.viewer_service._thread)
@@ -384,10 +408,37 @@ class ReferenceRuntimeTests(unittest.TestCase):
 
     def test_direct_settings_cannot_bypass_recovery_binding_type_or_node_coverage(self):
         queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(queue.close)
+        self.value=self.recovery_config(queue.authority_id);self.write_config()
         settings=self.settings()
-        for bindings in ({},{'cluster':{}},{'cluster':{},'main':{}},[]):
+        for bindings in (None,{}, {'cluster':{}},{'cluster':{},'main':{}},[]):
             with self.subTest(bindings=bindings),self.assertRaises(RuntimeConfigurationError):
                 ReferenceRuntime(queue,self.config,replace(settings,recovery_bindings=bindings))
+
+    def test_direct_settings_reject_duplicate_daemon_bindings_and_mismatched_queue_order(self):
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(queue.close)
+        self.value=self.recovery_config(queue.authority_id);self.write_config()
+        settings=self.settings()
+        duplicate_bindings=dict(settings.recovery_bindings)
+        duplicate_bindings['main']=replace(duplicate_bindings['main'],engine_id='physical-cluster')
+        with self.assertRaises(RuntimeConfigurationError):
+            ReferenceRuntime(queue,self.config,replace(settings,recovery_bindings=duplicate_bindings))
+        self.value=self.recovery_config(queue.authority_id);self.write_config()
+        settings=self.settings()
+        wrong_config=replace(self.config,prototype_node_ids=('main','cluster'))
+        with self.assertRaises(RuntimeConfigurationError):
+            ReferenceRuntime(queue,wrong_config,settings)
+
+    def test_direct_settings_reject_normalized_engine_origin_aliases_and_worker_coverage_gap(self):
+        queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(queue.close)
+        self.value=self.recovery_config(queue.authority_id);self.write_config();settings=self.settings()
+        aliases=replace(self.config,processing_nodes=(
+            ProcessingNode('cluster','http://NodeODM.Example:80/'),
+            ProcessingNode('main','http://nodeodm.example')))
+        with self.assertRaises(RuntimeConfigurationError):
+            ReferenceRuntime(queue,aliases,settings)
+        missing_worker=replace(settings,workers={'cluster':settings.workers['cluster']})
+        with self.assertRaises(RuntimeConfigurationError):
+            ReferenceRuntime(queue,self.config,missing_worker)
 
     @unittest.skipUnless(os.name=='posix','Linux coordinator recovery authority')
     def test_configured_recovery_routes_resume_original_claim_and_same_epoch_reassembly_does_not_rehold(self):
@@ -417,10 +468,13 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertEqual(second.store.get(job['jobId'],private=True)['claimToken'],claim['claimToken'])
 
     def test_explicit_runtime_shares_exact_native_queue_authority_and_global_slot(self):
+        seed=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True)
+        authority=seed.authority_id;seed.close()
+        self.value=self.recovery_config(authority);self.write_config()
         config = replace(self.config, reference_config_path=str(self.path))
         first, second = self.tls_patches()
         with first, second:
-            handler = make_handler(config)
+            handler = self.make_configured_handler(config)
         self.addCleanup(handler.prototype_queue.close)
         self.addCleanup(handler.viewer_service.close)
         runtime = handler.reference_listener
@@ -610,10 +664,13 @@ class ReferenceRuntimeTests(unittest.TestCase):
             self.assertNotIn(str(self.path), repr(config))
 
     def supervised_handler(self):
+        seed=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True)
+        authority=seed.authority_id;seed.close()
+        self.value=self.recovery_config(authority);self.write_config()
         config = replace(self.config, viewer_enabled=False, reference_config_path=str(self.path))
         first, second = self.tls_patches()
         with first, second:
-            handler = make_handler(config)
+            handler = self.make_configured_handler(config)
         self.addCleanup(handler.prototype_queue.close)
         return handler
 
