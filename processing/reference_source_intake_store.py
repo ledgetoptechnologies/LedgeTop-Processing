@@ -2,6 +2,7 @@
 import hashlib
 import hmac
 import json
+import math
 import secrets
 import time
 import uuid
@@ -381,103 +382,169 @@ class ReferenceSourceIntakeMethods:
         """Seal a claim-bound broker grant only after durable source intake acceptance."""
         from datetime import datetime
         from .reference_transfer import validate_grant
-        now = time.time() if clock is None else clock()
-        if isinstance(now, bool) or not isinstance(now, (int, float)):
-            raise Conflict('invalid source grant clock')
+        read_clock = time.time if clock is None else clock
+
+        def checked_now():
+            value = read_clock()
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value)):
+                raise Conflict('invalid source grant clock')
+            return value
+
+        def capture(db):
+            row = self._row(db, job_id)
+            claim = db.execute('''SELECT request_id,job_id,node_id,worker_id,instance_id,token
+                FROM reference_claims WHERE job_id=?''', (job_id,)).fetchone()
+            receipts = db.execute('''SELECT generation,object_id,object_kind,byte_size,sha256,mount_id,storage_key,receipt_json
+                FROM reference_source_object_receipts WHERE job_id=? ORDER BY generation,object_id''',
+                (job_id,)).fetchall()
+            grant_row = db.execute('SELECT grant_json,digest FROM reference_transfer_grants WHERE job_id=?',
+                                   (job_id,)).fetchone()
+            token_rows = db.execute('''SELECT token_sha256,job_id,generation FROM reference_source_grant_tokens
+                WHERE job_id=? ORDER BY token_sha256''', (job_id,)).fetchall()
+            claim_value = dict(claim) if claim is not None else None
+            snapshot = {
+                'row': {key: row[key] for key in (
+                    'job_id','submission_id','request_digest','environment','input_json','manifest_sha',
+                    'pipeline_digest','generation','phase','node_id','transfer_json','status','claim_hash',
+                    'held_reason','private_claim_token','source_request_digest','viewer_task_id','provider_task_id',
+                    'source_attestation_json','source_attestation_sha','source_manifest_json','derived_manifest_json',
+                    'source_manifest_sha','derived_manifest_sha','pipeline_manifest_sha','source_state',
+                    'derived_state','reserved_bytes','source_receipt_json','source_receipt_sha',
+                    'derived_receipt_json','derived_receipt_sha')},
+                'claim': claim_value,
+                'receipts': [dict(item) for item in receipts],
+                'grant': dict(grant_row) if grant_row is not None else None,
+                'tokens': [dict(item) for item in token_rows],
+            }
+            return row, claim_value, snapshot
+
+        # Read a consistent, immutable metadata snapshot briefly. In particular,
+        # leave Queue._db (and its lifecycle lock) before touching the NAS.
+        with self.queue._db() as db:
+            db.execute('BEGIN')
+            row, claim, snapshot = capture(db)
+            db.commit()
+
+        now = checked_now()
+        if row['status'] != 'running' or row['phase'] != 'awaiting_transfer':
+            raise Conflict('source grant requires a running transfer reservation')
+        if (row['source_state'] != 'accepted' or row['derived_state'] != 'accepted'
+                or not row['source_receipt_json'] or not row['derived_receipt_json']):
+            raise Conflict('source retention receipts are not accepted')
+        if (claim is None or claim['token'] != row['private_claim_token']
+                or not row['claim_hash']
+                or not hmac.compare_digest(hashlib.sha256(claim['token'].encode('utf-8')).hexdigest(), row['claim_hash'])):
+            raise Conflict('active source grant claim is unavailable')
+        request = json.loads(row['transfer_json']) if row['transfer_json'] else None
+        if not isinstance(request, dict):
+            raise Conflict('worker reservation is unavailable')
+        try:
+            expiry = datetime.fromisoformat(request['expiresAt'].replace('Z', '+00:00')).timestamp()
+        except (KeyError, ValueError, AttributeError, OverflowError, OSError):
+            raise Conflict('worker reservation expiry is invalid') from None
+        if not math.isfinite(expiry) or expiry <= now:
+            raise Conflict('worker reservation expired')
+        source_receipt = json.loads(row['source_receipt_json'])
+        derived_receipt = json.loads(row['derived_receipt_json'])
+        if (type(source_receipt) is not dict or type(derived_receipt) is not dict
+                or protocol.digest(source_receipt) != row['source_receipt_sha']
+                or protocol.digest(derived_receipt) != row['derived_receipt_sha']
+                or source_receipt.get('receiptType') != 'source_retention'
+                or derived_receipt.get('receiptType') != 'attempt_derived_input'
+                or (source_receipt.get('jobId'), source_receipt.get('attemptId'),
+                    source_receipt.get('generation'), source_receipt.get('environment'),
+                    source_receipt.get('pipelineManifestSha256'), source_receipt.get('sourceManifestSha256')) !=
+                   (job_id, row['submission_id'], row['generation'], row['environment'],
+                    row['pipeline_manifest_sha'], row['source_manifest_sha'])
+                or (derived_receipt.get('jobId'), derived_receipt.get('attemptId'),
+                    derived_receipt.get('generation'), derived_receipt.get('environment'),
+                    derived_receipt.get('derivedManifestSha256')) !=
+                   (job_id, row['submission_id'], row['generation'], row['environment'],
+                    row['derived_manifest_sha'])):
+            raise Conflict('source retention receipt binding changed')
+        try:
+            source = json.loads(row['source_manifest_json'])
+            derived = json.loads(row['derived_manifest_json'])
+            submission = json.loads(row['input_json'])
+            objects = submission['manifest']['objects']
+            expected = {item['id']: (item, 'source') for item in source['objects']}
+            expected.update({item['id']: (item, 'derived') for item in derived['objects']})
+            receipt_rows = snapshot['receipts']
+            if len(receipt_rows) != len(expected):
+                raise Conflict('accepted source receipt closure is incomplete')
+            by_id = {item['object_id']: item for item in receipt_rows
+                     if item['generation'] == row['generation']}
+            if len(by_id) != len(receipt_rows) or set(by_id) != set(expected):
+                raise Conflict('accepted source receipt closure changed')
+            for obj in objects:
+                stored = by_id.get(obj['id'])
+                retained = expected.get(obj['id'])
+                if (stored is None or retained is None
+                        or (stored['byte_size'], stored['sha256'], stored['object_kind']) !=
+                           (obj['byteSize'], obj['sha256'], retained[1])
+                        or stored['mount_id'] != source_spool.mount_id
+                        or stored['storage_key'] != source_spool.storage_key(
+                            job_id, row['generation'], obj['id'])):
+                    raise Conflict('pipeline source receipt binding changed')
+                receipt = json.loads(stored['receipt_json'])
+                actual = source_spool.verify_object(job_id=job_id, generation=row['generation'],
+                    object_id=obj['id'], byte_size=obj['byteSize'], sha256=obj['sha256'])
+                if _json(actual) != _json(receipt):
+                    raise Conflict('pipeline source object is no longer retained')
+        except (KeyError, TypeError, ValueError):
+            raise Conflict('source transfer grant could not be validated') from None
+
+        verified_at = checked_now()
+        if expiry <= verified_at:
+            raise Conflict('worker reservation expired during source verification')
+
+        # Hashing has finished. Take the write lock, re-read every authority and
+        # receipt binding, then mint or reconcile only against this exact state.
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = self._row(db, job_id)
-            if row['status'] != 'running' or row['phase'] != 'awaiting_transfer':
-                raise Conflict('source grant requires a running transfer reservation')
-            if (row['source_state'] != 'accepted' or row['derived_state'] != 'accepted'
-                    or not row['source_receipt_json'] or not row['derived_receipt_json']):
-                raise Conflict('source retention receipts are not accepted')
-            source_receipt = json.loads(row['source_receipt_json'])
-            derived_receipt = json.loads(row['derived_receipt_json'])
-            if (type(source_receipt) is not dict or type(derived_receipt) is not dict
-                    or protocol.digest(source_receipt) != row['source_receipt_sha']
-                    or protocol.digest(derived_receipt) != row['derived_receipt_sha']
-                    or source_receipt.get('receiptType') != 'source_retention'
-                    or derived_receipt.get('receiptType') != 'attempt_derived_input'
-                    or (source_receipt.get('jobId'), source_receipt.get('attemptId'),
-                        source_receipt.get('generation'), source_receipt.get('environment'),
-                        source_receipt.get('pipelineManifestSha256'), source_receipt.get('sourceManifestSha256')) !=
-                       (job_id, row['submission_id'], row['generation'], row['environment'],
-                        row['pipeline_manifest_sha'], row['source_manifest_sha'])
-                    or (derived_receipt.get('jobId'), derived_receipt.get('attemptId'),
-                        derived_receipt.get('generation'), derived_receipt.get('environment'),
-                        derived_receipt.get('derivedManifestSha256')) !=
-                       (job_id, row['submission_id'], row['generation'], row['environment'],
-                        row['derived_manifest_sha'])):
-                raise Conflict('source retention receipt binding changed')
-            old = db.execute('SELECT grant_json FROM reference_transfer_grants WHERE job_id=?',
-                             (job_id,)).fetchone()
-            if old:
-                return json.loads(old['grant_json'])
-            request = json.loads(row['transfer_json']) if row['transfer_json'] else None
-            if not isinstance(request, dict):
-                raise Conflict('worker reservation is unavailable')
-            try:
-                expiry = datetime.fromisoformat(request['expiresAt'].replace('Z', '+00:00')).timestamp()
-            except (KeyError, ValueError, AttributeError, OverflowError, OSError):
-                raise Conflict('worker reservation expiry is invalid') from None
-            if expiry <= now:
-                raise Conflict('worker reservation expired')
-            submission = json.loads(row['input_json'])
-            manifest = submission['manifest']
-            objects = manifest['objects']
+            current, current_claim, current_snapshot = capture(db)
+            before_cas = {key: value for key, value in snapshot.items() if key not in ('grant', 'tokens')}
+            after_cas = {key: value for key, value in current_snapshot.items() if key not in ('grant', 'tokens')}
+            if _json(after_cas) != _json(before_cas):
+                raise Conflict('source grant authority changed during verification')
+            if (current['status'] != 'running' or current['phase'] != 'awaiting_transfer'
+                    or current_claim is None or current_claim['token'] != current['private_claim_token']
+                    or current['generation'] != row['generation']
+                    or current['transfer_json'] != row['transfer_json']):
+                raise Conflict('source grant reservation changed during verification')
+            # Another identical verifier may have won the CAS while this thread
+            # was hashing. Return only that exact persisted, still-live grant.
+            if current_snapshot['grant'] is not None:
+                persisted = json.loads(current_snapshot['grant']['grant_json'])
+                token_hash = hashlib.sha256(persisted['token'].encode('ascii')).hexdigest()
+                if (current_snapshot['grant']['digest'] != protocol.digest(persisted)
+                        or len(current_snapshot['tokens']) != 1
+                        or current_snapshot['tokens'][0] != {
+                            'token_sha256': token_hash, 'job_id': job_id,
+                            'generation': current['generation']}
+                        or any(persisted.get(key) != request.get(key) for key in (
+                            'reservationId','generation','expiresAt','manifestSha256','byteBudget','nonce'))
+                        or persisted.get('jobId') != job_id
+                        or persisted.get('environment') != current['environment']
+                        or persisted.get('objectIds') != [item['id'] for item in objects]):
+                    raise Conflict('persisted source grant binding changed')
+                validate_grant(persisted, job=self._record(current, True), clock=checked_now)
+                return persisted
+            if checked_now() >= expiry:
+                raise Conflict('worker reservation expired during source verification')
             grant = {key: request[key] for key in
                      ('reservationId', 'generation', 'expiresAt', 'manifestSha256', 'byteBudget', 'nonce')}
-            grant.update(jobId=job_id, environment=row['environment'],
+            grant.update(jobId=job_id, environment=current['environment'],
                          objectIds=[item['id'] for item in objects], token=secrets.token_urlsafe(32))
-            try:
-                validate_grant(grant, job=self._record(row, True), clock=lambda: now)
-                source = json.loads(row['source_manifest_json'])
-                derived = json.loads(row['derived_manifest_json'])
-                receipt_rows = db.execute('''SELECT object_id,object_kind,byte_size,sha256,mount_id,storage_key,receipt_json
-                    FROM reference_source_object_receipts WHERE job_id=? AND generation=?''',
-                    (job_id, row['generation'])).fetchall()
-                expected = {item['id']: (item, 'source') for item in source['objects']}
-                expected.update({item['id']: (item, 'derived') for item in derived['objects']})
-                if len(receipt_rows) != len(expected):
-                    raise Conflict('accepted source receipt closure is incomplete')
-                by_id = {item['object_id']: item for item in receipt_rows}
-                if len(by_id) != len(receipt_rows) or set(by_id) != set(expected):
-                    raise Conflict('accepted source receipt closure changed')
-                # Rehash each pipeline input from the mounted spool immediately
-                # before releasing the scoped token to its claimed worker.
-                for obj in objects:
-                    stored = by_id.get(obj['id'])
-                    retained = expected.get(obj['id'])
-                    if (stored is None or retained is None
-                            or (stored['byte_size'], stored['sha256'], stored['object_kind']) !=
-                               (obj['byteSize'], obj['sha256'], retained[1])
-                            or stored['mount_id'] != source_spool.mount_id
-                            or stored['storage_key'] != source_spool.storage_key(
-                                job_id, row['generation'], obj['id'])):
-                        raise Conflict('pipeline source receipt binding changed')
-                    receipt = json.loads(stored['receipt_json'])
-                    actual = source_spool.verify_object(job_id=job_id, generation=row['generation'],
-                        object_id=obj['id'], byte_size=obj['byteSize'], sha256=obj['sha256'])
-                    if _json(actual) != _json(receipt):
-                        raise Conflict('pipeline source object is no longer retained')
-            except (KeyError, TypeError, ValueError):
-                raise Conflict('source transfer grant could not be validated') from None
-            # Rehashing the full source closure can take substantial time on a
-            # large NAS dataset. The initial reservation-expiry check does not
-            # authorize returning a grant that expired during that verification.
-            after_verification = time.time() if clock is None else clock()
-            if isinstance(after_verification, bool) or not isinstance(after_verification, (int, float)):
-                raise Conflict('invalid source grant clock')
-            if expiry <= after_verification:
-                raise Conflict('worker reservation expired during source verification')
+            validate_grant(grant, job=self._record(current, True), clock=checked_now)
             encoded = _json(grant)
             digest = protocol.digest(grant)
             token_sha = hashlib.sha256(grant['token'].encode('ascii')).hexdigest()
             self._quota(db, len(encoded.encode('utf-8')))
             db.execute('INSERT INTO reference_transfer_grants VALUES(?,?,?)', (job_id, encoded, digest))
             db.execute('INSERT INTO reference_source_grant_tokens(token_sha256,job_id,generation) VALUES(?,?,?)',
-                       (token_sha, job_id, row['generation']))
+                       (token_sha, job_id, current['generation']))
             return grant
 
     def source_object_for_grant(self, token, object_id, *, source_spool, clock=None):

@@ -105,6 +105,174 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
         self.payload["manifest"]["totalBytes"] = len(image_bytes) + len(derived_bytes)
         self.rehash()
 
+    def _make_reserved_source_job(self, directory, spool, claim_suffix):
+        worker_token = "synthetic-worker-token-012345"
+        queue = Queue(directory)
+        queue.allowed_profiles.add(PROFILE)
+        self.authority_id = queue.authority_id
+        self.payload["pipeline"]["odm"]["options"] = {"numeric-probe": 1e-7}
+        store = ReferenceStore(queue)
+        control = ReferenceControlAPI(store, viewer_bearers={"synthetic-staging-token": "staging"},
+            worker_bearers={worker_token: dict(node_id="cluster", worker_id="worker",
+                worker_instance_id="instance")}, capability_fingerprint="a" * 64,
+            options_fingerprint=self.payload["pipeline"]["odm"]["optionsFingerprint"],
+            allowed_odm_options={"numeric-probe"}, source_spool=spool,
+            source_attestation_keys=self.trusted_keys, authority_id=queue.authority_id)
+        signed = self.validate(allowed_odm_options={"numeric-probe"})
+        request = copy.deepcopy(self.payload)
+        request["sourceAttestation"] = signed["sourceAttestation"]
+        viewer_headers = {"Authorization": "Bearer synthetic-staging-token"}
+        posted = control.handle("POST", "/ltds/v2/jobs", viewer_headers,
+            p.canonical_json(request), protected_transport=True)
+        self.assertEqual(posted.status, 201, posted.body)
+        job = posted.body
+        bodies = {IMAGE_ID: b"abc", GCP_ID: b"id,lat,lon\n1,2,3\n", "gcp_" + ATTEMPT: b"1,2,3\n"}
+        all_objects = self.payload["sourceManifest"]["objects"] + self.payload["derivedManifest"]["objects"]
+        for object_id, body in bodies.items():
+            item = next(value for value in all_objects if value["id"] == object_id)
+            received = control.viewer.stream_source_object(
+                f"/ltds/v2/jobs/{job['jobId']}/source/{object_id}?generation=1",
+                {**viewer_headers, "Content-SHA256": item["sha256"]}, io.BytesIO(body), len(body),
+                protected_transport=True)
+            self.assertEqual(received.status, 201, received.body)
+        completion = {"generation": 1, "sourceManifestSha256": self.payload["sourceManifest"]["sha256"],
+            "derivedManifestSha256": self.payload["derivedManifest"]["sha256"],
+            "pipelineManifestSha256": self.payload["manifest"]["sha256"]}
+        completed = control.handle("POST", f"/ltds/v2/jobs/{job['jobId']}/source/complete",
+            viewer_headers, p.canonical_json(completion), protected_transport=True)
+        self.assertEqual(completed.status, 201, completed.body)
+        claim = control.handle("POST", "/ltds/worker/v1/claim", {"Authorization": "Bearer " + worker_token},
+            p.canonical_json({"jobId": job["jobId"], "claimRequestId": "source-claim-" + claim_suffix}),
+            protected_transport=True)
+        self.assertEqual(claim.status, 200, claim.body)
+        claim_token = claim.body["claimToken"]
+        expires = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+        reservation = {"reservationId": "source-reservation-" + claim_suffix,
+            "generation": claim.body["generation"], "expiresAt": expires,
+            "manifestSha256": job["manifestSha256"], "byteBudget": self.payload["manifest"]["totalBytes"],
+            "nonce": "source-nonce-" + claim_suffix}
+        reserved = control.handle("POST", f"/ltds/worker/v1/jobs/{job['jobId']}/reservation",
+            {"Authorization": "Bearer " + worker_token},
+            p.canonical_json({"claimToken": claim_token, "transferRequest": reservation}),
+            protected_transport=True)
+        self.assertEqual(reserved.status, 200, reserved.body)
+        return queue, store, control, job, claim_token
+
+    def test_source_grant_hash_does_not_hold_coordinator_lock_and_stale_claim_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "spool"
+            root.mkdir(mode=0o700)
+            marker = root / ".ltds-source-spool-id"
+            marker.write_text("a" * 64, encoding="ascii")
+            if os.name != "nt": marker.chmod(0o600)
+            mount_patch = patch("processing.source_spool.os.path.ismount", return_value=True)
+            mount_patch.start()
+            try:
+                spool = SourceSpool(root, mount_id="a" * 64, safety_floor_bytes=0,
+                    max_object_bytes=1024, chunk_bytes=3)
+                queue, store, _control, job, _claim_token = self._make_reserved_source_job(
+                    directory, spool, "blocked")
+                for invalid_clock in (float("nan"), float("inf"), float("-inf")):
+                    with self.assertRaisesRegex(Conflict, "invalid source grant clock"):
+                        store.mint_source_transfer_grant(job["jobId"], source_spool=spool,
+                            clock=lambda value=invalid_clock: value)
+                entered = threading.Event()
+                release = threading.Event()
+                write_done = threading.Event()
+                outcome = {}
+                original = spool.verify_object
+
+                def blocked_verify(**kwargs):
+                    entered.set()
+                    if not release.wait(3):
+                        raise AssertionError("test did not release the blocked verifier")
+                    return original(**kwargs)
+
+                def mint():
+                    try:
+                        outcome["grant"] = store.mint_source_transfer_grant(job["jobId"], source_spool=spool)
+                    except Exception as error:
+                        outcome["error"] = error
+
+                def unrelated_write():
+                    try:
+                        with queue._db() as db:
+                            db.execute("CREATE TABLE IF NOT EXISTS source_grant_lock_probe (value INTEGER)")
+                            db.execute("INSERT INTO source_grant_lock_probe(value) VALUES(1)")
+                    except Exception as error:
+                        outcome["write_error"] = error
+                    finally:
+                        write_done.set()
+
+                with patch.object(spool, "verify_object", side_effect=blocked_verify):
+                    mint_thread = threading.Thread(target=mint, name="grant-hash-blocked")
+                    mint_thread.start()
+                    try:
+                        self.assertTrue(entered.wait(2), "grant verification did not reach the blocked NAS read")
+                        write_thread = threading.Thread(target=unrelated_write, name="unrelated-coordinator-write")
+                        write_thread.start()
+                        self.assertTrue(write_done.wait(1), "coordinator write blocked behind NAS verification")
+                        write_thread.join(2)
+                        self.assertFalse(write_thread.is_alive(), "unrelated write did not finish")
+                        store.update_phase(job["jobId"], "held", error="test_claim_changed")
+                    finally:
+                        release.set()
+                        mint_thread.join(4)
+                    self.assertFalse(mint_thread.is_alive(), "grant mint thread leaked")
+                self.assertIsInstance(outcome.get("error"), Conflict)
+                with queue._db() as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM reference_transfer_grants").fetchone()[0], 0)
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM reference_source_grant_tokens").fetchone()[0], 0)
+            finally:
+                mount_patch.stop()
+                if 'queue' in locals(): queue.close()
+
+    def test_concurrent_identical_source_grant_mints_reconcile_one_persisted_grant(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "spool"
+            root.mkdir(mode=0o700)
+            marker = root / ".ltds-source-spool-id"
+            marker.write_text("a" * 64, encoding="ascii")
+            if os.name != "nt": marker.chmod(0o600)
+            mount_patch = patch("processing.source_spool.os.path.ismount", return_value=True)
+            mount_patch.start()
+            queue = None
+            try:
+                spool = SourceSpool(root, mount_id="a" * 64, safety_floor_bytes=0,
+                    max_object_bytes=1024, chunk_bytes=3)
+                queue, store, _control, job, _claim_token = self._make_reserved_source_job(
+                    directory, spool, "parallel")
+                rendezvous = threading.Barrier(2)
+                original = spool.verify_object
+                outcomes = []
+                errors = []
+
+                def paired_verify(**kwargs):
+                    if kwargs["object_id"] == IMAGE_ID:
+                        rendezvous.wait(timeout=3)
+                    return original(**kwargs)
+
+                def mint():
+                    try:
+                        outcomes.append(store.mint_source_transfer_grant(job["jobId"], source_spool=spool))
+                    except Exception as error:
+                        errors.append(error)
+
+                with patch.object(spool, "verify_object", side_effect=paired_verify):
+                    threads = [threading.Thread(target=mint, name=f"parallel-grant-{index}") for index in range(2)]
+                    for thread in threads: thread.start()
+                    for thread in threads: thread.join(8)
+                self.assertTrue(all(not thread.is_alive() for thread in threads), "grant mint thread leaked")
+                self.assertEqual(errors, [])
+                self.assertEqual(len(outcomes), 2)
+                self.assertEqual(outcomes[0], outcomes[1])
+                with queue._db() as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM reference_transfer_grants").fetchone()[0], 1)
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM reference_source_grant_tokens").fetchone()[0], 1)
+            finally:
+                mount_patch.stop()
+                if queue is not None: queue.close()
     def rehash(self):
         for key in ("sourceManifest", "derivedManifest"):
             manifest = self.payload[key]
