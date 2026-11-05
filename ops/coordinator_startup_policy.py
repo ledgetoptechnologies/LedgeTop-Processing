@@ -155,8 +155,10 @@ def materialize(policy, binding, phase, key):
             all(type(value) is str and old.HEX.fullmatch(value) for value in startup['sourceHashes'].values()) and
             all(type(startup[name]) is str and old.HEX.fullmatch(startup[name])
                 for name in ('bootstrapConfigSha256','finalConfigSha256')),'known_startup_policy_required')
-    _window(binding['bootstrapWindow']);_window(binding['finalWindow'])
+    _window(binding['bootstrapWindow'])
     is_final=phase in ('final-frozen','rollback-final');closed=phase!='final-frozen'
+    if is_final:_window(binding['finalWindow'])
+    else:require(binding['finalWindow'] is None,'future_final_window_must_be_absent')
     current=binding['currentStartupId']
     require((is_final and current!=binding['bootstrapStartupId']) or
             (not is_final and current==binding['bootstrapStartupId']),'startup_phase_identity_changed')

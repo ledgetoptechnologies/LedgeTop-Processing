@@ -73,6 +73,17 @@ class StartupPolicyTests(unittest.TestCase):
         self.assertEqual(policy['startup']['inventory']['nodes']['cluster']['engineOrigin'],['http','127.0.0.1',19001])
         self.assertEqual(policy['startup']['recovery']['main']['authority_id'],self.authority)
 
+    def test_bootstrap_does_not_invent_a_future_final_start_window(self):
+        policy=json.loads(self.build());startup=str(uuid.uuid4());plan=str(uuid.uuid4())
+        context=dict(bootstrapStartupId=startup,currentStartupId=startup,planId=plan,ownerSha256='a'*64,
+            requestIds={action:str(uuid.uuid5(uuid.UUID(plan),action)) for action in ('intent','drain','seal')},
+            operationBinding={'authorityId':self.authority},sourceReaderBinding=None,sourceCustody=None,
+            bootstrapWindow={'earliest':'2026-11-05 20:00:00','latest':'2026-11-05 20:00:30'},finalWindow=None)
+        result=s.materialize(policy,context,'bootstrap-frozen',b'x'*32)
+        self.assertEqual(result['rows']['coordinator_freeze_state'][0]['phase'],'frozen')
+        context['finalWindow']=dict(context['bootstrapWindow'])
+        with self.assertRaisesRegex(old.CensusRefused,'future_final_window'):s.materialize(policy,context,'bootstrap-frozen',b'x'*32)
+
     def test_clock_window_is_bounded_and_canonical(self):
         self.assertEqual(s._window({'earliest':'2026-11-05 20:00:00','latest':'2026-11-05 20:00:30'})['latest'],'2026-11-05 20:00:30')
         for window in ({'earliest':'bad','latest':'bad'},

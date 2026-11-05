@@ -90,3 +90,14 @@ signed Viewer-to-backend delivery/retention tests and cleanup observation agains
 the operator-qualified NAS boundary. That later transition must declare the three
 reviewed release tables and prove its timers/IO honor the same central freeze;
 this first-profile builder deliberately cannot silently authorize it.
+
+
+Bootstrap/frozen and rollback-bootstrap now require finalWindow=null: the final
+container has not started, so no future timestamp window may be invented. Only
+final-frozen/rollback-final require the independently recorded actual final
+window. A native regression checks both absent-future success and prepopulated
+future-window refusal; the real normal-child four-phase fixture now starts with
+null and supplies its final window only after that real launch.7/7 Linux policy
+and actual quarantine cases passed, no skips, in3.109 seconds. Owned bounded
+runner auto-removed and exact label inventory was empty. This closes a real
+constructor ordering gap rather than broadening timestamp acceptance.

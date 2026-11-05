@@ -234,7 +234,7 @@ class FirstCoordinatorQuarantineTests(unittest.TestCase):
             requestIds={action:str(uuid.uuid5(uuid.UUID(plan),action)) for action in ('intent','drain','seal')},
             operationBinding=binding,sourceReaderBinding=None,sourceCustody=None,
             bootstrapWindow=dict(earliest=bootstrap_earliest,latest=now()),
-            finalWindow=dict(earliest=bootstrap_earliest,latest=now()))
+            finalWindow=None)
         def verify(phase):
             from ops.coordinator_predecessor_census import _canonical
             return verify_projection(self.old.root,baseline=baseline,policy_bytes=policy,
