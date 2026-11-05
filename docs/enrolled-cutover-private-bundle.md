@@ -92,7 +92,8 @@ unknown outcomes inspect the exact owned helper/subdirectory and never blindly
 retry, delete partial evidence or promote bytes without closed readback and
 actual helper retirement. The subsequent ordinary cutover preflight still
 validates all configuration hashes and the independently generated policy.
-No staging writer is implemented or invoked by this bundle module.
+The separate `enrolled_config_stage` module implements this preparation. It is
+not invoked by bundle validation and still requires actual Docker qualification.
 
 `TrackedWorkerProbe` reuses the private remote-exec lifecycle with explicit
 reviewed actor UID and a host-bound envelope, separate from Docker container

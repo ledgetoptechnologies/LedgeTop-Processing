@@ -1,0 +1,93 @@
+"""Actual exclusive local writer; no live host/container/NAS preparation."""
+from contextlib import redirect_stdout
+import hashlib
+import io
+import os
+from pathlib import Path
+import tempfile
+import unittest
+import uuid
+from unittest.mock import patch
+
+from ops import enrolled_config_stage as s
+from ops import enrolled_coordinator_driver as d
+
+
+class ExplicitEntrypointTests(unittest.TestCase):
+    def test_staging_recipe_has_no_state_lease_network_or_private_payload_argv(self):
+        stage=s.ConfigPreparation.__new__(s.ConfigPreparation)
+        stage.plan=dict(operationId=str(uuid.uuid4()),candidate={'imageId':'sha256:'+'a'*64});stage.name='owned-stage'
+        args=stage._args(dict(createIntent=str(uuid.uuid4()),configRoot='/private/certificates'))
+        self.assertEqual(args[args.index('--network')+1],'none');self.assertIn('--init=false',args)
+        self.assertEqual(args.count('--mount'),1)
+        self.assertEqual(args[args.index('--mount')+1],'type=bind,src=/private/certificates,dst=/stage')
+        self.assertNotIn('/prototype-state',' '.join(args));self.assertNotIn('synthetic-private-token',' '.join(args))
+        self.assertEqual(args[-3:],['-I','-B','-'])
+    def test_action_is_required_and_help_has_no_apply_default(self):
+        with redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(SystemExit) as result:d.main(['--help'])
+        self.assertEqual(result.exception.code,0)
+        self.assertIn('config-inspect',output.getvalue());self.assertIn('reconcile-rearm',output.getvalue())
+        self.assertNotIn('--token',output.getvalue())
+
+    def test_private_path_failure_is_sanitized_without_traceback_or_argv(self):
+        with redirect_stdout(io.StringIO()) as output:
+            code=d.main(['--plan','/private/synthetic-secret-key-name','--bundle','/private/bundle','--receipt','/private/receipt','--action','status'])
+        self.assertEqual(code,2);self.assertNotIn('synthetic-secret',output.getvalue());self.assertNotIn('Traceback',output.getvalue())
+
+
+@unittest.skipUnless(os.name=='posix','actual Linux private modes and UID10001 writer')
+class ExclusiveWriterTests(unittest.TestCase):
+    def setUp(self):
+        self.assertEqual(os.geteuid(),10001)
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name);self.root.chmod(0o700)
+        self.old=self.root/'existing.json';self.old.write_bytes(b'old-private-configuration');self.old.chmod(0o440)
+        self.before=(self.old.read_bytes(),self.old.stat().st_mode,self.old.stat().st_uid,self.old.stat().st_gid,self.old.stat().st_ino)
+        self.payloads={'bootstrap.json':b'{"synthetic":"bootstrap"}','final.json':b'{"synthetic":"final"}'}
+        self.settings=dict(schemaVersion=1,operationId=str(uuid.uuid4()),planSha256='a'*64,imageId='sha256:'+'b'*64,
+            sourceHashes={name:'c'*64 for name in s.SOURCES},
+            rootIdentity=s.identity(self.root.stat()),hashes={name:hashlib.sha256(raw).hexdigest() for name,raw in self.payloads.items()})
+        self.operation=self.root/('first-cutover-'+self.settings['operationId'])
+
+    def unchanged_old(self):
+        self.assertEqual((self.old.read_bytes(),self.old.stat().st_mode,self.old.stat().st_uid,self.old.stat().st_gid,self.old.stat().st_ino),self.before)
+
+    def test_exact_new_private_files_and_fsync_readback_without_old_permission_changes(self):
+        proof=s.write_new(self.settings,self.payloads,root=str(self.root))
+        self.assertEqual(proof['status'],'staged');self.assertEqual(self.operation.stat().st_mode&0o777,0o700)
+        for name,raw in self.payloads.items():
+            path=self.operation/name
+            self.assertEqual(path.read_bytes(),raw);self.assertEqual(path.stat().st_mode&0o777,0o600)
+            self.assertEqual((path.stat().st_uid,path.stat().st_gid),(10001,10001))
+        self.unchanged_old()
+        with self.assertRaises(FileExistsError):s.write_new(self.settings,self.payloads,root=str(self.root))
+        self.unchanged_old()
+
+    def test_preexisting_symlink_operation_is_never_followed_or_overwritten(self):
+        outside=self.root/'outside';outside.mkdir();self.operation.symlink_to(outside,target_is_directory=True)
+        with self.assertRaises(FileExistsError):s.write_new(self.settings,self.payloads,root=str(self.root))
+        self.assertEqual(list(outside.iterdir()),[]);self.unchanged_old()
+
+    def test_fsync_failure_retains_partial_new_files_and_never_retries_or_promotes(self):
+        with patch.object(s.os,'fsync',side_effect=OSError('synthetic durability failure')) as fault:
+            with self.assertRaises(OSError):s.write_new(self.settings,self.payloads,root=str(self.root))
+        self.assertEqual(fault.call_count,1);self.assertTrue((self.operation/'bootstrap.json').exists())
+        self.assertFalse((self.operation/'final.json').exists());self.unchanged_old()
+        with self.assertRaises(FileExistsError):s.write_new(self.settings,self.payloads,root=str(self.root))
+
+    def test_unknown_directory_close_is_not_blindly_retried(self):
+        original=s.close_verified;closed=[];system_close=os.close;attempts=[]
+        def traced(fd):attempts.append(fd);return system_close(fd)
+        def close(fd):
+            mode=os.fstat(fd).st_mode;closed.append((fd,mode))
+            original(fd)
+            import stat
+            if stat.S_ISDIR(mode):raise OSError('synthetic close reported error after actual close')
+        with patch.object(s,'close_verified',side_effect=close),patch.object(s.os,'close',side_effect=traced):
+            with self.assertRaises(OSError):s.write_new(self.settings,self.payloads,root=str(self.root))
+        import stat
+        directories=[fd for fd,mode in closed if stat.S_ISDIR(mode)]
+        self.assertEqual(len(directories),1);self.assertEqual(attempts.count(directories[0]),1);self.unchanged_old()
+
+
+if __name__=='__main__':unittest.main()

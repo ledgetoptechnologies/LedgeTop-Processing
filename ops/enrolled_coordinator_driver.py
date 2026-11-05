@@ -34,6 +34,7 @@ class ConcreteCutoverDriver:
 
     def global_lock(self,plan):
         require(plan==self.plan,'driver_plan_changed')
+        require(all(pin is not None for pin in plan['gates'].values()),'first_cutover_prerequisites_unqualified')
         return self.host_operation.locked(plan)
 
     def _intent(self,event):
@@ -524,3 +525,60 @@ finally:db.close()
     def verify_not_applied(self,action,observation,intent,state):
         require(self.observe_not_applied(action,intent,state)==observation,'not_applied_evidence_changed')
         return True
+
+
+def main(argv=None):
+    """One explicit operator action; no implicit apply, loop or live defaults."""
+    import argparse
+    import json
+    import os
+    import re
+    parser=argparse.ArgumentParser(description='One reviewed enrolled-coordinator preparation/cutover action')
+    parser.add_argument('--plan',required=True,help='existing private0600 reviewed plan JSON')
+    parser.add_argument('--bundle',required=True,help='existing private0600 deployment bundle JSON')
+    parser.add_argument('--receipt',required=True,help='existing private0700 operation directory')
+    parser.add_argument('--action',required=True,choices=('status','prepare','advance','inspect','rollback',
+        'reconcile-rearm','reconcile-rollback','config-create','config-start','config-inspect','config-cleanup'))
+    parser.add_argument('--bootstrap-input',help='private operator0600 bootstrap payload, config actions only')
+    parser.add_argument('--final-input',help='private operator0600 final payload, config actions only')
+    args=parser.parse_args(argv)
+    try:
+        from .enrolled_coordinator_deployment import read_bundle
+        from .enrolled_config_stage import ConfigPreparation
+        require(os.name=='posix','linux_enrolled_driver_required')
+        plan=journal.validate_plan(decode(private_bytes(args.plan,maximum=262144),262144))
+        bundle=read_bundle(args.bundle,plan)
+        if args.action.startswith('config-'):
+            preparation=ConfigPreparation(plan,bundle,args.receipt)
+            if args.action in ('config-inspect','config-cleanup'):
+                require(args.bootstrap_input is None and args.final_input is None,'config_inputs_on_readback_or_cleanup_refused')
+                result=preparation.inspect() if args.action=='config-inspect' else preparation.cleanup()
+            else:
+                require(args.bootstrap_input is not None and args.final_input is not None,'private_config_inputs_required')
+                method=preparation.create if args.action=='config-create' else preparation.start
+                result=method(args.bootstrap_input,args.final_input)
+            print(json.dumps(dict(action=args.action,phase=result['phase'],scope='configuration-preparation-only')))
+            return 0
+        require(args.bootstrap_input is None and args.final_input is None,'config_inputs_on_cutover_action_refused')
+        driver=ConcreteCutoverDriver(plan,bundle,args.receipt)
+        controller=journal.FirstEnrolledCutover(args.receipt,plan,driver)
+        if args.action=='status':state=controller._load()  # Pure private metadata read, no global lock/write.
+        elif args.action=='prepare':state=controller.prepare()
+        elif args.action=='advance':state=controller.advance()
+        elif args.action=='inspect':state=controller.inspect()
+        elif args.action=='rollback':state=controller.begin_rollback()
+        else:state=controller.reconcile_not_applied(disposition='rearm' if args.action=='reconcile-rearm' else 'rollback')
+        print(json.dumps(dict(action=args.action,phase=state['phase'],direction=state['direction'],
+            index=state['index'],pendingAction=state['pending']['action'] if state['pending'] else None,
+            admissionOpened=state['admissionOpened'],scope='journal-metadata-only' if args.action=='status' else 'reviewed-single-action')))
+        return 0
+    except Exception as error:
+        from .enrolled_coordinator_transport import TransportHeld
+        reason=str(error) if type(error) in (TransportHeld,journal.CutoverHeld) else 'enrolled_action_held'
+        if not re.fullmatch('[a-z][a-z0-9_]{0,120}',reason):reason='enrolled_action_held'
+        # Never print argv, private paths, payloads, tokens, stderr or tracebacks.
+        print(json.dumps(dict(status='held',reason=reason)))
+        return 2
+
+
+if __name__=='__main__':raise SystemExit(main())

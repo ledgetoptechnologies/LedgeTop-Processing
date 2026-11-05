@@ -46,8 +46,8 @@ The holder/socket/kernel, tracked observer, full-census/TAR, native Docker CLI,
 worker TLS and projection implementations have separate component tests. The
 complete driver still needs actual composed Docker qualification and review;
 no installed coordinator, service, NAS data or real client job was changed by
-this checkpoint. The preparation writer described in the bundle document is
-not implemented or invoked here.
+this checkpoint. The preparation writer and explicit command entrypoint are
+implemented separately; their actual Docker qualification remains required.
 
 The follow-up suite passed 9/9 Linux control-flow cases in 0.556 seconds. It
 adds declared final rollback with retained authenticated source provenance,
@@ -57,3 +57,20 @@ A recreated inspector five minutes later validates the original immutable
 Docker start timestamp against its saved window; inspection time does not expire
 that successful start or create a new future window. The projection separately
 checks the actual inventory-row creation timestamp before admission.
+
+## Explicit operator entrypoint
+
+Run `python -m ops.enrolled_coordinator_driver --help` to inspect the interface.
+Every invocation requires `--plan`, `--bundle`, `--receipt` and an explicit
+`--action`. There is no default apply, automatic loop, credential flag or
+implicit service start. `status` reads private journal metadata only. `inspect`
+reads existing effects and may acknowledge their private control receipt; it
+does not repeat an unknown external mutation. `reconcile-rearm` and
+`reconcile-rollback` require the existing journal's exact current no-effect proof.
+
+Configuration preparation has separate `config-create`, `config-start`,
+`config-inspect` and `config-cleanup` actions. Only create/start accept private
+operator input payload paths. A known successful helper can be removed after
+readback; staged files are retained. Unknown helper creation/start/removal is
+inspection-only, and no cleanup uses force or removes the bind-mounted files.
+See `enrolled-config-preparation.md` for the preparation evidence boundary.
