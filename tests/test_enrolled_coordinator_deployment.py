@@ -64,6 +64,7 @@ class DeploymentBundleTests(unittest.TestCase):
         value,plan=bundle();result=d.validate_bundle(value,plan)
         self.assertEqual(result,value);self.assertNotIn('planSha256',result['holderSettings'])
         self.assertEqual(d.digest(result),plan['bindings']['deploymentSha256'])
+        self.assertEqual(d.derived_holder_settings(value,plan)['planSha256'],d.digest(plan))
 
     def test_extra_credentials_and_unknown_fields_cannot_enter_bundle(self):
         value,plan=bundle()

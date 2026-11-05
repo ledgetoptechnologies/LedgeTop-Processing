@@ -179,6 +179,11 @@ def read_bundle(path,plan):
     return validate_bundle(decode(private_bytes(path,maximum=262144),262144),plan)
 
 
+def derived_holder_settings(bundle,plan):
+    bundle=validate_bundle(bundle,plan)
+    return dict(bundle['holderSettings'],planSha256=digest(validate_plan(plan)))
+
+
 def verify_private_artifacts(bundle, plan, *, require_all_qualifications=False):
     """Hash existing private files. This is not live health or qualification."""
     bundle=validate_bundle(bundle,plan)
