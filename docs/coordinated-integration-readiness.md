@@ -10,6 +10,9 @@ result-delivery configuration while requiring their recovery bindings too.
 The 121-test Linux node-role/runtime/driver/daemon-routing/updater suite passed
 without skips. A node-local live identity probe and physical-host binding
 remain missing.
+The Ops #430 `50ddd6e8` HTTPS/Python source-range pairing was rerun against
+this identity follow-up (`572cf56`, documentation head `08e4e9d`): 20/20
+passed with no skips. The earlier 20/20 result below applied to code `c7aa1ce`.
 
 ## Integrated source
 
