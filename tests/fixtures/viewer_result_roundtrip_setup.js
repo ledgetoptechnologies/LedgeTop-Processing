@@ -21,8 +21,9 @@ try {
   const submit = db.prepare("SELECT id,lease_owner FROM processing_jobs WHERE attempt_id=? AND job_type='submit' AND status='leased'").get(row.id);
   if (!submit || !submit.lease_owner) throw new Error('synthetic submit lease missing');
   const dataset = processing.getDataset(attempt.datasetId || processing.getTask(attempt.taskId).datasetId, true);
-  assert.equal(dataset.files.length, 1);
-  const file = dataset.files[0];
+  assert.equal(dataset.files.length, config.withGcp ? 2 : 1);
+  const file = dataset.files.find(item => item.relativePath === 'photo.jpg');
+  assert.ok(file);
   const outbox = new PreparedSubmissionOutbox(db);
   const client = new SourceIntakeClientV2({ origin: config.origin, bearerToken: config.viewerBearer,
     environment: 'staging', outbox, timeoutMs: 5000, transferTimeoutMs: 10000 });
@@ -42,8 +43,9 @@ try {
         sign: bytes => crypto.sign(null, bytes, attestationPrivate) } },
     storage: { resolve(root, relative) {
       assert.equal(root, dataset.rootKey);
-      assert.equal(relative, `${dataset.relativePath}/${file.relativePath}`);
-      return config.sourceFilePath;
+      const source = dataset.files.find(item => relative === `${dataset.relativePath}/${item.relativePath}`);
+      assert.ok(source);
+      return require('node:path').join(require('node:path').dirname(config.sourceFilePath), source.relativePath);
     } },
     providerCredentials: { resolve() { throw new Error('legacy submission must not run'); } }
   });

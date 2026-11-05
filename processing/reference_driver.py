@@ -516,9 +516,14 @@ class ReferenceDriver:
         if (job['environment'] not in self.allowed_environments or job['nodeId'] != self.node_id
                 or p.canonical_json(checked) != p.canonical_json(submission)
                 or checked['manifestSha256'] != job['manifestSha256']
-                or checked['pipelineDigest'] != job['pipelineDigest']
-                or (kind == 'odm' and any(obj['kind'] != 'image' for obj in submission['manifest']['objects']))):
+                or checked['pipelineDigest'] != job['pipelineDigest']):
             raise DriverHeld('unsupported_worker_submission')
+        if kind == 'odm':
+            from .reference_odm_inputs import validate_odm_input_closure
+            try:
+                validate_odm_input_closure(job, authority_id=self.worker.authority_id)
+            except ValueError:
+                raise DriverHeld('unsupported_worker_submission') from None
         values = raw['pipeline']['odm']['options']
         if set(values) - self._option_definitions.keys():
             raise DriverHeld('engine_option_no_longer_available')

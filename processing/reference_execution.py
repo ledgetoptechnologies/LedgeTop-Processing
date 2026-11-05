@@ -293,8 +293,11 @@ class ExecutionRouter:
             raise RouteConflict('combined_or_empty_pipeline_requires_stage_plan')
         kind='odm' if odm else 'treedar'
         if kind=='odm':
-            if any(obj['kind']!='image' for obj in manifest['objects']):
-                raise RouteConflict('odm_image_inputs_required')
+            from .reference_odm_inputs import validate_odm_input_closure
+            try:
+                validate_odm_input_closure(job, authority_id=self.authority_id)
+            except ValueError:
+                raise RouteConflict('odm_image_inputs_required') from None
         elif (self.node_id!='main' or self.treedar_worker is None
                 or len(manifest['objects'])!=1 or manifest['objects'][0]['kind']!='lidar'
                 or pipeline['treedar']['inputObjectIds']!=[manifest['objects'][0]['id']]):

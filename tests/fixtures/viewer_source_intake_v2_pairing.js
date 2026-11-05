@@ -42,12 +42,31 @@ async function main() {
       storageMode: 'managed', rootKey: 'datasets' });
     const photoHash = sha256(inputBytes);
     const fileId = crypto.randomUUID();
-    processing.finalizeDataset(dataset.id, [{ id: fileId, relativePath: 'photo.jpg', byteSize: inputBytes.length,
-      sha256: photoHash, contentType: 'image/jpeg' }], sha256(Buffer.from('synthetic-dataset-manifest')));
+    const sourceFileId = crypto.randomUUID();
+    const source = 'Name,Easting,Northing,Elevation,Description,Longitude,Latitude,Ellipsoidal height,CS name\nA,100,200,10,Synthetic control,-88.1,44.5,11,NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)\n';
+    const files = [{ id: fileId, relativePath: 'photo.jpg', byteSize: inputBytes.length,
+      sha256: photoHash, contentType: 'image/jpeg', metadata: { width: 100, height: 100 } }];
+    if (config.withGcp) {
+      fs.writeFileSync(path.join(path.dirname(config.sourceFilePath), 'control.csv'), source);
+      files.push({ id: sourceFileId, relativePath: 'control.csv', byteSize: Buffer.byteLength(source),
+        sha256: sha256(Buffer.from(source)), contentType: 'text/csv', processingRole: 'gcp_source' });
+    }
+    processing.finalizeDataset(dataset.id, files, sha256(Buffer.from('synthetic-dataset-manifest')));
     const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'Synthetic coordinator',
       endpoint: config.origin, enabled: true });
     const task = processing.createTask({ projectId: project.id, datasetId: dataset.id,
       displayName: 'Synthetic source intake task' });
+    if (config.withGcp) {
+      const { GcpRepository } = viewerRequire('./server/gcpRepository');
+      const { parseGcpInterchange } = viewerRequire('./server/gcpImport');
+      const gcp = new GcpRepository(database);
+      const parsed = parseGcpInterchange({ format: 'emlid-all-columns-v1', content: source });
+      const set = gcp.importSet({ datasetId: dataset.id, displayName: 'Synthetic control', sourceFormat: 'emlid-all-columns-v1',
+        sourceFileId, sourceFilename: 'control.csv', sourceSha256: sha256(Buffer.from(source)), sourceContent: source,
+        crs: parsed.crs, elevationUnits: parsed.elevationUnits, provenance: parsed.provenance, points: parsed.points });
+      gcp.createCorrespondence({ taskId: task.id, pointId: set.points[0].id, imageFileId: fileId,
+        pixelX: 25, pixelY: 75, createdBy: 'synthetic:operator' });
+    }
     const options = { 'numeric-probe': 1e-7 };
     const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id, options,
       capabilityFingerprint: config.capabilityFingerprint });
@@ -68,6 +87,14 @@ async function main() {
     const manifest = { id: dataset.id, revision: 1, totalBytes: inputBytes.length, objectCount: 1,
       inputCounts: { images: 1, lidarObjects: 0, points: 0 }, objects: [{ id: fileId, name: 'photo.jpg',
         byteSize: inputBytes.length, sha256: photoHash, kind: 'image', mediaType: 'image/jpeg' }] };
+    if (config.withGcp) {
+      const snapshot = processing.getAttemptGcpSnapshot(attempt.id);
+      assert.ok(snapshot?.content?.length);
+      manifest.objects.push({ id: `gcp_${attempt.id}`, name: 'gcp_list.txt', byteSize: snapshot.content.length,
+        sha256: snapshot.sha256, kind: 'auxiliary', mediaType: 'text/plain' });
+      manifest.objectCount = manifest.objects.length;
+      manifest.totalBytes += snapshot.content.length;
+    }
     manifest.sha256 = ReferenceProtocol.manifestSha256(manifest);
     const pipeline = { odm: { requested: true, options, optionsFingerprint: config.optionsFingerprint },
       treedar: { requested: false, inputObjectIds: [], provenanceReceiptId: null },
@@ -130,8 +157,8 @@ async function main() {
       pipelineManifestSha256: preclaim.pipelineManifestSha256 };
     const derivedBytes = preclaim.derivedBytes;
     const openSourceStream = async (object) => {
-      assert.equal(object.id, fileId);
-      return fs.createReadStream(config.sourceFilePath);
+      assert.ok(object.id === fileId || config.withGcp && object.id === sourceFileId);
+      return fs.createReadStream(object.id === fileId ? config.sourceFilePath : path.join(path.dirname(config.sourceFilePath), 'control.csv'));
     };
     await assert.rejects(resumedClient.uploadClosure({ binding, manifests, derivedBytes,
       openSourceStream, localJobId, owner }), { code: 'source_intake_upload_uncertain' });
@@ -155,9 +182,13 @@ async function main() {
     const savedCompletion = JSON.parse(saved.sourceIntakeCompletionCanonical);
     assert.equal(savedCompletion.sourceState, 'retained');
     assert.equal(savedCompletion.derivedState, 'retained');
-    assert.equal(savedCompletion.sourceReceipt.objects.length, 1);
-    assert.equal(savedCompletion.sourceReceipt.objects[0].id, fileId);
-    assert.equal(savedCompletion.derivedReceipt.objects.length, 0);
+    assert.equal(savedCompletion.sourceReceipt.objects.length, config.withGcp ? 2 : 1);
+    assert.ok(savedCompletion.sourceReceipt.objects.some(object => object.id === fileId));
+    assert.equal(savedCompletion.derivedReceipt.objects.length, config.withGcp ? 1 : 0);
+    if (config.withGcp) {
+      assert.equal(savedCompletion.sourceReceipt.objects.find(object => object.id === sourceFileId).retentionClass, 'permanent_viewer_hold');
+      assert.equal(savedCompletion.derivedReceipt.objects[0].name, 'gcp_list.txt');
+    }
     assert.equal(savedCompletion.sourceReceiptSha256, sha256(canonicalizeJcs(savedCompletion.sourceReceipt)));
     assert.equal(savedCompletion.derivedReceiptSha256, sha256(canonicalizeJcs(savedCompletion.derivedReceipt)));
     out.strictCompletionPersisted = true;

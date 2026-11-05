@@ -227,10 +227,14 @@ class ReferenceEngineWorker:
         if (job['status'] != 'running' or job['nodeId'] != self.node_id
                 or not pipeline['odm']['requested'] or pipeline['treedar']['requested']
                 or pipeline['gaussian_splat']['requested']
-                or any(obj['kind'] != 'image' for obj in manifest['objects'])
                 or set(pipeline['odm']['options']) - self.allowed_options
                 or set(input_paths) != {obj['id'] for obj in manifest['objects']}):
             raise WorkerHeld('job is unsupported or lacks an active local claim')
+        from .reference_odm_inputs import validate_odm_input_closure
+        try:
+            validate_odm_input_closure(job, authority_id=self.authority_id)
+        except ValueError:
+            raise WorkerHeld('job is unsupported or lacks an active local claim') from None
         if (p.manifest_sha256(manifest) != job['manifestSha256']
                 or manifest['sha256'] != job['manifestSha256']
                 or pipeline_digest_for_job(job) != job['pipelineDigest']):

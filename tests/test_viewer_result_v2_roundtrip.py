@@ -17,6 +17,9 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from email.parser import BytesParser
+from email.policy import default as email_policy
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -128,6 +131,12 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
     def test_actual_viewer_range_v2_fetch_result_copy_lost_ack_and_worker_cleanup(self):
         self._roundtrip(source_range_v2_enabled=True)
 
+    def test_actual_viewer_gcp_snapshot_reaches_native_multipart_without_raw_csv(self):
+        self._roundtrip(source_range_v2_enabled=False, with_gcp=True)
+
+    def test_actual_viewer_range_v2_gcp_snapshot_reaches_native_multipart_without_raw_csv(self):
+        self._roundtrip(source_range_v2_enabled=True, with_gcp=True)
+
     @unittest.skipUnless(os.environ.get("LTDS_RUN_CONTROLLED_CONVERSION_QUALIFICATION") == "1",
                          "set LTDS_RUN_CONTROLLED_CONVERSION_QUALIFICATION=1 to require real Obj2Tiles qualification")
     def test_actual_controlled_conversion_verified_derivative_and_publication(self):
@@ -138,7 +147,7 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
         self.assertTrue(os.access(converter, os.X_OK), f"qualification requested but converter is not executable: {converter}")
         self._roundtrip(source_range_v2_enabled=False, controlled_conversion=True)
 
-    def _roundtrip(self, *, source_range_v2_enabled, controlled_conversion=False):
+    def _roundtrip(self, *, source_range_v2_enabled, controlled_conversion=False, with_gcp=False):
         requested = os.environ.get("LTDS_RUN_CONTROLLED_CONVERSION_QUALIFICATION") == "1"
         viewer_root = os.environ.get("LTDS_VIEWER_WORKTREE")
         if not viewer_root:
@@ -186,11 +195,35 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
             try:
                 spool = SourceSpool(spool_root, mount_id="c" * 64, safety_floor_bytes=0,
                                     max_object_bytes=1024 * 1024, chunk_bytes=64 * 1024)
-                store = ReferenceStore(queue)
+                store = ReferenceStore(queue, local_max_photos=1 if with_gcp else 1000)
+                captured_uploads = []
+                native_origin = 'http://127.0.0.1:3001'
+                if with_gcp:
+                    class CaptureUpload(BaseHTTPRequestHandler):
+                        def log_message(self, *_): pass
+                        def do_POST(self):
+                            length = int(self.headers.get('Content-Length', '0'))
+                            if not self.path.startswith('/task/new/upload/') or not 0 < length < 1024 * 1024:
+                                self.send_error(400); return
+                            raw = self.rfile.read(length)
+                            message = BytesParser(policy=email_policy).parsebytes(
+                                b'Content-Type: ' + self.headers['Content-Type'].encode('ascii')
+                                + b'\r\nMIME-Version: 1.0\r\n\r\n' + raw)
+                            captured_uploads.extend(dict(field=part.get_param('name', header='content-disposition'),
+                                name=part.get_filename(), body=part.get_payload(decode=True)) for part in message.iter_parts())
+                            payload = b'{"success":true}'
+                            self.send_response(200); self.send_header('Content-Type', 'application/json')
+                            self.send_header('Content-Length', str(len(payload))); self.end_headers(); self.wfile.write(payload)
+                    capture_server = HTTPServer(('127.0.0.1', 0), CaptureUpload)
+                    servers.append(capture_server)
+                    capture_thread = threading.Thread(target=capture_server.serve_forever,
+                        kwargs={'poll_interval': .02}, daemon=True)
+                    capture_thread.start(); threads.append(capture_thread)
+                    native_origin = f'http://127.0.0.1:{capture_server.server_address[1]}'
                 worker = ReferenceEngineWorker(root / "worker.sqlite",
                     ledger=ScratchLedger(root / "ledger.sqlite", scratch_root, capacity_probe=lambda _: 10**9,
                         safety_floor_bytes=1024, cleanup_grace_seconds=0),
-                    outbox=WorkerOutbox(root / "outbox.sqlite"), engine=NativeEngine("http://127.0.0.1:3001"),
+                    outbox=WorkerOutbox(root / "outbox.sqlite"), engine=NativeEngine(native_origin),
                     engine_id="roundtrip-engine", node_id="cluster", authority_id=queue.authority_id,
                     coordinator_origin="https://127.0.0.1:1", gate_generation=1,
                     worker_id="roundtrip-worker", engine_version="synthetic-engine-1",
@@ -211,9 +244,11 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                 result_bytes = transport.archive
                 engine_patches = []
                 for method in ("initialize", "upload", "action", "read", "download"):
+                    if with_gcp and method == 'upload':
+                        continue  # Exercise actual NativeEngine multipart transport, not the edge mock.
                     from unittest.mock import patch as mock_patch
-                    engine_patches.append(mock_patch.object(worker.engine, method,
-                        side_effect=getattr(transport, method)).start())
+                    engine_patch = mock_patch.object(worker.engine, method, side_effect=getattr(transport, method))
+                    engine_patch.start(); engine_patches.append(engine_patch)
                 # The removal assertion checks both coordinator acceptance and durable Viewer bytes.
                 def before_remove():
                     self.assertTrue(accepted["committed"], "engine cleanup preceded the signed Viewer ACK")
@@ -291,10 +326,16 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                     with NodeGate("roundtrip-engine") as gate:
                         gate.provision("cluster", coordinator_origin, queue.authority_id)
                 worker.origin = coordinator_origin
+                failure_outbox = FailureOutbox(root / "failures.sqlite")
+                execution_router = None
+                if with_gcp:
+                    from processing.reference_execution import ExecutionRouter
+                    execution_router = ExecutionRouter(root / 'routes.sqlite', worker, failure_outbox=failure_outbox)
                 driver = ReferenceDriver(worker, worker.ledger, worker.outbox,
                     BrokerClient(coordinator_origin, ssl_context=client_tls), coordinator_origin, WORKER_BEARER,
                     state_path=root / "driver.sqlite", ssl_context=client_tls, output_budget=1024 * 1024,
-                    transfer_ttl=240, safety_floor=1024, failure_outbox=FailureOutbox(root / "failures.sqlite"),
+                    transfer_ttl=240, safety_floor=1024, failure_outbox=failure_outbox,
+                    execution_router=execution_router,
                     worker_instance_id="roundtrip-instance",
                     source_range_v2_enabled=source_range_v2_enabled,
                     engine_cleanup=EngineCacheCleanup(worker, path=root / "engine-cleanup.sqlite",
@@ -310,6 +351,8 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                     "modelsRoot": str(stored_path), "resultBytesBase64": __import__('base64').b64encode(result_bytes).decode(),
                     "datasetMount": str(root / "datasets"), "cacheMount": str(root / "cache"),
                     "trashMount": str(root / "trash"), "ingestOpsBaseUrl": "http://operations.test"}
+                if with_gcp:
+                    config['withGcp'] = True
                 if controlled_conversion:
                     config["obj2TilesBin"] = os.environ["LTDS_OBJ2TILES_BIN"]
                     config["controlledConversionQualification"] = True
@@ -355,6 +398,20 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                 self.assertEqual(transport.calls.count(("initialize", state["providerTaskId"])), 1)
                 execution_identity = json.loads(worker._row(state["providerTaskId"])["identity"])
                 self.assertEqual(execution_identity["sourceAcceptanceBinding"]["jobId"], state["providerTaskId"])
+                if with_gcp:
+                    self.assertEqual([item['name'] for item in captured_uploads], ['photo.jpg', 'gcp_list.txt'])
+                    self.assertTrue(all(item['field'] == 'images' for item in captured_uploads))
+                    self.assertEqual(captured_uploads[0]['body'], SOURCE_BYTES)
+                    derived = current['derivedReceipt']['objects'][0]
+                    self.assertEqual(hashlib.sha256(captured_uploads[1]['body']).hexdigest(), derived['sha256'])
+                    self.assertEqual(len(captured_uploads[1]['body']), derived['byteSize'])
+                    self.assertIn(b'photo.jpg', captured_uploads[1]['body'])
+                    self.assertNotIn(b'control.csv', captured_uploads[1]['body'])
+                    self.assertEqual(current['submission']['manifest']['inputCounts']['images'], 1)
+                    self.assertEqual(len(current['submission']['manifest']['objects']), 2)
+                    raw_csv = next(item for item in current['sourceReceipt']['objects'] if item['sourceType'] == 'gcp_source_csv')
+                    self.assertEqual(raw_csv['retentionClass'], 'permanent_viewer_hold')
+                    self.assertIsNotNone(execution_router.describe(state['providerTaskId']))
                 self.assertTrue((root / "scratch").exists())
                 config.update({"reconcileJobId": state["reconcileJobId"], "reconcileOwner": state["reconcileOwner"]})
                 config_path.write_text(json.dumps(config), encoding="utf-8")
