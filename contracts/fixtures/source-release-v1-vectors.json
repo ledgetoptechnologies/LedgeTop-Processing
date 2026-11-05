@@ -1,0 +1,1004 @@
+{
+  "schemaVersion": 1,
+  "testOnlyPrivateSeedHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "trustedReleaseKeys": [
+    {
+      "environment": "production",
+      "issuerId": "viewer-test-release",
+      "keyId": "test-release-key",
+      "principalId": "viewer-production",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=\n-----END PUBLIC KEY-----\n"
+    }
+  ],
+  "positive": {
+    "request": {
+      "authorization": {
+        "schemaVersion": 1,
+        "protocol": "ltds-viewer-source-release-v1",
+        "releaseId": "00000000-0000-4000-8000-000000000001",
+        "issuerId": "viewer-test-release",
+        "keyId": "test-release-key",
+        "principalId": "viewer-production",
+        "coordinatorAuthorityId": "authority-test",
+        "jobId": "00000000-0000-4000-8000-000000000002",
+        "generation": 1,
+        "environment": "production",
+        "viewerTaskId": "00000000-0000-4000-8000-000000000003",
+        "providerTaskId": "00000000-0000-4000-8000-000000000002",
+        "viewerAttemptId": "00000000-0000-4000-8000-000000000004",
+        "activationId": "00000000-0000-4000-8000-000000000005",
+        "sourceSnapshotId": "00000000-0000-4000-8000-000000000006",
+        "preparedEnvelopeSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "inputManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "pipelineDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+        "resultManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "sourceManifestSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "derivedManifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+        "sourceReceiptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+        "derivedReceiptSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+        "workerObservationId": "00000000-0000-4000-8000-000000000007",
+        "workerObservationAckSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "receipts": [
+          {
+            "acceptanceReceiptId": "acceptance-test",
+            "acceptanceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "viewerReceiptId": "copy-test",
+            "viewerReceiptSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          }
+        ],
+        "readyProof": {
+          "kind": "verified_outputs_ready",
+          "attemptId": "00000000-0000-4000-8000-000000000004",
+          "modelId": "00000000-0000-4000-8000-000000000010",
+          "modelVersionId": "00000000-0000-4000-8000-000000000011",
+          "outputInventorySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "verifiedAt": "2026-11-05T00:00:00.000Z"
+        },
+        "policy": {
+          "id": "viewer-ready-plus-24h-v1",
+          "minimumAgeSeconds": 86400
+        },
+        "eligibleObjects": [
+          {
+            "id": "derived-test",
+            "objectKind": "derived",
+            "byteSize": 6,
+            "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          },
+          {
+            "id": "00000000-0000-4000-8000-000000000009",
+            "objectKind": "source",
+            "byteSize": 3,
+            "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          }
+        ],
+        "eligibleClosureSha256": "555cf23a6b954c4037a8291c7c38960cd7ca7eab9e3a3822fdaf2ca49dafa538"
+      },
+      "signature": "T9KjYUFqgts076vXNje2ii-rhdPK78XsmC1IxRwSzMrou5ecYT-Ph18uioDCba34gi1kiNOmSJE8NSbF-MPXCg",
+      "authorizationSha256": "c5608aee8b67f23faefa210ea23c9bdc4a73abb63630c06851810ead4432dd16"
+    },
+    "authorizationCanonical": "{\"activationId\":\"00000000-0000-4000-8000-000000000005\",\"coordinatorAuthorityId\":\"authority-test\",\"derivedManifestSha256\":\"7777777777777777777777777777777777777777777777777777777777777777\",\"derivedReceiptSha256\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"eligibleClosureSha256\":\"555cf23a6b954c4037a8291c7c38960cd7ca7eab9e3a3822fdaf2ca49dafa538\",\"eligibleObjects\":[{\"byteSize\":6,\"id\":\"derived-test\",\"objectKind\":\"derived\",\"sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"},{\"byteSize\":3,\"id\":\"00000000-0000-4000-8000-000000000009\",\"objectKind\":\"source\",\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"}],\"environment\":\"production\",\"generation\":1,\"inputManifestSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"issuerId\":\"viewer-test-release\",\"jobId\":\"00000000-0000-4000-8000-000000000002\",\"keyId\":\"test-release-key\",\"pipelineDigest\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"policy\":{\"id\":\"viewer-ready-plus-24h-v1\",\"minimumAgeSeconds\":86400},\"preparedEnvelopeSha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"principalId\":\"viewer-production\",\"protocol\":\"ltds-viewer-source-release-v1\",\"providerTaskId\":\"00000000-0000-4000-8000-000000000002\",\"readyProof\":{\"attemptId\":\"00000000-0000-4000-8000-000000000004\",\"kind\":\"verified_outputs_ready\",\"modelId\":\"00000000-0000-4000-8000-000000000010\",\"modelVersionId\":\"00000000-0000-4000-8000-000000000011\",\"outputInventorySha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"verifiedAt\":\"2026-11-05T00:00:00.000Z\"},\"receipts\":[{\"acceptanceReceiptId\":\"acceptance-test\",\"acceptanceSha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"viewerReceiptId\":\"copy-test\",\"viewerReceiptSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}],\"releaseId\":\"00000000-0000-4000-8000-000000000001\",\"resultManifestSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"schemaVersion\":1,\"sourceManifestSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\",\"sourceReceiptSha256\":\"8888888888888888888888888888888888888888888888888888888888888888\",\"sourceSnapshotId\":\"00000000-0000-4000-8000-000000000006\",\"sourceSnapshotSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"viewerAttemptId\":\"00000000-0000-4000-8000-000000000004\",\"viewerTaskId\":\"00000000-0000-4000-8000-000000000003\",\"workerObservationAckSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"workerObservationId\":\"00000000-0000-4000-8000-000000000007\"}",
+    "requestCanonicalSha256": "031ed3ac342e3d55b781daa774cd771fb41fcc331faf812f8f23831f157dafdf"
+  },
+  "negative": [
+    {
+      "name": "unknown_authorization_field",
+      "request": {
+        "authorization": {
+          "schemaVersion": 1,
+          "protocol": "ltds-viewer-source-release-v1",
+          "releaseId": "00000000-0000-4000-8000-000000000001",
+          "issuerId": "viewer-test-release",
+          "keyId": "test-release-key",
+          "principalId": "viewer-production",
+          "coordinatorAuthorityId": "authority-test",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "generation": 1,
+          "environment": "production",
+          "viewerTaskId": "00000000-0000-4000-8000-000000000003",
+          "providerTaskId": "00000000-0000-4000-8000-000000000002",
+          "viewerAttemptId": "00000000-0000-4000-8000-000000000004",
+          "activationId": "00000000-0000-4000-8000-000000000005",
+          "sourceSnapshotId": "00000000-0000-4000-8000-000000000006",
+          "preparedEnvelopeSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "inputManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "pipelineDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+          "resultManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "sourceManifestSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "derivedManifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "sourceReceiptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "derivedReceiptSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "workerObservationId": "00000000-0000-4000-8000-000000000007",
+          "workerObservationAckSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipts": [
+            {
+              "acceptanceReceiptId": "acceptance-test",
+              "acceptanceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "viewerReceiptId": "copy-test",
+              "viewerReceiptSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "readyProof": {
+            "kind": "verified_outputs_ready",
+            "attemptId": "00000000-0000-4000-8000-000000000004",
+            "modelId": "00000000-0000-4000-8000-000000000010",
+            "modelVersionId": "00000000-0000-4000-8000-000000000011",
+            "outputInventorySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "verifiedAt": "2026-11-05T00:00:00.000Z"
+          },
+          "policy": {
+            "id": "viewer-ready-plus-24h-v1",
+            "minimumAgeSeconds": 86400
+          },
+          "eligibleObjects": [
+            {
+              "id": "derived-test",
+              "objectKind": "derived",
+              "byteSize": 6,
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "objectKind": "source",
+              "byteSize": 3,
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ],
+          "eligibleClosureSha256": "555cf23a6b954c4037a8291c7c38960cd7ca7eab9e3a3822fdaf2ca49dafa538",
+          "unreviewed": true
+        },
+        "signature": "YBwyfKENUwBgeH4AGDsB7NaEBnVBSZvqP8hiisq40SUw3ap_90SNluebqAE0R2miHYAPeE7sPy3jwRf9xKRYAA",
+        "authorizationSha256": "0527c594ea571bf65e1ce24763428df2141d866f7f38680e65ce0db3eb4d3106"
+      }
+    },
+    {
+      "name": "boolean_generation",
+      "request": {
+        "authorization": {
+          "schemaVersion": 1,
+          "protocol": "ltds-viewer-source-release-v1",
+          "releaseId": "00000000-0000-4000-8000-000000000001",
+          "issuerId": "viewer-test-release",
+          "keyId": "test-release-key",
+          "principalId": "viewer-production",
+          "coordinatorAuthorityId": "authority-test",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "generation": true,
+          "environment": "production",
+          "viewerTaskId": "00000000-0000-4000-8000-000000000003",
+          "providerTaskId": "00000000-0000-4000-8000-000000000002",
+          "viewerAttemptId": "00000000-0000-4000-8000-000000000004",
+          "activationId": "00000000-0000-4000-8000-000000000005",
+          "sourceSnapshotId": "00000000-0000-4000-8000-000000000006",
+          "preparedEnvelopeSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "inputManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "pipelineDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+          "resultManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "sourceManifestSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "derivedManifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "sourceReceiptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "derivedReceiptSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "workerObservationId": "00000000-0000-4000-8000-000000000007",
+          "workerObservationAckSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipts": [
+            {
+              "acceptanceReceiptId": "acceptance-test",
+              "acceptanceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "viewerReceiptId": "copy-test",
+              "viewerReceiptSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "readyProof": {
+            "kind": "verified_outputs_ready",
+            "attemptId": "00000000-0000-4000-8000-000000000004",
+            "modelId": "00000000-0000-4000-8000-000000000010",
+            "modelVersionId": "00000000-0000-4000-8000-000000000011",
+            "outputInventorySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "verifiedAt": "2026-11-05T00:00:00.000Z"
+          },
+          "policy": {
+            "id": "viewer-ready-plus-24h-v1",
+            "minimumAgeSeconds": 86400
+          },
+          "eligibleObjects": [
+            {
+              "id": "derived-test",
+              "objectKind": "derived",
+              "byteSize": 6,
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "objectKind": "source",
+              "byteSize": 3,
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ],
+          "eligibleClosureSha256": "555cf23a6b954c4037a8291c7c38960cd7ca7eab9e3a3822fdaf2ca49dafa538"
+        },
+        "signature": "qV8cHUjMouJY1tEvOWZcBR7B7lAKG0dRtc-4HL6vQ_Eo1gxZDySgqlQ75TblcX8i93GCBmM2g9a1RK__2KilCQ",
+        "authorizationSha256": "449f8b187c8fec0566bf1d740c3ca8e422d7e8fb826b485a1484315b60485c17"
+      }
+    },
+    {
+      "name": "boolean_size",
+      "request": {
+        "authorization": {
+          "schemaVersion": 1,
+          "protocol": "ltds-viewer-source-release-v1",
+          "releaseId": "00000000-0000-4000-8000-000000000001",
+          "issuerId": "viewer-test-release",
+          "keyId": "test-release-key",
+          "principalId": "viewer-production",
+          "coordinatorAuthorityId": "authority-test",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "generation": 1,
+          "environment": "production",
+          "viewerTaskId": "00000000-0000-4000-8000-000000000003",
+          "providerTaskId": "00000000-0000-4000-8000-000000000002",
+          "viewerAttemptId": "00000000-0000-4000-8000-000000000004",
+          "activationId": "00000000-0000-4000-8000-000000000005",
+          "sourceSnapshotId": "00000000-0000-4000-8000-000000000006",
+          "preparedEnvelopeSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "inputManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "pipelineDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+          "resultManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "sourceManifestSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "derivedManifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "sourceReceiptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "derivedReceiptSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "workerObservationId": "00000000-0000-4000-8000-000000000007",
+          "workerObservationAckSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipts": [
+            {
+              "acceptanceReceiptId": "acceptance-test",
+              "acceptanceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "viewerReceiptId": "copy-test",
+              "viewerReceiptSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "readyProof": {
+            "kind": "verified_outputs_ready",
+            "attemptId": "00000000-0000-4000-8000-000000000004",
+            "modelId": "00000000-0000-4000-8000-000000000010",
+            "modelVersionId": "00000000-0000-4000-8000-000000000011",
+            "outputInventorySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "verifiedAt": "2026-11-05T00:00:00.000Z"
+          },
+          "policy": {
+            "id": "viewer-ready-plus-24h-v1",
+            "minimumAgeSeconds": 86400
+          },
+          "eligibleObjects": [
+            {
+              "id": "derived-test",
+              "objectKind": "derived",
+              "byteSize": true,
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "objectKind": "source",
+              "byteSize": 3,
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ],
+          "eligibleClosureSha256": "555cf23a6b954c4037a8291c7c38960cd7ca7eab9e3a3822fdaf2ca49dafa538"
+        },
+        "signature": "vcL7z_19KuVgMEy-IthP-gVIgMmjYgYOUz_ssNvo3PikuWxF7VTkGXc9xiIZjIMX2lNR7kOd_1IR99Hg9bXGCQ",
+        "authorizationSha256": "3e5362114dea6e9e8d2862ea6c0221fcbe7f2035a00b3d4e2b0b8ebcc8ff34ee"
+      }
+    },
+    {
+      "name": "boolean_minimum_age",
+      "request": {
+        "authorization": {
+          "schemaVersion": 1,
+          "protocol": "ltds-viewer-source-release-v1",
+          "releaseId": "00000000-0000-4000-8000-000000000001",
+          "issuerId": "viewer-test-release",
+          "keyId": "test-release-key",
+          "principalId": "viewer-production",
+          "coordinatorAuthorityId": "authority-test",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "generation": 1,
+          "environment": "production",
+          "viewerTaskId": "00000000-0000-4000-8000-000000000003",
+          "providerTaskId": "00000000-0000-4000-8000-000000000002",
+          "viewerAttemptId": "00000000-0000-4000-8000-000000000004",
+          "activationId": "00000000-0000-4000-8000-000000000005",
+          "sourceSnapshotId": "00000000-0000-4000-8000-000000000006",
+          "preparedEnvelopeSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "inputManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "pipelineDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+          "resultManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "sourceManifestSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "derivedManifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "sourceReceiptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "derivedReceiptSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "workerObservationId": "00000000-0000-4000-8000-000000000007",
+          "workerObservationAckSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipts": [
+            {
+              "acceptanceReceiptId": "acceptance-test",
+              "acceptanceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "viewerReceiptId": "copy-test",
+              "viewerReceiptSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "readyProof": {
+            "kind": "verified_outputs_ready",
+            "attemptId": "00000000-0000-4000-8000-000000000004",
+            "modelId": "00000000-0000-4000-8000-000000000010",
+            "modelVersionId": "00000000-0000-4000-8000-000000000011",
+            "outputInventorySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "verifiedAt": "2026-11-05T00:00:00.000Z"
+          },
+          "policy": {
+            "id": "viewer-ready-plus-24h-v1",
+            "minimumAgeSeconds": true
+          },
+          "eligibleObjects": [
+            {
+              "id": "derived-test",
+              "objectKind": "derived",
+              "byteSize": 6,
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "objectKind": "source",
+              "byteSize": 3,
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ],
+          "eligibleClosureSha256": "555cf23a6b954c4037a8291c7c38960cd7ca7eab9e3a3822fdaf2ca49dafa538"
+        },
+        "signature": "__jvaA02_swsqOCcs9IflYJOjdINqVUUkIS5ACIQzX8w0r7vXtUMpZZ3e7dDJrMnjO_YOfBI2hVLvkUVsN7GCg",
+        "authorizationSha256": "e00c4aa09c03c362977c28ea76675f725bfc7fc1ade30ef3b27e330e0a6ec7ee"
+      }
+    },
+    {
+      "name": "wrong_minimum_age",
+      "request": {
+        "authorization": {
+          "schemaVersion": 1,
+          "protocol": "ltds-viewer-source-release-v1",
+          "releaseId": "00000000-0000-4000-8000-000000000001",
+          "issuerId": "viewer-test-release",
+          "keyId": "test-release-key",
+          "principalId": "viewer-production",
+          "coordinatorAuthorityId": "authority-test",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "generation": 1,
+          "environment": "production",
+          "viewerTaskId": "00000000-0000-4000-8000-000000000003",
+          "providerTaskId": "00000000-0000-4000-8000-000000000002",
+          "viewerAttemptId": "00000000-0000-4000-8000-000000000004",
+          "activationId": "00000000-0000-4000-8000-000000000005",
+          "sourceSnapshotId": "00000000-0000-4000-8000-000000000006",
+          "preparedEnvelopeSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "inputManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "pipelineDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+          "resultManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "sourceManifestSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "derivedManifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "sourceReceiptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "derivedReceiptSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "workerObservationId": "00000000-0000-4000-8000-000000000007",
+          "workerObservationAckSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipts": [
+            {
+              "acceptanceReceiptId": "acceptance-test",
+              "acceptanceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "viewerReceiptId": "copy-test",
+              "viewerReceiptSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "readyProof": {
+            "kind": "verified_outputs_ready",
+            "attemptId": "00000000-0000-4000-8000-000000000004",
+            "modelId": "00000000-0000-4000-8000-000000000010",
+            "modelVersionId": "00000000-0000-4000-8000-000000000011",
+            "outputInventorySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "verifiedAt": "2026-11-05T00:00:00.000Z"
+          },
+          "policy": {
+            "id": "viewer-ready-plus-24h-v1",
+            "minimumAgeSeconds": 0
+          },
+          "eligibleObjects": [
+            {
+              "id": "derived-test",
+              "objectKind": "derived",
+              "byteSize": 6,
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "objectKind": "source",
+              "byteSize": 3,
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ],
+          "eligibleClosureSha256": "555cf23a6b954c4037a8291c7c38960cd7ca7eab9e3a3822fdaf2ca49dafa538"
+        },
+        "signature": "SvyQQZZEp4mkOVOLb5XtE82KB2GZos_Rtlclihz7yVq332pdjn9zrRhTfeqUGBHiFsxTuMQGkAptJyOp8zrtAA",
+        "authorizationSha256": "a1cd65d0389f1bcbd3db5687b91202813bceaaa0e79a07f928ddd2789c831392"
+      }
+    },
+    {
+      "name": "wrong_provider_job",
+      "request": {
+        "authorization": {
+          "schemaVersion": 1,
+          "protocol": "ltds-viewer-source-release-v1",
+          "releaseId": "00000000-0000-4000-8000-000000000001",
+          "issuerId": "viewer-test-release",
+          "keyId": "test-release-key",
+          "principalId": "viewer-production",
+          "coordinatorAuthorityId": "authority-test",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "generation": 1,
+          "environment": "production",
+          "viewerTaskId": "00000000-0000-4000-8000-000000000003",
+          "providerTaskId": "00000000-0000-4000-8000-000000000099",
+          "viewerAttemptId": "00000000-0000-4000-8000-000000000004",
+          "activationId": "00000000-0000-4000-8000-000000000005",
+          "sourceSnapshotId": "00000000-0000-4000-8000-000000000006",
+          "preparedEnvelopeSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "inputManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "pipelineDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+          "resultManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "sourceManifestSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "derivedManifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "sourceReceiptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "derivedReceiptSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "workerObservationId": "00000000-0000-4000-8000-000000000007",
+          "workerObservationAckSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipts": [
+            {
+              "acceptanceReceiptId": "acceptance-test",
+              "acceptanceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "viewerReceiptId": "copy-test",
+              "viewerReceiptSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "readyProof": {
+            "kind": "verified_outputs_ready",
+            "attemptId": "00000000-0000-4000-8000-000000000004",
+            "modelId": "00000000-0000-4000-8000-000000000010",
+            "modelVersionId": "00000000-0000-4000-8000-000000000011",
+            "outputInventorySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "verifiedAt": "2026-11-05T00:00:00.000Z"
+          },
+          "policy": {
+            "id": "viewer-ready-plus-24h-v1",
+            "minimumAgeSeconds": 86400
+          },
+          "eligibleObjects": [
+            {
+              "id": "derived-test",
+              "objectKind": "derived",
+              "byteSize": 6,
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "objectKind": "source",
+              "byteSize": 3,
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ],
+          "eligibleClosureSha256": "555cf23a6b954c4037a8291c7c38960cd7ca7eab9e3a3822fdaf2ca49dafa538"
+        },
+        "signature": "rn6ic_ZIAdy7OfD461MQf66FR24H9bFGzAs_mXPFJ88brRVAszbL_Rlb33VmGEjyvXpcQIwiWWwFnhkl0dkoAA",
+        "authorizationSha256": "f83f5c0650d66fe38cfe146a4b71138436b165396229f4a052dfbb27f8fa9d55"
+      }
+    },
+    {
+      "name": "wrong_ready_attempt",
+      "request": {
+        "authorization": {
+          "schemaVersion": 1,
+          "protocol": "ltds-viewer-source-release-v1",
+          "releaseId": "00000000-0000-4000-8000-000000000001",
+          "issuerId": "viewer-test-release",
+          "keyId": "test-release-key",
+          "principalId": "viewer-production",
+          "coordinatorAuthorityId": "authority-test",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "generation": 1,
+          "environment": "production",
+          "viewerTaskId": "00000000-0000-4000-8000-000000000003",
+          "providerTaskId": "00000000-0000-4000-8000-000000000002",
+          "viewerAttemptId": "00000000-0000-4000-8000-000000000004",
+          "activationId": "00000000-0000-4000-8000-000000000005",
+          "sourceSnapshotId": "00000000-0000-4000-8000-000000000006",
+          "preparedEnvelopeSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "inputManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "pipelineDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+          "resultManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "sourceManifestSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "derivedManifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "sourceReceiptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "derivedReceiptSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "workerObservationId": "00000000-0000-4000-8000-000000000007",
+          "workerObservationAckSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipts": [
+            {
+              "acceptanceReceiptId": "acceptance-test",
+              "acceptanceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "viewerReceiptId": "copy-test",
+              "viewerReceiptSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "readyProof": {
+            "kind": "verified_outputs_ready",
+            "attemptId": "00000000-0000-4000-8000-000000000099",
+            "modelId": "00000000-0000-4000-8000-000000000010",
+            "modelVersionId": "00000000-0000-4000-8000-000000000011",
+            "outputInventorySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "verifiedAt": "2026-11-05T00:00:00.000Z"
+          },
+          "policy": {
+            "id": "viewer-ready-plus-24h-v1",
+            "minimumAgeSeconds": 86400
+          },
+          "eligibleObjects": [
+            {
+              "id": "derived-test",
+              "objectKind": "derived",
+              "byteSize": 6,
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "objectKind": "source",
+              "byteSize": 3,
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ],
+          "eligibleClosureSha256": "555cf23a6b954c4037a8291c7c38960cd7ca7eab9e3a3822fdaf2ca49dafa538"
+        },
+        "signature": "PdfYBHlbYwZe9Tok2eNi2MOPeSeiq56adsr6Xs4UUmGOEfuQszqlxtpXgBmkRI2ePsJR4nZcHDx-SU2RGA0EBA",
+        "authorizationSha256": "745f2aff6dfef635fb12895bd3e6b80406abb8a7b43ef518b933a53122866b3a"
+      }
+    },
+    {
+      "name": "noncanonical_ready_timestamp",
+      "request": {
+        "authorization": {
+          "schemaVersion": 1,
+          "protocol": "ltds-viewer-source-release-v1",
+          "releaseId": "00000000-0000-4000-8000-000000000001",
+          "issuerId": "viewer-test-release",
+          "keyId": "test-release-key",
+          "principalId": "viewer-production",
+          "coordinatorAuthorityId": "authority-test",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "generation": 1,
+          "environment": "production",
+          "viewerTaskId": "00000000-0000-4000-8000-000000000003",
+          "providerTaskId": "00000000-0000-4000-8000-000000000002",
+          "viewerAttemptId": "00000000-0000-4000-8000-000000000004",
+          "activationId": "00000000-0000-4000-8000-000000000005",
+          "sourceSnapshotId": "00000000-0000-4000-8000-000000000006",
+          "preparedEnvelopeSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "inputManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "pipelineDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+          "resultManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "sourceManifestSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "derivedManifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "sourceReceiptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "derivedReceiptSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "workerObservationId": "00000000-0000-4000-8000-000000000007",
+          "workerObservationAckSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipts": [
+            {
+              "acceptanceReceiptId": "acceptance-test",
+              "acceptanceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "viewerReceiptId": "copy-test",
+              "viewerReceiptSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "readyProof": {
+            "kind": "verified_outputs_ready",
+            "attemptId": "00000000-0000-4000-8000-000000000004",
+            "modelId": "00000000-0000-4000-8000-000000000010",
+            "modelVersionId": "00000000-0000-4000-8000-000000000011",
+            "outputInventorySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "verifiedAt": "2026-11-05T00:00:00Z"
+          },
+          "policy": {
+            "id": "viewer-ready-plus-24h-v1",
+            "minimumAgeSeconds": 86400
+          },
+          "eligibleObjects": [
+            {
+              "id": "derived-test",
+              "objectKind": "derived",
+              "byteSize": 6,
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "objectKind": "source",
+              "byteSize": 3,
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ],
+          "eligibleClosureSha256": "555cf23a6b954c4037a8291c7c38960cd7ca7eab9e3a3822fdaf2ca49dafa538"
+        },
+        "signature": "rZn11YzkLJ3BoVQq4AdwbnJU-JkCgoPSNU6wrx0ci_TKi6hPoMcPJuhY9ZzJHIkyqqq48Pe5vM8f6ZcZYK50BA",
+        "authorizationSha256": "58a1a4a893571f4be190fbdf2bcf2d1df1aeb1e247f80951b243d49afffc4269"
+      }
+    },
+    {
+      "name": "unknown_ready_field",
+      "request": {
+        "authorization": {
+          "schemaVersion": 1,
+          "protocol": "ltds-viewer-source-release-v1",
+          "releaseId": "00000000-0000-4000-8000-000000000001",
+          "issuerId": "viewer-test-release",
+          "keyId": "test-release-key",
+          "principalId": "viewer-production",
+          "coordinatorAuthorityId": "authority-test",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "generation": 1,
+          "environment": "production",
+          "viewerTaskId": "00000000-0000-4000-8000-000000000003",
+          "providerTaskId": "00000000-0000-4000-8000-000000000002",
+          "viewerAttemptId": "00000000-0000-4000-8000-000000000004",
+          "activationId": "00000000-0000-4000-8000-000000000005",
+          "sourceSnapshotId": "00000000-0000-4000-8000-000000000006",
+          "preparedEnvelopeSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "inputManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "pipelineDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+          "resultManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "sourceManifestSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "derivedManifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "sourceReceiptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "derivedReceiptSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "workerObservationId": "00000000-0000-4000-8000-000000000007",
+          "workerObservationAckSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipts": [
+            {
+              "acceptanceReceiptId": "acceptance-test",
+              "acceptanceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "viewerReceiptId": "copy-test",
+              "viewerReceiptSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "readyProof": {
+            "kind": "verified_outputs_ready",
+            "attemptId": "00000000-0000-4000-8000-000000000004",
+            "modelId": "00000000-0000-4000-8000-000000000010",
+            "modelVersionId": "00000000-0000-4000-8000-000000000011",
+            "outputInventorySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "verifiedAt": "2026-11-05T00:00:00.000Z",
+            "ready": true
+          },
+          "policy": {
+            "id": "viewer-ready-plus-24h-v1",
+            "minimumAgeSeconds": 86400
+          },
+          "eligibleObjects": [
+            {
+              "id": "derived-test",
+              "objectKind": "derived",
+              "byteSize": 6,
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "objectKind": "source",
+              "byteSize": 3,
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ],
+          "eligibleClosureSha256": "555cf23a6b954c4037a8291c7c38960cd7ca7eab9e3a3822fdaf2ca49dafa538"
+        },
+        "signature": "oR1b9RmyvIXsrEKZw1wMZ-aJqUHdTitl4fdTg__gBF-_yHcxpYF60lMnpYVstli_ATXS2eFJZgsSdivQqOZyDQ",
+        "authorizationSha256": "91d3af1bb697b4e553b1e4da5279aa0e8aeacd443197f0d7f2876d71e80dbddb"
+      }
+    },
+    {
+      "name": "wrong_eligible_digest",
+      "request": {
+        "authorization": {
+          "schemaVersion": 1,
+          "protocol": "ltds-viewer-source-release-v1",
+          "releaseId": "00000000-0000-4000-8000-000000000001",
+          "issuerId": "viewer-test-release",
+          "keyId": "test-release-key",
+          "principalId": "viewer-production",
+          "coordinatorAuthorityId": "authority-test",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "generation": 1,
+          "environment": "production",
+          "viewerTaskId": "00000000-0000-4000-8000-000000000003",
+          "providerTaskId": "00000000-0000-4000-8000-000000000002",
+          "viewerAttemptId": "00000000-0000-4000-8000-000000000004",
+          "activationId": "00000000-0000-4000-8000-000000000005",
+          "sourceSnapshotId": "00000000-0000-4000-8000-000000000006",
+          "preparedEnvelopeSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "inputManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "pipelineDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+          "resultManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "sourceManifestSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "derivedManifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "sourceReceiptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "derivedReceiptSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "workerObservationId": "00000000-0000-4000-8000-000000000007",
+          "workerObservationAckSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipts": [
+            {
+              "acceptanceReceiptId": "acceptance-test",
+              "acceptanceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "viewerReceiptId": "copy-test",
+              "viewerReceiptSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "readyProof": {
+            "kind": "verified_outputs_ready",
+            "attemptId": "00000000-0000-4000-8000-000000000004",
+            "modelId": "00000000-0000-4000-8000-000000000010",
+            "modelVersionId": "00000000-0000-4000-8000-000000000011",
+            "outputInventorySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "verifiedAt": "2026-11-05T00:00:00.000Z"
+          },
+          "policy": {
+            "id": "viewer-ready-plus-24h-v1",
+            "minimumAgeSeconds": 86400
+          },
+          "eligibleObjects": [
+            {
+              "id": "derived-test",
+              "objectKind": "derived",
+              "byteSize": 6,
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "objectKind": "source",
+              "byteSize": 3,
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ],
+          "eligibleClosureSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "signature": "lDelj_XM0w1oWIkLEtu8Lru_52QiM5X2kG3vJlYI3ZN9C-1l9AwUV4zui-xuDI_iCi-UCfjtvsWt2CK9CMarCA",
+        "authorizationSha256": "838c291c61e7312daa6523f30ba94c7c49aca9e85248939ee81b343052683893"
+      }
+    },
+    {
+      "name": "unsorted_eligible_objects",
+      "request": {
+        "authorization": {
+          "schemaVersion": 1,
+          "protocol": "ltds-viewer-source-release-v1",
+          "releaseId": "00000000-0000-4000-8000-000000000001",
+          "issuerId": "viewer-test-release",
+          "keyId": "test-release-key",
+          "principalId": "viewer-production",
+          "coordinatorAuthorityId": "authority-test",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "generation": 1,
+          "environment": "production",
+          "viewerTaskId": "00000000-0000-4000-8000-000000000003",
+          "providerTaskId": "00000000-0000-4000-8000-000000000002",
+          "viewerAttemptId": "00000000-0000-4000-8000-000000000004",
+          "activationId": "00000000-0000-4000-8000-000000000005",
+          "sourceSnapshotId": "00000000-0000-4000-8000-000000000006",
+          "preparedEnvelopeSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "inputManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "pipelineDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+          "resultManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "sourceManifestSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "derivedManifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "sourceReceiptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "derivedReceiptSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "workerObservationId": "00000000-0000-4000-8000-000000000007",
+          "workerObservationAckSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipts": [
+            {
+              "acceptanceReceiptId": "acceptance-test",
+              "acceptanceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "viewerReceiptId": "copy-test",
+              "viewerReceiptSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "readyProof": {
+            "kind": "verified_outputs_ready",
+            "attemptId": "00000000-0000-4000-8000-000000000004",
+            "modelId": "00000000-0000-4000-8000-000000000010",
+            "modelVersionId": "00000000-0000-4000-8000-000000000011",
+            "outputInventorySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "verifiedAt": "2026-11-05T00:00:00.000Z"
+          },
+          "policy": {
+            "id": "viewer-ready-plus-24h-v1",
+            "minimumAgeSeconds": 86400
+          },
+          "eligibleObjects": [
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "objectKind": "source",
+              "byteSize": 3,
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            },
+            {
+              "id": "derived-test",
+              "objectKind": "derived",
+              "byteSize": 6,
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            }
+          ],
+          "eligibleClosureSha256": "99a03a6528c61e0f454b692f167eb52d69ab8d231c20945c0690fca8a4716f8d"
+        },
+        "signature": "TsV77GAm-cTc7XgP2YNe1Hy-VGNmtX3M60sH_94bIyX8_sjcJtv4sxtXktXPhj893-4RgD21J9sSVularHYgCA",
+        "authorizationSha256": "557319726e99fb73fb97ab1c177c0f1c61101115b19675801cfe44a89203514b"
+      }
+    },
+    {
+      "name": "duplicate_eligible_object",
+      "request": {
+        "authorization": {
+          "schemaVersion": 1,
+          "protocol": "ltds-viewer-source-release-v1",
+          "releaseId": "00000000-0000-4000-8000-000000000001",
+          "issuerId": "viewer-test-release",
+          "keyId": "test-release-key",
+          "principalId": "viewer-production",
+          "coordinatorAuthorityId": "authority-test",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "generation": 1,
+          "environment": "production",
+          "viewerTaskId": "00000000-0000-4000-8000-000000000003",
+          "providerTaskId": "00000000-0000-4000-8000-000000000002",
+          "viewerAttemptId": "00000000-0000-4000-8000-000000000004",
+          "activationId": "00000000-0000-4000-8000-000000000005",
+          "sourceSnapshotId": "00000000-0000-4000-8000-000000000006",
+          "preparedEnvelopeSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "inputManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "pipelineDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+          "resultManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "sourceManifestSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "derivedManifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "sourceReceiptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "derivedReceiptSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "workerObservationId": "00000000-0000-4000-8000-000000000007",
+          "workerObservationAckSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipts": [
+            {
+              "acceptanceReceiptId": "acceptance-test",
+              "acceptanceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "viewerReceiptId": "copy-test",
+              "viewerReceiptSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "readyProof": {
+            "kind": "verified_outputs_ready",
+            "attemptId": "00000000-0000-4000-8000-000000000004",
+            "modelId": "00000000-0000-4000-8000-000000000010",
+            "modelVersionId": "00000000-0000-4000-8000-000000000011",
+            "outputInventorySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "verifiedAt": "2026-11-05T00:00:00.000Z"
+          },
+          "policy": {
+            "id": "viewer-ready-plus-24h-v1",
+            "minimumAgeSeconds": 86400
+          },
+          "eligibleObjects": [
+            {
+              "id": "derived-test",
+              "objectKind": "derived",
+              "byteSize": 6,
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "objectKind": "source",
+              "byteSize": 3,
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "objectKind": "source",
+              "byteSize": 3,
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ],
+          "eligibleClosureSha256": "50cd03ac0dc76a35bcebdc7226412297e7ab715711c875ddfe8d24f3aadf7d8d"
+        },
+        "signature": "wtTvHnpz6aWOjy8yTX2j5eJlvYlE9APn6R-x2gGSskw5Nn39FEUliPdQ3BpeIUBRwICcPNAY8iS-WINIRxlYCA",
+        "authorizationSha256": "c8bc522c6ce035701d6583ac15dea1b9f703c32f002a5d1023afaa37bbee2ca2"
+      }
+    },
+    {
+      "name": "untrusted_release_principal",
+      "request": {
+        "authorization": {
+          "schemaVersion": 1,
+          "protocol": "ltds-viewer-source-release-v1",
+          "releaseId": "00000000-0000-4000-8000-000000000001",
+          "issuerId": "viewer-test-release",
+          "keyId": "test-release-key",
+          "principalId": "another-viewer",
+          "coordinatorAuthorityId": "authority-test",
+          "jobId": "00000000-0000-4000-8000-000000000002",
+          "generation": 1,
+          "environment": "production",
+          "viewerTaskId": "00000000-0000-4000-8000-000000000003",
+          "providerTaskId": "00000000-0000-4000-8000-000000000002",
+          "viewerAttemptId": "00000000-0000-4000-8000-000000000004",
+          "activationId": "00000000-0000-4000-8000-000000000005",
+          "sourceSnapshotId": "00000000-0000-4000-8000-000000000006",
+          "preparedEnvelopeSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "inputManifestSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "pipelineDigest": "4444444444444444444444444444444444444444444444444444444444444444",
+          "resultManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "sourceManifestSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+          "derivedManifestSha256": "7777777777777777777777777777777777777777777777777777777777777777",
+          "sourceReceiptSha256": "8888888888888888888888888888888888888888888888888888888888888888",
+          "derivedReceiptSha256": "9999999999999999999999999999999999999999999999999999999999999999",
+          "workerObservationId": "00000000-0000-4000-8000-000000000007",
+          "workerObservationAckSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "receipts": [
+            {
+              "acceptanceReceiptId": "acceptance-test",
+              "acceptanceSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "viewerReceiptId": "copy-test",
+              "viewerReceiptSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            }
+          ],
+          "readyProof": {
+            "kind": "verified_outputs_ready",
+            "attemptId": "00000000-0000-4000-8000-000000000004",
+            "modelId": "00000000-0000-4000-8000-000000000010",
+            "modelVersionId": "00000000-0000-4000-8000-000000000011",
+            "outputInventorySha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "verifiedAt": "2026-11-05T00:00:00.000Z"
+          },
+          "policy": {
+            "id": "viewer-ready-plus-24h-v1",
+            "minimumAgeSeconds": 86400
+          },
+          "eligibleObjects": [
+            {
+              "id": "derived-test",
+              "objectKind": "derived",
+              "byteSize": 6,
+              "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            {
+              "id": "00000000-0000-4000-8000-000000000009",
+              "objectKind": "source",
+              "byteSize": 3,
+              "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            }
+          ],
+          "eligibleClosureSha256": "555cf23a6b954c4037a8291c7c38960cd7ca7eab9e3a3822fdaf2ca49dafa538"
+        },
+        "signature": "kD3oheXpRNHzW13AomZqflHc3-VupB2yzdJBZYV-4D1SinexZHNar9tC_-QCic8fy3O6KTBUyoulCRfGfoFKBw",
+        "authorizationSha256": "ba9112e114c373748ce31a9be357ac9c8b0c0ccb5a1918469cbf4f8f720c619a"
+      }
+    }
+  ]
+}
