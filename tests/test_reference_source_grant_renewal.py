@@ -31,8 +31,8 @@ from processing.reference_source_readers import SourceReaderError
 from processing.reference_source_intake_store import SOURCE_RANGE_GRANT_TTL_SECONDS
 from processing.reference_store import PROFILE, ReferenceStore
 from processing.reference_transfer import TransferError
-from processing.source_range_transfer import (RENEWAL_ACK_PATH, RENEWAL_PATH, SourceRangeClient,
-    _request_id, validate_source_grant)
+from processing.source_range_transfer import (MAX_RENEWAL_SEQUENCE, RENEWAL_ACK_PATH, RENEWAL_PATH,
+    SourceRangeClient, _request_id, validate_source_grant)
 from processing.source_spool import SourceSpool
 from tests.test_reference_source_range_broker import _ControlOpener, _Response
 
@@ -566,6 +566,72 @@ class SourceGrantRenewalTests(RenewalHarness):
         with self.assertRaises(Conflict):
             self.renew_directly()
         self.assertEqual(self.journal(), [])
+
+
+class ExhaustedBoundsTests(RenewalHarness):
+    """There is no wall-clock limit; finite budgets end in a hold, never a delete."""
+
+    def setUp(self):
+        super().setUp()
+        self.first = validate_source_grant(self.first_grant, job=self.claim, clock=lambda: self.now[0])
+        self.kept = self.root / 'fetched-input.bin'
+        self.client.download_object(grant=self.first, object_id=self.first.objects[0].id, destination=self.kept)
+        self.after_lease()
+        self.before = self.retained()
+
+    def retained(self):
+        """Everything either side would lose if an exhausted bound cleaned up."""
+        tables = ('reference_source_object_receipts', 'reference_source_object_pins', 'reference_transfer_grants')
+        with self.queue._db() as db:
+            rows = {table: [tuple(row) for row in db.execute(f'SELECT * FROM {table} WHERE job_id=?', (self.job_id,))]
+                    for table in tables}
+            status = tuple(db.execute('SELECT status,held_reason FROM jobs WHERE id=?', (self.job_id,)).fetchone())
+        spool = {path.name: path.read_bytes() for path in self.spool.root.rglob('*') if path.is_file()}
+        worker = sorted(item.name for item in self.root.glob('*.bin'))
+        return rows, status, spool, self.kept.read_bytes(), worker
+
+    def assert_held_with_nothing_deleted(self, reason):
+        for _attempt in range(2):
+            with self.assertRaisesRegex(DriverHeld, reason):
+                self.renew()
+            self.assertEqual(self.retained(), self.before)
+            self.assertEqual(self.journal(), [])
+            self.assertEqual(self.data['grant'], self.first_grant)
+
+    def test_spent_attempt_budget_holds(self):
+        budget = self.first.attempt_budget
+        self.execute('UPDATE reference_source_range_usage SET attempts_used=? WHERE job_id=?', budget, self.job_id)
+        self.execute('UPDATE reference_source_range_requests SET attempts_used=? WHERE job_id=?', budget, self.job_id)
+        self.assert_held_with_nothing_deleted('source_renewal_rejected')
+
+    def test_spent_byte_budget_holds(self):
+        over = self.first.byte_budget + 1
+        self.execute('UPDATE reference_source_range_usage SET bytes_used=? WHERE job_id=?', over, self.job_id)
+        self.execute('UPDATE reference_source_range_requests SET range_length=? WHERE job_id=?', over, self.job_id)
+        self.assert_held_with_nothing_deleted('source_renewal_rejected')
+
+    def test_spent_request_budget_holds(self):
+        extra = self.first.request_budget
+        for index in range(extra):
+            self.execute('INSERT INTO reference_source_range_requests VALUES(?,?,?,?,?,?,?)', self.job_id,
+                self.first_grant['generation'], f'extra-{index}', self.first.objects[0].id, 0, 0, 1)
+        self.execute('''UPDATE reference_source_range_usage SET requests_used=requests_used+?,
+            attempts_used=attempts_used+? WHERE job_id=?''', extra, extra, self.job_id)
+        self.assert_held_with_nothing_deleted('source_renewal_rejected')
+
+    def test_spent_renewal_sequence_holds_without_asking_the_coordinator(self):
+        self.data['sourceRenewalSequence'] = MAX_RENEWAL_SEQUENCE
+        self.opener(lambda *_args, **_kwargs: self.fail('an exhausted sequence must not reach the coordinator'))
+        self.assert_held_with_nothing_deleted('source_renewal_sequence_exhausted')
+
+    def test_coordinator_refuses_a_sequence_past_the_bound(self):
+        with self.assertRaisesRegex(Conflict, 'sequence invalid'):
+            self.renew_directly(self.request(sequence=MAX_RENEWAL_SEQUENCE + 1))
+        self.assertEqual(self.retained(), self.before)
+
+    def test_time_alone_is_not_a_bound(self):
+        self.now[0] += 10 * 365 * 24 * 3600
+        self.assertEqual(self.fetch(self.renew(), 1), b'1,2,3\n')
 
 
 class RenewalRestartTests(RenewalHarness):

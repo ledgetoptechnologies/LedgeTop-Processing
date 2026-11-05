@@ -447,6 +447,53 @@ class ReferenceDriverTests(unittest.TestCase):
             data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
         self.assertEqual((data['grant'], data['sourceRenewalSequence']), (successor, 1))
 
+    def test_exhausted_renewal_bounds_hold_and_keep_fetched_inputs(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-exhausted.sqlite')
+        client = self.driver.source_range_client
+        job = self.submit(contents=(b'kept-first-photo', b'unfetched-second-photo'))
+        self.advance(job, 'fetching')
+
+        def download(*, grant, object_id, destination, grant_provider=None):
+            Path(destination).write_bytes(self.contents[object_id])
+            return Path(destination)
+
+        with patch.object(client, 'download_object', side_effect=download):
+            self.assertEqual(self.driver.step()['state'], 'fetching')
+
+        def journal():
+            with self.driver._db() as db:
+                row = db.execute('SELECT stage,data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+            return row[0], json.loads(row[1])
+
+        _stage, data = journal()
+        [relative] = data['inputPaths'].values()
+        fetched = self.ledger.root / relative
+        kept = fetched.read_bytes()
+        data['grant']['expiresAt'] = '1970-01-01T00:00:00.000Z'
+        self.driver._save(job['jobId'], 'fetching', data)
+
+        def assert_held(reason):
+            for _ in range(2):
+                self.assertEqual(self.driver.step(), {'state': 'held', 'reason': reason})
+                self.assertEqual(journal()[0], 'fetching')
+                self.assertEqual(fetched.read_bytes(), kept)
+            self.assertEqual(self.store.get(job['jobId'])['status'], 'running')
+            self.assertEqual(list(self.transport.calls), before)
+
+        before = list(self.transport.calls)
+        refused = (409, {'error': 'source_renewal_unavailable'})
+        with patch.object(client, 'renew_grant', return_value=refused) as renew:
+            assert_held('source_renewal_rejected')
+        self.assertEqual(renew.call_args_list[0], renew.call_args_list[1])
+        _stage, data = journal()
+        data.pop('sourceRenewal')
+        data['sourceRenewalSequence'] = 1000
+        self.driver._save(job['jobId'], 'fetching', data)
+        with patch.object(client, 'renew_grant') as renew:
+            assert_held('source_renewal_sequence_exhausted')
+        renew.assert_not_called()
+
     def test_source_renewal_credentials_go_only_to_the_coordinator(self):
         from processing.source_range_transfer import RENEWAL_ACK_PATH, RENEWAL_PATH
         self.driver = self.make_driver(source_range_v2_enabled=True,
