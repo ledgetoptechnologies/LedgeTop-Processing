@@ -47,7 +47,8 @@ SOURCE_RECOVERY_ATTEMPTS = 8
 # the worker is ahead of the coordinator, whose history was lost, so it stays held.
 SOURCE_RECOVERY_PHASES = {'reservation_pending': ('awaiting_transfer',), 'awaiting_grant': ('awaiting_transfer',),
     'fetching_pending': ('awaiting_transfer', 'fetching'), 'fetching': ('fetching',),
-    'processing_pending': ('fetching', 'processing'), 'execution_pending': ('processing',)}
+    'processing_pending': ('fetching', 'processing'), 'execution_pending': ('processing',),
+    'executing': ('processing',)}
 # A claim the coordinator holds with no reservation has nothing to bind, so it waits
 # for an operator. Add these to reservation_pending above to change that, along
 # with a coordinator state for a job with no transfer.
@@ -1318,6 +1319,59 @@ class ReferenceDriver:
         return dict(engineClass='unstarted', executionRow=False, ledgerState=state, allocatedBytes=allocated,
             gateReservation=None, engineTask=observed)
 
+    def _source_started_proof(self, job_id, data):
+        """Local proof of one committed task, or a refusal; polling carries on either way.
+
+        The row, gate, ledger and engine must all name this exact start. Status 20
+        and processing time prove nothing about a commit: only a row past the commit,
+        or engine output for a row stuck at it, does. Earlier phases never get here,
+        since poll refuses them, and nothing on this path can start an engine.
+        """
+        if self._kind(job_id) != 'odm':
+            raise DriverHeld('source_recovery_engine_unsupported')
+        reservation, claim = data['reservation']['reservationId'], data['claim']
+        try:
+            row = self.worker._row(job_id)
+        except WorkerHeld:
+            raise DriverHeld('source_recovery_execution_missing') from None
+        identity = json.loads(row['identity'])
+        if identity['reservation'] != reservation or any(identity['job'][key] != claim[key]
+                for key in ('jobId', 'generation', 'environment', 'manifestSha256', 'pipelineDigest')):
+            raise DriverHeld('source_recovery_execution_changed')
+        with NodeGate(self.worker.engine_id) as gate:
+            bound = gate.snapshot()['reservation']
+        if (bound is None or bound['receiptId'] != row['receipt'] or bound['completionDigest'] is not None
+                or (bound['job'] or {}).get('id') != job_id):
+            raise DriverHeld('source_recovery_gate_changed')
+        with self.ledger._transaction() as db:
+            ledger = self.ledger._reservation(db, reservation)['state']
+        if ledger != 'engine_started':
+            raise DriverHeld('source_recovery_ledger_changed')
+        observed, info = self.worker.task_observation(job_id)
+        if observed == 'unreachable':
+            raise DriverWait('source_recovery_engine_unreachable')
+        if observed != 'present' or info['status']['code'] not in (10, 20):
+            raise DriverHeld('source_recovery_engine_task_changed')
+        if row['phase'] == 'commit_pending':
+            output, _more = self.worker.engine.output_page(job_id, line=0, limit=1)
+            if not output:
+                raise DriverHeld('source_recovery_commit_unproven')
+        elif row['phase'] != 'processing':
+            raise DriverHeld('source_recovery_execution_changed')
+        return dict(engineClass='started', executionPhase=row['phase'], ledgerState=ledger,
+            gateReceipt=row['receipt'], engineTask=observed)
+
+    def _source_started_visible(self, job_id, data):
+        """Show a running engine as running after a restart. Never stops the poll."""
+        if data['reservation'].get('protocol') != 'source-range-v2':
+            return
+        try:
+            state = self._claim_state(job_id, data['claim'])
+            if state is not None and self._restart_recoverable(state, data, 'executing'):
+                self._recover_source_fetch(job_id, 'executing', data)
+        except (DriverHeld, DriverWait, ValueError, KeyError, PolicyConflict):
+            pass
+
     def _source_recovery_state(self, job_id, claim, data):
         from .reference_recovery import SOURCE_STATE_PROTOCOL, SOURCE_UNSTARTED_PHASES
         status, state = self._request('GET', '/jobs/' + job_id + '/recovery-state', claim_token=claim['claimToken'])
@@ -1360,7 +1414,10 @@ class ReferenceDriver:
         running = state['claim']['status'] == 'running' and state['claim']['heldReason'] is None
         phase = state['claim']['executionPhase']
         # Checked before any POST, a replay included: the intent proves nothing now.
-        proof = self._source_unstarted_proof(job_id, data, phase) if phase != 'fetching' and state['eligible'] else None
+        proof = None
+        if phase != 'fetching' and state['eligible']:
+            proof = (self._source_started_proof(job_id, data) if stage == 'executing'
+                else self._source_unstarted_proof(job_id, data, phase))
 
         def settle(request):
             status, receipt = self._request('POST', suffix, request, claim_token=token)
@@ -1836,6 +1893,8 @@ class ReferenceDriver:
                 raise DriverHeld('engine_reconciliation_required') from None
             self._clear_watch(job_id, 'executing', data)
             if outbox_id is None:
+                if not tree:
+                    self._source_started_visible(job_id, data)
                 return {'state': 'executing', 'jobId': job_id}
             if tree and adapter.completion(job_id)['kind'] == 'failure':
                 completion = self.failure_outbox.get(outbox_id)
