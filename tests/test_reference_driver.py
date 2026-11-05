@@ -1,5 +1,5 @@
 """Real durable components and NativeEngine with transport mocked at its edge."""
-from contextlib import closing
+from contextlib import ExitStack, closing, contextmanager
 import copy
 from datetime import datetime, timezone
 import hashlib
@@ -703,6 +703,126 @@ class ReferenceDriverTests(unittest.TestCase):
         self.advance(job, 'awaiting_failure_acceptance')
         self.assertEqual(self.worker._row(job['jobId'])['phase'], 'failure_delivered')
         self.assertEqual(self.store.get(job['jobId'], private=True)['status'], 'failed')
+
+    def restart_process(self):
+        # A replacement process over the same files. The driver journal pins the old gate
+        # generation, so this process can finish owed rows but takes no new work.
+        self.ledger = ScratchLedger(self.root / 'ledger.sqlite', self.scratch, capacity_probe=lambda _: 10**9,
+            safety_floor_bytes=1024, cleanup_grace_seconds=0)
+        self.outbox = WorkerOutbox(self.root / 'outbox.sqlite')
+        self.failures = FailureOutbox(self.root / 'failures.sqlite')
+        self.worker = ReferenceEngineWorker(self.root / 'worker.sqlite', ledger=self.ledger, outbox=self.outbox,
+            engine=self.native, engine_id='engine', node_id='cluster', authority_id=self.queue.authority_id,
+            coordinator_origin=self.gate_origin, gate_generation=1, worker_id='worker',
+            engine_version='pinned-engine-1', engine_probe=lambda deadline: 'engine')
+        self.driver = self.make_driver()
+
+    def accept_result(self, job):
+        result = self.store.get(job['jobId'], private=True)['resultManifest']
+        self.store.accept(job['jobId'], dict(schemaVersion=1, receiptId='retire-viewer', storageReceiptId='retire-storage',
+            jobId=job['jobId'], generation=1, environment='staging', inputManifestSha256=job['manifestSha256'],
+            pipelineDigest=job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
+            acceptedObjectIds=[obj['id'] for obj in result['objects']], acceptedAt='2026-11-02T00:00:00Z',
+            validationVersion='ltds-reference-v1'))
+
+    def accept_failure(self, job):
+        failure = self.api.viewer.terminal.outcome(job['jobId'], 'staging')
+        self.api.viewer.terminal.accept(job['jobId'], dict(schemaVersion=1, receiptId='retire-terminal',
+            storageReceiptId='retire-terminal-storage', jobId=job['jobId'], generation=1, environment='staging',
+            inputManifestSha256=job['manifestSha256'], pipelineDigest=job['pipelineDigest'],
+            failureSha256=failure['failureSha256'], acceptedAt='2026-10-27T22:00:00Z',
+            validationVersion='ltds-reference-v1'), 'staging')
+
+    @contextmanager
+    def death_after_retirement(self):
+        real = NodeGate.retire_job
+        deaths = []
+        def die(gate, job_id):
+            real(gate, job_id)  # The replaced file is fsynced before this returns.
+            deaths.append(job_id)
+            raise OSError('synthetic death')
+        with patch.object(NodeGate, 'retire_job', autospec=True, side_effect=die):
+            yield deaths
+
+    @contextmanager
+    def replay_without_evidence(self):
+        with ExitStack() as stack:
+            for method in ('resolved', 'prepare_completion', 'acknowledge'):
+                stack.enter_context(patch.object(NodeGate, method, side_effect=AssertionError('replay touched gate completion')))
+            yield
+
+    def assert_evidence_gone(self, job, receipt):
+        with NodeGate('engine') as gate:
+            self.assertFalse(gate.resolved(receipt, job['jobId']))
+            self.assertEqual(gate.resolutions(), {})
+
+    def assert_replay_completes_without_evidence(self, job, phase, stage):
+        receipt = self.worker._row(job['jobId'])['receipt']
+        with self.death_after_retirement() as deaths:
+            self.driver.step()
+        self.assertEqual(deaths, [job['jobId']])
+        self.assertEqual(self.data(job)[0], stage)
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], phase)
+        self.assert_evidence_gone(job, receipt)
+        self.restart_process()
+        with self.replay_without_evidence():
+            self.driver.step()
+        self.assertEqual(self.data(job)[0], 'completed')
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], phase)
+        self.assert_evidence_gone(job, receipt)
+
+    def test_delivered_replay_after_death_past_retirement_needs_no_evidence(self):
+        job = self.submit()
+        self.die_inside_poll(job)
+        self.resolve_gate()
+        self.restart_process()
+        self.advance(job, 'awaiting_acceptance')
+        self.accept_result(job)
+        self.assert_replay_completes_without_evidence(job, 'delivered', 'awaiting_acceptance')
+
+    def test_failure_delivered_replay_after_death_past_retirement_needs_no_evidence(self):
+        job = self.submit()
+        self.die_sealing_failure(job)
+        self.resolve_gate()
+        self.restart_process()
+        self.advance(job, 'awaiting_failure_acceptance')
+        self.accept_failure(job)
+        self.assert_replay_completes_without_evidence(job, 'failure_delivered', 'awaiting_failure_acceptance')
+        self.assertEqual(self.data(job)[1]['terminalAcceptance']['receiptId'], 'retire-terminal')
+
+    def test_unstarted_replay_after_death_past_retirement_needs_no_evidence(self):
+        job = self.submit()
+        self.advance(job, 'execution_pending')
+        with patch.object(self.ledger, 'set_engine_state', side_effect=OSError('synthetic crash')):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        receipt = self.worker._row(job['jobId'])['receipt']
+        self.end_job(job)
+        self.resolve_gate()
+        with self.death_after_retirement(), self.assertRaises(OSError):
+            self.driver.reconcile_unstarted(job['jobId'])
+        self.assertNotEqual(self.data(job)[0], 'completed')
+        self.assert_evidence_gone(job, receipt)
+        self.restart_process()
+        with self.replay_without_evidence():
+            self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+        self.assert_evidence_gone(job, receipt)
+
+    def test_a_busy_gate_at_completion_retires_nothing_and_retries(self):
+        job = self.submit()
+        self.die_inside_poll(job)
+        self.resolve_gate()
+        self.restart_process()
+        self.advance(job, 'awaiting_acceptance')
+        self.accept_result(job)
+        receipt = self.worker._row(job['jobId'])['receipt']
+        with NodeGate('engine'):
+            self.driver.step()
+        self.assertEqual(self.data(job)[0], 'awaiting_acceptance')
+        with NodeGate('engine') as gate:
+            self.assertTrue(gate.resolved(receipt, job['jobId']))
+        self.driver.step()
+        self.assertEqual(self.data(job)[0], 'completed')
+        self.assert_evidence_gone(job, receipt)
 
     def test_a_never_resolved_receipt_stays_blocked_on_a_clear_gate(self):
         job = self.submit()
