@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from unittest.mock import patch
 import uuid
@@ -473,6 +474,29 @@ class ReferenceDriverTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM executions').fetchone()[0], 0)
         self.assertNotIn(('initialize', job['jobId']), self.transport.calls)
 
+    def assert_physically_retained(self, job, kept, result, reason):
+        self.assertEqual(result, {'state': 'held', 'jobId': job['jobId'], 'reason': reason,
+            'terminalStatus': self.store.get(job['jobId'], private=True)['status'],
+            'reconciliation': 'physical_reservation_retained'})
+        stage, data = self.data(job)
+        self.assertNotEqual(stage, 'completed')
+        self.assertEqual(data['unstartedHold'], 'physical_reservation_retained')
+        self.assertNotIn('unstartedOutcome', data)
+        self.assertEqual(self.lease(job), kept)
+        self.assertGreater(kept['remaining'], 0)
+
+    def resolve_gate(self):
+        with NodeGate('engine') as gate:
+            state = gate.snapshot()
+            gate.resolve(state['reservation']['receiptId'], state['generation'], old_worker_stopped=True,
+                coordinator_resolved=True, note='synthetic')
+
+    def reserve_gate(self):
+        with NodeGate('engine') as gate:
+            receipt = uuid.uuid4().hex
+            gate.reserve(self.worker.node_id, self.worker.origin, self.worker.authority_id, self.worker.gate_generation, receipt)
+        return receipt
+
     def test_crash_after_prepared_keeps_capacity_then_ends_on_the_coordinator_word(self):
         job = self.submit()
         self.advance(job, 'execution_pending')
@@ -489,10 +513,49 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(self.driver.reconcile_unstarted(job['jobId'])['state'], 'held')
         self.assertEqual(self.lease(job), kept)
         self.end_job(job)
-        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
-        self.assertNotIn(('initialize', job['jobId']), self.transport.calls)
+        for _ in range(2):
+            self.assert_physically_retained(job, kept, self.driver.reconcile_unstarted(job['jobId']),
+                'unstarted_claim_requires_reconciliation')
         with NodeGate('engine') as gate:
             self.assertEqual(gate.snapshot()['reservation']['job']['id'], job['jobId'])
+        self.resolve_gate()
+        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+        self.assertNotIn(('initialize', job['jobId']), self.transport.calls)
+
+    def test_step_keeps_a_physical_hold_past_the_terminal_word(self):
+        job = self.submit(contents=(b'never-arrives',))
+        self.advance(job, 'fetching')
+        with patch.object(self.broker, 'download_object', side_effect=OSError('synthetic')):
+            for _ in range(3):
+                self.assertEqual(self.driver.step()['state'], 'retry_wait')
+            self.assertEqual(self.driver.step()['reason'], 'worker_fetch_attempt_budget_exhausted')
+            kept = self.lease(job)
+            self.reserve_gate()  # Unbound: a crash between reserve and bind may be this job's.
+            self.end_job(job)
+            self.assert_physically_retained(job, kept, self.driver.step(), 'worker_fetch_attempt_budget_exhausted')
+            self.resolve_gate()
+            self.assert_unstarted_terminal(job, 'worker_fetch_attempt_budget_exhausted', self.driver.step())
+
+    def test_gate_naming_another_job_retains_nothing_here(self):
+        job = self.submit()
+        self.advance(job, 'processing_pending')
+        self.end_job(job)
+        receipt = self.reserve_gate()
+        with NodeGate('engine') as gate:
+            gate.bind(receipt, dict(id=str(uuid.uuid4()), workerId=self.worker.worker_id, nodeId=self.worker.node_id,
+                authorityId=self.worker.authority_id))
+        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+
+    def test_treedar_controller_intent_is_a_physical_hold(self):
+        job = self.submit()
+        self.advance(job, 'processing_pending')
+        self.end_job(job)
+        kept = self.lease(job)
+        controller = types.SimpleNamespace(_row=lambda _job: {})
+        router = types.SimpleNamespace(treedar_worker=types.SimpleNamespace(controller=controller))
+        with patch.object(self.driver, 'execution_router', router):
+            self.assert_physically_retained(job, kept, self.driver.reconcile_unstarted(job['jobId']),
+                'unstarted_claim_requires_reconciliation')
 
     def test_fetch_budget_exhaustion_keeps_fence_until_job_ends_then_frees_the_node(self):
         job = self.submit(contents=(b'never-arrives',))
