@@ -126,7 +126,17 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
     def test_actual_viewer_range_v2_fetch_result_copy_lost_ack_and_worker_cleanup(self):
         self._roundtrip(source_range_v2_enabled=True)
 
-    def _roundtrip(self, *, source_range_v2_enabled):
+    @unittest.skipUnless(os.environ.get("LTDS_RUN_CONTROLLED_CONVERSION_QUALIFICATION") == "1",
+                         "set LTDS_RUN_CONTROLLED_CONVERSION_QUALIFICATION=1 to require real Obj2Tiles qualification")
+    def test_actual_controlled_conversion_verified_derivative_and_publication(self):
+        binary = os.environ.get("LTDS_OBJ2TILES_BIN")
+        self.assertTrue(binary, "qualification requested but LTDS_OBJ2TILES_BIN is not configured")
+        converter = Path(binary)
+        self.assertTrue(converter.is_file(), f"qualification requested but converter is missing: {converter}")
+        self.assertTrue(os.access(converter, os.X_OK), f"qualification requested but converter is not executable: {converter}")
+        self._roundtrip(source_range_v2_enabled=False, controlled_conversion=True)
+
+    def _roundtrip(self, *, source_range_v2_enabled, controlled_conversion=False):
         viewer = Path(os.environ["LTDS_VIEWER_WORKTREE"]).resolve()
         viewer_app = viewer / "apps" / "viewer"
         node = os.environ.get("LTDS_NODE") or shutil.which("node")
@@ -290,6 +300,9 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                     "modelsRoot": str(stored_path), "resultBytesBase64": __import__('base64').b64encode(result_bytes).decode(),
                     "datasetMount": str(root / "datasets"), "cacheMount": str(root / "cache"),
                     "trashMount": str(root / "trash"), "ingestOpsBaseUrl": "http://operations.test"}
+                if controlled_conversion:
+                    config["obj2TilesBin"] = os.environ["LTDS_OBJ2TILES_BIN"]
+                    config["controlledConversionQualification"] = True
                 for directory in (config["datasetMount"], config["cacheMount"], config["trashMount"]):
                     Path(directory).mkdir(parents=True, exist_ok=True)
                 config_path = root / "pairing-config.json"
@@ -372,6 +385,19 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                 self.assertEqual(ingested["eptFileCount"], 3)
                 self.assertTrue(ingested["assetsHaveDigests"])
                 self.assertFalse(ingested["published"])
+                if controlled_conversion:
+                    derivative = subprocess.run([node, str(Path(__file__).parent / "fixtures" /
+                        "viewer_result_roundtrip_controlled_derivative.js")], cwd=viewer_app,
+                        env=environment, capture_output=True, text=True, timeout=300, check=False)
+                    self.assertEqual(derivative.returncode, 0,
+                        f"actual controlled conversion/publication failed: {derivative.stderr[-5000:]}\n{derivative.stdout[-2000:]}")
+                    qualified = json.loads(derivative.stdout.strip().splitlines()[-1])
+                    self.assertEqual(qualified["derivativeStatus"], "complete")
+                    self.assertTrue(qualified["verifiedReceipt"])
+                    self.assertEqual(qualified["attemptStatus"], "published")
+                    self.assertEqual(qualified["outputStatus"], "published")
+                    self.assertTrue(qualified["publishedTilesVerified"])
+                    self.assertFalse(qualified["publishedObj"])
                 self.assertEqual(accepted["drop_count"], 1)
                 self.assertEqual(transport.calls.count(("initialize", state["providerTaskId"])), 1,
                                  "accepted-copy retry and cleanup must not duplicate engine task execution")

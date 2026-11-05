@@ -64,7 +64,7 @@ function makeOneTriangleGlb(texture) {
     asset: { version: '2.0', generator: 'LedgeTop deterministic ingest test' }, scene: 0,
     scenes: [{ nodes: [0] }], nodes: [{ mesh: 0 }],
     meshes: [{ primitives: [{ attributes: { POSITION: 0, NORMAL: 1, TEXCOORD_0: 2 }, indices: 3, material: 0 }] }],
-    materials: [{ pbrMetallicRoughness: { baseColorTexture: { index: 0 } } }],
+    materials: [{ pbrMetallicRoughness: { baseColorTexture: { index: 0 }, metallicFactor: 0, roughnessFactor: 1 } }],
     textures: [{ source: 0 }], images: [{ bufferView: imageBufferView, mimeType: 'image/png' }],
     accessors: [
       { bufferView: 0, componentType: 5126, count: 3, type: 'VEC3', min: [0, 0, 0], max: [1, 1, 0] },
