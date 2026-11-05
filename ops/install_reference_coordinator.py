@@ -234,13 +234,17 @@ def check_native_environment(old, env):
     return observed
 
 
-LOADER = """import json,ssl
+LOADER = """def _require(condition):
+    if not condition:
+        raise ValueError("coordinator_safety_condition_failed")
+
+import json,ssl
 from processing.config import from_environment
 from processing.reference_runtime import load_reference_settings
 config=from_environment(); settings=load_reference_settings('/run/processing-reference/runtime.json',config)
 ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.load_cert_chain(settings.listener['certificate'],settings.listener['privateKey'])
 ssl.create_default_context(cafile=settings.listener['clientCA'])
-assert set(settings.viewer_bearers.values())=={'staging'}
+_require(set(settings.viewer_bearers.values())=={'staging'})
 print(json.dumps({'settingsValid':True,'uidValidated':10001,'stagingOnly':True}))
 """
 
@@ -292,34 +296,38 @@ def prepare(root, target, revision, main_image):
     return state
 
 
-BACKUP = r"""import hashlib,json,os,sqlite3,stat
+BACKUP = r"""def _require(condition):
+    if not condition:
+        raise ValueError("coordinator_safety_condition_failed")
+
+import hashlib,json,os,sqlite3,stat
 from pathlib import Path
 source,target=Path('/source'),Path('/backup')
-assert target.stat().st_uid==10001 and target.stat().st_gid==10001 and stat.S_IMODE(target.stat().st_mode)==0o700
-assert not list(target.iterdir())
-assert not any((source/('jobs.sqlite3'+suffix)).exists() for suffix in ('-wal','-shm','-journal'))
+_require(target.stat().st_uid==10001 and target.stat().st_gid==10001 and stat.S_IMODE(target.stat().st_mode)==0o700)
+_require(not list(target.iterdir()))
+_require(not any((source/('jobs.sqlite3'+suffix)).exists() for suffix in ('-wal','-shm','-journal')))
 manifest=[]; directories=[target]; counts={'regularFiles':0,'directories':1,'bytes':0}
 def copy(src,dst,relative=''):
  for entry in sorted(src.iterdir(),key=lambda p:p.name):
   info=entry.lstat(); rel=relative+'/'+entry.name
-  assert info.st_uid==10001 and info.st_gid==10001 and not stat.S_ISLNK(info.st_mode)
+  _require(info.st_uid==10001 and info.st_gid==10001 and not stat.S_ISLNK(info.st_mode))
   output=dst/entry.name
   if stat.S_ISDIR(info.st_mode):
    output.mkdir(mode=stat.S_IMODE(info.st_mode));directories.append(output);counts['directories']+=1
    manifest.append([rel,'directory',stat.S_IMODE(info.st_mode)]);copy(entry,output,rel)
   else:
-   assert stat.S_ISREG(info.st_mode) and info.st_nlink==1
+   _require(stat.S_ISREG(info.st_mode) and info.st_nlink==1)
    read=os.open(entry,os.O_RDONLY|os.O_NOFOLLOW);write=os.open(output,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,stat.S_IMODE(info.st_mode))
    sha=hashlib.sha256();total=0
    try:
-    observed=os.fstat(read);assert (observed.st_dev,observed.st_ino)==(info.st_dev,info.st_ino)
+    observed=os.fstat(read);_require((observed.st_dev,observed.st_ino)==(info.st_dev,info.st_ino))
     with os.fdopen(read,'rb',closefd=False) as inp,os.fdopen(write,'wb',closefd=False) as out:
      while True:
       chunk=inp.read(1048576)
       if not chunk:break
-      total+=len(chunk);assert total<=info.st_size;sha.update(chunk);out.write(chunk)
+      total+=len(chunk);_require(total<=info.st_size);sha.update(chunk);out.write(chunk)
      out.flush();os.fsync(write)
-    current=entry.lstat();assert total==info.st_size and (current.st_dev,current.st_ino,current.st_size,current.st_mtime_ns)==(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)
+    current=entry.lstat();_require(total==info.st_size and (current.st_dev,current.st_ino,current.st_size,current.st_mtime_ns)==(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns))
    finally:os.close(read);os.close(write)
    counts['regularFiles']+=1;counts['bytes']+=total;manifest.append([rel,'file',stat.S_IMODE(info.st_mode),total,sha.hexdigest()])
 copy(source,target)
@@ -328,16 +336,16 @@ for directory in reversed(directories):
 def database(path):
  db=sqlite3.connect('file:'+str(path)+'?mode=ro&immutable=1',uri=True);db.row_factory=sqlite3.Row
  try:
-  assert db.execute('PRAGMA quick_check').fetchall()[0][0]=='ok'
+  _require(db.execute('PRAGMA quick_check').fetchall()[0][0]=='ok')
   jobs=[dict(row) for row in db.execute('SELECT * FROM jobs ORDER BY seq')]
-  assert not any(row['status'] in ('queued','running','held') for row in jobs)
-  assert db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]=='7131882e-38ce-4d3e-99cc-4ba5a94d2ee8'
+  _require(not any(row['status'] in ('queued','running','held') for row in jobs))
+  _require(db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]=='7131882e-38ce-4d3e-99cc-4ba5a94d2ee8')
   tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
   for table in ('viewer_tasks','viewer_files','viewer_incarnations'):
-   if table in tables:assert db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]==0
+   if table in tables:_require(db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]==0)
   return {'count':len(jobs),'sha256':hashlib.sha256(json.dumps(jobs,sort_keys=True,separators=(',',':')).encode()).hexdigest()}
  finally:db.close()
-original=database(source/'jobs.sqlite3');assert database(target/'jobs.sqlite3')==original
+original=database(source/'jobs.sqlite3');_require(database(target/'jobs.sqlite3')==original)
 counts.update(sqliteQuickCheck='ok',databaseHistory=original,treeSha256=hashlib.sha256(json.dumps(manifest,sort_keys=True,separators=(',',':')).encode()).hexdigest())
 print(json.dumps(counts))
 """
@@ -349,11 +357,15 @@ def backup(root, state):
         raise CutoverStopped('backup_destination_already_exists')
     # Numeric UID 10001 has no host passwd entry. install -o 10001 performs a
     # name lookup here; use the already-qualified numeric chown mechanism.
-    make_backup = """import os,stat,sys
+    make_backup = """def _require(condition):
+    if not condition:
+        raise ValueError("coordinator_safety_condition_failed")
+
+import os,stat,sys
 from pathlib import Path
-p=Path(sys.argv[1]);assert p.is_absolute() and p.name=='original-state-backup'
-assert p.parent.resolve()==p.parent and not any(q.is_symlink() for q in p.parents)
-s=p.parent.stat();assert s.st_uid==1000 and not stat.S_IMODE(s.st_mode)&0o077
+p=Path(sys.argv[1]);_require(p.is_absolute() and p.name=='original-state-backup')
+_require(p.parent.resolve()==p.parent and not any(q.is_symlink() for q in p.parents))
+s=p.parent.stat();_require(s.st_uid==1000 and not stat.S_IMODE(s.st_mode)&0o077)
 os.mkdir(p,0o700);os.chown(p,10001,10001)
 fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
 """
@@ -522,15 +534,19 @@ finally: db.close()
         raise CutoverStopped('completed_rollback_precheck_failed') from None
 
 
-OFFLINE_ROLLBACK_CENSUS = """import json,sqlite3,hashlib,stat
+OFFLINE_ROLLBACK_CENSUS = """def _require(condition):
+    if not condition:
+        raise ValueError("coordinator_safety_condition_failed")
+
+import json,sqlite3,hashlib,stat
 from pathlib import Path
 from collections import Counter
 p=Path('/source/jobs.sqlite3');s=p.lstat()
-assert stat.S_ISREG(s.st_mode) and s.st_nlink==1 and s.st_uid==10001
-assert not any(Path(str(p)+suffix).exists() for suffix in ('-wal','-shm','-journal'))
+_require(stat.S_ISREG(s.st_mode) and s.st_nlink==1 and s.st_uid==10001)
+_require(not any(Path(str(p)+suffix).exists() for suffix in ('-wal','-shm','-journal')))
 db=sqlite3.connect('file:/source/jobs.sqlite3?mode=ro&immutable=1',uri=True);db.row_factory=sqlite3.Row
 try:
- assert db.execute('PRAGMA quick_check').fetchone()[0]=='ok'
+ _require(db.execute('PRAGMA quick_check').fetchone()[0]=='ok')
  authority=db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
  rows=[];statuses=[]
  for r in db.execute('SELECT * FROM jobs ORDER BY id'):
@@ -538,7 +554,7 @@ try:
   rows.append(dict(id=r['id'],requestId=r['request_id'],environment=r['environment'],profile=r['profile'],
    status=r['status'],workerId=r['worker_id'],nodeId=r['node_id'],heldReason=r['held_reason'],
    result=json.loads(r['result']) if r['result'] else None,createdAt=r['created_at'],updatedAt=r['updated_at']))
- assert not any(s in ('queued','running','held') for s in statuses)
+ _require(not any(s in ('queued','running','held') for s in statuses))
  native=db.execute('SELECT COUNT(*) FROM viewer_tasks WHERE removed=0').fetchone()[0]
  reference=db.execute('SELECT COUNT(*) FROM reference_jobs').fetchone()[0]
  history=dict(count=len(rows),statusCounts=dict(Counter(statuses)),sha256=hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest())

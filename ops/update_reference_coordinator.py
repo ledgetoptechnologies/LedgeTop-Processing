@@ -126,11 +126,15 @@ def volume_census(root, *, uid=10001, offline=False):
     Job/receipt contents never leave this function. Only the two system node
     rows are retained privately to prove exact operation-owned CAS transitions.
     """
+    def _require(condition):
+        if not condition:
+            raise ValueError("coordinator_safety_condition_failed")
+
     import hashlib, json, os, re, sqlite3, stat
     from pathlib import Path
     root=Path(root)
     root_info=root.lstat()
-    assert stat.S_ISDIR(root_info.st_mode) and root_info.st_uid==uid and root_info.st_gid==uid
+    _require(stat.S_ISDIR(root_info.st_mode) and root_info.st_uid==uid and root_info.st_gid==uid)
     def encode(value):return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
     def sha(value):return hashlib.sha256(encode(value)).hexdigest()
     allowed={'jobs','sqlite_sequence','coordinator_identity','nodes','viewer_tasks','viewer_files','viewer_incarnations',
@@ -140,39 +144,39 @@ def volume_census(root, *, uid=10001, offline=False):
     files=[]
     for path in sorted(root.rglob('*')):
         relative=path.relative_to(root).as_posix();info=path.lstat()
-        assert info.st_uid==uid and info.st_gid==uid and not stat.S_ISLNK(info.st_mode)
+        _require(info.st_uid==uid and info.st_gid==uid and not stat.S_ISLNK(info.st_mode))
         # The reviewed baseline contains system metadata and empty native dirs.
-        assert relative in ('jobs.sqlite3','coordinator.lock','viewer-tasks','viewer-spool')
+        _require(relative in ('jobs.sqlite3','coordinator.lock','viewer-tasks','viewer-spool'))
         if stat.S_ISDIR(info.st_mode):files.append(dict(path=relative,kind='directory',mode=stat.S_IMODE(info.st_mode)))
         else:
-            assert stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size<=67108864
+            _require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_size<=67108864)
             fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
             try:
-                before=os.fstat(fd);assert (before.st_dev,before.st_ino)==(info.st_dev,info.st_ino)
+                before=os.fstat(fd);_require((before.st_dev,before.st_ino)==(info.st_dev,info.st_ino))
                 h=hashlib.sha256();size=0
                 while True:
                     data=os.read(fd,1048576)
                     if not data:break
-                    size+=len(data);assert size<=info.st_size;h.update(data)
+                    size+=len(data);_require(size<=info.st_size);h.update(data)
                 after=path.lstat()
-                assert size==info.st_size and (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)==(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)
+                _require(size==info.st_size and (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns)==(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns))
             finally:os.close(fd)
             files.append(dict(path=relative,kind='file',mode=stat.S_IMODE(info.st_mode),bytes=size,sha256=h.hexdigest()))
-    assert any(item['path']=='jobs.sqlite3' for item in files)
+    _require(any(item['path']=='jobs.sqlite3' for item in files))
     uri='file:'+str(root/'jobs.sqlite3')+'?mode=ro'+('&immutable=1' if offline else '')
     db=sqlite3.connect(uri,uri=True,timeout=3)
     try:
         db.execute('BEGIN')
-        assert db.execute('PRAGMA quick_check').fetchone()[0]=='ok'
+        _require(db.execute('PRAGMA quick_check').fetchone()[0]=='ok')
         objects=[list(row) for row in db.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")]
         names={row[1] for row in objects if row[0]=='table'}
-        assert not names-allowed and {'jobs','coordinator_identity','nodes','reference_jobs','viewer_tasks'}<=names
+        _require(not names-allowed and {'jobs','coordinator_identity','nodes','reference_jobs','viewer_tasks'}<=names)
         viewer_tables={'reference_viewer_receipts','reference_viewer_transfers'}
         present_viewer_tables=viewer_tables & names
-        assert not present_viewer_tables or present_viewer_tables==viewer_tables
+        _require(not present_viewer_tables or present_viewer_tables==viewer_tables)
         if present_viewer_tables:
             normalize=lambda rows:[[ *row[:3], re.sub(r'\s+',' ',row[3]).strip() if row[3] is not None else None] for row in rows]
-            assert normalize([row for row in objects if row[2] in viewer_tables])==normalize(viewer_acceptance_schema())
+            _require(normalize([row for row in objects if row[2] in viewer_tables])==normalize(viewer_acceptance_schema()))
             # Only immutable, fully accepted results may cross the maintenance
             # fence. Pending uploads, partial acceptance, active leases, and
             # receipts detached from a succeeded job keep the node held.
@@ -197,12 +201,12 @@ def volume_census(root, *, uid=10001, offline=False):
                   OR COALESCE(r.phase,'')!='completed' OR COALESCE(j.status,'')!='succeeded'
                   OR NOT EXISTS (SELECT 1 FROM reference_viewer_receipts v
                     WHERE v.job_id=t.job_id AND v.acceptance_receipt_id=t.receipt_id) ''').fetchone()[0]
-            assert invalid_reference_jobs==0 and invalid_acceptances==0 and invalid_receipts==0 and invalid_transfers==0
-        assert not any(row[0] in ('trigger','view') for row in objects)
-        assert all(row[0]!='index' or row[1].startswith('sqlite_autoindex_') or row[1]=='viewer_engine_uuid' for row in objects)
+            _require(invalid_reference_jobs==0 and invalid_acceptances==0 and invalid_receipts==0 and invalid_transfers==0)
+        _require(not any(row[0] in ('trigger','view') for row in objects))
+        _require(all(row[0]!='index' or row[1].startswith('sqlite_autoindex_') or row[1]=='viewer_engine_uuid' for row in objects))
         tables={}
         for name in sorted(names):
-            assert name in allowed
+            _require(name in allowed)
             columns=[list(row) for row in db.execute('PRAGMA table_info("'+name+'")')]
             rows=[]
             for row in db.execute('SELECT * FROM "'+name+'"'):
@@ -211,11 +215,11 @@ def volume_census(root, *, uid=10001, offline=False):
             tables[name]=dict(count=len(rows),sha256=sha(rows),columns=columns)
         authority=db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
         active=db.execute("SELECT COUNT(*) FROM jobs WHERE status NOT IN ('succeeded','failed')").fetchone()[0]
-        assert active==0
+        _require(active==0)
         for name in names:
             if ((name.startswith(('reference_','viewer_')) or name=='owned_maintenance_schedules')
                     and name not in (viewer_tables | {'reference_acceptances','reference_jobs'} if present_viewer_tables else set())):
-                assert tables[name]['count']==0
+                _require(tables[name]['count']==0)
         node_columns=[row[1] for row in db.execute('PRAGMA table_info(nodes)')]
         nodes={row[0]:dict(zip(node_columns,row)) for row in db.execute('SELECT * FROM nodes ORDER BY id')}
         return dict(authorityId=authority,schema=objects,tables=tables,files=files,nodeRows=nodes,
@@ -292,25 +296,29 @@ def compatible(observed, baseline, *, ignore_nodes=False, allow_owned=False, all
     if a!=b:raise Stopped('full_census_changed')
 
 
-TLS_CENSUS = """import hashlib,json,os,stat
+TLS_CENSUS = """def _require(condition):
+    if not condition:
+        raise ValueError("coordinator_safety_condition_failed")
+
+import hashlib,json,os,stat
 from pathlib import Path
 root=Path('/run/processing-reference');result=[]
-rs=root.lstat();assert stat.S_ISDIR(rs.st_mode) and rs.st_uid==10001 and rs.st_gid==10001 and stat.S_IMODE(rs.st_mode)==0o700
+rs=root.lstat();_require(stat.S_ISDIR(rs.st_mode) and rs.st_uid==10001 and rs.st_gid==10001 and stat.S_IMODE(rs.st_mode)==0o700)
 for p in sorted(root.rglob('*')):
- s=p.lstat();assert s.st_uid==10001 and s.st_gid==10001 and not stat.S_ISLNK(s.st_mode)
- assert stat.S_ISREG(s.st_mode) and s.st_nlink==1 and s.st_size<=1048576
+ s=p.lstat();_require(s.st_uid==10001 and s.st_gid==10001 and not stat.S_ISLNK(s.st_mode))
+ _require(stat.S_ISREG(s.st_mode) and s.st_nlink==1 and s.st_size<=1048576)
  fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
  try:
-  a=os.fstat(fd);assert (a.st_dev,a.st_ino)==(s.st_dev,s.st_ino)
+  a=os.fstat(fd);_require((a.st_dev,a.st_ino)==(s.st_dev,s.st_ino))
   h=hashlib.sha256();n=0
   while True:
    b=os.read(fd,65536)
    if not b:break
-   n+=len(b);assert n<=s.st_size;h.update(b)
-  z=p.lstat();assert (z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns)==(s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns)
+   n+=len(b);_require(n<=s.st_size);h.update(b)
+  z=p.lstat();_require((z.st_dev,z.st_ino,z.st_size,z.st_mtime_ns)==(s.st_dev,s.st_ino,s.st_size,s.st_mtime_ns))
   result.append(dict(path=p.relative_to(root).as_posix(),uid=s.st_uid,gid=s.st_gid,mode=stat.S_IMODE(s.st_mode),dev=s.st_dev,ino=s.st_ino,bytes=n,sha256=h.hexdigest()))
  finally:os.close(fd)
-assert result
+_require(result)
 print(json.dumps(dict(root=dict(dev=rs.st_dev,ino=rs.st_ino,uid=rs.st_uid,gid=rs.st_gid,mode=stat.S_IMODE(rs.st_mode)),files=result)))
 """
 
@@ -339,10 +347,14 @@ def owned_api_probe(operator):
 
 
 def backup_script():
-    extra=inspect.getsource(volume_census)+'\n'+inspect.getsource(viewer_acceptance_schema)+'''
+    extra=inspect.getsource(volume_census)+'\n'+inspect.getsource(viewer_acceptance_schema)+'''def _require(condition):
+    if not condition:
+        raise ValueError("coordinator_safety_condition_failed")
+
+
 before=volume_census(source,offline=True); copied=volume_census(target,offline=True)
-assert copied.pop('rootMode')==0o700
-comparison=dict(before);comparison.pop('rootMode');assert comparison==copied
+_require(copied.pop('rootMode')==0o700)
+comparison=dict(before);comparison.pop('rootMode');_require(comparison==copied)
 counts['fullCensusSha256']=hashlib.sha256(json.dumps(before,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
 print(json.dumps(counts))
 '''
@@ -352,11 +364,15 @@ print(json.dumps(counts))
 def copy_backup(transport,root,state):
     destination=root/'original-state-backup'
     if destination.exists() or destination.is_symlink():raise Stopped('new_backup_destination_required')
-    installer='''import os,stat,sys
+    installer='''def _require(condition):
+    if not condition:
+        raise ValueError("coordinator_safety_condition_failed")
+
+import os,stat,sys
 from pathlib import Path
-p=Path(sys.argv[1]);assert p.is_absolute() and p.name=='original-state-backup'
-assert p.parent.resolve()==p.parent and not any(q.is_symlink() for q in p.parents)
-s=p.parent.stat();assert s.st_uid==1000 and not stat.S_IMODE(s.st_mode)&0o077
+p=Path(sys.argv[1]);_require(p.is_absolute() and p.name=='original-state-backup')
+_require(p.parent.resolve()==p.parent and not any(q.is_symlink() for q in p.parents))
+s=p.parent.stat();_require(s.st_uid==1000 and not stat.S_IMODE(s.st_mode)&0o077)
 os.mkdir(p,0o700);os.chown(p,10001,10001)
 fd=os.open(p.parent,os.O_RDONLY|os.O_DIRECTORY);os.fsync(fd);os.close(fd)
 '''
