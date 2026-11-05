@@ -313,8 +313,7 @@ class ReferenceEngineWorker:
             job, reservation = identity['job'], identity['reservation']
             with self.ledger._transaction() as db:
                 settings = json.loads(self.ledger._reservation(db, reservation)['settings'])
-            directory = self.ledger.root / 'jobs' / reservation
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            directory = self.ledger.prepare_job_directory(reservation)
             self.ledger._owned_path(reservation, 'jobs/' + reservation + '/all.zip')
             archive = directory / 'all.zip'
             part = directory / '.archive.part'

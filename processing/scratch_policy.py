@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 import re
 import shutil
 import sqlite3
+import stat
 import time
 import secrets
 import unicodedata
@@ -421,6 +422,46 @@ class ScratchLedger:
                        "THEN COALESCE(terminal_at,?) ELSE terminal_at END, "
                        "remaining=CASE WHEN ?='terminal' THEN 0 ELSE remaining END WHERE id=?",
                        (state, state, now, state, reservation_id))
+
+    def prepare_job_directory(self, reservation_id):
+        """Create each owned directory privately, independently of process umask.
+
+        pathlib's parents=True applies its mode only to the last component.
+        Never repair an existing directory's permissions or follow its links.
+        """
+        self._owned_path(reservation_id, 'jobs/' + reservation_id + '/.directory-check')
+        with self._transaction() as db:
+            self._reservation(db, reservation_id)
+        if os.name == 'nt':
+            directory = self.root
+            for component in ('jobs', reservation_id):
+                directory = directory / component
+                directory.mkdir(mode=0o700, exist_ok=True)
+                if directory.is_symlink() or not directory.is_dir():
+                    raise PolicyConflict('owned scratch directory required')
+            return directory
+        descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for component in (None, 'jobs', reservation_id):
+                if component is not None:
+                    try:
+                        os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                    except FileExistsError:
+                        pass
+                    else:
+                        os.fsync(descriptor)
+                    child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                    dir_fd=descriptor)
+                    previous = descriptor
+                    descriptor = child
+                    os.close(previous)
+                observed = os.fstat(descriptor)
+                if (not stat.S_ISDIR(observed.st_mode) or observed.st_uid != os.geteuid()
+                        or observed.st_mode & 0o022):
+                    raise PolicyConflict('scratch directory must be worker-owned without other writers')
+            return self.root / 'jobs' / reservation_id
+        finally:
+            os.close(descriptor)
 
     def _owned_path(self, reservation_id, relative_path):
         if not isinstance(relative_path, str) or "\\" in relative_path or ":" in relative_path:

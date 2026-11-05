@@ -1018,8 +1018,7 @@ class ReferenceDriver:
             else:
                 grant = validate_grant(data['grant'], job=claim, clock=self.clock)
             reservation = data['reservation']['reservationId']
-            directory = self.ledger.root / 'jobs' / reservation
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            directory = self.ledger.prepare_job_directory(reservation)
             paths = dict(data.get('inputPaths', {}))
             for obj in claim['submission']['manifest']['objects']:
                 if obj['id'] in paths:

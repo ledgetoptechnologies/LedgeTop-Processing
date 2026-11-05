@@ -7,6 +7,7 @@ import sqlite3
 import hashlib
 import json
 import copy
+import os
 import importlib.util
 from contextlib import closing
 
@@ -33,6 +34,44 @@ class ScratchPolicyTests(unittest.TestCase):
             environment='production', ttl_seconds=20, worker_ready=True)
         values.update(kwargs)
         return self.ledger.reserve(**values)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX directory permissions')
+    def test_job_directories_are_private_under_permissive_umask(self):
+        self.reserve()
+        previous = os.umask(0o002)
+        try:
+            directory = self.ledger.prepare_job_directory('r1')
+        finally:
+            os.umask(previous)
+        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(directory.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.ledger.prepare_job_directory('r1'), directory)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX directory permissions')
+    def test_job_directory_refuses_existing_other_writers_without_chmod(self):
+        self.reserve()
+        parent = self.root / 'jobs'
+        parent.mkdir(mode=0o700)
+        parent.chmod(0o775)
+        with self.assertRaises(PolicyConflict):
+            self.ledger.prepare_job_directory('r1')
+        self.assertEqual(parent.stat().st_mode & 0o777, 0o775)
+        self.assertFalse((parent / 'r1').exists())
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX nofollow directory traversal')
+    def test_job_directory_refuses_symlink_and_unreserved_name(self):
+        self.reserve()
+        with self.assertRaises(PolicyConflict):
+            self.ledger.prepare_job_directory('unreserved')
+        self.assertFalse((self.root / 'jobs').exists())
+        target = self.root / 'other'
+        target.mkdir(mode=0o700)
+        (self.root / 'jobs').symlink_to(target, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            self.ledger.prepare_job_directory('r1')
+        self.assertEqual(list(target.iterdir()), [])
+        with self.assertRaises(ValueError):
+            self.ledger.prepare_job_directory('../other')
 
     def register(self):
         self.reserve()

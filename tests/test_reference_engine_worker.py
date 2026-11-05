@@ -101,7 +101,7 @@ class ReferenceEngineWorkerTests(unittest.TestCase):
             manifest_sha256=self.job['manifestSha256'], input_bytes=3, output_budget=output_budget,
             environment='staging', ttl_seconds=3600, worker_ready=True)
         directory = self.scratch / 'jobs' / 'reservation-1'
-        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        self.ledger.prepare_job_directory('reservation-1')
         (directory / 'image-1.jpg').write_bytes(b'abc')
         self.ledger.record_allocated('reservation-1', 3)
         self.input_paths = {'image-1': 'jobs/reservation-1/image-1.jpg'}
