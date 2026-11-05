@@ -21,6 +21,7 @@ from .maintenance import Conflict
 from . import reference_protocol as protocol
 from .viewer_result_manifest import derive_viewer_result_manifest, validate_viewer_acceptance
 from .prototype import PROFILE as TREEDAR_PROFILE, VIEWER_PROFILE
+from .reference_source_intake_store import ReferenceSourceIntakeMethods
 
 PROFILE = "reference-pipeline-v1"
 PHASES = {
@@ -35,6 +36,10 @@ PHASES = {
 }
 _NORMALIZED = {"schemaVersion", "submissionId", "manifest", "pipeline", "capabilityFingerprint",
                "environment", "requestDigest", "manifestSha256", "pipelineDigest"}
+_SOURCE_INTAKE_FIELDS = {"schemaVersion", "submissionId", "providerTaskId", "sourceManifest",
+                         "derivedManifest", "manifest", "pipeline", "capabilityFingerprint",
+                         "environment", "requestDigest", "manifestSha256", "sourceManifestSha256",
+                         "derivedManifestSha256", "pipelineDigest"}
 
 
 def _json(value):
@@ -46,7 +51,7 @@ def _reason(value):
         raise ValueError("error must be a bounded reason code")
 
 
-class ReferenceStore:
+class ReferenceStore(ReferenceSourceIntakeMethods):
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
                  main_node_id=None, node_limits=None, node_option_validator=None):
@@ -114,6 +119,27 @@ class ReferenceStore:
                   manifest_sha TEXT NOT NULL, pipeline_digest TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1,
                   phase TEXT NOT NULL, node_id TEXT, transfer_json TEXT, result_json TEXT, error TEXT,
                   created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE IF NOT EXISTS reference_source_intakes (
+                  job_id TEXT PRIMARY KEY REFERENCES reference_jobs(job_id),
+                  request_digest TEXT NOT NULL, source_manifest_json TEXT NOT NULL,
+                  viewer_task_id TEXT, provider_task_id TEXT, source_attestation_json TEXT,
+                  source_attestation_sha TEXT,
+                  derived_manifest_json TEXT NOT NULL, source_manifest_sha TEXT NOT NULL,
+                  derived_manifest_sha TEXT NOT NULL, pipeline_manifest_sha TEXT NOT NULL,
+                  reserved_bytes INTEGER NOT NULL DEFAULT 0 CHECK(reserved_bytes>=0),
+                  source_receipt_json TEXT, source_receipt_sha TEXT,
+                  derived_receipt_json TEXT, derived_receipt_sha TEXT,
+                  source_state TEXT NOT NULL CHECK(source_state IN ('receiving','accepted','held')),
+                  derived_state TEXT NOT NULL CHECK(derived_state IN ('receiving','accepted','held')),
+                  created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP);
+                CREATE TABLE IF NOT EXISTS reference_source_object_receipts (
+                  job_id TEXT NOT NULL REFERENCES reference_source_intakes(job_id),
+                  generation INTEGER NOT NULL, object_id TEXT NOT NULL,
+                  object_kind TEXT NOT NULL CHECK(object_kind IN ('source','derived')),
+                  storage_key TEXT NOT NULL, byte_size INTEGER NOT NULL, sha256 TEXT NOT NULL,
+                  mount_id TEXT NOT NULL, receipt_json TEXT NOT NULL,
+                  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                  PRIMARY KEY(job_id,generation,object_id));
                 CREATE TABLE IF NOT EXISTS reference_acceptances (
                   receipt_id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES reference_jobs(job_id),
                   digest TEXT NOT NULL, receipt_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -142,7 +168,23 @@ class ReferenceStore:
                   job_id TEXT NOT NULL, receipt_json TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS reference_transfer_grants (
                   job_id TEXT PRIMARY KEY, grant_json TEXT NOT NULL, digest TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS reference_source_grant_tokens (
+                  token_sha256 TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES reference_jobs(job_id),
+                  generation INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
             """)
+            intake_columns = {row[1] for row in db.execute('PRAGMA table_info(reference_source_intakes)')}
+            if 'reserved_bytes' not in intake_columns:
+                db.execute('ALTER TABLE reference_source_intakes ADD COLUMN reserved_bytes INTEGER NOT NULL DEFAULT 0 CHECK(reserved_bytes>=0)')
+                for intake in db.execute('SELECT job_id,source_manifest_json,derived_manifest_json FROM reference_source_intakes').fetchall():
+                    source=json.loads(intake['source_manifest_json']);derived=json.loads(intake['derived_manifest_json'])
+                    db.execute('UPDATE reference_source_intakes SET reserved_bytes=? WHERE job_id=?',
+                        (source['totalBytes']+sum(item['byteSize'] for item in derived['objects']),intake['job_id']))
+            for column in ('source_receipt_json','source_receipt_sha','derived_receipt_json','derived_receipt_sha'):
+                if column not in intake_columns:
+                    db.execute(f'ALTER TABLE reference_source_intakes ADD COLUMN {column} TEXT')
+            for column in ('viewer_task_id','provider_task_id','source_attestation_json','source_attestation_sha'):
+                if column not in intake_columns:
+                    db.execute(f'ALTER TABLE reference_source_intakes ADD COLUMN {column} TEXT')
             transfer_columns = {row[1] for row in db.execute('PRAGMA table_info(reference_viewer_transfers)')}
             if 'viewer_manifest_json' not in transfer_columns:
                 db.execute('ALTER TABLE reference_viewer_transfers ADD COLUMN viewer_manifest_json TEXT')
@@ -158,10 +200,22 @@ class ReferenceStore:
         failure_join = 'LEFT JOIN reference_worker_failures f ON f.job_id=r.job_id AND f.generation=r.generation' if has_failure else ''
         row = db.execute(f"""SELECT r.*,j.status,j.result AS queue_result,j.claim_hash,j.held_reason,c.token AS private_claim_token,
           {failure_columns},
-          g.grant_json AS private_grant_json
+          g.grant_json AS private_grant_json,
+          s.request_digest AS source_request_digest,s.viewer_task_id,s.provider_task_id,
+          s.source_attestation_json,s.source_attestation_sha,s.source_manifest_json,s.derived_manifest_json,
+          s.source_manifest_sha,s.derived_manifest_sha,s.pipeline_manifest_sha,
+          s.source_state,s.derived_state,s.reserved_bytes,s.source_receipt_json,s.source_receipt_sha,
+          s.derived_receipt_json,s.derived_receipt_sha,
+          (SELECT json_group_array(json_object('objectId',sr.object_id,'objectKind',sr.object_kind,
+              'byteSize',sr.byte_size,'sha256',sr.sha256,'generation',sr.generation,
+              'manifestSha256',CASE WHEN sr.object_kind='source' THEN s.source_manifest_sha ELSE s.derived_manifest_sha END))
+              FROM (SELECT * FROM reference_source_object_receipts
+                    WHERE job_id=r.job_id AND generation=r.generation ORDER BY object_kind,object_id) sr
+              ) AS source_object_receipts_json
           FROM reference_jobs r JOIN jobs j ON j.id=r.job_id
           LEFT JOIN reference_claims c ON c.job_id=r.job_id
           LEFT JOIN reference_transfer_grants g ON g.job_id=r.job_id
+          LEFT JOIN reference_source_intakes s ON s.job_id=r.job_id
           {failure_join}
           WHERE r.job_id=? AND j.profile=?""", (job_id, PROFILE)).fetchone()
         if row is None:
@@ -173,13 +227,22 @@ class ReferenceStore:
         grant = json.loads(row['private_grant_json']) if row['private_grant_json'] else None
         recovering = row["status"] == "held" and row["held_reason"] == "coordinator_restart"
         phase, status, error = ('held' if recovering else row['phase']), row['status'], ('coordinator_restart' if recovering else row['error'])
+        source_receiving = row['source_state'] is not None and (
+            row['source_state'] != 'accepted' or row['derived_state'] != 'accepted')
+        source_held = row['source_state'] == 'held' or row['derived_state'] == 'held'
+        if not recovering and source_held:
+            phase, status, error = 'held', 'held', 'source_receipt_held'
+        elif not recovering and source_receiving:
+            phase = 'source_receiving'
         if row['terminal_failure_json'] and row['failure_delivery_state'] == 'awaiting_viewer_failure_acceptance' and status == 'failed':
             failure = json.loads(row['terminal_failure_json'])
             expected = {key: failure[key] for key in ('failureSha256', 'terminalState', 'errorCode')}
             if row['queue_result'] and json.loads(row['queue_result']) == expected:
                 status, error = failure['terminalState'], failure['errorCode']
                 phase = 'completed' if row['phase'] == 'completed' else 'awaiting_acceptance'
-        return {"jobId": row["job_id"], "generation": row["generation"],
+        result_record = {"jobId": row["job_id"], "attemptId": row['submission_id'],
+                "providerTaskId": row['job_id'] if json.loads(row['input_json'])['pipeline']['odm']['requested'] else None,
+                "generation": row["generation"],
                 "environment": row["environment"], "phase": phase,
                 "manifestSha256": row["manifest_sha"], "pipelineDigest": row["pipeline_digest"],
                 "status": status, "nodeId": row["node_id"],
@@ -187,6 +250,32 @@ class ReferenceStore:
                 "transferGrantAcknowledgement": self._transfer_grant_ack(grant) if grant else None,
                 "error": error,
                 "resultManifestSha256": result["resultManifestSha256"] if result else None}
+        if row['source_state'] is not None:
+            result_record.update(sourceIntakeVersion=2,
+                sourceState='retained' if row['source_state']=='accepted' else row['source_state'],
+                derivedState='retained' if row['derived_state']=='accepted' else row['derived_state'],
+                sourceManifestSha256=row['source_manifest_sha'],
+                derivedManifestSha256=row['derived_manifest_sha'],
+                pipelineManifestSha256=row['pipeline_manifest_sha'],
+                pipelineDigest=row['pipeline_digest'],
+                providerTaskId=row['provider_task_id'],
+                sourceReceipt=json.loads(row['source_receipt_json']) if row['source_receipt_json'] else None,
+                sourceReceiptSha256=row['source_receipt_sha'],
+                derivedReceipt=json.loads(row['derived_receipt_json']) if row['derived_receipt_json'] else None,
+                derivedReceiptSha256=row['derived_receipt_sha'],
+                sourceObjectReceipts=json.loads(row['source_object_receipts_json'] or '[]'),
+                derivedObjectReceipts=[])
+            if result_record['sourceObjectReceipts']:
+                acks = result_record['sourceObjectReceipts']
+                result_record['sourceObjectReceipts'] = [ack for ack in acks if ack['objectKind']=='source']
+                result_record['derivedObjectReceipts'] = [ack for ack in acks if ack['objectKind']=='derived']
+            if not recovering and source_held:
+                result_record.update(queueReason='source_receipt_held',
+                    queueMessage='Waiting for operator resolution of source custody.')
+            elif not recovering and source_receiving:
+                result_record.update(queueReason='source_receiving',
+                    queueMessage='Waiting for durable source and derived input receipts.')
+        return result_record
 
     def _record(self, row, private):
         result = self._public(row)
@@ -200,6 +289,9 @@ class ReferenceStore:
         used = db.execute("""SELECT COALESCE(SUM(length(CAST(input_json AS BLOB))+
           COALESCE(length(CAST(transfer_json AS BLOB)),0)+COALESCE(length(CAST(result_json AS BLOB)),0)),0)
           FROM reference_jobs""").fetchone()[0]
+        used += db.execute("""SELECT COALESCE(SUM(length(CAST(source_manifest_json AS BLOB))+
+          length(CAST(derived_manifest_json AS BLOB))),0) FROM reference_source_intakes""").fetchone()[0]
+        used += db.execute("SELECT COALESCE(SUM(length(CAST(receipt_json AS BLOB))),0) FROM reference_source_object_receipts").fetchone()[0]
         for table, column in (("reference_acceptances", "receipt_json"), ("reference_outbox", "payload_json"),
                               ("reference_viewer_receipts", "receipt_json"),
                               ("reference_viewer_transfers", "acceptance_json"),
@@ -482,6 +574,8 @@ class ReferenceStore:
             self.queue._refresh_nodes(db)
             if row["phase"] not in ("queued", "waiting_capacity"):
                 raise Conflict("reference phase cannot be claimed")
+            if row['source_state'] is not None and (row['source_state']!='accepted' or row['derived_state']!='accepted'):
+                raise Conflict("reference source custody is incomplete")
             submission = json.loads(row["input_json"])
             candidate = self._candidate_row(db, node_id)
             if candidate is None or candidate["job_id"] != job_id:
@@ -522,9 +616,12 @@ class ReferenceStore:
         row = db.execute('''SELECT r.*,j.status AS queue_status,j.environment AS queue_environment,
             j.node_id AS queue_node,j.worker_id AS queue_worker,j.claim_hash AS queue_claim_hash,
             j.held_reason,c.request_id AS claim_request,c.node_id AS claim_node,
-            c.worker_id AS claim_worker,c.instance_id AS claim_instance,c.token AS claim_token
+            c.worker_id AS claim_worker,c.instance_id AS claim_instance,c.token AS claim_token,
+            s.source_state,s.derived_state
             FROM reference_jobs r JOIN jobs j ON j.id=r.job_id
-            JOIN reference_claims c ON c.job_id=r.job_id WHERE r.job_id=? AND j.profile=?''',
+            JOIN reference_claims c ON c.job_id=r.job_id
+            LEFT JOIN reference_source_intakes s ON s.job_id=r.job_id
+            WHERE r.job_id=? AND j.profile=?''',
             (job_id, PROFILE)).fetchone()
         if (not authority or authority['authority_id'] != self.queue.authority_id or row is None
                 or (row['node_id'], row['queue_node'], row['claim_node']) != (node_id,) * 3
@@ -547,23 +644,33 @@ class ReferenceStore:
             _reason(row['held_reason'])
             submission = json.loads(row['input_json'])
             if (row['phase'] not in PHASES
+                    or row['source_state'] is not None and (row['source_state']!='accepted' or row['derived_state']!='accepted')
                     or row['queue_status'] not in ('running', 'held', 'succeeded', 'failed', 'cancelled')
                     or row['queue_status'] != 'held' and row['held_reason'] is not None
                     or submission['environment'] != row['environment']
                     or submission['manifestSha256'] != row['manifest_sha']
                     or submission['pipelineDigest'] != row['pipeline_digest']
-                    or protocol.manifest_sha256(submission['manifest']) != row['manifest_sha']
-                    or protocol.digest(submission['pipeline']) != row['pipeline_digest']):
+                    or protocol.manifest_sha256(submission['manifest']) != row['manifest_sha']):
                 raise ValueError()
+            if row['source_state'] is None:
+                if protocol.digest(submission['pipeline']) != row['pipeline_digest']:
+                    raise ValueError()
+            else:
+                from .reference_source_intake_canonical import pipeline_digest as v2_pipeline_digest
+                if v2_pipeline_digest(submission['pipeline']) != row['pipeline_digest']:
+                    raise ValueError()
         except (KeyError, TypeError, ValueError):
             raise Conflict('persisted claim binding unavailable') from None
-        return dict(schemaVersion=1, protocol='ltds-parent-claim-v1',
+        result = dict(schemaVersion=1, protocol='ltds-parent-claim-v1',
             authorityId=authority['authority_id'], jobId=job_id, generation=row['generation'],
             environment=row['environment'], nodeId=node_id, workerId=worker_id,
             workerInstanceId=worker_instance_id, claimRequestId=row['claim_request'],
             claimTokenSha256=supplied_hash, manifestSha256=row['manifest_sha'],
             pipelineDigest=row['pipeline_digest'], status=row['queue_status'],
             executionPhase=row['phase'], heldReason=row['held_reason'])
+        if row['source_state'] is not None:
+            result['sourceIntakeVersion'] = 2
+        return result
 
     def update_phase(self, job_id, phase, *, expected_phase=None, error=None):
         _reason(error)

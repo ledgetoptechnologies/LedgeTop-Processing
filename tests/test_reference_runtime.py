@@ -245,6 +245,33 @@ class ReferenceRuntimeTests(unittest.TestCase):
         for value in bad_values:
             self.value = value; self.write_config()
             with self.subTest(value=value), self.assertRaises(RuntimeConfigurationError): self.settings()
+
+    def test_schema6_loads_private_source_spool_and_pinned_attestation_signer(self):
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        spool_root=self.root/'source-spool';spool_root.mkdir(mode=0o700)
+        marker=spool_root/'.ltds-source-spool-id';marker.write_text('a'*64,encoding='ascii')
+        secret=self.root/'viewer-source-service-key.txt';secret.write_text('synthetic-viewer-service-key-material')
+        if os.name!='nt':
+            marker.chmod(0o600);secret.chmod(0o600)
+        source_key=Ed25519PrivateKey.generate().public_key().public_bytes(
+            serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode('ascii')
+        self.value=self.recovery_config()
+        self.value.update(schemaVersion=6,viewerReceiptKeys=SyntheticViewerSigner().trusted_keys,
+            viewerAcceptance={'staging':{'origin':'https://viewer.example','keyId':'viewer-service-v1','secretFile':str(secret)}},
+            sourceSpool={'root':str(spool_root),'mountPath':str(spool_root),'mountId':'a'*64,
+                'markerName':'.ltds-source-spool-id','safetyFloorBytes':0,'maxObjectBytes':1024,'chunkBytes':16},
+            sourceAttestationKeys=[{'environment':'staging','issuerId':'viewer-test','keyId':'source-v1',
+                'principalId':'viewer-staging','publicKeyPem':source_key}])
+        self.write_config()
+        with patch('processing.source_spool.os.path.ismount',return_value=True):
+            loaded=self.settings()
+        self.assertIsNotNone(loaded.source_spool)
+        self.assertEqual(loaded.source_spool.mount_id,'a'*64)
+        self.assertEqual(loaded.source_attestation_keys.records.keys(),{('staging','viewer-test','source-v1')})
+        self.value['sourceAttestationKeys'][0]['publicKeyPem']='not-a-key';self.write_config()
+        with patch('processing.source_spool.os.path.ismount',return_value=True):
+            with self.assertRaises(RuntimeConfigurationError):self.settings()
     def test_schema2_rejects_duplicate_engine_ids_and_accepts_unique_daemon_bindings(self):
         self.value=self.recovery_config();self.write_config()
         self.assertEqual(set(self.settings().recovery_bindings),{'cluster','main'})

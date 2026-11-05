@@ -17,6 +17,7 @@ from processing.reference_protocol import digest
 from processing.reference_store import ReferenceStore, PROFILE
 from processing.reference_failure import FailureOutbox, make_failure
 from processing.reference_binary import BinaryResponse
+from processing.reference_api import Response
 
 
 STAGING = "synthetic-http-staging-token"
@@ -222,6 +223,27 @@ class ReferenceHTTPTests(unittest.TestCase):
         headers, body = result.split(b"\r\n\r\n", 1)
         status = int(headers.split(b" ", 2)[1])
         return status, json.loads(body), headers
+
+    def test_v2_source_put_is_streamed_without_metadata_body_cap(self):
+        received=[]
+        class StreamingAPI:
+            def handle(self,*args,**kwargs):return Response(404,{"error":"not_found"})
+            def stream_source_object(self,path,headers,reader,length,*,protected_transport=False):
+                received.append((path,length,reader.read(length),protected_transport))
+                return Response(201,{"received":length})
+        server=create_reference_http_server(StreamingAPI(),request_timeout=1)
+        thread=threading.Thread(target=server.serve_forever,kwargs={"poll_interval":0.02})
+        thread.start()
+        try:
+            connection=http.client.HTTPConnection(*server.server_address,timeout=2)
+            connection.request("PUT","/ltds/v2/jobs/job-1/source/object-1?generation=1",body=b"synthetic-bytes",
+                headers={"Authorization": "Bearer " + STAGING,"Content-SHA256":"a"*64})
+            response=connection.getresponse();body=json.loads(response.read());connection.close()
+            self.assertEqual((response.status,body),(201,{"received":15}))
+            self.assertEqual(received,[('/ltds/v2/jobs/job-1/source/object-1?generation=1',15,
+                b"synthetic-bytes",True)])
+        finally:
+            server.shutdown();server.server_close();thread.join(2)
 
     def test_real_http_auth_capability_submit_status_replay_and_cross_environment(self):
         self.assertEqual(self.request("GET", "/ltds/v1/capabilities", token=None)[0], 401)

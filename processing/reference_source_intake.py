@@ -11,6 +11,8 @@ import re
 
 from . import reference_protocol as p
 
+SOURCE_PREFIX = "/ltds/v2"
+
 
 SOURCE_MANIFEST_FIELDS = (
     "schemaVersion", "id", "datasetManifestSha256", "sha256",
@@ -28,7 +30,8 @@ DERIVED_OBJECT_FIELDS = (
 )
 INTAKE_FIELDS = (
     "schemaVersion", "submissionId", "providerTaskId", "sourceManifest",
-    "derivedManifest", "manifest", "pipeline", "capabilityFingerprint",
+    "viewerTaskId", "derivedManifest", "manifest", "pipeline", "capabilityFingerprint",
+    "sourceAttestation",
 )
 MAX_SOURCE_BYTES = p.MAX_SAFE_INTEGER
 
@@ -135,7 +138,8 @@ def _validate_derived_manifest(value, attempt_id):
 
 def validate_source_intake(payload, *, environment, capability_fingerprint,
                            options_fingerprint=None, allowed_odm_options=None,
-                           available_engines=("odm", "treedar")):
+                           available_engines=("odm", "treedar"),
+                           trusted_source_keys=None, authority_id=None):
     """Validate a v2 Viewer submission and return a detached normalized copy.
 
     The caller must durably persist every identity/digest before acknowledging
@@ -156,6 +160,8 @@ def validate_source_intake(payload, *, environment, capability_fingerprint,
                "invalid providerTaskId")
     if provider_task_id is not None:
         p._uuid(provider_task_id, "providerTaskId")
+    viewer_task_id = payload["viewerTaskId"]
+    p._uuid(viewer_task_id, "viewerTaskId")
     p._environment(environment)
 
     source_objects = _validate_source_manifest(payload["sourceManifest"])
@@ -178,6 +184,25 @@ def validate_source_intake(payload, *, environment, capability_fingerprint,
         options_fingerprint=options_fingerprint,
         allowed_odm_options=allowed_odm_options,
         available_engines=available_engines)
+    from .reference_source_intake_canonical import pipeline_digest as v2_pipeline_digest
+    checked["pipelineDigest"] = v2_pipeline_digest(checked["pipeline"])
+
+    # The Viewer signs its server-owned prepared attempt and source snapshot.
+    # Verify this against the authenticated bearer environment and configured
+    # queue authority before recording any claimable job metadata.
+    if trusted_source_keys is None or authority_id is None:
+        raise p.ProtocolError("source attestation verification is not configured")
+    p._uuid(authority_id, "queue authority ID")
+    from .viewer_source_attestation import validate_and_verify
+    attestation = validate_and_verify(payload["sourceAttestation"],
+        trusted_keys=trusted_source_keys, authority_id=authority_id,
+        environment=environment, submission_id=payload["submissionId"],
+        provider_task_id=provider_task_id, attempt_id=payload["submissionId"],
+        viewer_task_id=viewer_task_id,
+        source_manifest_sha256=payload["sourceManifest"]["sha256"],
+        derived_manifest_sha256=payload["derivedManifest"]["sha256"],
+        pipeline_manifest_sha256=checked["manifestSha256"],
+        pipeline_digest=checked["pipelineDigest"])
 
     pipeline_objects = checked["manifest"]["objects"]
     for item in pipeline_objects:
@@ -198,5 +223,7 @@ def validate_source_intake(payload, *, environment, capability_fingerprint,
                   manifestSha256=checked["manifestSha256"],
                   sourceManifestSha256=payload["sourceManifest"]["sha256"],
                   derivedManifestSha256=payload["derivedManifest"]["sha256"],
-                  pipelineDigest=checked["pipelineDigest"])
+                  pipelineDigest=checked["pipelineDigest"],
+                  sourceAttestation=attestation,
+                  viewerTaskId=viewer_task_id)
     return result

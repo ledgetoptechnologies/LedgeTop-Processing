@@ -161,7 +161,10 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             return False
 
         def _dispatch(self):
-            if "?" in self.path or "#" in self.path:
+            source_put = (self.command == "PUT" and re.fullmatch(
+                r"/ltds/v2/jobs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}/source/"
+                r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\?generation=[1-9][0-9]{0,8}", self.path))
+            if "#" in self.path or ("?" in self.path and not source_put):
                 self._error(400, "invalid_request_target")
                 return
             if self.headers.get_all("Transfer-Encoding"):
@@ -172,7 +175,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                     self._error(400, "duplicate_header")
                     return
             lengths = self.headers.get_all("Content-Length", [])
-            if not lengths and self.command == "POST":
+            if not lengths and self.command in ("POST", "PUT"):
                 self._error(411, "content_length_required")
                 return
             length = 0
@@ -181,12 +184,24 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                 if not re.fullmatch(r"[0-9]+", text):
                     self._error(400, "invalid_content_length")
                     return
-                if len(text) > 10 or int(text) > MAX_BODY_BYTES:
+                if len(text) > 20 or (self.command != "PUT" and int(text) > MAX_BODY_BYTES):
                     self._error(413, "metadata_too_large")
                     return
                 length = int(text)
-            if self.command != "POST" and length:
+            if self.command not in ("POST", "PUT") and length:
                 self._error(400, "unexpected_request_body")
+                return
+            if self.command == "PUT":
+                if not source_put or not callable(getattr(api, "stream_source_object", None)):
+                    self._error(404, "not_found")
+                    return
+                try:
+                    response = api.stream_source_object(self.path, dict(self.headers.items()), self.rfile, length,
+                        protected_transport=_protected(self.connection))
+                except Exception:
+                    self._error(500, "internal_error")
+                    return
+                self._reply(response)
                 return
             try:
                 body = self.rfile.read(length) if length else b""

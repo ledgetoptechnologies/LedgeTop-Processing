@@ -1,11 +1,23 @@
 import copy
+import base64
 import hashlib
 import json
+import io
+import os
 from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 from processing import reference_protocol as p
+from processing import viewer_source_attestation as attest
+from processing.reference_source_intake_canonical import pipeline_digest
 from processing.reference_source_intake import validate_source_intake
+from processing.prototype import Queue
+from processing.reference_api import ReferenceAPI
+from processing.reference_store import PROFILE, ReferenceStore
+from processing.source_spool import SourceSpool
+from processing.maintenance import Conflict
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / "contracts" / "reference-v1-fixtures.json"
@@ -14,6 +26,8 @@ ATTEMPT = "00000000-0000-4000-8000-000000000001"
 DATASET = "00000000-0000-4000-8000-000000000002"
 IMAGE_ID = "00000000-0000-4000-8000-000000000010"
 GCP_ID = "00000000-0000-4000-8000-000000000020"
+TASK = "00000000-0000-4000-8000-000000000030"
+AUTHORITY = "00000000-0000-4000-8000-000000000040"
 
 
 def sha(value):
@@ -22,6 +36,12 @@ def sha(value):
 
 class ReferenceSourceIntakeTests(unittest.TestCase):
     def setUp(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+        self.signing_key = Ed25519PrivateKey.generate()
+        self.trusted_keys = [{"environment":"staging","issuerId":"viewer-test","keyId":"source-test",
+            "principalId":"viewer-staging","publicKeyPem":self.signing_key.public_key().public_bytes(
+                serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode("ascii")}]
         fixtures = json.loads(FIXTURES.read_text(encoding="utf-8"))
         image_bytes = b"abc"
         gcp_bytes = b"id,lat,lon\n1,2,3\n"
@@ -30,6 +50,7 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
             "schemaVersion": 2,
             "submissionId": ATTEMPT,
             "providerTaskId": "00000000-0000-4000-8000-000000000003",
+            "viewerTaskId": TASK,
             "sourceManifest": {
                 "schemaVersion": 1,
                 "id": DATASET,
@@ -85,11 +106,28 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
         self.payload["manifest"]["sha256"] = p.manifest_sha256(self.payload["manifest"])
 
     def validate(self, payload=None, **kwargs):
+        payload = copy.deepcopy(payload or self.payload)
+        proof = {"schemaVersion":2,"protocol":attest.PROTOCOL,"issuerId":"viewer-test","keyId":"source-test",
+            "principalId":"viewer-staging","authorityId":getattr(self,"authority_id",AUTHORITY),"environment":"staging",
+            "submissionId":payload["submissionId"],"viewerAttemptId":payload["submissionId"],
+            "viewerTaskId":payload["viewerTaskId"],"providerTaskId":payload["providerTaskId"],
+            "activationId":"00000000-0000-4000-8000-000000000050",
+            "preparedEnvelopeSha256":"1"*64,"sourceSnapshotSha256":"2"*64,
+            "sourceManifestSha256":payload["sourceManifest"]["sha256"],
+            "derivedManifestSha256":payload["derivedManifest"]["sha256"],
+            "pipelineManifestSha256":payload["manifest"]["sha256"],
+            "pipelineDigest":pipeline_digest(payload["pipeline"])}
+        message=attest.DOMAIN+p.canonical_json(proof)
+        signature=self.signing_key.sign(message)
+        payload["sourceAttestation"]={"proof":proof,
+            "signature":base64.urlsafe_b64encode(signature).decode("ascii").rstrip("="),
+            "attestationSha256":hashlib.sha256(message).hexdigest()}
         options = dict(capability_fingerprint="a" * 64,
                        options_fingerprint=self.payload["pipeline"]["odm"]["optionsFingerprint"],
-                       allowed_odm_options=set())
+                       allowed_odm_options=set(), trusted_source_keys=self.trusted_keys,
+                       authority_id=getattr(self,"authority_id",AUTHORITY))
         options.update(kwargs)
-        return validate_source_intake(payload or self.payload, environment="staging",
+        return validate_source_intake(payload, environment="staging",
             **options)
 
     def test_valid_raw_and_derived_closures_bind_to_existing_pipeline_manifest(self):
@@ -99,7 +137,7 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
         self.assertEqual(result["sourceManifestSha256"], self.payload["sourceManifest"]["sha256"])
         self.assertEqual(result["derivedManifestSha256"], self.payload["derivedManifest"]["sha256"])
         self.assertEqual(result["manifestSha256"], self.payload["manifest"]["sha256"])
-        self.assertEqual(result["pipelineDigest"], p.digest(self.payload["pipeline"]))
+        self.assertEqual(result["pipelineDigest"], pipeline_digest(self.payload["pipeline"]))
         self.assertEqual(len(result["sourceManifest"]["objects"]), 2)
         self.assertTrue(self.payload["manifest"]["objects"][-1]["id"].startswith("gcp_"))
         result["sourceManifest"]["objects"].clear()
@@ -214,6 +252,91 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
             self.validate(candidate)
         with self.assertRaisesRegex(p.ProtocolError, "stale capability"):
             self.validate(capability_fingerprint="f" * 64)
+
+    def test_authenticated_post_streamed_objects_completion_and_exact_replay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/"spool";root.mkdir(mode=0o700)
+            marker=root/".ltds-source-spool-id";marker.write_text("a"*64,encoding="ascii")
+            if os.name!="nt":marker.chmod(0o600)
+            self.mount_patch=patch("processing.source_spool.os.path.ismount",return_value=True)
+            self.mount_patch.start()
+            try:
+                spool=SourceSpool(root,mount_id="a"*64,safety_floor_bytes=0,max_object_bytes=1024,chunk_bytes=3)
+                queue=Queue(directory);queue.allowed_profiles.add(PROFILE)
+                try:
+                    self.authority_id=queue.authority_id
+                    self.payload["pipeline"]["odm"]["options"]={"numeric-probe":1e-7}
+                    api=ReferenceAPI(ReferenceStore(queue),bearer_tokens={"synthetic-staging-token":"staging"},
+                        capability_fingerprint="a"*64,options_fingerprint=self.payload["pipeline"]["odm"]["optionsFingerprint"],
+                        allowed_odm_options={"numeric-probe"},source_spool=spool,
+                        source_attestation_keys=self.trusted_keys,authority_id=queue.authority_id)
+                    signed_payload=self.validate(allowed_odm_options={"numeric-probe"})
+                    request=copy.deepcopy(self.payload)
+                    request["sourceAttestation"]=signed_payload["sourceAttestation"]
+                    response=api.handle("POST","/ltds/v2/jobs",{"Authorization":"Bearer synthetic-staging-token"},
+                        p.canonical_json(request),protected_transport=True)
+                    self.assertEqual(response.status,201,response.body)
+                    job=response.body
+                    self.assertEqual((job["sourceIntakeVersion"],job["phase"],job["sourceState"],job["derivedState"]),
+                        (2,"source_receiving","receiving","receiving"))
+                    with self.assertRaises(Conflict):
+                        api.store.claim(job["jobId"],node_id="cluster",worker_id="worker",
+                            worker_instance_id="instance",claim_request_id="before-receipts")
+                    body_map={IMAGE_ID:b"abc",GCP_ID:b"id,lat,lon\n1,2,3\n","gcp_"+ATTEMPT:b"1,2,3\n"}
+                    for object_id,body in body_map.items():
+                        item=next(obj for obj in self.payload["sourceManifest"]["objects"]+
+                            self.payload["derivedManifest"]["objects"] if obj["id"]==object_id)
+                        receipt=api.stream_source_object(f"/ltds/v2/jobs/{job['jobId']}/source/{object_id}?generation=1",
+                            {"Authorization":"Bearer synthetic-staging-token","Content-SHA256":item["sha256"]},
+                            io.BytesIO(body),len(body),protected_transport=True)
+                        self.assertEqual(receipt.status,201,receipt.body)
+                    completion={"generation":1,"sourceManifestSha256":self.payload["sourceManifest"]["sha256"],
+                        "derivedManifestSha256":self.payload["derivedManifest"]["sha256"],
+                        "pipelineManifestSha256":self.payload["manifest"]["sha256"]}
+                    completed=api.handle("POST",f"/ltds/v2/jobs/{job['jobId']}/source/complete",
+                        {"Authorization":"Bearer synthetic-staging-token"},p.canonical_json(completion),protected_transport=True)
+                    self.assertEqual(completed.status,201,completed.body)
+                    self.assertEqual((completed.body["phase"],completed.body["sourceState"],completed.body["derivedState"]),
+                        ("queued","retained","retained"))
+                    self.assertEqual(len(completed.body["sourceObjectReceipts"]),2)
+                    self.assertEqual(len(completed.body["derivedObjectReceipts"]),1)
+                    claim=api.store.claim(job["jobId"],node_id="cluster",worker_id="worker",
+                        worker_instance_id="instance",claim_request_id="after-receipts")
+                    self.assertEqual((claim["sourceIntakeVersion"],claim["submission"]["sourceIntakeVersion"]),(2,2))
+                    parent_claim=api.store.claim_snapshot(job["jobId"],node_id="cluster",worker_id="worker",
+                        worker_instance_id="instance",claim_token=claim["claimToken"])
+                    self.assertEqual(parent_claim["sourceIntakeVersion"],2)
+                    replay=api.handle("POST","/ltds/v2/jobs",{"Authorization":"Bearer synthetic-staging-token"},
+                        p.canonical_json(request),protected_transport=True)
+                    self.assertEqual((replay.status,replay.body["jobId"]),(200,job["jobId"]))
+                    self.assertEqual(replay.body["sourceReceipt"],completed.body["sourceReceipt"])
+                    queue.close()
+                    queue=Queue(directory);queue.allowed_profiles.add(PROFILE)
+                    reopened=ReferenceStore(queue)
+                    self.assertEqual(reopened.reconcile_source_spool(spool),{"jobs":1,"adopted":0,"held":0})
+                    stored=reopened.get(job["jobId"],private=True)
+                    self.assertEqual(stored["submission"]["sourceIntakeVersion"],2)
+                    recovered_claim=reopened.claim_snapshot(job["jobId"],node_id="cluster",worker_id="worker",
+                        worker_instance_id="instance",claim_token=claim["claimToken"])
+                    self.assertEqual(recovered_claim["sourceIntakeVersion"],2)
+                    replay_api=ReferenceAPI(reopened,bearer_tokens={"synthetic-staging-token":"staging"},
+                        capability_fingerprint="a"*64,options_fingerprint=self.payload["pipeline"]["odm"]["optionsFingerprint"],
+                        allowed_odm_options={"numeric-probe"},source_spool=spool,
+                        source_attestation_keys=self.trusted_keys,authority_id=queue.authority_id)
+                    recovered=replay_api.handle("POST","/ltds/v2/jobs",{"Authorization":"Bearer synthetic-staging-token"},
+                        p.canonical_json(request),protected_transport=True)
+                    self.assertEqual((recovered.status,recovered.body["sourceReceipt"]),
+                        (200,completed.body["sourceReceipt"]))
+                    changed=copy.deepcopy(self.payload);changed["pipeline"]["odm"]["options"]["numeric-probe"]=2e-7
+                    changed_signature=self.validate(changed,allowed_odm_options={"numeric-probe"})
+                    changed["sourceAttestation"]=changed_signature["sourceAttestation"]
+                    conflict=replay_api.handle("POST","/ltds/v2/jobs",{"Authorization":"Bearer synthetic-staging-token"},
+                        p.canonical_json(changed),protected_transport=True)
+                    self.assertEqual(conflict.status,409)
+                finally:
+                    if queue is not None:queue.close()
+            finally:
+                self.mount_patch.stop()
 
 
 if __name__ == "__main__":

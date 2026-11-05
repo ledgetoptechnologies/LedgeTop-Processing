@@ -4,3 +4,6 @@
 cryptography==50.0.2
 cffi==2.1.1
 pycparser==3.12
+# V2 source-intake pipeline hashes must match Viewer's ECMAScript/JCS encoding.
+# Do not replace the existing V1 digest function or reinterpret persisted jobs.
+rfc8785==0.1.4

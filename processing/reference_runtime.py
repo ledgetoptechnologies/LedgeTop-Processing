@@ -29,6 +29,7 @@ from .reference_store import ReferenceStore
 from .reference_tls import verified_client_context
 from .reference_recovery import RecoveryNodeBinding
 from .config import normalized_node_origin
+from .reference_source_intake import SOURCE_PREFIX
 
 MAX_CONFIG_BYTES = 64 * 1024
 _UNSAFE = re.compile(r"\b(file|filename|path|directory|folder|url|uri|endpoint|host|hostname|"
@@ -157,6 +158,8 @@ class ReferenceSettings:
     recovery_bindings: dict | None = None
     viewer_receipt_keys: dict | None = None
     viewer_acceptance_targets: dict | None = None
+    source_spool: object | None = None
+    source_attestation_keys: object | None = None
 
 
 def _file(path, *, private):
@@ -190,18 +193,23 @@ def load_reference_settings(path, config):
         if len(raw) > MAX_CONFIG_BYTES:
             raise RuntimeConfigurationError("reference configuration exceeds size limit")
         value = p.decode_submission(raw)
-        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3, 4):
+        if type(value.get("schemaVersion")) is not int or value["schemaVersion"] not in (1, 2, 3, 4, 5, 6):
             raise RuntimeConfigurationError("unsupported runtime configuration version")
         node_ids = _validate_node_configuration(config)
         if len(node_ids) > 1 and value["schemaVersion"] == 1:
             raise RuntimeConfigurationError(
                 "multi-node dispatch requires daemon identity bindings; these do not prove physical-host identity")
         fields=("schemaVersion", "listener", "viewerBearers", "workers", "streamBudget")
-        if value["schemaVersion"] in (3, 4):
+        if value["schemaVersion"] in (3, 4, 5, 6):
             required = set(fields) | {"viewerReceiptKeys"}
-            if value["schemaVersion"] == 4:
+            if value["schemaVersion"] in (4,5,6):
                 required.add("viewerAcceptance")
             allowed = required | {"recoveryBindings"}
+            if value["schemaVersion"] in (5,6):allowed.add("sourceSpool")
+            if value["schemaVersion"]==6:
+                required.add("sourceSpool")
+                required.add("sourceAttestationKeys")
+                allowed.add("sourceAttestationKeys")
             if not required <= set(value) or set(value) - allowed:
                 raise RuntimeConfigurationError("runtime configuration fields differ")
         else:
@@ -270,11 +278,11 @@ def load_reference_settings(path, config):
         if len(node_ids) > 1 and recovery is None:
             raise RuntimeConfigurationError("multi-node runtime requires daemon identity bindings")
         viewer_keys = {}
-        if value["schemaVersion"] in (3, 4):
+        if value["schemaVersion"] in (3, 4, 5, 6):
             from .viewer_acceptance_receipt import validate_trusted_viewer_receipt_keys
             viewer_keys = validate_trusted_viewer_receipt_keys(value["viewerReceiptKeys"])
         viewer_targets = {}
-        if value["schemaVersion"] == 4:
+        if value["schemaVersion"] in (4,5,6):
             configured = value["viewerAcceptance"]
             if (type(configured) is not dict or not configured
                     or not set(configured) <= {"production", "staging"}):
@@ -313,9 +321,21 @@ def load_reference_settings(path, config):
                 viewer_targets[environment] = {"origin": origin, "keyId": key_id, "secret": secret}
             if len(set(target_secrets)) != len(target_secrets) or not viewer_keys:
                 raise RuntimeConfigurationError("distinct Viewer service keys and receipt pins are required")
+        source_spool=None
+        source_attestation_keys=None
+        if value["schemaVersion"] in (5,6):
+            spool=value["sourceSpool"]
+            p._closed(spool,("root","mountPath","mountId","markerName","safetyFloorBytes","maxObjectBytes","chunkBytes"),"source spool")
+            from .source_spool import SourceSpool
+            source_spool=SourceSpool(spool["root"],mount_path=spool["mountPath"],mount_id=spool["mountId"],
+                marker_name=spool["markerName"],safety_floor_bytes=spool["safetyFloorBytes"],
+                max_object_bytes=spool["maxObjectBytes"],chunk_bytes=spool["chunkBytes"])
+        if value["schemaVersion"]==6:
+            from .viewer_source_attestation import validate_trusted_keys
+            source_attestation_keys=validate_trusted_keys(value["sourceAttestationKeys"])
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
                                  {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery,
-                                 viewer_keys, viewer_targets or None)
+                                 viewer_keys, viewer_targets or None, source_spool, source_attestation_keys)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -446,7 +466,8 @@ class _DynamicAPI:
                                        protected_transport=protected_transport)
         # Authenticate before engine discovery; ordinary status and worker actions
         # never depend on live catalog reads. Each admission sees a fresh snapshot.
-        if path in (p.PREFIX + '/options', p.PREFIX + "/capabilities", p.PREFIX + "/jobs") and method in ("GET", "POST"):
+        if path in (p.PREFIX + '/options', p.PREFIX + "/capabilities", p.PREFIX + "/jobs",
+                    SOURCE_PREFIX + "/capabilities", SOURCE_PREFIX + "/jobs") and method in ("GET", "POST"):
             if protected_transport is not True:
                 return Response(503, {"error": "protected_transport_required"})
             environment = self.control.viewer._authenticate(headers)
@@ -464,10 +485,13 @@ class _DynamicAPI:
                     capability_fingerprint=capability, options_fingerprint=options,
                     allowed_odm_options=allowed, treedar_available=False,
                     result_proxy=self.control.viewer.result_proxy,
-                    viewer_receipt_keys=self.settings.viewer_receipt_keys)
+                    viewer_receipt_keys=self.settings.viewer_receipt_keys,
+                    source_spool=self.settings.source_spool,
+                    source_attestation_keys=self.settings.source_attestation_keys,
+                    authority_id=self.control.viewer.store.queue.authority_id)
             except Exception:
                 return Response(503, {"error": "engine_catalog_unavailable"})
-            if path == p.PREFIX + "/jobs" and method == "POST":
+            if path in (p.PREFIX + "/jobs",SOURCE_PREFIX + "/jobs") and method == "POST":
                 try:
                     payload = p.decode_submission(body)
                     validate_discovered_option_values(payload, snapshot, allowed)
@@ -475,6 +499,13 @@ class _DynamicAPI:
                     return Response(400, {"error": "invalid_request"})
             return api.handle(method, path, headers, body, protected_transport=protected_transport)
         return self.control.handle(method, path, headers, body, protected_transport=protected_transport)
+
+    @property
+    def source_spool(self):return self.settings.source_spool
+
+    def stream_source_object(self,path,headers,reader,content_length,*,protected_transport=False):
+        return self.control.viewer.stream_source_object(path,headers,reader,content_length,
+            protected_transport=protected_transport)
 
 
 class ReferenceRuntime:
@@ -523,6 +554,7 @@ class ReferenceRuntime:
                                   next((node.id for node in endpoints if node.id != "cluster"), None)),
                 node_limits=node_limits,
                 node_option_validator=self._node_options_valid)
+            self.source_reconciliation=self.store.reconcile_source_spool(settings.source_spool)
             self._streams = threading.BoundedSemaphore(settings.stream_budget["maxConcurrent"])
             proxy = ResultProxy({node: worker["resultOrigin"] for node, worker in settings.workers.items()},
                 worker_bearers={node: worker["resultBearer"] for node, worker in settings.workers.items()},
@@ -533,7 +565,10 @@ class ReferenceRuntime:
             self.control = ReferenceControlAPI(self.store, viewer_bearers=settings.viewer_bearers,
                 worker_bearers=workers, capability_fingerprint=placeholder,
                 options_fingerprint=placeholder, result_proxy=proxy, treedar_available=False,
-                recovery_bindings=recovery, viewer_receipt_keys=settings.viewer_receipt_keys)
+                recovery_bindings=recovery, viewer_receipt_keys=settings.viewer_receipt_keys,
+                source_spool=settings.source_spool,
+                source_attestation_keys=settings.source_attestation_keys,
+                authority_id=queue.authority_id)
             if settings.viewer_acceptance_targets:
                 from .reference_viewer_transfer_worker import ReferenceViewerTransferWorker
                 from .viewer_acceptance_transfer import ViewerAcceptanceTransfer, ViewerTransferUnavailable
