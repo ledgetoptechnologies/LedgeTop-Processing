@@ -17,6 +17,15 @@ and owned descendant timeout cleanup; the seven portable cases passed locally.
 The expanded Linux suite has not yet been rerun at this checkpoint. No actual
 Docker create/cp deployment qualification is claimed by these tests.
 
+The expanded suite subsequently passed 16/16 Linux cases in 1.150 seconds,
+without skips, under the same bounded isolation. It additionally checks the
+fixed existing installation lock and persistent exact-operation binding, private
+immutable evidence, distinct rejection artifact names for each dispatch attempt,
+directory-replacement refusal, and owned descendant timeout cleanup. The exact
+container and task-label inventory are absent after completion. The active-plan
+binding is intentionally retained on disk after lock release: another receipt
+directory or operation does not authorize a competing cutover.
+
 ## Historical pilot record provenance
 
 A bounded local history lookup located the original operator artifacts:

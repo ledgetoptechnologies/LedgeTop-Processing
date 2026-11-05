@@ -14,6 +14,7 @@ import tarfile
 import time
 import unittest
 import uuid
+from unittest.mock import patch
 
 from ops import enrolled_coordinator_transport as t
 from ops import enrolled_coordinator_lease_helper as holder
@@ -104,6 +105,42 @@ class StructuredTransportTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name=='posix','Linux selector pipes and private file modes')
 class BoundedSubprocessTests(unittest.TestCase):
+    def test_immutable_proof_cannot_be_replaced_and_rearmed_dispatch_has_distinct_artifact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);root.chmod(0o700);proofs=t.PrivateProofs(root)
+            intent=dict(intentId=str(uuid.uuid4()),action='synthetic')
+            first=dict(intentSha256=t.digest(intent),attempt=1,dispatchId=str(uuid.uuid4()))
+            second=dict(intentSha256=t.digest(intent),attempt=2,dispatchId=str(uuid.uuid4()))
+            sha=proofs.retain(intent,{'outcome':'rejected'},dispatch=first,kind='rejection')
+            self.assertEqual(proofs.retain(intent,{'outcome':'rejected'},dispatch=first,kind='rejection'),sha)
+            with self.assertRaises(t.TransportHeld):proofs.retain(intent,{'outcome':'changed'},dispatch=first,kind='rejection')
+            proofs.retain(intent,{'outcome':'rejected'},dispatch=second,kind='rejection')
+            self.assertNotEqual(proofs.name(intent,first,kind='rejection'),proofs.name(intent,second,kind='rejection'))
+            self.assertEqual(len(list(root.iterdir())),2)
+
+    def test_fixed_host_operation_binding_survives_exit_and_refuses_new_receipt_directory(self):
+        from ops import install_reference_coordinator as installer
+        from tests.test_enrolled_coordinator_cutover import plan
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);root.chmod(0o700)
+            one=root/'one';two=root/'two';one.mkdir(mode=0o700);two.mkdir(mode=0o700)
+            value=plan()
+            with patch.object(installer,'LOCK_PATH',root/'coordinator-install.lock'):
+                operation=t.HostOperation(one)
+                with operation.locked(value):pass
+                with operation.locked(value):pass
+                with self.assertRaises(t.TransportHeld):
+                    with t.HostOperation(two).locked(value):pass
+                other=copy.deepcopy(value);other['operationId']=str(uuid.uuid4())
+                with self.assertRaises(t.TransportHeld):
+                    with operation.locked(other):pass
+
+    def test_proof_directory_replacement_and_symlink_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/'proofs';root.mkdir(mode=0o700);proofs=t.PrivateProofs(root)
+            root.rename(root.with_name('original'));root.mkdir(mode=0o700)
+            with self.assertRaises(t.TransportHeld):proofs.retain({'intentId':str(uuid.uuid4())},{})
+
     def test_private_stdin_roundtrip_and_sanitized_stderr_failure(self):
         runner=t.BoundedSubprocess()
         self.assertEqual(runner.run([sys.executable,'-c','import sys;sys.stdout.buffer.write(sys.stdin.buffer.read())'],

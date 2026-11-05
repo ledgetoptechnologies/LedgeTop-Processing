@@ -19,6 +19,7 @@ import subprocess
 import tarfile
 import time
 from decimal import Decimal
+import uuid
 
 
 class TransportHeld(RuntimeError):
@@ -287,6 +288,107 @@ def environment_file(path):
                 and '\x00' not in item and len(item) <= 4096, 'private_environment_invalid')
         result[name] = item
     return result
+
+
+class PrivateProofs:
+    """Immutable local evidence, never authority inferred from deployment state.
+
+    The operation directory must already exist. An uncertain write is resolved
+    by inspecting the exact bytes; no replacement or automatic repair occurs.
+    """
+    def __init__(self, root):
+        self.root = Path(_absolute_path(str(root)))
+        require(self.root.resolve() == self.root and
+                not any(part.is_symlink() for part in self.root.parents), 'original_proof_directory_required')
+        info = self.root.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and
+                stat.S_IMODE(info.st_mode) == 0o700, 'private_proof_directory_required')
+        self.identity = (info.st_dev, info.st_ino)
+
+    def _directory(self):
+        fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        opened, current = os.fstat(fd), self.root.lstat()
+        try:
+            require((opened.st_dev, opened.st_ino) == self.identity == (current.st_dev, current.st_ino)
+                    and opened.st_uid == os.geteuid() and stat.S_IMODE(opened.st_mode) == 0o700,
+                    'proof_directory_identity_changed')
+        except BaseException:
+            os.close(fd)
+            raise
+        return fd
+
+    @staticmethod
+    def name(intent, dispatch=None, *, kind='facts'):
+        require(type(intent) is dict and type(intent.get('intentId')) is str, 'exact_proof_intent_required')
+        try: valid = str(uuid.UUID(intent['intentId'])) == intent['intentId']
+        except (ValueError, AttributeError): valid = False
+        require(valid and kind in ('facts', 'rejection'), 'exact_proof_intent_required')
+        suffix = 'read'
+        if dispatch is not None:
+            require(type(dispatch) is dict and set(dispatch) == {'intentSha256', 'attempt', 'dispatchId'}
+                    and dispatch['intentSha256'] == digest(intent) and type(dispatch['attempt']) is int
+                    and 1 <= dispatch['attempt'] <= 128, 'exact_proof_dispatch_required')
+            try: valid = str(uuid.UUID(dispatch['dispatchId'])) == dispatch['dispatchId']
+            except (ValueError, AttributeError): valid = False
+            require(valid, 'exact_proof_dispatch_required')
+            suffix = str(dispatch['attempt']) + '-' + dispatch['dispatchId']
+        require(kind != 'rejection' or dispatch is not None, 'rejection_dispatch_required')
+        return kind + '-' + intent['intentId'] + '-' + suffix + '.json'
+
+    def retain(self, intent, facts, *, dispatch=None, kind='facts'):
+        name = self.name(intent, dispatch, kind=kind)
+        document = dict(schemaVersion=1, intentSha256=digest(intent), dispatch=dispatch, facts=facts)
+        raw = canonical(document)
+        require(len(raw) <= 1024 * 1024, 'bounded_proof_required')
+        directory = self._directory()
+        try:
+            try:
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                             0o600, dir_fd=directory)
+            except FileExistsError:
+                require(private_bytes(self.root / name) == raw, 'immutable_proof_changed')
+            else:
+                try:
+                    offset = 0
+                    while offset < len(raw):
+                        count = os.write(fd, raw[offset:])
+                        require(count > 0, 'proof_write_outcome_unknown')
+                        offset += count
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                os.fsync(directory)
+            require(private_bytes(self.root / name) == raw, 'retained_proof_unverified')
+            # Revalidate the owned directory after the artifact, too.
+            current = self._directory(); os.close(current)
+        finally:
+            os.close(directory)
+        return hashlib.sha256(raw).hexdigest()
+
+
+class HostOperation:
+    """Reuse the existing fixed installation lock, retaining one active plan.
+
+    The binding is deliberately not deleted on exit or terminal success. A new
+    operation requires a separately reviewed rebaseline, not a new receipt dir.
+    """
+    def __init__(self, operation_directory):
+        self.proofs = PrivateProofs(operation_directory)
+
+    @contextmanager
+    def locked(self, plan):
+        from ops.install_reference_coordinator import operation_lock, LOCK_PATH
+        from ops.enrolled_coordinator_cutover import validate_plan
+        plan = validate_plan(plan)
+        with operation_lock():
+            parent = PrivateProofs(LOCK_PATH.parent)
+            binding = dict(schemaVersion=1, operationId=plan['operationId'], planSha256=digest(plan),
+                           directoryIdentity=list(self.proofs.identity))
+            # The fixed logical identity makes a second operation collide even
+            # if it supplies a new private operation/receipt directory.
+            fixed = dict(intentId='b769525d-8f74-5b46-8bd6-430739377242')
+            parent.retain(fixed, binding)
+            yield
 
 
 RECIPE_FIELDS = frozenset(('schemaVersion', 'name', 'imageId', 'user', 'workingDir', 'environmentFile',
