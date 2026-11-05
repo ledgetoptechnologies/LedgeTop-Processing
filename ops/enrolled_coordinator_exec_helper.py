@@ -82,10 +82,19 @@ def execute(settings,source):
     root.mkdir(mode=0o700)
     identity=dict(settings=settings,pid=os.getpid(),start=start_time(os.getpid()))
     write(root/'start.json',identity)
-    output=BoundedOutput(settings['maximum']);success=False
+    output=BoundedOutput(settings['maximum']);success=False;body_completed=False
     try:
         with contextlib.redirect_stdout(output),contextlib.redirect_stderr(BoundedOutput(16384)):
             exec(compile(source,'<reviewed-transport-request>','exec'),{'__name__':'__main__'})
+        body_completed=True
+    except SystemExit as error:
+        # Existing reviewed stdin helpers conventionally end in SystemExit(0).
+        # This denotes body completion, never the future OS process exit status.
+        body_completed=error.code is None or type(error.code) is int and error.code==0
+    except BaseException:
+        body_completed=False
+    try:
+        require(body_completed)
         result=json.loads(bytes(output.value))
         require(len(canonical(result))<=settings['maximum'])
         write(root/'result.json',result);success=True

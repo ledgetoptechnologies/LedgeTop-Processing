@@ -410,6 +410,23 @@ class RemoteExecLifecycleTests(unittest.TestCase):
         value=remote.inspect(self.settings)
         self.assertTrue(value['processRetired']);self.assertEqual(value['result'],{'bounded':True})
 
+    def test_reviewed_helper_explicit_systemexit_zero_is_body_completion_not_os_status(self):
+        import hashlib
+        self.source=b'import json;print(json.dumps({"bounded":True}));raise SystemExit(0)'
+        self.settings['sourceSha256']=hashlib.sha256(self.source).hexdigest()
+        self.launch();_,error=self.child.communicate(timeout=3)
+        self.assertEqual(self.child.returncode,0,error.decode())
+        value=remote.inspect(self.settings)
+        self.assertTrue(value['success']);self.assertTrue(value['processRetired'])
+
+    def test_nonzero_systemexit_with_json_does_not_promote_partial_body_output(self):
+        import hashlib
+        self.source=b'import json;print(json.dumps({"bounded":True}));raise SystemExit(2)'
+        self.settings['sourceSha256']=hashlib.sha256(self.source).hexdigest()
+        self.launch();self.child.communicate(timeout=3)
+        value=remote.inspect(self.settings)
+        self.assertFalse(value['success']);self.assertIsNone(value['result'])
+
     def test_child_death_without_exit_record_is_not_a_completed_observer(self):
         self.launch();self.child.terminate();self.child.communicate(timeout=3)
         with self.assertRaises((RuntimeError,FileNotFoundError)):remote.inspect(self.settings)
