@@ -14,7 +14,7 @@ import stat
 import tarfile
 import uuid
 
-from ops.enrolled_coordinator_transport import BoundedSubprocess, canonical, decode, digest, require
+from ops.enrolled_coordinator_transport import BoundedSubprocess, TransportHeld, canonical, decode, digest, require
 
 PROTOCOL = 'ltds-first-worker-enrollment-v1'
 UNIT = 'ledgetop-processing-reference-worker.service'
@@ -22,6 +22,8 @@ MAX_ARCHIVE = 256 * 1024**2
 MAX_EXPANDED = 512 * 1024**2
 MAX_FILES = 8192
 INSTALL_BASE = Path('/opt/ledgetop-processing-reference')
+UNSET_STARTUP_NAMES = ('LD_PRELOAD','LD_LIBRARY_PATH','LD_AUDIT','PYTHONPATH','PYTHONHOME',
+                       'PYTHONUSERBASE','PYTHONSTARTUP','PYTHONINSPECT','PYTHONPYCACHEPREFIX')
 
 
 def closed(value, fields):
@@ -111,6 +113,8 @@ def render_unit(manifest):
     text=('[Unit]\nDescription=LedgeTop Processing reference worker\nStartLimitIntervalSec=10min\nStartLimitBurst=20\n\n'
           '[Service]\nType=simple\nWorkingDirectory='+str(root/'source')+'\nExecStart='+str(root/'venv/bin/python')+
           ' -B -m ops.reference_worker_daemon --config '+str(home/'.config/ledgetop-processing/reference-worker.json')+
+          '\nEnvironment=PYTHONNOUSERSITE=1 HOME='+str(home)+' XDG_STATE_HOME='+str(home/'.local/state')+
+          '\nUnsetEnvironment='+' '.join(UNSET_STARTUP_NAMES)+
           '\nRestart=on-failure\nRestartSec=15s\nTimeoutStartSec=30s\nTimeoutStopSec=10min\nKillMode=mixed\n'
           'SendSIGKILL=no\nUMask=0077\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target\n')
     return text
@@ -143,6 +147,38 @@ def sync_directory(path):
     original(path);fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
     try:os.fsync(fd)
     finally:os.close(fd)
+
+
+def directory_identity(path):
+    original(path);info=path.lstat();require(stat.S_ISDIR(info.st_mode),'original_worker_parent_required')
+    return [info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid]
+
+
+def user_directory_script(home,path,uid):
+    parts=path.relative_to(home).parts
+    require(parts and len(parts)<=16,'bounded_worker_parent_required')
+    # Execute as the service user, never root: no attacker-swapped directory
+    # can receive a privileged chown, and existing modes remain unchanged.
+    return (('import json,os,pathlib,stat\nhome=pathlib.Path('+repr(str(home))+');parts='+repr(tuple(parts))+';uid='+str(uid)+'\n')+'''
+assert os.geteuid()==uid
+assert home.resolve()==home
+opened=[]
+try:
+ fd=os.open(home,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC);opened.append(fd)
+ for name in parts:
+  try:child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+  except FileNotFoundError:
+   os.mkdir(name,0o700,dir_fd=fd)
+   child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+   os.fsync(fd)
+  opened.append(child);fd=child
+  info=os.fstat(fd)
+  assert info.st_uid==uid and not info.st_mode&0o022 and info.st_mode&0o300==0o300
+ info=os.fstat(fd);os.fsync(fd)
+ print(json.dumps([info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid]))
+finally:
+ for fd in reversed(opened):os.close(fd)
+''').encode()
 
 
 def source_footprint(root):
@@ -203,6 +239,26 @@ class ActualBoundary:
         uid=m['service']['uid']
         return self.run(['/usr/sbin/runuser','--user',m['service']['name'],'--','/usr/bin/env',
             'XDG_RUNTIME_DIR=/run/user/'+str(uid),'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/'+str(uid)+'/bus',*args],**kwargs)
+    def ensure_user_directory(self,m,path):
+        raw=self.as_user(m,['/usr/bin/python3','-I','-B','-'],
+            input_bytes=user_directory_script(absolute(m['service']['home']),path,m['service']['uid']),
+            output_limit=4096,error_limit=4096,timeout=15)
+        return decode(raw,4096)
+    def assert_clean_manager_environment(self,m):
+        # For the separately guarded activation path, not an authorization to
+        # start anything. Never return manager environment contents or secrets.
+        raw=self.as_user(m,['/usr/bin/systemctl','--user','show-environment'],output_limit=65536).decode()
+        names=[]
+        for line in raw.splitlines():
+            require('=' in line,'worker_manager_environment_unavailable')
+            name=line.split('=',1)[0]
+            require(re.fullmatch('[A-Za-z_][A-Za-z0-9_]*',name) and name not in names,
+                    'worker_manager_environment_unavailable')
+            names.append(name)
+        require(not any(name.startswith(('LD_','PYTHON')) and name not in UNSET_STARTUP_NAMES and
+                        name!='PYTHONNOUSERSITE' for name in names),
+                'unexpected_worker_manager_startup_override')
+        return dict(managerEnvironmentSha256=hashlib.sha256(raw.encode()).hexdigest(),unexpectedSourceOverridesAbsent=True)
     def no_unit(self,m,*,owned=False):
         raw=self.as_user(m,['/usr/bin/systemctl','--user','show','--no-pager',
             '--property=LoadState,ActiveState,MainPID,UnitFileState',UNIT],output_limit=4096).decode()
@@ -378,25 +434,47 @@ class Installer:
         return dict(rootIdentity=identity(path.lstat()),entries=entries)
 
     def _new_private(self,path,raw,owner):
-        fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+        return self._new_at_parent(path,raw,owner,directory_identity(path.parent))
+
+    def _private_proof(self,path,owner):
+        parent=directory_identity(path.parent)
+        raw=read_file(path,owner=owner,maximum=65536)
+        require(parent==directory_identity(path.parent),'worker_parent_changed')
+        return dict(identity=identity(path.lstat()),sha256=hashlib.sha256(raw).hexdigest(),parentIdentity=parent)
+
+    def _new_at_parent(self,path,raw,owner,parent):
+        directory=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+        fd=None
         try:
+            info=os.fstat(directory)
+            observed=[info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid]
+            require(observed==parent==directory_identity(path.parent),'worker_parent_changed')
+            fd=os.open(path.name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=directory)
             with os.fdopen(fd,'wb',closefd=False) as stream:stream.write(raw);stream.flush();os.fchown(fd,owner,self.m['service']['gid']);os.fsync(fd)
-        finally:os.close(fd)
-        sync_directory(path.parent)
-        return dict(identity=identity(path.lstat()),sha256=hashlib.sha256(raw).hexdigest())
+            created=os.fstat(fd)
+            require(stat.S_ISREG(created.st_mode) and created.st_nlink==1 and created.st_uid==owner and
+                    created.st_gid==self.m['service']['gid'] and stat.S_IMODE(created.st_mode)==0o600,
+                    'new_private_worker_file_required')
+            require(identity(os.fstat(fd))==identity(os.stat(path.name,dir_fd=directory,follow_symlinks=False)),
+                    'new_worker_file_changed')
+            os.fsync(directory)
+            require(observed==directory_identity(path.parent) and identity(os.fstat(fd))==identity(path.lstat()),
+                    'worker_parent_changed')
+            return dict(identity=identity(os.fstat(fd)),sha256=hashlib.sha256(raw).hexdigest(),parentIdentity=parent)
+        finally:
+            if fd is not None:os.close(fd)
+            os.close(directory)
 
     def _verify(self,state):
         for name in ('source','dependencies'):
             path=self.root/('venv' if name=='dependencies' else name)
             require(state['steps'].get(name)==self._tree(path),'prepared_worker_tree_changed')
         stage=self.root/'worker-config.json'
-        raw=read_file(stage,owner=self.m['service']['uid'],maximum=65536)
-        require(state['steps'].get('stageConfig')==dict(identity=identity(stage.lstat()),sha256=hashlib.sha256(raw).hexdigest()),
+        require(state['steps'].get('stageConfig')==self._private_proof(stage,self.m['service']['uid']),
                 'prepared_worker_config_changed')
         for name,path in (('config',self.config),('unit',self.unit)):
             if name in state['steps']:
-                actual=read_file(path,owner=self.m['service']['uid'],maximum=65536)
-                require(state['steps'][name]==dict(identity=identity(path.stat()),sha256=hashlib.sha256(actual).hexdigest()),
+                require(state['steps'][name]==self._private_proof(path,self.m['service']['uid']),
                         'enrolled_worker_file_changed')
         self.boundary.validate_prepared(self.m,stage)
 
@@ -439,20 +517,25 @@ class Installer:
             require(hashlib.sha256(requirements).hexdigest()==self.m['source']['requirementsSha256'],'requirements_pin_changed')
             python=read_file(self.root/'venv/bin/python',owner=0,maximum=64*1024**2,mode=0o550)
             require(hashlib.sha256(python).hexdigest()==self.m['dependencies']['pythonSha256'],'interpreter_pin_changed')
+            pyvenv=read_file(self.root/'venv/pyvenv.cfg',owner=0,maximum=65536,mode=0o440).decode()
+            entries={}
+            for line in pyvenv.splitlines():
+                if not line.strip():continue
+                require('=' in line,'closed_python_environment_required');key,value=line.split('=',1)
+                require(key.strip() not in entries,'closed_python_environment_required');entries[key.strip()]=value.strip()
+            require(entries.get('include-system-site-packages')=='false','isolated_python_environment_required')
             if 'stageConfig' not in state['steps']:
                 state['steps']['stageConfig']=self._new_private(self.root/'worker-config.json',raw,self.m['service']['uid']);self._save(state)
             self._verify(state);state['phase']='prepared';self._save(state)
             return self._receipt(state)
 
     def _parent(self,path,state):
-        pending=[];current=path
-        while not current.exists():pending.append(current);current=current.parent
-        original(current)
-        for current in reversed(pending):
-            current.mkdir(mode=0o700);os.chown(current,self.m['service']['uid'],self.m['service']['gid']);sync_directory(current.parent)
-        original(path);info=path.stat()
+        proof=self.boundary.ensure_user_directory(self.m,path)
+        require(proof==directory_identity(path),'worker_parent_changed')
+        info=path.stat()
         require(info.st_uid==self.m['service']['uid'] and not info.st_mode&0o022 and info.st_mode&0o300==0o300,
                 'owned_worker_parent_required')
+        return proof
 
     def enroll(self):
         with self._owned() as state:
@@ -462,22 +545,21 @@ class Installer:
             state['phase']='enrolling';self._save(state)
             for name,path,raw in (('config',self.config,raw),('unit',self.unit,render_unit(self.m).encode())):
                 if name in state['steps']:
-                    actual=read_file(path,owner=self.m['service']['uid'],maximum=65536)
-                    require(state['steps'][name]==dict(identity=identity(path.stat()),sha256=hashlib.sha256(actual).hexdigest()),
+                    require(state['steps'][name]==self._private_proof(path,self.m['service']['uid']),
                             'enrolled_worker_file_changed');continue
                 require(not os.path.lexists(path),'foreign_worker_file_refused')
-                self._parent(path.parent,state)
-                state['steps'][name]=self._new_private(path,raw,self.m['service']['uid']);self._save(state)
-            self._gate();state['phase']='enrolled'
+                parent=self._parent(path.parent,state)
+                state['steps'][name]=self._new_at_parent(path,raw,self.m['service']['uid'],parent);self._save(state)
+            self._verify(state);self._gate();state['phase']='enrolled'
             if state['receipt'] is None:state['receipt']=dict(schemaVersion=1,protocol=PROTOCOL,operationId=self.m['operationId'],
                 manifestSha256=digest(self.m),sourceSha256=self.m['source']['footprintSha256'],
                 configSha256=self.m['config']['sha256'],unitSha256=self.m['unitSha256'],unitInstalled=True,
-                serviceStarted=False,serviceEnabled=False,engineChanged=False)
+                serviceStartIssued=False,serviceEnableIssued=False,engineMutationIssued=False)
             self._save(state);return state['receipt']
 
     def _receipt(self,state):
         return state['receipt'] or dict(schemaVersion=1,protocol=PROTOCOL,operationId=self.m['operationId'],
-            manifestSha256=digest(self.m),phase=state['phase'],serviceStarted=False,serviceEnabled=False)
+            manifestSha256=digest(self.m),phase=state['phase'],serviceStartIssued=False,serviceEnableIssued=False)
 
     def inspect(self):
         self._check()
@@ -485,8 +567,7 @@ class Installer:
         state=self._state();self._verify(state)
         if state['phase']=='enrolled':
             for name,path in (('config',self.config),('unit',self.unit)):
-                raw=read_file(path,owner=self.m['service']['uid'],maximum=65536)
-                require(state['steps'][name]==dict(identity=identity(path.stat()),sha256=hashlib.sha256(raw).hexdigest()),
+                require(state['steps'][name]==self._private_proof(path,self.m['service']['uid']),
                         'enrolled_worker_file_changed')
         return self._receipt(state)
 
@@ -498,8 +579,9 @@ def main():
     try:
         path=absolute(args.manifest);manifest=decode(read_file(path,owner=0,maximum=262144),262144)
         value=getattr(Installer(manifest),args.action)();print(json.dumps(value,sort_keys=True));return 0
-    except Exception:
-        print(json.dumps(dict(error='first_worker_enrollment_held',serviceStarted=False,serviceEnabled=False)));return 1
+    except Exception as error:
+        reason=str(error) if isinstance(error,TransportHeld) and re.fullmatch('[a-z_]{1,80}',str(error)) else 'inspection_required'
+        print(json.dumps(dict(error='first_worker_enrollment_held',reason=reason,serviceStartIssued=False,serviceEnableIssued=False)));return 1
 
 
 if __name__=='__main__':raise SystemExit(main())

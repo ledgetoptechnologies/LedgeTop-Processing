@@ -73,6 +73,15 @@ class FirstWorkerEnrollmentTests(unittest.TestCase):
             def local_filesystem(self,path):self.calls.append('local')
             def no_unit(self,m,*,owned=False):self.calls.append('unit-status')
             def engine(self,m,c):self.calls.append('engine-read')
+            def ensure_user_directory(self,m,path):
+                process=subprocess.Popen([sys.executable,'-I','-B','-'],stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,stderr=subprocess.PIPE,user=10001,group=10001,extra_groups=[],start_new_session=True)
+                try:
+                    raw,error=process.communicate(install.user_directory_script(testcase.home,path,10001),timeout=5)
+                    testcase.assertEqual(process.returncode,0,error.decode());return json.loads(raw)
+                finally:
+                    from ops.enrolled_coordinator_transport import _terminate_owned
+                    _terminate_owned(process)
             def validate_prepared(self,m,path):
                 self.calls.append('validate-readonly')
                 testcase.assertEqual(install.source_footprint(testcase.root/'source'),m['source']['footprintSha256'])
@@ -100,7 +109,7 @@ class FirstWorkerEnrollmentTests(unittest.TestCase):
         result=self.installer.enroll();before=(self.installer.config.stat().st_ino,self.installer.unit.stat().st_ino)
         self.assertEqual(self.installer.enroll(),result);self.assertEqual(self.installer.inspect(),result)
         self.assertEqual(before,(self.installer.config.stat().st_ino,self.installer.unit.stat().st_ino))
-        self.assertFalse(result['serviceStarted']);self.assertFalse(result['serviceEnabled']);self.assertFalse(result['engineChanged'])
+        self.assertFalse(result['serviceStartIssued']);self.assertFalse(result['serviceEnableIssued']);self.assertFalse(result['engineMutationIssued'])
         self.assertEqual(self.installer.config.read_bytes(),self.config_data)
         self.assertEqual(self.installer.unit.read_bytes(),install.render_unit(self.manifest).encode())
         self.assertEqual(Path(self.manifest['gate']['path']).read_bytes(),self.original_gate)
@@ -154,7 +163,7 @@ class FirstWorkerEnrollmentTests(unittest.TestCase):
         with patch.object(self.installer,'_save',side_effect=lost):
             with self.assertRaises(OSError):self.installer.enroll()
         inode=self.installer.config.stat().st_ino;result=self.installer.enroll()
-        self.assertEqual(inode,self.installer.config.stat().st_ino);self.assertFalse(result['serviceStarted'])
+        self.assertEqual(inode,self.installer.config.stat().st_ino);self.assertFalse(result['serviceStartIssued'])
 
     def test_original_gate_change_and_existing_worker_state_refuse(self):
         gate=Path(self.manifest['gate']['path']);gate.write_bytes(b'foreign')
@@ -201,6 +210,54 @@ class FirstWorkerEnrollmentTests(unittest.TestCase):
         body=observed[0][1]['input_bytes']
         self.assertIn(b'load_config(',body);self.assertIn(b'immutable_source_paths(',body)
         self.assertNotIn(b'build_worker(',body);self.assertNotIn(b'systemctl',body)
+
+    def test_ancestor_swap_before_parent_open_writes_no_foreign_file(self):
+        self.installer.prepare();foreign=self.base/'foreign';foreign.mkdir();(foreign/'ledgetop-processing').mkdir()
+        original=self.installer._parent
+        def swapped(path,state):
+            proof=original(path,state)
+            (self.home/'.config').rename(self.home/'original-config')
+            (self.home/'.config').symlink_to(foreign,target_is_directory=True)
+            return proof
+        with patch.object(self.installer,'_parent',side_effect=swapped):
+            with self.assertRaises(Exception):self.installer.enroll()
+        self.assertEqual(list((foreign/'ledgetop-processing').iterdir()),[])
+        self.assertFalse((self.home/'original-config/ledgetop-processing/reference-worker.json').exists())
+
+    def test_ancestor_swap_after_pinned_parent_never_redirects_file_creation(self):
+        self.installer.prepare();foreign=self.base/'foreign';foreign.mkdir();(foreign/'ledgetop-processing').mkdir()
+        original=os.open;swapped=[False]
+        def opened(path,*args,**kwargs):
+            if path=='reference-worker.json' and kwargs.get('dir_fd') is not None and not swapped[0]:
+                swapped[0]=True
+                (self.home/'.config').rename(self.home/'original-config')
+                (self.home/'.config').symlink_to(foreign,target_is_directory=True)
+            return original(path,*args,**kwargs)
+        with patch.object(install.os,'open',side_effect=opened):
+            with self.assertRaises(Exception):self.installer.enroll()
+        self.assertTrue(swapped[0]);self.assertEqual(list((foreign/'ledgetop-processing').iterdir()),[])
+        self.assertTrue((self.home/'original-config/ledgetop-processing/reference-worker.json').exists())
+
+    def test_launch_parity_and_unexpected_manager_overrides_are_explicit(self):
+        unit=install.render_unit(self.manifest)
+        self.assertIn('XDG_STATE_HOME='+str(self.home/'.local/state'),unit)
+        self.assertIn('Environment=PYTHONNOUSERSITE=1 HOME=',unit)
+        self.assertNotIn('*',unit)
+        for name in install.UNSET_STARTUP_NAMES:self.assertIn(name,unit)
+        boundary=install.ActualBoundary()
+        boundary.as_user=lambda *args,**kwargs:b'HOME=/safe\nLD_AUDIT=/removed-by-unit\n'
+        self.assertTrue(boundary.assert_clean_manager_environment(self.manifest)['unexpectedSourceOverridesAbsent'])
+        for text in (b'LD_FUTURE_STARTUP=/unreviewed\n',b'PYTHON_FUTURE_STARTUP=unreviewed\n'):
+            boundary.as_user=lambda *args,**kwargs:text
+            with self.assertRaises(Exception):boundary.assert_clean_manager_environment(self.manifest)
+
+    def test_system_site_packages_cannot_differ_from_isolated_preflight(self):
+        files=dict(self.dependency_files,**{'pyvenv.cfg':b'include-system-site-packages = true\n'})
+        artifact=self.archive('dependencies',files)
+        self.manifest['dependencies'].update(artifact)
+        installer=install.Installer(self.manifest,boundary=self.boundary)
+        with self.assertRaises(Exception):installer.prepare()
+        self.assertFalse(installer.config.exists());self.assertFalse(installer.unit.exists())
 
 
 if __name__=='__main__':unittest.main()
