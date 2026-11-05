@@ -62,3 +62,62 @@ was therefore qualified on the bounded Linux runner rather than called green
 from Windows. Actual installed receipt inventories, public Viewer behavior, backup,
 Docker recreation, live processing and first-cutover activation remain separate
 unqualified boundaries.
+
+## Descriptor-owner review followup
+
+Independent review of the initial candidate found that a bare Python archive
+file could lose its only HTTP pin after an uncertain close, because the generic
+Viewer facade catches OSError on close. The followup replaces that file with an
+exact typed owner registered in the existing central Gate. It reserves a separate
+durable `legacy-archive` operation pin before opening any validation descriptor,
+tracks non-inheritable descriptor identities and the bounded directory iterator,
+and retains the actual owner object until each descriptor is closed once and
+EBADF is verified. Pin retirement requires the original typed registered owner,
+original process/thread, closed status, empty descriptor/iterator sets and exact
+original epoch/kind. No new database table, lease, execution authority, receipt or
+accepted-copy proof is added.
+
+A failed close or a false success with a still-live descriptor becomes typed
+uncertainty. The owner and pin remain; no timed expiry, blind FD close retry,
+cleanup, or fallback occurs. An unknown pin-retirement commit also retains the
+in-memory owner. Ordinary HTTP pin retirement cannot remove this separate pin.
+The final normal CoordinatorService shutdown waits for these owners after native
+HTTP drain and before runtime/Queue/external-lease teardown. It intentionally
+continues to own the process and original leases if close remains uncertain.
+The generic Viewer facade is unchanged; only this adapter handles the typed
+exception by closing the HTTP connection without writing a second response.
+Bytes already delivered before a close failure do not establish any new custody
+acknowledgement. Retained journal/descriptor uncertainty requires inspection.
+
+Directory inventory uses incremental scandir and refuses the first unknown or
+excess entry, rather than materializing an unbounded list. A failed iterator
+close also retains its actual iterator object and owner/pin.
+
+Initial lifecycle qualification passed 10/10 Linux tests in 9.584 seconds,
+including an actual blocked HTTP archive read plus SIGTERM retaining both main
+and external enrolled flocks until unblock and verified close. An injected
+unknown archive close retained its durable uncertain pin and owning process
+through SIGTERM without retrying. Only the fault-injected owned child was killed
+for test cleanup after proving that negative; the uncertain journal remained.
+The owned runner auto-removed and its exact filtered inventory was empty.
+
+The complete affected lifecycle suite subsequently passed 112/112 Linux tests,
+no skips, in 32.391 seconds. It includes the twelve legacy tests, coordinator
+freeze and Reference runtime, ordinary service/native HTTP/node-role compatibility,
+normal quarantined constructor/restart, and the actual source-release service
+SIGTERM/blocked-I/O lease test. New negatives prove that a close returning success
+while its FD remains live cannot retire the owner, and that directory inventory
+refuses its first unknown entry without consuming an unbounded tail. The runner
+auto-removed and its exact filtered inventory was empty. Test-only readback
+connections were then changed to explicit `contextlib.closing` after Python's
+ResourceWarning exposed SQLite context managers that did not close connections;
+production read-only connections already close explicitly.
+
+Final qualification passed 113/113 affected Linux tests in 31.331 seconds, no
+skips or ResourceWarnings, with the same bounded runner settings. It includes
+thirteen legacy cases and all preceding compatibility/lifecycle scopes. A real
+SQLite metadata invariant additionally proves that the legacy pin's longest
+`uncertain` state is prepaid in both total and CONTROL usage; reporting an
+unknown close cannot consume new capacity. Other operation kinds retain their
+existing accounting. The exact final owned container auto-removed and its
+all-container inventory was empty. Compile and diff checks also passed.

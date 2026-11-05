@@ -20,7 +20,7 @@ from functools import wraps
 from .maintenance import Conflict
 
 OPERATION_KINDS = frozenset(('http', 'viewer-dispatch', 'viewer-transfer',
-    'source-io-admission', 'source-io', 'source-release-submit', 'source-release'))
+    'source-io-admission', 'source-io', 'source-release-submit', 'source-release', 'legacy-archive'))
 CONTROL_LIMIT = 256 * 1024
 TRANSITION_RESERVE = 2048
 PLAN_FINISH_RESERVE = 8192
@@ -72,6 +72,15 @@ def _wire(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
+def _pin_metadata_size(row):
+    used = sum(len(str(value).encode('utf-8')) for value in row if value is not None)
+    if row[2] == 'legacy-archive':
+        # Unknown descriptor close must not borrow capacity to represent itself.
+        current = len(row[4].encode('utf-8')) if type(row[4]) is str else 0
+        used += max(0, len('uncertain') - current)
+    return used
+
+
 def metadata_bytes(db):
     names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     used = 0
@@ -79,7 +88,8 @@ def metadata_bytes(db):
                   'coordinator_operation_epochs'):
         if table in names:
             for row in db.execute('SELECT * FROM ' + table):
-                used += sum(len(str(value).encode('utf-8')) for value in row if value is not None)
+                used += (_pin_metadata_size(row) if table == 'coordinator_operation_pins' else
+                         sum(len(str(value).encode('utf-8')) for value in row if value is not None))
     return used
 
 
@@ -96,7 +106,7 @@ def active_metadata_bytes(db):
     if state['phase'] != 'open' and 'coordinator_freeze_receipts' in names:
         used += sum(size(row) for row in db.execute('SELECT * FROM coordinator_freeze_receipts WHERE plan_id=?', (state['plan_id'],)))
     if 'coordinator_operation_pins' in names:
-        used += sum(size(row) for row in db.execute("SELECT * FROM coordinator_operation_pins WHERE state IN ('active','uncertain')"))
+        used += sum(_pin_metadata_size(row) for row in db.execute("SELECT * FROM coordinator_operation_pins WHERE state IN ('active','uncertain')"))
     if 'coordinator_operation_epochs' in names:
         used += sum(size(row) for row in db.execute("SELECT * FROM coordinator_operation_epochs WHERE state='active'"))
     return used
@@ -107,6 +117,8 @@ class FreezeGate:
         self.queue = queue
         self._local = threading.local()
         self._active = {}
+        self._legacy_archives = {}
+        self._legacy_archive_condition = threading.Condition()
         self._pid = os.getpid()
         with queue._db() as db:
             existing = {item[0] for item in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -386,9 +398,72 @@ class FreezeGate:
             self._local.lifecycle = previous
 
     def require_quiescent_close(self):
+        with self._legacy_archive_condition:
+            if self._legacy_archives:
+                raise CoordinatorFrozen('legacy_archives_still_live_or_uncertain')
         with self.queue._db() as db:
             if db.execute("SELECT 1 FROM coordinator_operation_pins WHERE state IN ('active','uncertain') LIMIT 1").fetchone():
                 raise CoordinatorFrozen('coordinator_operations_still_live_or_uncertain')
+
+    def register_legacy_archive(self, owner):
+        """Only an actual typed descriptor owner may outlive its HTTP pin."""
+        from .legacy_viewer_readonly import _ArchiveOwner
+        self._check()
+        token = getattr(self._local, 'operation', None)
+        if (type(owner) is not _ArchiveOwner or owner.queue is not self.queue
+                or owner.thread_id != threading.get_ident() or owner.closed or owner.uncertain
+                or self._active.get(token) != threading.get_ident()):
+            raise CoordinatorFrozen('verified_legacy_archive_owner_required')
+        with self.queue._lifecycle_lock, self._legacy_archive_condition, self._control(), self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db)
+            if row['phase'] != 'open' or owner.reference in self._legacy_archives:
+                raise CoordinatorFrozen('coordinator_maintenance')
+            if db.execute("SELECT count(*) FROM coordinator_operation_pins WHERE state IN ('active','uncertain')").fetchone()[0] >= 128:
+                raise CoordinatorFrozen('coordinator_operation_capacity')
+            values = (owner.reference, self.queue.startup_id, 'legacy-archive', row['revision'], 'active')
+            self._quota(db, _pin_metadata_size(values))
+            db.execute('INSERT INTO coordinator_operation_pins VALUES(?,?,?,?,?)', values)
+            self._legacy_archives[owner.reference] = owner
+
+    def finish_legacy_archive(self, owner):
+        """Retirement is after verified close, never a finally-side assumption."""
+        from .legacy_viewer_readonly import _ArchiveOwner
+        self._check()
+        if (type(owner) is not _ArchiveOwner or owner.queue is not self.queue
+                or owner.process_id != os.getpid() or owner.thread_id != threading.get_ident()
+                or not owner.closed or owner.uncertain or owner._fds or owner._iterators):
+            raise CoordinatorFrozen('verified_legacy_archive_close_required')
+        with self.queue._lifecycle_lock, self._legacy_archive_condition, self._control(), self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if self._legacy_archives.get(owner.reference) is not owner:
+                raise CoordinatorFrozen('legacy_archive_owner_changed')
+            changed = db.execute("DELETE FROM coordinator_operation_pins WHERE reference=? AND epoch=? AND kind='legacy-archive' AND state='active'",
+                                 (owner.reference, self.queue.startup_id))
+            if changed.rowcount != 1:
+                raise CoordinatorFrozen('legacy_archive_retirement_uncertain')
+        with self._legacy_archive_condition:
+            del self._legacy_archives[owner.reference]
+            self._legacy_archive_condition.notify_all()
+
+    def uncertain_legacy_archive(self, owner):
+        from .legacy_viewer_readonly import _ArchiveOwner
+        self._check()
+        if (type(owner) is not _ArchiveOwner or owner.queue is not self.queue or not owner.uncertain
+                or owner.process_id != os.getpid() or owner.thread_id != threading.get_ident()
+                or self._legacy_archives.get(owner.reference) is not owner):
+            raise CoordinatorFrozen('verified_legacy_archive_owner_required')
+        # An unknown metadata commit retains the actual in-memory typed owner.
+        with self._control(), self.queue._db() as db:
+            db.execute("UPDATE coordinator_operation_pins SET state='uncertain' WHERE reference=? AND epoch=? AND kind='legacy-archive'",
+                       (owner.reference, self.queue.startup_id))
+
+    def drain_legacy_archives(self):
+        """Final service shutdown waits; an uncertain close has no retry here."""
+        self._check()
+        with self._legacy_archive_condition:
+            while self._legacy_archives:
+                self._legacy_archive_condition.wait()
 
     def seal_epoch(self):
         self.require_quiescent_close()
@@ -531,7 +606,7 @@ class FreezeGate:
             if db.execute("SELECT count(*) FROM coordinator_operation_pins WHERE state IN ('active','uncertain')").fetchone()[0] >= 128:
                 raise CoordinatorFrozen('coordinator_operation_capacity')
             values = (token, self.queue.startup_id, kind, row['revision'], 'active')
-            self._quota(db, sum(len(str(value).encode('utf-8')) for value in values))
+            self._quota(db, _pin_metadata_size(values))
             db.execute('INSERT INTO coordinator_operation_pins VALUES(?,?,?,?,?)', values)
             self._active[token] = threading.get_ident()
         self._local.operation = token

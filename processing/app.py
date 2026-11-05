@@ -481,6 +481,8 @@ class CoordinatorService:
                 # leases alive until already-issued source I/O safely joins.
                 runtime.drain_source_release()
             self._close_server(self.server, self._native_thread if native_started else None, stop)
+            if self.handler.prototype_queue is not None:
+                self.handler.prototype_queue._coordinator_freeze.drain_legacy_archives()
             runtime = self.handler.reference_listener
             if runtime is not None:
                 try:

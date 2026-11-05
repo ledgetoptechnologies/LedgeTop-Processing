@@ -7,12 +7,14 @@ freeze operation for the entire read. A missing/corrupt cache is unavailable.
 from contextlib import contextmanager
 import hashlib
 import hmac
+import errno
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import sqlite3
 import stat
+import threading
 import uuid
 import zipfile
 
@@ -39,6 +41,98 @@ def _json(value, maximum=1024 * 1024):
         return result
     return json.loads(value, object_pairs_hook=pairs,
                       parse_constant=lambda _: _require(False))
+
+
+class LegacyArchiveCloseUncertain(RuntimeError):
+    """An exact descriptor owner and durable pin remain; never retry its FD."""
+
+
+def _close_owned_fd(fd):
+    """Single-attempt close seam; the caller independently verifies EBADF."""
+    os.close(fd)
+
+
+class _ArchiveOwner:
+    def __init__(self, service, task):
+        self.queue = service.queue
+        self.reference = str(uuid.uuid4())
+        self.thread_id = threading.get_ident()
+        self.process_id = os.getpid()
+        self.binding = (self.queue.authority_id, self.queue.startup_id, task['uuid'],
+                        task['generation'], task['job_id'], task['node_id'], task['engine_uuid'])
+        self.closed, self.uncertain = False, False
+        self._fds, self._archive, self._iterators = {}, None, []
+        self.streaming = False
+        self.queue._coordinator_freeze.register_legacy_archive(self)
+
+    def _check(self):
+        if self.uncertain or self.closed or self.process_id != os.getpid() or self.thread_id != threading.get_ident():
+            raise LegacyArchiveCloseUncertain('legacy_archive_owner_unavailable')
+
+    def _hold(self):
+        self.uncertain = True
+        try: self.queue._coordinator_freeze.uncertain_legacy_archive(self)
+        except BaseException: pass  # The actual owner registry still prevents shutdown.
+        raise LegacyArchiveCloseUncertain('legacy_archive_close_uncertain') from None
+
+    @staticmethod
+    def _fd_key(value):
+        return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid)
+
+    def open(self, path, flags, *, dir_fd=None):
+        self._check()
+        fd = os.open(path, flags, dir_fd=dir_fd)
+        self._fds[fd] = None
+        try:
+            if os.get_inheritable(fd): self._hold()
+            self._fds[fd] = self._fd_key(os.fstat(fd))
+        except BaseException: self._hold()
+        return fd
+
+    def close_fd(self, fd):
+        self._check()
+        try:
+            if fd not in self._fds or self._fds[fd] != self._fd_key(os.fstat(fd)):
+                self._hold()
+            _close_owned_fd(fd)
+            try: os.fstat(fd)
+            except OSError as error:
+                if error.errno != errno.EBADF: self._hold()
+            else: self._hold()
+        except LegacyArchiveCloseUncertain:
+            raise
+        except BaseException:
+            self._hold()
+        del self._fds[fd]
+
+    def fileno(self):
+        self._check()
+        return self._archive
+
+    def read(self, size=-1):
+        self._check()
+        if size == -1:
+            size = os.fstat(self._archive).st_size - self.tell()
+        _require(type(size) is int and 0 <= size <= 8 * 1024 * 1024)
+        return os.read(self._archive, size)
+
+    def seek(self, offset, whence=0):
+        self._check()
+        return os.lseek(self._archive, offset, whence)
+
+    def tell(self): return self.seek(0, 1)
+
+    def seekable(self): return True
+
+    def close(self):
+        if self.closed and not self.uncertain: return
+        self._check()
+        if self._iterators: self._hold()
+        for fd in reversed(tuple(self._fds)):
+            self.close_fd(fd)
+        self.closed = True
+        try: self.queue._coordinator_freeze.finish_legacy_archive(self)
+        except BaseException: self._hold()
 
 
 class LegacyViewerReadonly:
@@ -145,34 +239,47 @@ class LegacyViewerReadonly:
         directory = self.root / 'viewer-tasks' / task['directory']
         _require(task['archive_path'] in (None, str(directory / 'all.zip')))
         descriptors, stream = [], None
+        owner = _ArchiveOwner(self, task)
         try:
             _require(self.root.resolve() == self.root and not any(p.is_symlink() for p in self.root.parents))
-            rootfd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            rootfd = owner.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             descriptors.append(rootfd); self._owned(rootfd, directory=True, root=True)
             for name in ('viewer-tasks', task['directory']):
-                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptors[-1])
+                fd = owner.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptors[-1])
                 descriptors.append(fd); self._owned(fd, directory=True)
             folder = descriptors[-1]
             expected = {item['path'] for item in task['_files']} | {'all.zip', 'all.zip.receipt'}
-            _require(set(os.listdir(folder)) == expected)
+            observed = set()
+            entries = os.scandir(folder)
+            owner._iterators.append(entries)
+            try:
+                for entry in entries:
+                    _require(entry.name in expected and entry.name not in observed and len(observed) < len(expected))
+                    observed.add(entry.name)
+            finally:
+                try: entries.close()
+                except BaseException: owner._hold()
+                owner._iterators.remove(entries)
+            _require(observed == expected)
             for item in task['_files']:
-                fd = os.open(item['path'], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+                fd = owner.open(item['path'], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
                 try: _require(self._owned(fd).st_size == item['bytes'])
-                finally: os.close(fd)
-            fd = os.open('all.zip.receipt', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+                finally: owner.close_fd(fd)
+            fd = owner.open('all.zip.receipt', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
             try:
                 before = self._owned(fd); _require(before.st_size <= 65536)
                 receipt = _json(os.read(fd, before.st_size + 1).decode(), 65536)
                 _require(_identity(before) == _identity(os.fstat(fd)))
-            finally: os.close(fd)
+            finally: owner.close_fd(fd)
             identity = dict(version=1, task=identifier, generation=task['generation'], job=task['job_id'],
                             node=task['node_id'], engine=task['engine_uuid'])
             _require(type(receipt) is dict and set(receipt) == set(identity) | {'bytes', 'sha256'}
                      and all(type(receipt[key]) is type(value) and receipt[key] == value for key, value in identity.items())
                      and type(receipt['bytes']) is int and 4 <= receipt['bytes'] <= self.maximum
                      and type(receipt['sha256']) is str and re.fullmatch('[a-f0-9]{64}', receipt['sha256']))
-            fd = os.open('all.zip', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
-            stream = os.fdopen(fd, 'rb'); before = self._owned(fd)
+            fd = owner.open('all.zip', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+            owner._archive = fd
+            stream = owner; before = self._owned(fd)
             _require(before.st_size == receipt['bytes'])
             digest = hashlib.sha256(); remaining = receipt['bytes']
             while remaining:
@@ -197,16 +304,23 @@ class LegacyViewerReadonly:
             _require(_identity(before) == _identity(os.fstat(stream.fileno())) ==
                      _identity(os.stat('all.zip', dir_fd=folder, follow_symlinks=False)))
             stream.seek(0)
+            stream.streaming = True
             result, stream = stream, None
             return result, receipt['bytes']
         except (OSError, ValueError, sqlite3.Error, zipfile.BadZipFile):
             raise RequestError(503, 'legacy_retained_data_unavailable') from None
         finally:
-            if stream is not None: stream.close()
-            for fd in reversed(descriptors): os.close(fd)
+            if not owner.streaming: owner.close()
 
 
 class LegacyViewerReadonlyFacade(ViewerFacade):
+    def handle(self, handler):
+        try: return super().handle(handler)
+        except LegacyArchiveCloseUncertain:
+            # A typed close failure must not become a successful pin retirement.
+            # Headers may already have been sent; close, never send a second body.
+            handler.close_connection = True
+            return True
     def _post(self, handler, path, environment):
         raise RequestError(405, 'legacy_read_only')
 
