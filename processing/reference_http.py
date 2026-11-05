@@ -116,7 +116,11 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                 self.send_header('Cache-Control', 'no-store')
                 self.send_header('X-Content-Type-Options', 'nosniff')
                 self.send_header('Connection', 'close')
-                for key in ('Content-Range', 'Accept-Ranges', 'X-Result-Sha256', 'X-Result-Manifest-Sha256'):
+                # Preserve the bounded source-range protocol metadata needed by
+                # SourceRangeClient. Keep this allowlist explicit; never forward
+                # arbitrary upstream headers from a binary adapter.
+                for key in ('Content-Range', 'Accept-Ranges', 'ETag', 'X-Processing-Request-ID',
+                            'X-Result-Sha256', 'X-Result-Manifest-Sha256'):
                     value = response.headers.get(key)
                     if value is not None and isinstance(value, str) and all(0x20 <= ord(c) <= 0x7e for c in value):
                         self.send_header(key, value)

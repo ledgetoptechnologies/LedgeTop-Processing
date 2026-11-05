@@ -96,6 +96,57 @@ class ReferenceSourceRangeBrokerTests(unittest.TestCase):
             validated=validate_source_grant(grant,job=store.get(job['jobId'],private=True),clock=lambda:now[0])
             objects=list(validated.objects)
             identity_json=json.dumps(validated.identity.canonical(),sort_keys=True,separators=(',',':'))
+            # Exercise the actual HTTPS listener and SourceRangeClient together.
+            # The in-process opener below intentionally remains useful for lost
+            # renewal/ACK replay cases, but cannot catch headers dropped by the
+            # HTTP adapter's binary response writer.
+            from cryptography import x509
+            from cryptography.hazmat.primitives import hashes,serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            from cryptography.x509.oid import NameOID
+            import ipaddress, ssl, threading
+            from datetime import datetime, timedelta, timezone
+            from processing.reference_http import create_reference_http_server
+            from urllib.request import HTTPSHandler, build_opener
+            tls_key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+            subject=x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,'127.0.0.1')])
+            cert_now=datetime.now(timezone.utc).replace(tzinfo=None)
+            certificate=(x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
+                .public_key(tls_key.public_key()).serial_number(x509.random_serial_number())
+                .not_valid_before(cert_now-timedelta(minutes=1)).not_valid_after(cert_now+timedelta(minutes=10))
+                .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address('127.0.0.1'))]),
+                    critical=False).sign(tls_key,hashes.SHA256()))
+            cert_path=Path(directory.name)/'range-broker-cert.pem'; key_path=Path(directory.name)/'range-broker-key.pem'
+            cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+            key_path.write_bytes(tls_key.private_bytes(serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,serialization.NoEncryption()))
+            server_tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); server_tls.load_cert_chain(cert_path,key_path)
+            client_tls=ssl.create_default_context(cafile=str(cert_path))
+            https_server=create_reference_http_server(control,ssl_context=server_tls,request_timeout=3)
+            https_thread=threading.Thread(target=https_server.serve_forever,kwargs={'poll_interval':0.02},daemon=True)
+            https_thread.start()
+            try:
+                real_open=build_opener(HTTPSHandler(context=client_tls)).open
+                observed=[]
+                def record_https_response(request,timeout=None):
+                    response=real_open(request,timeout=timeout); observed.append(dict(response.headers.items())); return response
+                https_client=SourceRangeClient(f'https://127.0.0.1:{https_server.server_address[1]}',
+                    Path(directory.name)/'https-worker-ledger.sqlite',opener=record_https_response,
+                    ssl_context=client_tls,clock=lambda:now[0],timeout=3)
+                https_destination=Path(directory.name)/'https-range-download.bin'
+                https_client.download_object(grant=validated,object_id=objects[0].id,destination=https_destination)
+                self.assertEqual(https_destination.read_bytes(),b'abc')
+                self.assertTrue(observed)
+                response_headers=observed[0]
+                for header in ('Content-Range','Content-Length','ETag','X-Processing-Request-ID'):
+                    self.assertIn(header,response_headers)
+                self.assertEqual(response_headers['Content-Range'],f'bytes 0-2/{objects[0].byte_size}')
+                self.assertEqual(response_headers['Content-Length'],'3')
+                self.assertEqual(response_headers['ETag'],'"sha256-'+objects[0].sha256+'"')
+                self.assertTrue(response_headers['X-Processing-Request-ID'])
+                self.assertEqual(response_headers.get('Content-Encoding','identity'),'identity')
+            finally:
+                https_server.shutdown(); https_server.server_close(); https_thread.join(2)
             probe_id=_request_id(identity_json,objects[0],0,min(validated.chunk_bytes,objects[0].byte_size))
             from urllib.request import Request
             probe=Request('https://broker.invalid'+OBJECT_PREFIX+objects[0].id,method='GET',headers={
