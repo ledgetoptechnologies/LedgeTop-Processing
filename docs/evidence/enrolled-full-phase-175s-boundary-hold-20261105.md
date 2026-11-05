@@ -40,7 +40,7 @@ backup receipt/TAR without starting the controller. The unchanged production
 `validate_tar` independently revalidated the467968-byte archive against the
 original baseline and synthetic census key:
 
--202 files,13 directories,262429 content bytes.
+- 202 files,13 directories,262429 content bytes.
 - SHA256 `7b9f1866f661236d1ba48e40ee0b5146e146aaad3b8bf784743c5a262bc9d6a9`.
 - Exact receipt match, clean stream closure and client exit0.
 - `restoreAuthorized=false`; a copy is never original lock authority.
