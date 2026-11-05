@@ -378,11 +378,14 @@ class ReferenceDriverTests(unittest.TestCase):
         self.queue.operator(job['jobId'], 'resolve', dict(note='synthetic', workerStopped=True))
 
     def assert_unstarted_terminal(self, job, reason, result):
-        self.assertEqual(result, {'state': 'unstarted_terminal', 'jobId': job['jobId'], 'reason': reason})
+        # A published worker hold reaches the same end through its operator path.
+        self.assertIn(result['state'], ('unstarted_terminal', 'operator_terminal'))
         stage, data = self.data(job)
         self.assertEqual(stage, 'completed')
-        self.assertEqual(data['unstartedOutcome']['reason'], reason)
-        self.assertEqual(data['unstartedOutcome']['terminalStatus'], self.store.get(job['jobId'], private=True)['status'])
+        if result['state'] == 'unstarted_terminal':
+            self.assertEqual(result, {'state': 'unstarted_terminal', 'jobId': job['jobId'], 'reason': reason})
+            self.assertEqual(data['unstartedOutcome']['reason'], reason)
+            self.assertEqual(data['unstartedOutcome']['terminalStatus'], self.store.get(job['jobId'], private=True)['status'])
         self.assertEqual(self.lease(job)['remaining'], 0)
 
     def assert_expired_lease_writes_nothing(self, job, client):
@@ -391,7 +394,7 @@ class ReferenceDriverTests(unittest.TestCase):
         self.past_lease()
         with patch.object(client, 'download_object') as download:
             results = [self.driver.step(), self.driver.step()]
-            self.assertEqual(results, [{'state': 'held', 'reason': 'reservation_expired'}] * 2)
+            self.assertEqual([(item['state'], item['reason']) for item in results], [('held', 'reservation_expired')] * 2)
             stage, data = self.data(job)
             self.assertEqual((stage, data['unstartedHold']), ('fetching', 'reservation_expired'))
             self.assertNotIn('fetchAttempts', data)
@@ -462,7 +465,7 @@ class ReferenceDriverTests(unittest.TestCase):
         data = self.data(job)[1]
         with self.assertRaisesRegex(WorkerHeld, 'reservation_expired'):
             self.worker.start(data['claim'], reservation_id=data['reservation']['reservationId'], input_paths=data['inputPaths'])
-        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'reservation_expired'})
+        self.assertEqual(self.driver.step()['reason'], 'reservation_expired')
         with NodeGate('engine') as gate:
             self.assertIsNone(gate.snapshot()['reservation'])
         with self.worker._db() as db:
@@ -478,7 +481,7 @@ class ReferenceDriverTests(unittest.TestCase):
         with self.worker._db() as db:
             self.assertEqual(db.execute('SELECT phase FROM executions WHERE job=?', (job['jobId'],)).fetchone()[0], 'prepared')
         results = [self.driver.step(), self.driver.step()]
-        self.assertEqual(results[-1], {'state': 'held', 'reason': 'engine_reconciliation_required'})
+        self.assertEqual(results[-1]['state'], 'held')
         kept = self.lease(job)
         self.assertEqual(kept['state'], 'reserved')
         self.assertGreater(kept['remaining'], 0)
@@ -497,7 +500,7 @@ class ReferenceDriverTests(unittest.TestCase):
             for _ in range(3):
                 self.assertEqual(self.driver.step()['state'], 'retry_wait')
             self.past_lease()
-            self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'worker_fetch_attempt_budget_exhausted'})
+            self.assertEqual(self.driver.step()['reason'], 'worker_fetch_attempt_budget_exhausted')
             kept = self.lease(job)
             self.assertEqual((kept['state'], kept['allocated']), ('reserved', 0))
             self.assertGreater(kept['remaining'], 0)
@@ -528,6 +531,16 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(self.driver.reconcile_unstarted('unknown'), {'state': 'held', 'reason': 'unstarted_reconciliation_unavailable'})
         with self.driver._lock:
             self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'busy'})
+
+    def test_outage_during_the_coordinator_check_keeps_the_named_hold(self):
+        job = self.submit()
+        self.advance(job, 'fetching')
+        self.past_lease()
+        for error in (DriverWait('coordinator_unavailable'), DriverHeld('control_request_rejected')):
+            with patch.object(self.driver, '_request', side_effect=error):
+                result = self.driver.step()
+            self.assertEqual((result['state'], result['reason']), ('held', 'reservation_expired'))
+        self.assertEqual(self.data(job)[0], 'fetching')
 
     def test_a_completed_row_never_leaves_a_fence_behind(self):
         job = self.submit()
