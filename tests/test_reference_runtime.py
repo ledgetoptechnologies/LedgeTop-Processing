@@ -477,6 +477,32 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(response.body['job']['jobId'], job['jobId'])
 
+    def test_frozen_real_runtime_restart_keeps_admission_closed_and_skips_source_reconciliation(self):
+        queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
+                      treedar_node_ids=('main',), reference_enabled=True)
+        runtime = self.runtime(queue)
+        owner = 'synthetic-coordinator-maintenance-owner'
+        plan = str(uuid.uuid4())
+        for action in ('intent', 'drain', 'seal'):
+            gate = queue._coordinator_freeze
+            gate.transition(dict(requestId=str(uuid.uuid4()), planId=plan, action=action,
+                expectedRevision=gate.status()['revision'], startupId=queue.startup_id), owner_secret=owner)
+        authority = queue.authority_id
+        runtime.close(); queue.close()
+        restarted = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
+                          treedar_node_ids=('main',), reference_enabled=True)
+        self.addCleanup(restarted.close)
+        with patch('processing.reference_store.ReferenceStore.reconcile_source_spool',
+                   side_effect=AssertionError('frozen startup must not reconcile live storage')):
+            candidate = self.runtime(restarted)
+        self.addCleanup(candidate.close)
+        self.assertEqual(restarted.authority_id, authority)
+        self.assertEqual(restarted._coordinator_freeze.status()['phase'], 'frozen')
+        self.assertEqual(candidate.source_reconciliation, {'state': 'maintenance_frozen'})
+        from processing.coordinator_freeze import CoordinatorFrozen
+        with self.assertRaises(CoordinatorFrozen), restarted.coordinator_operation('http'):
+            pass
+
     def test_partial_engine_outage_still_admits_and_queues_work_for_healthy_node(self):
         queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
                       treedar_node_ids=('main',), reference_enabled=True)

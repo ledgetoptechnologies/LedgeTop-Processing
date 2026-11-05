@@ -13,6 +13,8 @@ import sqlite3
 import threading
 import uuid
 import re
+import stat
+from pathlib import Path
 from functools import wraps
 
 from .maintenance import Conflict
@@ -29,7 +31,7 @@ STARTUP_TABLES = frozenset(('coordinator_identity', 'jobs', 'nodes', 'owned_main
     'reference_worker_failures', 'reference_worker_receipts', 'source_reader_binding',
     'source_reader_epochs', 'source_reader_fences', 'source_reader_pins', 'sqlite_sequence',
     'viewer_files', 'viewer_incarnations', 'viewer_tasks', 'coordinator_freeze_state',
-    'coordinator_freeze_receipts', 'coordinator_operation_pins'))
+    'coordinator_freeze_receipts', 'coordinator_operation_pins', 'coordinator_operation_epochs'))
 
 
 class CoordinatorFrozen(RuntimeError):
@@ -67,7 +69,8 @@ def _wire(value):
 def metadata_bytes(db):
     names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     used = 0
-    for table in ('coordinator_freeze_state', 'coordinator_freeze_receipts', 'coordinator_operation_pins'):
+    for table in ('coordinator_freeze_state', 'coordinator_freeze_receipts', 'coordinator_operation_pins',
+                  'coordinator_operation_epochs'):
         if table in names:
             for row in db.execute('SELECT * FROM ' + table):
                 used += sum(len(str(value).encode('utf-8')) for value in row if value is not None)
@@ -91,13 +94,108 @@ class FreezeGate:
                 CREATE TABLE IF NOT EXISTS coordinator_operation_pins (
                   reference TEXT PRIMARY KEY, epoch TEXT NOT NULL, kind TEXT NOT NULL,
                   start_revision INTEGER NOT NULL, state TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS coordinator_operation_epochs (
+                  epoch TEXT PRIMARY KEY, binding_json TEXT NOT NULL, binding_sha256 TEXT NOT NULL,
+                  state TEXT NOT NULL, retired_by TEXT);
                 INSERT OR IGNORE INTO coordinator_freeze_state VALUES(1,0,NULL,'open',NULL,NULL);
             ''')
             row = self._row(db)
-            uncertain = db.execute('SELECT 1 FROM coordinator_operation_pins WHERE epoch!=? LIMIT 1', (queue.startup_id,)).fetchone()
+            binding = self._binding()
+            wire = _wire(binding)
+            binding_sha = hashlib.sha256(wire.encode('ascii')).hexdigest()
+            epochs = {item['epoch']: item for item in db.execute('SELECT * FROM coordinator_operation_epochs')}
+            registered = set()
+            uncertain = False
+            for epoch, saved in epochs.items():
+                try:
+                    valid = (str(uuid.UUID(epoch)) == epoch and saved['binding_json'] == wire
+                        and saved['binding_sha256'] == binding_sha and saved['state'] in ('active', 'closed', 'retired'))
+                    if valid and saved['state'] == 'retired':
+                        successor = saved['retired_by']
+                        valid = (type(successor) is str and str(uuid.UUID(successor)) == successor
+                                 and successor != epoch and successor in epochs)
+                    elif valid:
+                        valid = saved['retired_by'] is None
+                except (ValueError, TypeError, AttributeError):
+                    valid = False
+                if valid:
+                    registered.add(epoch)
+                else:
+                    uncertain = True
+            for epoch in tuple(registered):
+                seen = set()
+                current = epoch
+                while current in registered and epochs[current]['state'] == 'retired':
+                    if current in seen:
+                        break
+                    seen.add(current)
+                    current = epochs[current]['retired_by']
+                if current not in registered or current in seen:
+                    registered.difference_update(seen)
+                    uncertain = True
+            prior_pins = db.execute('SELECT * FROM coordinator_operation_pins').fetchall()
+            retire_pins = []
+            for pin in prior_pins:
+                try:
+                    reference_valid = str(uuid.UUID(pin['reference'])) == pin['reference']
+                except (ValueError, TypeError, AttributeError):
+                    reference_valid = False
+                valid = (reference_valid and pin['epoch'] in registered and pin['kind'] in OPERATION_KINDS
+                        and type(pin['start_revision']) is int and 0 <= pin['start_revision'] <= row['revision'])
+                if valid and pin['state'] == 'retired':
+                    valid = epochs[pin['epoch']]['state'] == 'retired'
+                elif valid and pin['state'] == 'active':
+                    valid = epochs[pin['epoch']]['state'] == 'active'
+                else:
+                    valid = False
+                if not valid:
+                    uncertain = True
+                elif pin['state'] == 'active':
+                    retire_pins.append(pin)
+            charge = sum(len(value) for value in (queue.startup_id, wire, binding_sha, 'active'))
+            charge += len(retire_pins) + 37 * sum(epochs[epoch]['state'] == 'active' for epoch in registered)
+            if metadata_bytes(db) + charge + 512 > 256 * 1024:
+                uncertain = True
+            else:
+                db.execute('INSERT INTO coordinator_operation_epochs VALUES(?,?,?,?,NULL)',
+                           (queue.startup_id, wire, binding_sha, 'active'))
+                # Queue acquired this exact original private main lease before
+                # constructing the gate. A cloned/restored DB has a different
+                # inode/root/lease binding and cannot retire original pins.
+                for pin in retire_pins:
+                    db.execute("UPDATE coordinator_operation_pins SET state='retired' WHERE reference=? AND epoch=? AND state='active'",
+                               (pin['reference'], pin['epoch']))
+                for epoch in registered:
+                    if not db.execute("SELECT 1 FROM coordinator_operation_pins WHERE epoch=? AND state IN ('active','uncertain') LIMIT 1", (epoch,)).fetchone():
+                        db.execute("UPDATE coordinator_operation_epochs SET state='retired',retired_by=? WHERE epoch=? AND state='active'",
+                                   (queue.startup_id, epoch))
             if ((row['phase'] in ('intent', 'draining') and row['owner_epoch'] != queue.startup_id)
                     or uncertain):
                 db.execute("UPDATE coordinator_freeze_state SET phase='held',revision=revision+1 WHERE singleton=1")
+
+    def _binding(self):
+        queue = self.queue
+        if queue._creator_pid != os.getpid() or queue._lock.closed:
+            raise CoordinatorFrozen('original_coordinator_lease_required')
+        database = Path(queue.path).absolute()
+        root = database.parent
+        lease = root / 'coordinator.lock'
+        for path in (database, root, lease):
+            if path.resolve() != path or any(parent.is_symlink() for parent in path.parents):
+                raise CoordinatorFrozen('original_coordinator_paths_required')
+        db_info, root_info, lock_info = database.stat(), root.stat(), lease.stat()
+        opened = os.fstat(queue._lock.fileno())
+        if (not stat.S_ISDIR(root_info.st_mode) or not stat.S_ISREG(db_info.st_mode)
+                or not stat.S_ISREG(lock_info.st_mode) or db_info.st_nlink != 1 or lock_info.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (lock_info.st_dev, lock_info.st_ino)):
+            raise CoordinatorFrozen('original_coordinator_identity_required')
+        if os.name == 'posix' and (root_info.st_uid != os.geteuid() or db_info.st_uid != os.geteuid()
+                or lock_info.st_uid != os.geteuid() or root_info.st_mode & 0o077 or lock_info.st_mode & 0o022):
+            raise CoordinatorFrozen('private_original_coordinator_lease_required')
+        return dict(authorityId=queue.authority_id, database=str(database),
+            databaseIdentity=[db_info.st_dev, db_info.st_ino], root=str(root),
+            rootIdentity=[root_info.st_dev, root_info.st_ino], lease=str(lease),
+            leaseIdentity=[lock_info.st_dev, lock_info.st_ino, lock_info.st_mode, lock_info.st_nlink, lock_info.st_uid])
 
     def _check(self):
         if os.getpid() != self._pid or self.queue._lock.closed:
@@ -113,7 +211,7 @@ class FreezeGate:
         self._check()
         with self.queue._db() as db:
             row = self._row(db)
-            active = db.execute('SELECT count(*) FROM coordinator_operation_pins').fetchone()[0]
+            active = db.execute("SELECT count(*) FROM coordinator_operation_pins WHERE state IN ('active','uncertain')").fetchone()[0]
             return dict(authorityId=self.queue.authority_id, startupId=self.queue.startup_id,
                         revision=row['revision'], planId=row['plan_id'], phase=row['phase'], operations=active)
 
@@ -155,6 +253,8 @@ class FreezeGate:
                 if action == sqlite3.SQLITE_ALTER_TABLE and second in tables:
                     return sqlite3.SQLITE_OK
                 if first == 'sqlite_master' and action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE):
+                    return sqlite3.SQLITE_OK
+                if action == sqlite3.SQLITE_UPDATE and first == 'jobs' and second in ('status', 'held_reason', 'updated_at'):
                     return sqlite3.SQLITE_OK
                 if action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE) and first in (
                     'reference_recovery_startup', 'source_reader_binding', 'source_reader_epochs',
@@ -209,8 +309,18 @@ class FreezeGate:
 
     def require_quiescent_close(self):
         with self.queue._db() as db:
-            if db.execute('SELECT 1 FROM coordinator_operation_pins LIMIT 1').fetchone():
+            if db.execute("SELECT 1 FROM coordinator_operation_pins WHERE state IN ('active','uncertain') LIMIT 1").fetchone():
                 raise CoordinatorFrozen('coordinator_operations_still_live_or_uncertain')
+
+    def seal_epoch(self):
+        self.require_quiescent_close()
+        binding = _wire(self._binding())
+        with self._control(), self.queue._db() as db:
+            row = db.execute('SELECT binding_json,state FROM coordinator_operation_epochs WHERE epoch=?',
+                             (self.queue.startup_id,)).fetchone()
+            if row is None or row['binding_json'] != binding or row['state'] != 'active':
+                raise CoordinatorFrozen('coordinator_epoch_sealing_uncertain')
+            db.execute("UPDATE coordinator_operation_epochs SET state='closed' WHERE epoch=?", (self.queue.startup_id,))
 
     @contextmanager
     def source_pin_retire(self, handle):
@@ -249,7 +359,7 @@ class FreezeGate:
         # ReferenceStore still measures these bytes in its total, and cannot
         # allocate payload using this reserve. Census adds this 256KiB ceiling
         # explicitly when deriving the physical DB/headroom budget.
-        if metadata_bytes(db) + extra > 256 * 1024:
+        if metadata_bytes(db) + extra + 512 > 256 * 1024:
             raise CoordinatorFrozen('coordinator_freeze_metadata_full')
 
     @contextmanager
@@ -269,7 +379,7 @@ class FreezeGate:
             row = self._row(db)
             if row['phase'] != 'open':
                 raise CoordinatorFrozen('coordinator_maintenance')
-            if db.execute('SELECT count(*) FROM coordinator_operation_pins').fetchone()[0] >= 128:
+            if db.execute("SELECT count(*) FROM coordinator_operation_pins WHERE state IN ('active','uncertain')").fetchone()[0] >= 128:
                 raise CoordinatorFrozen('coordinator_operation_capacity')
             values = (token, self.queue.startup_id, kind, row['revision'], 'active')
             self._quota(db, sum(len(str(value).encode('utf-8')) for value in values))
@@ -324,12 +434,12 @@ class FreezeGate:
                     raise Conflict('freeze plan identity already used')
                 if db.execute("SELECT 1 FROM nodes WHERE state NOT IN ('active','draining') LIMIT 1").fetchone():
                     raise Conflict('node maintenance ownership must resolve first')
-                if db.execute('SELECT 1 FROM coordinator_operation_pins WHERE epoch!=? LIMIT 1', (self.queue.startup_id,)).fetchone():
+                if db.execute("SELECT 1 FROM coordinator_operation_pins WHERE epoch!=? AND state IN ('active','uncertain') LIMIT 1", (self.queue.startup_id,)).fetchone():
                     raise Conflict('previous coordinator operations remain uncertain')
             elif row['plan_id'] != request['planId'] or row['owner_sha256'] != owner:
                 raise Conflict('freeze plan owner changed')
             if request['action'] == 'seal':
-                if db.execute('SELECT 1 FROM coordinator_operation_pins LIMIT 1').fetchone():
+                if db.execute("SELECT 1 FROM coordinator_operation_pins WHERE state IN ('active','uncertain') LIMIT 1").fetchone():
                     raise Conflict('coordinator operations still draining')
                 names = {item[0] for item in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 if 'source_reader_pins' in names and db.execute("SELECT 1 FROM source_reader_pins WHERE state IN ('active','uncertain') LIMIT 1").fetchone():
@@ -345,3 +455,4 @@ class FreezeGate:
             db.execute('INSERT INTO coordinator_freeze_receipts VALUES(?,?,?,?,?,?)',
                        (request['requestId'], request['planId'], owner, digest, wire, encoded))
             return receipt
+

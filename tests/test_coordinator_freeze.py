@@ -5,6 +5,14 @@ import unittest
 import uuid
 import http.client
 import time
+import os
+from pathlib import Path
+import subprocess
+import sys
+import select
+import shutil
+import json
+import hashlib
 
 from processing.coordinator_freeze import CoordinatorFrozen
 from processing.maintenance import Conflict
@@ -20,7 +28,7 @@ class FreezeTests(unittest.TestCase):
         self.owner = 'synthetic-freeze-owner'
 
     def tearDown(self):
-        self.queue.close()
+        if self.queue: self.queue.close()
         self.temp.cleanup()
 
     def request(self, action, **overrides):
@@ -139,6 +147,64 @@ class FreezeTests(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close(); thread.join(2)
             self.assertFalse(thread.is_alive())
+
+    @unittest.skipUnless(os.name == 'posix', 'actual Linux original lease retirement')
+    def test_http_process_death_recovers_only_original_registered_lease_not_clone(self):
+        self.queue.close(); self.queue = None
+        code = '''
+import os,sys
+from processing.prototype import Queue
+from processing.reference_http import create_reference_http_server
+q=Queue(sys.argv[1])
+class API:
+ coordinator_queue=q
+ def handle(self,*args,**kwargs): os._exit(42)
+s=create_reference_http_server(API())
+print(s.server_port,flush=True)
+s.serve_forever()
+'''
+        child = subprocess.Popen([sys.executable, '-c', code, self.temp.name],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            readable, _, _ = select.select([child.stdout], [], [], 5)
+            self.assertTrue(readable, 'owned test child did not start')
+            port = int(child.stdout.readline())
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=2)
+            try:
+                connection.request('POST', '/synthetic-crash', body=b'')
+                with self.assertRaises((http.client.RemoteDisconnected, ConnectionResetError)):
+                    connection.getresponse()
+            finally:
+                connection.close()
+            self.assertEqual(child.wait(timeout=5), 42)
+            original_hash = hashlib.sha256((Path(self.temp.name) / 'jobs.sqlite3').read_bytes()).hexdigest()
+            with tempfile.TemporaryDirectory() as clone_root:
+                clone = Path(clone_root) / 'copy'
+                shutil.copytree(self.temp.name, clone)
+                probe = '''
+import json,os,sys
+from processing.prototype import Queue
+q=Queue(sys.argv[1])
+with q._db() as db:
+ pins=[row[0] for row in db.execute('SELECT state FROM coordinator_operation_pins')]
+print(json.dumps(dict(phase=q._coordinator_freeze.status()['phase'],pins=pins)),flush=True)
+os._exit(0)
+'''
+                result = subprocess.run([sys.executable, '-c', probe, str(clone)], capture_output=True,
+                                        text=True, timeout=5, check=True)
+                observed = json.loads(result.stdout)
+                self.assertEqual(observed, {'phase': 'held', 'pins': ['active']})
+            self.assertEqual(hashlib.sha256((Path(self.temp.name) / 'jobs.sqlite3').read_bytes()).hexdigest(), original_hash)
+            self.queue = Queue(self.temp.name)
+            self.gate = self.queue._coordinator_freeze
+            self.assertEqual(self.gate.status()['phase'], 'open')
+            self.assertEqual(self.gate.status()['operations'], 0)
+            with self.queue._db() as db:
+                self.assertEqual([row[0] for row in db.execute('SELECT state FROM coordinator_operation_pins')], ['retired'])
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)
 
 
 if __name__ == '__main__': unittest.main()

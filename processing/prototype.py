@@ -54,7 +54,7 @@ class Queue(Maintenance):
         if reference_enabled:
             self.allowed_profiles.add(REFERENCE_PROFILE)
         root = Path(directory)
-        root.mkdir(parents=True, exist_ok=True)
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._lock = (root / "coordinator.lock").open("a+b")
         self._lock.seek(0)
         if os.name == "nt":
@@ -124,6 +124,8 @@ class Queue(Maintenance):
                 # Refused shutdown retains both leases; live/uncertain source
                 # descriptors must never outlive coordinator authority.
                 readers.close()
+            if gate is not None:
+                gate.seal_epoch()
             self._lock.close()
 
     def coordinator_operation(self, kind):
