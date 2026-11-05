@@ -65,10 +65,14 @@ Both owned runners and their disposable volumes exited and were removed.
 A subsequent read-only installed metadata check found runtime UID/GID 10001,
 an original authority-lease directory owned by 10001 with mode `0711`, and its
 single-link regular lease file owned by 10001 with mode `0600`. Neither is a
-symlink. The current candidate requires `0700` on the directory and therefore
-would refuse this installed predecessor. A narrowly reviewed compatibility fix
-and exact-mode regression remain required; no installed permission was changed.
-This is an enablement blocker in addition to the current-schema census gate.
+symlink. The initial candidate required `0700` on the directory and would refuse
+this installed predecessor. Follow-up `b0bcd8f` narrowly accepts owner `0700` or
+`0711` lease directories and requires a single-link `0600` lease file. Writable
+`0770`/`0777` directories remain refused. The nine-case Linux authority module
+passed **9/9, no skips**, in 0.512 seconds, including exact installed-mode
+acceptance without chmod and unsafe-mode rejection. Its owned runner and volume
+were removed. No installed permission was changed. Current-schema census,
+frozen backup/rollback and actual cutover acceptance remain enablement gates.
 
 Processing `18e37ac` passed **126/126 focused Linux integration tests, no skips**,
 in 68.948 seconds across ten modules. This includes actual Viewer whole/range
