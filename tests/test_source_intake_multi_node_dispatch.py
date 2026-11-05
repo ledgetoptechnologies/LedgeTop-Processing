@@ -104,6 +104,14 @@ class SourceIntakeMultiNodeDispatchTests(unittest.TestCase):
             protected_transport=True)
         return response
 
+    def test_source_intake_production_over_the_small_cap_leaves_it_to_staging(self):
+        job_id = self.admit(2)  # This fixture's Viewer bearer is staging-scoped.
+        with self.queue._db() as db:
+            db.execute("UPDATE jobs SET environment='production' WHERE id=?",(job_id,))
+            db.execute("UPDATE reference_jobs SET environment='production' WHERE job_id=?",(job_id,))
+        self.assertTrue(self.queue.staging_open('cluster'))
+        self.assertFalse(self.queue.staging_open('main'))
+
     def test_two_small_jobs_claim_cluster_then_main_without_sharing_a_slot(self):
         first,second,third = self.admit(1),self.admit(1),self.admit(1)
         self.assertIsNone(self.next_job('main'))

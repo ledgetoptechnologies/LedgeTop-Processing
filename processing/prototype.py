@@ -192,6 +192,27 @@ class Queue(Maintenance):
             row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
             return self.public(row) if row else None
 
+    def _staging_open(self, db, node_id):
+        """The one staging fence; every claim recomputes it in its own transaction.
+
+        Held production blocks staging on every node. Running production keeps
+        only its own node, through the occupied-slot check. Queued production
+        keeps every node unless the shared scheduler proves it cannot use this
+        one; without a scheduler nothing is proven. Running work is never preempted.
+        """
+        if db.execute("SELECT 1 FROM jobs WHERE environment='production' AND status='held' LIMIT 1").fetchone():
+            return False
+        queued = db.execute("SELECT * FROM jobs WHERE environment='production' AND status='queued' ORDER BY seq").fetchall()
+        scheduler = getattr(self, '_reference_scheduler', None)
+        return not queued or (scheduler is not None
+                              and all(scheduler._production_cannot_use(db, job, node_id) for job in queued))
+
+    def staging_open(self, node_id):
+        """Advisory selection; claim rechecks against current queue state."""
+        self._known_node(node_id)
+        with self._db() as db:
+            return self._staging_open(db, node_id)
+
     def claim(self, payload):
         expected = ['workerId']
         if isinstance(payload, dict):
@@ -250,11 +271,7 @@ class Queue(Maintenance):
                     if any(item['profile'] != VIEWER_PROFILE
                            and item['profile'] in self.node_profiles(node_id) for item in earlier):
                         return None
-            # A staging job cannot start while production work is queued or
-            # active anywhere in the fleet. Running work is never preempted.
-            if (row['environment'] == 'staging'
-                    and db.execute("SELECT 1 FROM jobs WHERE environment='production' "
-                                   "AND status IN ('queued','running','held') LIMIT 1").fetchone()):
+            if row['environment'] == 'staging' and not self._staging_open(db, node_id):
                 return None
             if (row['profile'] == VIEWER_PROFILE
                     and (payload['workerId'] != 'viewer-dispatch' or profiles != [VIEWER_PROFILE])):

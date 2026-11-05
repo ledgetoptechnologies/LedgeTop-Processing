@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import stat
 import threading
 import time
@@ -21,6 +22,7 @@ from .maintenance import Conflict
 from . import reference_protocol as protocol
 from .viewer_result_manifest import derive_viewer_result_manifest, validate_viewer_acceptance
 from .prototype import PROFILE as TREEDAR_PROFILE, VIEWER_PROFILE
+from .reference_source_intake_canonical import pipeline_digest as v2_pipeline_digest
 from .reference_source_intake_store import ReferenceSourceIntakeMethods
 
 PROFILE = "reference-pipeline-v1"
@@ -52,6 +54,9 @@ def _reason(value):
 
 
 class ReferenceStore(ReferenceSourceIntakeMethods):
+    # Readiness may supply current (availableBytes, reservedBytes) for a node.
+    node_scratch_evidence = None
+
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
                  main_node_id=None, node_limits=None, node_option_validator=None):
@@ -463,8 +468,8 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         return db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1",
                           (node_id,)).fetchone() is None
 
-    def _select_node(self, db, submission, profile=PROFILE):
-        for node_id in self.queue.node_ids:
+    def _select_node(self, db, submission, profile=PROFILE, nodes=None):
+        for node_id in self.queue.node_ids if nodes is None else nodes:
             if (profile not in self.queue.node_profiles(node_id)
                     or not self._node_has_slot(db, node_id)
                     or not self._node_fits(submission, node_id)):
@@ -510,39 +515,100 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         self.queue._refresh_nodes(db)
         if not self._node_has_slot(db, node_id):
             return None
-        production_pending = db.execute("SELECT 1 FROM jobs WHERE environment='production' "
-            "AND status IN ('queued','running','held') LIMIT 1").fetchone() is not None
-        environment = "production" if production_pending else "staging"
-        rows = db.execute("SELECT id,profile,environment FROM jobs WHERE status='queued' AND environment=? "
-                          "ORDER BY seq", (environment,)).fetchall()
-        for item in rows:
-            profile = item["profile"]
-            if profile not in self.queue.node_profiles(node_id):
-                continue
-            if profile == PROFILE:
-                row = self._row(db, item["id"])
-                if row["phase"] not in ("queued", "waiting_capacity"):
+        for environment in ("production", "staging"):
+            nodes = None
+            if environment == "staging":
+                # Production on this node comes first. Staging then selects only
+                # among fence-open nodes, so a closed small node cannot strand
+                # it from a later open one.
+                nodes = [node for node in self.queue.node_ids if self.queue._staging_open(db, node)]
+                if node_id not in nodes:
+                    return None
+            rows = db.execute("SELECT id,profile,environment FROM jobs WHERE status='queued' AND environment=? "
+                              "ORDER BY seq", (environment,)).fetchall()
+            for item in rows:
+                profile = item["profile"]
+                if profile not in self.queue.node_profiles(node_id):
                     continue
-                submission = json.loads(row["input_json"])
-                if self._select_node(db, submission, PROFILE) == node_id:
-                    return item
-                continue
-            if profile == VIEWER_PROFILE:
-                submission = self._viewer_submission(db, item["id"], item["environment"])
-                if submission is None:
-                    # Missing/corrupt private metadata must not let a later
-                    # profile bypass this job on a node that could run Viewer.
-                    return item
-                if self._select_node(db, submission, VIEWER_PROFILE) == node_id:
-                    return item
-                continue
-            if profile == TREEDAR_PROFILE and node_id not in self.queue.treedar_node_ids:
-                continue
-            # Legacy or future profiles have no shared size contract yet.
-            # Their advertised profile membership is sufficient to hold this
-            # node's place in FIFO until that contract is available.
-            return item
+                if profile == PROFILE:
+                    row = self._row(db, item["id"])
+                    if row["phase"] not in ("queued", "waiting_capacity"):
+                        continue
+                    submission = json.loads(row["input_json"])
+                    if self._select_node(db, submission, PROFILE, nodes) == node_id:
+                        return item
+                    continue
+                if profile == VIEWER_PROFILE:
+                    submission = self._viewer_submission(db, item["id"], item["environment"])
+                    if submission is None:
+                        # Missing/corrupt private metadata must not let a later
+                        # profile bypass this job on a node that could run Viewer.
+                        return item
+                    if self._select_node(db, submission, VIEWER_PROFILE, nodes) == node_id:
+                        return item
+                    continue
+                if profile == TREEDAR_PROFILE and node_id not in self.queue.treedar_node_ids:
+                    continue
+                # Legacy or future profiles have no shared size contract yet.
+                # Their advertised profile membership is sufficient to hold this
+                # node's place in FIFO until that contract is available.
+                return item
         return None
+
+    def _reference_input(self, db, job):
+        """Return hash-verified (images, bytes, treedar), or None for doubtful metadata."""
+        row = db.execute("SELECT environment,input_json,manifest_sha,pipeline_digest FROM reference_jobs WHERE job_id=?",
+                         (job["id"],)).fetchone()
+        if row is None or row["environment"] != job["environment"]:
+            return None
+        submission = json.loads(row["input_json"])
+        manifest, pipeline = submission["manifest"], submission["pipeline"]
+        images, total, objects = manifest["inputCounts"]["images"], manifest["totalBytes"], manifest["objects"]
+        pipeline_digest = v2_pipeline_digest if submission.get("sourceIntakeVersion") == 2 else protocol.digest
+        if (type(images) is not int or type(total) is not int or type(objects) is not list
+                or images != sum(item["kind"] == "image" for item in objects)
+                or total != sum(item["byteSize"] for item in objects)
+                or row["manifest_sha"] != manifest["sha256"] or row["manifest_sha"] != protocol.manifest_sha256(manifest)
+                or row["pipeline_digest"] != pipeline_digest(pipeline)):
+            return None
+        return images, total, pipeline["treedar"]["requested"] is True
+
+    def _viewer_input(self, db, job):
+        """Return Viewer (images, None, False); its bytes are not rechecked here."""
+        tasks = db.execute("SELECT uuid FROM viewer_tasks WHERE job_id=?", (job["id"],)).fetchall()
+        submission = self._viewer_submission(db, job["id"], job["environment"]) if len(tasks) == 1 else None
+        if (submission is None or not submission["manifest"]["inputCounts"]["images"]
+                or db.execute("SELECT 1 FROM viewer_files WHERE uuid=? AND is_photo NOT IN (0,1) LIMIT 1",
+                              (tasks[0]["uuid"],)).fetchone()):
+            return None
+        return submission["manifest"]["inputCounts"]["images"], None, False
+
+    def _production_cannot_use(self, db, job, node_id):
+        """Prove queued production cannot run on this node; doubt proves nothing.
+
+        Proof is a configured capability or photo cap, or verified bytes above
+        a current scratch observation. Live engine reports (readiness, queue
+        depth, reported maxImages) are not proof, so a node still being probed
+        stays unknown, never busy.
+        """
+        if job["profile"] not in self.queue.node_profiles(node_id):
+            return True
+        readers = {PROFILE: self._reference_input, VIEWER_PROFILE: self._viewer_input}
+        try:
+            evidence = readers[job["profile"]](db, job) if job["profile"] in readers else None
+            if evidence is None:
+                return False
+            images, total, treedar = evidence
+            limit = self._configured_node_limits[node_id]["maxImages"]
+            if (limit is not None and images > limit) or (treedar and node_id not in self.queue.treedar_node_ids):
+                return True
+            scratch = self.node_scratch_evidence(node_id) if self.node_scratch_evidence is not None else None
+            if total is None or scratch is None:
+                return False
+            available, reserve = scratch
+            return type(available) is int and type(reserve) is int and total + reserve > available
+        except (sqlite3.Error, KeyError, TypeError, ValueError, AttributeError):
+            return False
 
     def _candidate_row(self, db, node_id):
         candidate = self._candidate_any_row(db, node_id)

@@ -142,12 +142,12 @@ class ViewerTaskStoreTests(unittest.TestCase):
             self.store.commit(self.identifier)
         self.assertIsNone(self.store.task(self.identifier)['job_id'])
 
-    def test_tree_claim_and_held_work_block_viewer_claim_globally(self):
+    def test_running_tree_keeps_its_node_and_held_tree_blocks_viewer_globally(self):
         tree, _ = self.queue.submit({'requestId': 'tree-first', 'environment': 'production', 'profile': PROFILE})
         self.ready(environment='staging')
         claimed = self.queue.claim({'workerId': 'trees', 'nodeId': 'main'})
         self.assertEqual(claimed['id'], tree['id'])
-        self.assertIsNone(self.claim())
+        self.assertTrue(self.queue.staging_open('cluster'))
         self.queue.operator(tree['id'], 'hold', {'note': 'synthetic uncertain engine'})
         self.assertIsNone(self.claim())
         self.queue.operator(tree['id'], 'resolve', {'note': 'verified stopped', 'workerStopped': True})
