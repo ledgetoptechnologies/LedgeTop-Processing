@@ -25,6 +25,97 @@ def _json(value):
 
 
 class ReferenceSourceIntakeMethods:
+    def _source_completion_ack(self, row, receipt_rows):
+        """Project the immutable intake completion acknowledgement from durable receipts.
+
+        This is the historical response consumed by Viewer upload recovery. It
+        deliberately excludes live queue status, phase, node, and result data;
+        GET job continues to expose those current values.
+        """
+        source = json.loads(row['source_manifest_json'])
+        derived = json.loads(row['derived_manifest_json'])
+        source_receipt = json.loads(row['source_receipt_json'])
+        derived_receipt = json.loads(row['derived_receipt_json'])
+        source_fields = {'schemaVersion', 'receiptType', 'receiptId', 'storageReceiptId', 'jobId',
+            'attemptId', 'generation', 'environment', 'pipelineManifestSha256', 'sourceManifestSha256',
+            'pipelineDigest', 'objects', 'retainedAt', 'retentionGuarantee'}
+        derived_fields = {'schemaVersion', 'receiptType', 'receiptId', 'jobId', 'attemptId',
+            'generation', 'environment', 'derivedManifestSha256', 'objects', 'retainedAt'}
+        if (type(source_receipt) is not dict or type(derived_receipt) is not dict
+                or set(source_receipt) != source_fields or set(derived_receipt) != derived_fields
+                or protocol.digest(source_receipt) != row['source_receipt_sha']
+                or protocol.digest(derived_receipt) != row['derived_receipt_sha']):
+            raise Conflict('persisted source completion receipts are unavailable')
+        receipt_ids = (source_receipt['receiptId'], source_receipt['storageReceiptId'],
+                       derived_receipt['receiptId'])
+        try:
+            canonical_ids = tuple(str(uuid.UUID(value)) for value in receipt_ids)
+        except (ValueError, TypeError, AttributeError):
+            raise Conflict('persisted source completion receipt identity changed') from None
+        if (canonical_ids != receipt_ids or len(set(receipt_ids)) != len(receipt_ids)
+                or type(source_receipt['schemaVersion']) is not int or source_receipt['schemaVersion'] != 2
+                or source_receipt['receiptType'] != 'source_retention'
+                or source_receipt['retentionGuarantee'] != 'until_explicit_source_release_v1'
+                or type(derived_receipt['schemaVersion']) is not int or derived_receipt['schemaVersion'] != 1
+                or type(source_receipt['generation']) is not int
+                or type(derived_receipt['generation']) is not int
+                or derived_receipt['receiptType'] != 'attempt_derived_input'
+                or source_receipt['retainedAt'] != derived_receipt['retainedAt']):
+            raise Conflict('persisted source completion receipt identity changed')
+        expected_source_receipt_objects = [{key: obj[key] for key in (
+            'id', 'byteSize', 'sha256', 'sourceType', 'retentionClass', 'retentionHoldId')}
+            for obj in source['objects']]
+        expected_derived_receipt_objects = [{key: obj[key] for key in (
+            'id', 'name', 'byteSize', 'sha256', 'snapshotAttemptId', 'snapshotContentSha256',
+            'snapshotEvidenceSha256', 'sourceType', 'retentionHoldId', 'retentionClass')}
+            for obj in derived['objects']]
+        if (source_receipt.get('objects') != expected_source_receipt_objects
+                or derived_receipt.get('objects') != expected_derived_receipt_objects
+                or (source_receipt.get('jobId'), source_receipt.get('attemptId'),
+                    source_receipt.get('generation'), source_receipt.get('environment'),
+                    source_receipt.get('pipelineManifestSha256'), source_receipt.get('sourceManifestSha256'),
+                    source_receipt.get('pipelineDigest')) !=
+                   (row['job_id'], row['submission_id'], row['generation'], row['environment'],
+                    row['pipeline_manifest_sha'], row['source_manifest_sha'], row['pipeline_digest'])
+                or (derived_receipt.get('jobId'), derived_receipt.get('attemptId'),
+                    derived_receipt.get('generation'), derived_receipt.get('environment'),
+                    derived_receipt.get('derivedManifestSha256')) !=
+                   (row['job_id'], row['submission_id'], row['generation'], row['environment'],
+                    row['derived_manifest_sha'])):
+            raise Conflict('persisted source completion receipt binding changed')
+        by_id = {item['object_id']: item for item in receipt_rows
+                 if item['generation'] == row['generation']}
+        expected = {obj['id'] for obj in source['objects'] + derived['objects']}
+        if len(by_id) != len(receipt_rows) or set(by_id) != expected:
+            raise Conflict('persisted source completion receipt inventory changed')
+
+        def acknowledgements(manifest, kind, manifest_sha):
+            result = []
+            for obj in manifest['objects']:
+                stored = by_id.get(obj['id'])
+                if (stored is None or stored['object_kind'] != kind
+                        or stored['byte_size'] != obj['byteSize'] or stored['sha256'] != obj['sha256']):
+                    raise Conflict('persisted source completion object acknowledgement changed')
+                result.append({'objectId': obj['id'], 'objectKind': kind,
+                    'byteSize': obj['byteSize'], 'sha256': obj['sha256'],
+                    'generation': row['generation'], 'manifestSha256': manifest_sha})
+            return result
+
+        return {
+            'jobId': row['job_id'], 'attemptId': row['submission_id'],
+            'providerTaskId': row['provider_task_id'], 'generation': row['generation'],
+            'environment': row['environment'], 'status': 'queued', 'phase': 'queued',
+            'sourceState': 'retained', 'derivedState': 'retained',
+            'pipelineManifestSha256': row['pipeline_manifest_sha'],
+            'sourceManifestSha256': row['source_manifest_sha'],
+            'derivedManifestSha256': row['derived_manifest_sha'],
+            'pipelineDigest': row['pipeline_digest'],
+            'sourceReceipt': source_receipt, 'sourceReceiptSha256': row['source_receipt_sha'],
+            'derivedReceipt': derived_receipt, 'derivedReceiptSha256': row['derived_receipt_sha'],
+            'sourceObjectReceipts': acknowledgements(source, 'source', row['source_manifest_sha']),
+            'derivedObjectReceipts': acknowledgements(derived, 'derived', row['derived_manifest_sha']),
+        }
+
     def _source_acceptance_binding(self, row):
         """Project only the authenticated, persisted V2 source/attempt identity."""
         from .source_acceptance_binding import validate_source_acceptance_binding
@@ -422,16 +513,16 @@ class ReferenceSourceIntakeMethods:
                     # persisted receipts, not newly generated IDs/timestamps, win.
                     if (row['source_state'] == 'accepted' and row['derived_state'] == 'accepted'
                             and row['source_receipt_json'] and row['derived_receipt_json']):
-                        return self._record(row, False), False
+                        return self._source_completion_ack(row, receipts), False
                     raise Conflict('source completion receipt binding changed')
-                return self._record(row, False), False
+                return self._source_completion_ack(row, receipts), False
             self._quota(db, len(source_receipt_json.encode('utf-8'))
                 + len(derived_receipt_json.encode('utf-8')))
             db.execute('''UPDATE reference_source_intakes SET source_state='accepted',
                 derived_state='accepted',source_receipt_json=?,source_receipt_sha=?,
                 derived_receipt_json=?,derived_receipt_sha=?,updated_at=CURRENT_TIMESTAMP WHERE job_id=?''',
                 (source_receipt_json, source_receipt_sha, derived_receipt_json, derived_receipt_sha, job_id))
-            result = self._record(self._row(db, job_id), False)
+            result = self._source_completion_ack(self._row(db, job_id), receipts)
         return result, True
 
     def mint_source_transfer_grant(self, job_id, *, source_spool, clock=None):

@@ -636,6 +636,25 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                     parent_claim=api.store.claim_snapshot(job["jobId"],node_id="cluster",worker_id="worker",
                         worker_instance_id="instance",claim_token=claim["claimToken"])
                     self.assertEqual(parent_claim["sourceIntakeVersion"],2)
+                    completion_ack=copy.deepcopy(completed.body)
+                    expires=(datetime.now(timezone.utc)+timedelta(minutes=5)).isoformat(
+                        timespec="milliseconds").replace("+00:00","Z")
+                    transfer={"reservationId":"source-completion-replay-reservation",
+                        "generation":claim["generation"],"expiresAt":expires,
+                        "manifestSha256":job["manifestSha256"],
+                        "byteBudget":self.payload["manifest"]["totalBytes"],"nonce":"completion-replay-nonce"}
+                    api.store.reserve(job["jobId"],transfer,node_id="cluster")
+                    api.store.mint_source_transfer_grant(job["jobId"],source_spool=spool)
+                    api.store.update_phase(job["jobId"],"fetching")
+                    api.store.update_phase(job["jobId"],"processing")
+                    completion_retry=api.handle("POST",f"/ltds/v2/jobs/{job['jobId']}/source/complete",
+                        {"Authorization":"Bearer synthetic-staging-token"},p.canonical_json(completion),
+                        protected_transport=True)
+                    self.assertEqual((completion_retry.status,completion_retry.body),(200,completion_ack))
+                    self.assertEqual(p.canonical_json(completion_retry.body),p.canonical_json(completion_ack))
+                    live=api.handle("GET",f"/ltds/v2/jobs/{job['jobId']}",
+                        {"Authorization":"Bearer synthetic-staging-token"},protected_transport=True)
+                    self.assertEqual((live.body["status"],live.body["phase"]),("running","processing"))
                     replay=api.handle("POST","/ltds/v2/jobs",{"Authorization":"Bearer synthetic-staging-token"},
                         p.canonical_json(request),protected_transport=True)
                     self.assertEqual((replay.status,replay.body["jobId"]),(200,job["jobId"]))
@@ -654,6 +673,15 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                         capability_fingerprint="a"*64,options_fingerprint=self.payload["pipeline"]["odm"]["optionsFingerprint"],
                         allowed_odm_options={"numeric-probe"},source_spool=spool,
                         source_attestation_keys=self.trusted_keys,authority_id=queue.authority_id)
+                    completion_replay=replay_api.handle("POST",f"/ltds/v2/jobs/{job['jobId']}/source/complete",
+                        {"Authorization":"Bearer synthetic-staging-token"},p.canonical_json(completion),
+                        protected_transport=True)
+                    self.assertEqual((completion_replay.status,completion_replay.body),(200,completion_ack))
+                    self.assertEqual(p.canonical_json(completion_replay.body),p.canonical_json(completion_ack))
+                    after_restart=replay_api.handle("GET",f"/ltds/v2/jobs/{job['jobId']}",
+                        {"Authorization":"Bearer synthetic-staging-token"},protected_transport=True)
+                    self.assertEqual((after_restart.body["status"],after_restart.body["phase"]),
+                        ("held","held"))
                     recovered=replay_api.handle("POST","/ltds/v2/jobs",{"Authorization":"Bearer synthetic-staging-token"},
                         p.canonical_json(request),protected_transport=True)
                     self.assertEqual((recovered.status,recovered.body["sourceReceipt"]),
