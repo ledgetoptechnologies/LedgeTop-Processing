@@ -65,6 +65,61 @@ establish installed or real-data acceptance.
 
 ## Remaining full-goal deliverables
 
+### Source retention and release integration
+
+The live intake stores source/derived custody receipts with
+`until_explicit_source_release_v1`, but has no release Store/API operation or
+completed-object deletion executor. The older V1 retention validator and
+unmounted V2 proposals use different guarantees and must not be substituted.
+Viewer creates held source snapshots, but its accept/release helpers currently
+have no production caller. Keep source deletion disabled for the pilot.
+
+Complete this through the existing intake, Store and API perimeter after the
+provider-admission/pilot gate; do not add another processing controller:
+
+1. Agree the explicit release operation with the Viewer owner, binding exact
+   job/generation/environment, authenticated owner, source/derived receipts,
+   accepted result-copy identity, release set and retention policy. A copy ACK
+   is a prerequisite, not source-delete authorization. Proposed initial policy
+   also waits for successful Viewer publication; this still needs the coupled
+   worker decision and is not an active policy.
+2. Persist authorization, deletion intent, per-object outcomes and a replayable
+   release receipt/tombstone. Fence new grants and drain existing source readers
+   before effects. Recheck the configured mount/root/marker and each exact
+   no-follow, owned, single-link file identity; require directory fsync before
+   acknowledging deletion. Uncertain outcomes retain the durable intent and
+   hold further cleanup rather than inventing success.
+3. Release only eligible processing-spool raw-input and attempt-derived copies.
+   Preserve permanent GCP holds, Viewer originals and accepted result objects.
+   Startup reconciliation must recognize exact release tombstones; unexplained
+   missing files must still hold. Retire only the exact Viewer's snapshot hold
+   after its agreed release boundary, never by clearing unrelated holds.
+4. Qualify lost replies, restart at each filesystem boundary, active readers,
+   grant revocation, wrong identity/receipt, mutation, mount replacement and
+   failed fsync using task-owned synthetic data. Beau still controls TrueNAS
+   administrative changes; no live deletion follows merely from this plan.
+
+### Unattended maintenance integration
+
+The existing updater can create an owned drain plan, wait for the scheduled
+boundary, empty running/held queue, free physical gate and idle backend, then
+perform health-checked replacement and supported pre-reopen rollback. Reference
+claims use the same authoritative queue node state, so they are blocked once
+draining starts. Installed qualification must prove both APIs use the same
+authority/database; the historical October 28 updater receipts do not do so for
+this new release.
+
+Before enabling its timer, bind the exact source/config/state and use a qualified
+dependency interpreter. The current updater renderer uses system Python, unlike
+the reference worker's prepared venv. Preserve the maintenance loopback/tunnel
+transport separately from reference worker TLS. Exercise scheduled drain,
+running-job completion, failed health/rollback and successful reopen with the
+installed reference worker and durable outboxes. The adapter currently chooses
+time-based plans, not an `afterJobId`; qualify that job-specific path before
+offering it. Updater/release inventories still hardcode main/cluster and must be
+made config-driven before claiming automatic maintenance for a future third
+node. Container updates remain in scope; OS updates stay deferred.
+
 After the photo milestone, qualify genuine LAS/LAZ TreeDar input and typed outputs
 on main using the same per-host reservation and durable handoff. Keep Gaussian
 splats disabled while exposing only its agreed future scaffold. Finish NAS source
