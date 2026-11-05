@@ -843,6 +843,20 @@ class ReferenceDriver:
                     sha256=item['sha'], byte_size=item['bytes'], relative_path=item['path'])
         return observed
 
+    def _physically_live(self, job_id):
+        """Whether this job may still own the node; only the gate can say it does not."""
+        tree = getattr(self.execution_router, 'treedar_worker', None)
+        if tree is not None:
+            try:
+                tree.controller._row(job_id)
+                return True
+            except (WorkerHeld, TreeDarHeld):
+                pass
+        with NodeGate(self.worker.engine_id) as gate:
+            reservation = gate.snapshot()['reservation']
+        # An unbound reservation may be this job's crash between reserve and bind.
+        return reservation is not None and (reservation['job'] is None or reservation['job']['id'] == job_id)
+
     def _terminal_status(self, job_id, data):
         """Exact authenticated terminal word for this claim, else None (keep trying)."""
         claim = data['claim']
@@ -871,16 +885,28 @@ class ReferenceDriver:
         proves no engine was told, so the job is the one doubt left. Only the exact
         terminal word for this claim settles it; until then, outage included, the
         row stays held under its named reason and a fence keeps its capacity. An
-        operator ends the job, then this ends the row. A gate left by a crash stays
-        the operator's physical step.
+        operator ends the job, then this ends the row, unless a crash left a live
+        physical intent: gate.resolve is the operator's step, so until it happens
+        the row, its capacity and the reported hold all stay. A started engine is
+        not this path's to judge and keeps its own reconciliation.
         """
+        reservation = data['reservation']['reservationId']
         status = self._terminal_status(job_id, data)
-        if status is None:
-            if data.get('unstartedHold') != reason:
-                data['unstartedHold'] = reason
+        with self.ledger._transaction() as db:
+            ledger = db.execute('SELECT state FROM reservations WHERE id=?', (reservation,)).fetchone()
+        started = ledger is not None and ledger['state'] in ('engine_started', 'uncertain')
+        retained = status is not None and not started and self._physically_live(job_id)
+        if status is None or retained:
+            named = 'physical_reservation_retained' if retained else reason
+            if data.get('unstartedHold') != named:
+                data['unstartedHold'] = named
                 self._save(job_id, stage, data)
+        if status is None:
             raise DriverHeld(reason)
-        if self.ledger.settle_unstarted(data['reservation']['reservationId'], transfer_ended=True) not in (None, 'expired', 'terminal'):
+        if retained:
+            return {'state': 'held', 'jobId': job_id, 'reason': reason, 'terminalStatus': status,
+                'reconciliation': 'physical_reservation_retained'}
+        if self.ledger.settle_unstarted(reservation, transfer_ended=True) not in (None, 'expired', 'terminal'):
             raise DriverHeld('engine_reconciliation_required')
         data['unstartedOutcome'] = dict(reason=reason, stage=stage, terminalStatus=status)
         self._save(job_id, 'completed', data)
