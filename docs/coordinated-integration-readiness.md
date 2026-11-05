@@ -28,14 +28,47 @@ replay. One queued/source-receiving job stored both 10,000-entry manifests and
 a 50,000,000,000-byte reservation, with no uploaded source bytes or object
 receipts. Capacity and physical-mount checks were injected, so this is neither
 a NAS nor 50 GB transfer qualification. Peak server-only RSS was 156,876,800
-bytes. The separate server-only **256 MiB / 0.5 CPU cgroup** experiment is still
-pending; RSS margin alone does not prove it will avoid OOM under installed load.
+bytes. A separate server-only **256 MiB / 0.5 CPU cgroup** experiment also
+passed with the producer outside that cgroup: final read-only-container peak
+was **181,211,136 bytes (about 173 MiB)**, with `max`, `oom` and `oom_kill` event
+deltas all zero. Submission returned 201 in 3.43 seconds; exact replay returned
+200 in 2.91 seconds. It exercised the same busy/GET/error recovery cases. The
+default Linux HTTP/scale regression passed **20/20** after fixture changes.
+See the [reproduction and evidence note](evidence/reference-source-intake-cgroup-qualification-20261105.md).
+This qualifies that metadata-only case under the node limit; installed load,
+actual source transfers and engine execution still need qualification.
 
 The inactive `504af0e` source directories on both PCs described below predate
 these admission fixes. They must be replaced by a qualified exact candidate
 before activation; their earlier validator results do not qualify this code.
 
 ## Controlled conversion, publication and delivery checkpoint
+
+The separate Viewer ImageSharp candidate is frozen at
+`6718d1beca0f7fbf8cbaae2bbec14326e1e053bb` on
+`codex/viewer-imagesharp-320-20261105`. Its source ZIP SHA-256 is
+`5d2ce82d1840bd75172c5b71480853b85ff427221c6fc2e28b5768cf3eb3363d`.
+Independent Linux qualification passed **48/48 tests, no skips**, in 20.417
+seconds across `obj2tiles-bounded-worker`, `lod-derivative-policy`,
+`lod-equivalence-audit`, `lod-provenance` and `lod-provenance-receipt`.
+It reused the exact frozen-2317 production dependency lock and Node 24.22.2,
+with one CPU/1 GiB, read-only mounts and external networking disabled.
+
+The candidate separates historical receipt validation from current generation:
+old upstream/schema-1 binaries cannot generate current 3.2.0 provenance, and
+the worker verifies the current executable before spawning it. Checks also
+exercise durable receipt authority, changed asset/tree rejection and private
+proof verification for published sessions. The GitHub build-secret mapping uses
+the action's `secret-envs` syntax, not Buildx CLI grammar in the `secrets` input.
+This is a separate reviewable candidate, not a merged Viewer release or actual
+licensed 3.2.0 build. The binary/build and installed acceptance gates remain.
+
+The same frozen Viewer candidate also passed **35/35** targeted GCP tests in
+8.718 seconds under the same bounded Linux setup. These cover strict Emlid/CSV
+parsing and units/CRS handling, import API and immutable raw CSV custody,
+attempt-specific ODM serialization and snapshot retention, and workspace source
+contracts. Workspace checks in this run are static source assertions, **not a
+rendered browser flow**. No client CSV or coordinates were used or printed.
 
 Processing `0327d45bdc83eea4b4a663806b555e2987a291e9` with frozen Viewer
 `2317d40029f5b0dbbb002cd319c8f25d321a1bfb` passed **272/272 selected Linux tests,
