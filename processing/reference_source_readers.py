@@ -8,6 +8,7 @@ lease after its prior owner exits permits retirement of registered old pins.
 """
 from contextlib import contextmanager
 import json
+import hashlib
 import os
 from pathlib import Path
 import secrets
@@ -244,7 +245,10 @@ class SourceReaders:
             raise ValueError('invalid source operation')
         with self.queue._lifecycle_lock, self._mutex:
             self.check()
-            reference = secrets.token_hex(24)
+            reference = (hashlib.sha256(('source-release-v1:'+self.epoch+':'+job_id+':'+str(generation)+':'+str(_release_id)).encode('ascii')).hexdigest()[:48]
+                if operation=='source-release' else secrets.token_hex(24))
+            if reference in self._handles:
+                raise SourceReaderError('source_operation_busy')
             handle = SourceReadHandle(self, reference, job_id, generation, object_id, operation)
             self._handles[reference] = handle
             wrote = False
@@ -262,9 +266,20 @@ class SourceReaders:
                         self._unfenced(db, job_id, generation)
                         self._admit_operation(db, job_id, generation, operation)
                     authorize(db)
-                    (quota or self.store._quota)(db, sum(len(str(x)) for x in (reference, self.epoch, job_id, generation, object_id, 'superseded', operation)))
-                    wrote = True
-                    db.execute("INSERT INTO source_reader_pins(reference,epoch,job_id,generation,object_id,state,operation) VALUES(?,?,?,?,?,'active',?)", (reference, self.epoch, job_id, generation, object_id, operation))
+                    old=db.execute('SELECT * FROM source_reader_pins WHERE reference=?',(reference,)).fetchone()
+                    if old is not None:
+                        if (operation!='source-release' or (old['epoch'],old['job_id'],old['generation'],old['object_id'],old['operation'],old['state'])!=
+                                (self.epoch,job_id,generation,object_id,operation,'released')):
+                            raise SourceReaderError('source_reader_pin_changed')
+                        # Exact same-epoch synchronous release pin reactivation
+                        # needs no new metadata; its longest state is prepaid.
+                        wrote=True
+                        changed=db.execute("UPDATE source_reader_pins SET state='active' WHERE reference=? AND epoch=? AND state='released'",(reference,self.epoch))
+                        if changed.rowcount!=1:raise SourceReaderError('source_reader_pin_changed')
+                    else:
+                        (quota or self.store._quota)(db, sum(len(str(x)) for x in (reference, self.epoch, job_id, generation, object_id, 'superseded', operation)))
+                        wrote = True
+                        db.execute("INSERT INTO source_reader_pins(reference,epoch,job_id,generation,object_id,state,operation) VALUES(?,?,?,?,?,'active',?)", (reference, self.epoch, job_id, generation, object_id, operation))
                 return handle
             except Exception:
                 # A failed commit could have published a pin. Retain ownership
@@ -300,7 +315,7 @@ class SourceReaders:
 
     def reserve_release(self, job_id, generation, release_id, *, authorize):
         """Internal only: exact journal/fence authorizer, after all I/O drains."""
-        return self.reserve(job_id,generation,'source-release',authorize=authorize,
+        return self.reserve(job_id,generation,release_id,authorize=authorize,
             operation='source-release',_release_id=release_id)
 
     def active_count(self, job_id, generation):

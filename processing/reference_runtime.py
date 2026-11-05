@@ -411,6 +411,7 @@ class ReferenceRuntime:
         self._viewer_transfer_worker, self._viewer_transfer_thread = None, None
         self._source_release = None
         self._source_release_thread = None
+        self._source_timer_thread = None
         self._source_release_stop = threading.Event()
         self._viewer_transfer_stop = threading.Event()
         try:
@@ -570,6 +571,10 @@ class ReferenceRuntime:
             self._start_source_release()
         except Exception:
             self._source_release_stop.set()
+            if self._source_timer_thread is not None:
+                self._source_timer_thread.join(timeout=1)
+                if self._source_timer_thread.is_alive():
+                    raise RuntimeConfigurationError('source release timer still draining; authority retained') from None
             if self._source_release_thread is not None:
                 self._source_release_thread.join(timeout=1)
                 if self._source_release_thread.is_alive():
@@ -602,6 +607,10 @@ class ReferenceRuntime:
         if self._source_release is None or not self.settings.source_release.enabled:
             return
         self._source_release_stop.clear()
+        if self._source_timer_thread is None or not self._source_timer_thread.is_alive():
+            self._source_timer_thread=threading.Thread(target=self._source_timer_loop,
+                name='processing-source-retention-clock',daemon=True)
+            self._source_timer_thread.start()
         if self._source_release_thread is not None and self._source_release_thread.is_alive():
             return
         self._source_release_thread=threading.Thread(target=self._source_release_loop,
@@ -610,14 +619,25 @@ class ReferenceRuntime:
 
     def _source_release_loop(self):
         while not self._source_release_stop.is_set():
-            progress=self._source_release.run_once()
+            progress=self._source_release.run_io_batch()
             if self._source_release_stop.wait(0.1 if progress else 2):
+                return
+
+    def _source_timer_loop(self):
+        while not self._source_release_stop.is_set():
+            self._source_release.checkpoint_timers()
+            if self._source_release_stop.wait(30):
                 return
 
     def close(self):
         # Do not stop HTTP/delivery first: an unresponsive NAS operation still
         # owns its exact source pin and must remain attached to this runtime.
         self._source_release_stop.set()
+        if self._source_timer_thread is not None:
+            self._source_timer_thread.join(timeout=1)
+            if self._source_timer_thread.is_alive():
+                raise RuntimeConfigurationError('source release timer still draining; authority retained')
+            self._source_timer_thread=None
         if self._source_release_thread is not None:
             self._source_release_thread.join(timeout=1)
             if self._source_release_thread.is_alive():

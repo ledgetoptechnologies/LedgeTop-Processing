@@ -11,6 +11,29 @@ from processing.source_release_filesystem import encode_physical,MAX_PHYSICAL_BY
 
 
 class SourceReleaseMetadataTests(unittest.TestCase):
+    def test_namespace_binding_and_terminal_header_fit_separate_fixed_reservation(self):
+        from processing.source_release_filesystem import validate_namespace
+        from processing.source_release import MINIMUM_NS
+        maximum=2**64-1;uid=2**32-1;mode=0o40755
+        parent=[maximum,maximum,mode,uid]
+        identity='00000000-0000-4000-8000-000000000001'
+        namespace=dict(schemaVersion=1,protocol='ltds-source-release-namespace-v1',authorizationSha256='a'*64,
+            eligibleClosureSha256='b'*64,preservedClosureSha256='c'*64,
+            parents={key:list(parent) for key in ('root','job','generation')},quarantineName='.ltds-release-'+identity)
+        encoded=validate_namespace(namespace,authorization_sha256='a'*64,eligible_sha256='b'*64,
+            preserved_sha256='c'*64,release_id=identity)
+        receipt=dict(schemaVersion=1,protocol='ltds-source-release-receipt-v1',coordinatorAuthorityId='a'*128,
+            jobId=identity,generation=p.MAX_SAFE_INTEGER,environment='production',principalId='p'*128,
+            releaseId=identity,authorizationSha256='a'*64,sourceSnapshotId=identity,sourceSnapshotSha256='b'*64,
+            workerObservationAckSha256='c'*64,eligibleClosureSha256='d'*64,preservedClosureSha256='e'*64,
+            removedObjectCount=20000,removedBytes=p.MAX_SAFE_INTEGER,completedAt='9999-12-31T23:59:59.999Z',receiptSha256='f'*64)
+        # Exact request/preserved bytes are reserved separately, and all object
+        # physical rows use their own1280B slot. This covers every other column.
+        columns=[identity,p.MAX_SAFE_INTEGER,identity,'p'*128,'a'*64,'b'*64,'waiting_policy',
+            'release_role_unavailable','9999-12-31T23:59:59.999Z',MINIMUM_NS,'e'*64,2**63-1,
+            p.canonical_json(receipt).decode(),64*1024*1024,'d'*64,encoded]
+        self.assertLessEqual(sum(len(str(value)) for value in columns),TERMINAL_JOURNAL_RESERVE)
+
     def test_maximum_closed_physical_evidence_and_completed_outcome_fit_reserved_bytes(self):
         maximum=2**64-1
         unsigned32=2**32-1;signed64=2**63-1

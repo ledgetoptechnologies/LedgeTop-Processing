@@ -16,6 +16,7 @@ from . import reference_protocol as p
 from .source_spool import _close_owned_fd, SourceSpoolError
 
 MAX_PHYSICAL_BYTES=1024
+MAX_NAMESPACE_BYTES=1024
 
 
 def validate_qualification_value(value):
@@ -53,9 +54,11 @@ def validate_physical(phase,physical,obj):
     required={'root','job','generation','file'}
     if phase in ('quarantining','quarantined','unlinking','removed'):required.add('quarantine')
     if phase in ('quarantined','unlinking','removed'):required.add('quarantinedFile')
-    if phase not in ('verified','quarantining','quarantined','unlinking','removed') or not required<=set(physical):
+    if phase not in ('listed','verified','quarantining','quarantined','unlinking','removed') or not required<=set(physical):
         raise ReleaseFilesystemError('journal_invalid')
-    if phase in ('verified','quarantining') and 'quarantinedFile' in physical:
+    if phase in ('listed','verified','quarantining') and 'quarantinedFile' in physical:
+        raise ReleaseFilesystemError('journal_invalid')
+    if phase=='listed' and ('quarantine' in physical or 'effectIntent' in physical):
         raise ReleaseFilesystemError('journal_invalid')
     for name in ('root','job','generation','quarantine','file','quarantinedFile'):
         if name not in physical:continue
@@ -91,6 +94,24 @@ def encode_physical(phase,physical,obj):
         longest=p.canonical_json(completed).decode('ascii')
     if max(len(encoded),len(longest))>MAX_PHYSICAL_BYTES:
         raise ReleaseFilesystemError('metadata_quota')
+    return encoded
+
+
+def validate_namespace(value,*,authorization_sha256,eligible_sha256,preserved_sha256,release_id):
+    p._closed(value,('schemaVersion','protocol','authorizationSha256','eligibleClosureSha256',
+        'preservedClosureSha256','parents','quarantineName'),'source namespace checkpoint')
+    expected=dict(schemaVersion=1,protocol='ltds-source-release-namespace-v1',authorizationSha256=authorization_sha256,
+        eligibleClosureSha256=eligible_sha256,preservedClosureSha256=preserved_sha256,
+        quarantineName='.ltds-release-'+release_id)
+    if any(value[key]!=wanted or type(value[key]) is not type(wanted) for key,wanted in expected.items()):
+        raise ReleaseFilesystemError('journal_invalid')
+    p._closed(value['parents'],('root','job','generation'),'source namespace parents')
+    for identity in value['parents'].values():
+        if (type(identity) is not list or len(identity)!=4 or any(type(v) is not int or not 0<=v<2**64 for v in identity)
+                or identity[2]>0o177777 or identity[3]>=2**32 or not stat.S_ISDIR(identity[2]) or identity[2]&0o022):
+            raise ReleaseFilesystemError('journal_invalid')
+    encoded=p.canonical_json(value).decode('ascii')
+    if len(encoded)>MAX_NAMESPACE_BYTES:raise ReleaseFilesystemError('metadata_quota')
     return encoded
 
 
@@ -216,19 +237,51 @@ class SourceReleaseFilesystem:
             if ctypes.get_errno()==errno.EEXIST:raise ReleaseFilesystemError('quarantine_conflict')
             raise OSError(ctypes.get_errno(),'source quarantine rename failed')
 
-    def audit(self,auth,journal,preserved,*,verify_remaining=False):
+    def capture_namespace(self,auth,preserved,authorization_sha256):
+        """One bounded initial namespace/stat scan; no source bytes are deleted.
+
+        Every target's ORIGINAL physical identity is pinned here. Full content
+        verification happens again immediately before that target's own effect.
+        """
+        with self._context(auth) as ctx:
+            if ctx['quarantine'] is not None:raise ReleaseFilesystemError('quarantine_conflict')
+            expected={self._names(auth,obj)[0] for obj in auth['eligibleObjects']+preserved}
+            if set(os.listdir(ctx['generation']))!=expected:raise ReleaseFilesystemError('source_identity_changed')
+            parents=self._parents(auth,ctx)
+            entries=[]
+            for obj in auth['eligibleObjects']:
+                original,_=self._names(auth,obj)
+                info=self._stat(ctx['generation'],original)
+                if info is None:raise ReleaseFilesystemError('source_missing')
+                physical=dict(parents,file=file_identity(info))
+                if info.st_dev!=self.spool._root_identity[0] or info.st_uid!=os.geteuid():
+                    raise ReleaseFilesystemError('source_identity_changed')
+                entries.append(dict(objectKind=obj['objectKind'],id=obj['id'],
+                    physical=encode_physical('listed',physical,obj)))
+            for obj in preserved:self._verified(ctx['generation'],self._names(auth,obj)[0],obj)
+            self._parents(auth,ctx,parents)
+            if set(os.listdir(ctx['generation']))!=expected:raise ReleaseFilesystemError('source_identity_changed')
+            namespace=dict(schemaVersion=1,protocol='ltds-source-release-namespace-v1',
+                authorizationSha256=authorization_sha256,eligibleClosureSha256=auth['eligibleClosureSha256'],
+                preservedClosureSha256=p.digest(preserved),parents=parents,quarantineName=ctx['quarantineName'])
+            validate_namespace(namespace,authorization_sha256=authorization_sha256,
+                eligible_sha256=auth['eligibleClosureSha256'],preserved_sha256=p.digest(preserved),release_id=auth['releaseId'])
+            return namespace,entries
+
+    def audit(self,auth,journal,preserved,*,verify_remaining=False,namespace=None):
         """Closed namespace and permanent-object check; never repair or unlink."""
         with self._context(auth) as ctx:
+            if namespace is not None:self._parents(auth,ctx,namespace['parents'])
             rows={(row['object_kind'],row['object_id']):row for row in journal}
             expected={};quarantine_expected=set()
             for obj in auth['eligibleObjects']:
                 row=rows.get((obj['objectKind'],obj['id']))
                 if not row:raise ReleaseFilesystemError('journal_invalid')
                 original,quarantine=self._names(auth,obj)
-                if row['phase'] not in ('planned','verified','quarantining','quarantined','unlinking','removed'):
+                if row['phase'] not in ('planned','listed','verified','quarantining','quarantined','unlinking','removed'):
                     raise ReleaseFilesystemError('journal_invalid')
                 source=self._stat(ctx['generation'],original);copy=self._stat(ctx['quarantine'],quarantine)
-                if row['phase'] in ('planned','verified'):
+                if row['phase'] in ('planned','listed','verified'):
                     if source is None or copy is not None:raise ReleaseFilesystemError('source_missing')
                 elif row['phase']=='quarantining':
                     if (source is None)==(copy is None):raise ReleaseFilesystemError('quarantine_conflict')
@@ -237,6 +290,10 @@ class SourceReleaseFilesystem:
                 elif row['phase'] in ('unlinking','removed'):
                     if source is not None or (row['phase']=='removed' and copy is not None):
                         raise ReleaseFilesystemError('quarantine_conflict')
+                    if row['phase']=='unlinking' and copy is None:
+                        intent=json.loads(row['physical_json']).get('effectIntent',{})
+                        if intent.get('kind')!='unlink' or intent.get('outcome') not in ('prepared','completed'):
+                            raise ReleaseFilesystemError('source_missing')
                 if source is not None:expected[original]=obj
                 if copy is not None:quarantine_expected.add(quarantine)
                 physical=json.loads(row['physical_json'])
@@ -255,14 +312,17 @@ class SourceReleaseFilesystem:
             if ctx['quarantine'] is not None and set(os.listdir(ctx['quarantine']))!=quarantine_expected:
                 raise ReleaseFilesystemError('quarantine_conflict')
 
-    def remove_one(self,auth,obj,row,persist,effect):
+    def remove_one(self,auth,obj,row,persist,effect,*,namespace=None):
+        if namespace is None:raise ReleaseFilesystemError('journal_invalid')
         with self._context(auth) as ctx:
+            self._parents(auth,ctx,namespace['parents'])
             original,name=self._names(auth,obj)
             physical=json.loads(row['physical_json']);phase=row['phase']
             validate_physical(phase,physical,obj)
-            if phase=='planned':
-                physical=self._parents(auth,ctx)
-                physical['file']=self._verified(ctx['generation'],original,obj)
+            if phase=='planned':raise ReleaseFilesystemError('journal_invalid')
+            if phase=='listed':
+                self._parents(auth,ctx,physical)
+                physical['file']=self._verified(ctx['generation'],original,obj,physical['file'])
                 persist('verified',physical);phase='verified'
             self._parents(auth,ctx,physical)
             if ctx['quarantine'] is None:
@@ -299,6 +359,9 @@ class SourceReleaseFilesystem:
                 if self._stat(ctx['generation'],original) is not None:raise ReleaseFilesystemError('quarantine_conflict')
                 copy=self._stat(ctx['quarantine'],name)
                 if copy is None and phase!='unlinking':raise ReleaseFilesystemError('source_missing')
+                if copy is None and (physical.get('effectIntent',{}).get('kind')!='unlink'
+                        or physical['effectIntent'].get('outcome') not in ('prepared','completed')):
+                    raise ReleaseFilesystemError('source_missing')
                 if copy is not None:self._verified(ctx['quarantine'],name,obj,physical['quarantinedFile'])
                 if phase=='quarantined':persist('unlinking',physical)
                 def unlink():

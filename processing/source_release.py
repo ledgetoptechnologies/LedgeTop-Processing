@@ -10,6 +10,7 @@ import math
 import threading
 import time
 import uuid
+from collections import OrderedDict
 
 from . import reference_protocol as p
 from .maintenance import Conflict
@@ -24,7 +25,7 @@ TERMINAL_JOURNAL_RESERVE=4096
 TABLE_COLUMNS={
     'source_releases':('job_id','generation','release_id','principal_id','request_json','request_sha256',
         'request_canonical_sha256','state','hold_reason','accepted_at','remaining_ns','clock_epoch','clock_ns',
-        'preserved_json','receipt_json','reserved_metadata_bytes'),
+        'preserved_json','receipt_json','reserved_metadata_bytes','binding_sha256','namespace_json'),
     'source_release_objects':('release_id','object_kind','object_id','phase','physical_json'),
     'source_release_schedule':('singleton','last_release_id')}
 
@@ -65,6 +66,7 @@ def ensure_schema(db):
         state TEXT NOT NULL,hold_reason TEXT,accepted_at TEXT NOT NULL,
         remaining_ns INTEGER NOT NULL,clock_epoch TEXT NOT NULL,clock_ns INTEGER NOT NULL,
         preserved_json TEXT NOT NULL,receipt_json TEXT,reserved_metadata_bytes INTEGER NOT NULL,
+        binding_sha256 TEXT NOT NULL,namespace_json TEXT,
         PRIMARY KEY(job_id,generation))''')
     db.execute('''CREATE TABLE IF NOT EXISTS source_release_objects(
         release_id TEXT NOT NULL,object_kind TEXT NOT NULL,object_id TEXT NOT NULL,
@@ -77,6 +79,8 @@ def ensure_schema(db):
             raise Conflict('source release cursor missing from retained journal')
         db.execute('INSERT INTO source_release_schedule VALUES(1,NULL)')
     validate_schema(db)
+    db.execute('CREATE INDEX IF NOT EXISTS source_release_due ON source_releases(state,remaining_ns,release_id)')
+    db.execute("CREATE INDEX IF NOT EXISTS source_release_pending ON source_release_objects(release_id,object_kind,object_id) WHERE phase!='removed'")
 
 
 def metadata_bytes(db):
@@ -87,6 +91,37 @@ def metadata_bytes(db):
     return db.execute('SELECT COALESCE(SUM(reserved_metadata_bytes),0) FROM source_releases').fetchone()[0]+128
 
 
+def scalar_binding(store,db,job_id):
+    """Current immutable scalar CAS; full payloads validate at epoch/checkpoints.
+
+    No NAS access, full manifest parse, signature verification or quota SUM is
+    performed by this per-effect check. App-owned accepted payloads are immutable.
+    Full journal/current payload validation repeats on restart and before ACK.
+    """
+    row=db.execute('''SELECT r.job_id,r.generation,r.environment,r.submission_id,r.manifest_sha,r.pipeline_digest,
+        r.phase,(r.result_json IS NOT NULL) AS result_present,j.status,j.environment AS queue_environment,j.profile,
+        s.request_digest AS source_request_digest,s.viewer_task_id,s.provider_task_id,s.source_attestation_sha,
+        s.source_manifest_sha,s.derived_manifest_sha,s.pipeline_manifest_sha,s.source_receipt_sha,s.derived_receipt_sha,
+        s.source_state,s.derived_state,c.node_id,c.worker_id,c.instance_id,c.token,
+        o.observation_id,o.request_sha256 AS observation_request_sha256,o.ack_json,o.claim_sha256
+        FROM reference_jobs r JOIN jobs j ON j.id=r.job_id JOIN reference_source_intakes s ON s.job_id=r.job_id
+        JOIN reference_claims c ON c.job_id=r.job_id JOIN reference_worker_acceptance_observations o
+        ON o.job_id=r.job_id AND o.generation=r.generation WHERE r.job_id=?''',(job_id,)).fetchone()
+    if not row:raise Conflict('source release immutable binding changed')
+    values=dict(row)
+    state={name:values.pop(name) for name in ('phase','result_present','status','source_state','derived_state')}
+    token=values.pop('token');ack=values.pop('ack_json')
+    if (type(token) is not str or not token.isascii() or not 1<=len(token)<=128
+            or type(ack) is not str or not ack.isascii() or not 1<=len(ack)<=4096):
+        raise Conflict('source release immutable binding changed')
+    values['claimTokenSha256']=hashlib.sha256(token.encode('ascii')).hexdigest()
+    values['observationAckCanonicalSha256']=hashlib.sha256(ack.encode('ascii')).hexdigest()
+    values['coordinatorAuthorityId']=store.queue.authority_id
+    if values['queue_environment']!=values['environment'] or values['profile']!='reference-pipeline-v1':
+        raise Conflict('source release immutable binding changed')
+    return p.digest(values),state
+
+
 def validate_retained_journal(store,db,*,release_keys=None,release_id=None):
     """Read-only closed census hook; does not enable release or repair evidence.
 
@@ -94,7 +129,7 @@ def validate_retained_journal(store,db,*,release_keys=None,release_id=None):
     Store/authority. Missing keys do not grant a new release role: historical
     rows are integrity/binding checked only and remain non-executable.
     """
-    from .source_release_filesystem import validate_physical,encode_physical
+    from .source_release_filesystem import validate_physical,encode_physical,validate_namespace
     if not db.execute("SELECT 1 FROM sqlite_master WHERE name='source_releases'").fetchone():return []
     validate_schema(db)
     results=[]
@@ -125,6 +160,9 @@ def validate_retained_journal(store,db,*,release_keys=None,release_id=None):
             raise Conflict('source release retained state invalid')
         p._hash(row['clock_epoch'],'retained release clock epoch');wire.utc(row['accepted_at'])
         preserved=validate_job_binding(store,db,auth,row['principal_id'],historical=True)
+        p._hash(row['binding_sha256'],'source release scalar binding')
+        if scalar_binding(store,db,auth['jobId'])[0]!=row['binding_sha256']:
+            raise Conflict('source release scalar binding changed')
         if row['preserved_json']!=p.canonical_json(preserved).decode('ascii'):
             raise Conflict('source release permanent closure changed')
         reserve=reservation_bytes(request,preserved)
@@ -138,6 +176,17 @@ def validate_retained_journal(store,db,*,release_keys=None,release_id=None):
             if item['physical_json']!=encode_physical(item['phase'],physical,obj):
                 raise Conflict('source release physical journal changed')
             validate_physical(item['phase'],physical,obj)
+        namespace=json.loads(row['namespace_json']) if row['namespace_json'] else None
+        if namespace:
+            if row['namespace_json']!=validate_namespace(namespace,authorization_sha256=row['request_sha256'],
+                    eligible_sha256=auth['eligibleClosureSha256'],preserved_sha256=p.digest(preserved),release_id=row['release_id']):
+                raise Conflict('source namespace checkpoint changed')
+            for item in objects:
+                physical=json.loads(item['physical_json'])
+                if item['phase']=='planned' or any(physical.get(name)!=value for name,value in namespace['parents'].items()):
+                    raise Conflict('source namespace object inventory changed')
+        elif row['state'] in ('deleting','released') or any(item['phase']!='planned' for item in objects):
+            raise Conflict('source namespace checkpoint unavailable')
         fence=db.execute('SELECT release_id FROM source_reader_fences WHERE job_id=? AND generation=?',(row['job_id'],row['generation'])).fetchone()
         needs_fence=row['state'] in ('draining','deleting','released') or any(item['phase']!='planned' for item in objects)
         if (needs_fence and (not fence or fence['release_id']!=row['release_id'])
@@ -160,7 +209,7 @@ def validate_retained_journal(store,db,*,release_keys=None,release_id=None):
                     or any(item['phase']!='removed' for item in objects)):
                 raise Conflict('source release retained terminal receipt changed')
         results.append(dict(jobId=row['job_id'],generation=row['generation'],releaseId=row['release_id'],
-            state=row['state'],authorization=auth,preserved=preserved,objects=[dict(item) for item in objects]))
+            state=row['state'],authorization=auth,preserved=preserved,namespace=namespace,objects=[dict(item) for item in objects]))
     if release_id is None and db.execute('''SELECT 1 FROM source_release_objects o LEFT JOIN source_releases r
         ON r.release_id=o.release_id WHERE r.release_id IS NULL LIMIT 1''').fetchone():
         raise Conflict('orphan source release object journal')
@@ -191,7 +240,8 @@ def reconcile_source_release_custody(store,spool,job_id,generation):
         qualification=dict(mountId=spool.mount_id,renameNoReplace=True,directoryFsync=True)
         for prefix,identity in (('root',spool._root_identity),('mount',spool._mount_identity),('marker',spool._marker_identity)):
             qualification[prefix+'Device']=str(identity[0]);qualification[prefix+'Inode']=str(identity[1])
-        SourceReleaseFilesystem(spool,qualification).audit(record['authorization'],record['objects'],record['preserved'],verify_remaining=True)
+        SourceReleaseFilesystem(spool,qualification).audit(record['authorization'],record['objects'],record['preserved'],
+            verify_remaining=True,namespace=record['namespace'])
         return True
     except BaseException as error:
         from .source_spool import SourceSpoolCloseUncertain
@@ -293,6 +343,8 @@ class SourceReleaseService:
         self.clock=monotonic_ns or time.monotonic_ns
         self.stop_requested=stop_requested or (lambda:False)
         self._mutex=threading.Lock()
+        self._timer_mutex=threading.Lock()
+        self._validated=OrderedDict()
         with store.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             ensure_schema(db)
@@ -342,9 +394,9 @@ class SourceReleaseService:
             self.store._quota(db,reserve)
             db.execute('''INSERT INTO source_releases(job_id,generation,release_id,principal_id,request_json,
                 request_sha256,request_canonical_sha256,state,hold_reason,accepted_at,remaining_ns,clock_epoch,clock_ns,preserved_json,
-                receipt_json,reserved_metadata_bytes) VALUES(?,?,?,?,?,?,?,'waiting_policy',NULL,?,?,?,?,?,NULL,?)''',
+                receipt_json,reserved_metadata_bytes,binding_sha256,namespace_json) VALUES(?,?,?,?,?,?,?,'waiting_policy',NULL,?,?,?,?,?,NULL,?,?,NULL)''',
                 (job_id,auth['generation'],auth['releaseId'],principal,encoded,request['authorizationSha256'],p.digest(request),
-                 accepted_at,MINIMUM_NS,readers.epoch,now,preserved_json,reserve))
+                 accepted_at,MINIMUM_NS,readers.epoch,now,preserved_json,reserve,scalar_binding(self.store,db,job_id)[0]))
             for obj in auth['eligibleObjects']:
                 db.execute("INSERT INTO source_release_objects VALUES(?,?,?,'planned','{}')",(auth['releaseId'],obj['objectKind'],obj['id']))
             return self._status(db.execute('SELECT * FROM source_releases WHERE release_id=?',(auth['releaseId'],)).fetchone()),True
@@ -379,51 +431,136 @@ class SourceReleaseService:
         with self.store.queue._db() as db:
             db.execute("UPDATE source_releases SET state='held',hold_reason=? WHERE release_id=? AND state!='released'",(reason,release_id))
 
+    def checkpoint_timers(self):
+        """One bounded local-only batch, independent of slow NAS cleanup I/O."""
+        from .coordinator_freeze import CoordinatorFrozen
+        if not self.settings.enabled or self.stop_requested():return False
+        try:
+            with self.store.queue.coordinator_operation('source-release'):
+                if not self._timer_mutex.acquire(blocking=False):return False
+                try:
+                    readers=self.store.source_readers();now=self._clock()
+                    with readers._db() as db:
+                        rows=db.execute("SELECT release_id,remaining_ns,clock_epoch,clock_ns FROM source_releases WHERE state='waiting_policy' LIMIT 10001").fetchall()
+                        if len(rows)>10000:raise Conflict('source release timer batch bound exceeded')
+                        values=[]
+                        for row in rows:
+                            p._uuid(row['release_id'],'release timer identity');p._hash(row['clock_epoch'],'release timer epoch')
+                            remaining=row['remaining_ns'];previous=row['clock_ns']
+                            if (type(remaining) is not int or not 0<=remaining<=MINIMUM_NS
+                                    or type(previous) is not int or not 0<=previous<2**63):
+                                raise Conflict('source release timer journal invalid')
+                            if row['clock_epoch']==readers.epoch and now<previous:
+                                db.execute("UPDATE source_releases SET state='held',hold_reason='timer_clock_invalid' WHERE release_id=?",(row['release_id'],))
+                                continue
+                            if row['clock_epoch']==readers.epoch and now-previous<=MAX_CHECKPOINT_NS:
+                                remaining=max(0,remaining-(now-previous))
+                            values.append((remaining,readers.epoch,now,row['release_id']))
+                        db.executemany('UPDATE source_releases SET remaining_ns=?,clock_epoch=?,clock_ns=? WHERE release_id=? AND state=\'waiting_policy\'',values)
+                        return bool(rows)
+                finally:self._timer_mutex.release()
+        except CoordinatorFrozen:return False
+
+    def _cached(self,db,row,readers):
+        saved=self._validated.get(row['release_id'])
+        if (saved is not None and saved['epoch']==readers.epoch and saved['keys'] is self.settings.keys
+                and saved['request_sha']==row['request_sha256'] and saved['canonical_sha']==row['request_canonical_sha256']
+                and saved['binding_sha']==row['binding_sha256'] and saved['namespace_json']==row['namespace_json']):
+            self._fast_authorize(db,row['release_id'],saved,require_ready=False)
+            self._validated.move_to_end(row['release_id'])
+            return saved
+        records=validate_retained_journal(self.store,db,release_keys=self.settings.keys,release_id=row['release_id'])
+        if len(records)!=1:raise Conflict('source release journal unavailable')
+        record=records[0];auth=record['authorization']
+        saved=dict(epoch=readers.epoch,keys=self.settings.keys,request_sha=row['request_sha256'],
+            canonical_sha=row['request_canonical_sha256'],binding_sha=row['binding_sha256'],
+            auth=auth,preserved=record['preserved'],namespace=record['namespace'],namespace_json=row['namespace_json'],
+            by_id={(obj['objectKind'],obj['id']):obj for obj in auth['eligibleObjects']})
+        self._validated[row['release_id']]=saved
+        while len(self._validated)>16:self._validated.popitem(last=False)
+        self._fast_authorize(db,row['release_id'],saved,require_ready=False)
+        return saved
+
+    def _fast_authorize(self,db,release_id,cached,*,require_ready=True):
+        row=db.execute('''SELECT job_id,generation,principal_id,request_sha256,request_canonical_sha256,
+            binding_sha256,state,remaining_ns,namespace_json FROM source_releases WHERE release_id=?''',(release_id,)).fetchone()
+        auth=cached['auth']
+        if (not row or cached['keys'] is not self.settings.keys or not self.settings.enabled
+                or row['request_sha256']!=cached['request_sha'] or row['request_canonical_sha256']!=cached['canonical_sha']
+                or row['binding_sha256']!=cached['binding_sha'] or row['namespace_json']!=cached['namespace_json']
+                or (row['job_id'],row['generation'],row['principal_id'])!=(auth['jobId'],auth['generation'],auth['principalId'])
+                or row['state'] not in ('waiting_policy','draining','deleting')
+                or require_ready and (row['remaining_ns']!=0 or row['state']=='waiting_policy')):
+            raise Conflict('source release immutable binding changed')
+        fingerprint,state=scalar_binding(self.store,db,auth['jobId'])
+        if fingerprint!=cached['binding_sha']:raise Conflict('source release immutable binding changed')
+        if (state['phase']!='completed' or state['status']!='succeeded' or not state['result_present']
+                or state['source_state']!='accepted' or state['derived_state']!='accepted'):
+            self._validated.pop(release_id,None)
+            raise Conflict('source release custody held')
+        if require_ready:
+            fence=db.execute('SELECT release_id FROM source_reader_fences WHERE job_id=? AND generation=?',(auth['jobId'],auth['generation'])).fetchone()
+            if not fence or fence['release_id']!=release_id:raise Conflict('source release fence changed')
+        return row
+
     def run_once(self):
+        """Convenience synchronous turn; Runtime separates timer and I/O loops."""
+        self.checkpoint_timers()
+        return self.run_io_once()
+
+    def run_io_batch(self):
+        """Amortize bounded CONTROL admission using one real same-thread token.
+
+        Never start another object after maintenance intent. Each already-issued
+        effect may finish; its next effect checks the gate independently too.
+        """
+        from .coordinator_freeze import CoordinatorFrozen
+        if not self.settings.enabled or self.stop_requested():return False
+        progress=False
+        try:
+            with self.store.queue.coordinator_operation('source-release'):
+                for _ in range(16):
+                    if self.stop_requested() or self.store.queue._coordinator_freeze.status()['phase']!='open':break
+                    worked=self.run_io_once();progress=progress or worked
+                    if not worked:break
+        except (CoordinatorFrozen,ReleaseStopped):pass
+        return progress
+
+    def run_io_once(self):
         from .coordinator_freeze import CoordinatorFrozen
         if not self.settings.enabled or self.stop_requested():return False
         with self.store.queue._db() as db:
-            if not db.execute("SELECT 1 FROM source_releases WHERE state IN ('waiting_policy','draining','deleting') LIMIT 1").fetchone():return False
+            if not db.execute("SELECT 1 FROM source_releases WHERE (state='waiting_policy' AND remaining_ns=0) OR state IN ('draining','deleting') LIMIT 1").fetchone():return False
         try:
             with self.store.queue.coordinator_operation('source-release'):
-                return self._run_once()
-        except (CoordinatorFrozen,ReleaseStopped):
-            return False
+                return self._run_io_once()
+        except (CoordinatorFrozen,ReleaseStopped):return False
 
-    def _run_once(self):
-        """At most one object per pass; no silent retries of held/uncertain work."""
-        if not self.settings.enabled:return False
+    def _run_io_once(self):
+        """One inventory checkpoint or exact object; no NAS under Queue locks."""
         if not self._mutex.acquire(blocking=False):return False
         try:
             readers=self.store.source_readers()
             with readers._db() as db:
                 cursor=db.execute('SELECT last_release_id FROM source_release_schedule WHERE singleton=1').fetchone()
                 if not cursor:raise Conflict('source release cursor unavailable')
-                row=db.execute("SELECT * FROM source_releases WHERE state IN ('waiting_policy','draining','deleting') AND release_id>? ORDER BY release_id LIMIT 1",(cursor[0] or '',)).fetchone()
-                if row is None:row=db.execute("SELECT * FROM source_releases WHERE state IN ('waiting_policy','draining','deleting') ORDER BY release_id LIMIT 1").fetchone()
+                columns=','.join(name for name in TABLE_COLUMNS['source_releases'] if name not in ('request_json','preserved_json'))
+                eligible="((state='waiting_policy' AND remaining_ns=0) OR state IN ('draining','deleting'))"
+                row=db.execute('SELECT '+columns+' FROM source_releases WHERE '+eligible+' AND release_id>? ORDER BY release_id LIMIT 1',(cursor[0] or '',)).fetchone()
+                if row is None:row=db.execute('SELECT '+columns+' FROM source_releases WHERE '+eligible+' ORDER BY release_id LIMIT 1').fetchone()
                 if not row:return False
                 release_id=row['release_id']
+                cached=self._cached(db,row,readers);auth=cached['auth']
                 db.execute('UPDATE source_release_schedule SET last_release_id=? WHERE singleton=1',(release_id,))
-                validate_retained_journal(self.store,db,release_keys=self.settings.keys,release_id=release_id)
-                request=json.loads(row['request_json']);auth=wire.verify(request,self.settings.keys)
-                self._binding(db,auth,row['principal_id'])
-                now=self._clock();remaining=row['remaining_ns']
-                if row['clock_epoch']==readers.epoch:
-                    delta=now-row['clock_ns']
-                    if delta<0:
-                        db.execute("UPDATE source_releases SET state='held',hold_reason='timer_clock_invalid' WHERE release_id=?",(release_id,))
-                        return True
-                    if delta<=MAX_CHECKPOINT_NS:remaining=max(0,remaining-delta)
-                db.execute('UPDATE source_releases SET remaining_ns=?,clock_epoch=?,clock_ns=? WHERE release_id=?',(remaining,readers.epoch,now,release_id))
-                if remaining:return False
-                # Fence and already-authenticated intent commit under one authority transaction.
-                readers.fence_in_transaction(db,auth['jobId'],auth['generation'],release_id)
-                db.execute("UPDATE source_releases SET state='draining',hold_reason='active_source_io' WHERE release_id=? AND state='waiting_policy'",(release_id,))
-            return self._execute_one(auth)
+                if row['state']=='waiting_policy':
+                    readers.fence_in_transaction(db,auth['jobId'],auth['generation'],release_id)
+                    db.execute("UPDATE source_releases SET state='draining',hold_reason='active_source_io' WHERE release_id=?",(release_id,))
+            return self._execute_one(auth,cached)
         except Exception as error:
             from .coordinator_freeze import CoordinatorFrozen
             if isinstance(error,(CoordinatorFrozen,ReleaseStopped)):raise
             if 'release_id' not in locals():raise
+            self._validated.pop(release_id,None)
             reason='binding_changed'
             from .source_spool import SourceSpoolCloseUncertain
             if isinstance(error,SourceSpoolCloseUncertain):reason='durability_uncertain'
@@ -437,30 +574,40 @@ class SourceReleaseService:
             return True
         finally:self._mutex.release()
 
-    def _execute_one(self,auth):
+    def _execute_one(self,auth,cached):
         from .source_release_filesystem import SourceReleaseFilesystem,encode_physical
         readers=self.store.source_readers()
         def authorize(db):
-            row=db.execute('SELECT * FROM source_releases WHERE release_id=?',(auth['releaseId'],)).fetchone()
-            if not row or row['state'] not in ('draining','deleting') or row['remaining_ns']!=0:
-                raise Conflict('source release execution unavailable')
-            wire.verify(json.loads(row['request_json']),self.settings.keys)
-            self._binding(db,auth,row['principal_id'])
+            self._fast_authorize(db,auth['releaseId'],cached)
         try:handle=readers.reserve_release(auth['jobId'],auth['generation'],auth['releaseId'],authorize=authorize)
         except Conflict as error:
             if str(error)=='source_operation_busy':return False
             raise
         try:
             filesystem=SourceReleaseFilesystem(self.spool,self.settings.qualification)
+            if cached['namespace'] is None:
+                namespace,entries=filesystem.capture_namespace(auth,cached['preserved'],cached['request_sha'])
+                encoded=p.canonical_json(namespace).decode('ascii')
+                with readers._db() as db:
+                    authorize(db)
+                    current=db.execute('SELECT namespace_json FROM source_releases WHERE release_id=?',(auth['releaseId'],)).fetchone()
+                    if current['namespace_json'] is not None or db.execute("SELECT 1 FROM source_release_objects WHERE release_id=? AND phase!='planned' LIMIT 1",(auth['releaseId'],)).fetchone():
+                        raise Conflict('source namespace checkpoint changed')
+                    for entry in entries:
+                        changed=db.execute("UPDATE source_release_objects SET phase='listed',physical_json=? WHERE release_id=? AND object_kind=? AND object_id=? AND phase='planned'",
+                            (entry['physical'],auth['releaseId'],entry['objectKind'],entry['id']))
+                        if changed.rowcount!=1:raise Conflict('source namespace inventory changed')
+                    db.execute("UPDATE source_releases SET namespace_json=?,state='deleting',hold_reason=NULL WHERE release_id=?",(encoded,auth['releaseId']))
+                cached['namespace']=namespace;cached['namespace_json']=encoded
+                return True
             with self.store.queue._db() as db:
-                row=db.execute('SELECT * FROM source_releases WHERE release_id=?',(auth['releaseId'],)).fetchone()
-                objects=db.execute("SELECT * FROM source_release_objects WHERE release_id=? AND phase!='removed' ORDER BY object_kind,object_id",(auth['releaseId'],)).fetchall()
-                all_objects=[dict(item) for item in db.execute('SELECT * FROM source_release_objects WHERE release_id=?',(auth['releaseId'],))]
-                preserved=json.loads(row['preserved_json'])
-                db.execute("UPDATE source_releases SET state='deleting',hold_reason=NULL WHERE release_id=?",(auth['releaseId'],))
-            filesystem.audit(auth,all_objects,preserved)
-            if objects:
-                item=dict(objects[0]);expected=next(obj for obj in auth['eligibleObjects'] if (obj['objectKind'],obj['id'])==(item['object_kind'],item['object_id']))
+                authorize(db)
+                item=db.execute("SELECT * FROM source_release_objects WHERE release_id=? AND phase!='removed' ORDER BY object_kind,object_id LIMIT 1",(auth['releaseId'],)).fetchone()
+            preserved=cached['preserved']
+            if item is not None:
+                item=dict(item)
+                expected=cached['by_id'].get((item['object_kind'],item['object_id']))
+                if expected is None:raise Conflict('source release object inventory changed')
                 def persist(phase,physical):
                     # A new phase snapshot subsumes the previous completed
                     # effect intent. Uncertain intents never reach this point.
@@ -474,7 +621,7 @@ class SourceReleaseService:
                     # This commit is the authority linearization point. NAS I/O
                     # MUST remain outside Queue._db: even fsync may block on NFS.
                     effect_id=str(uuid.uuid4())
-                    if self.stop_requested():raise ReleaseStopped()
+                    if self.stop_requested() or self.store.queue._coordinator_freeze.status()['phase']!='open':raise ReleaseStopped()
                     with readers._db() as db:
                         authorize(db)
                         current=db.execute('SELECT phase,physical_json FROM source_release_objects WHERE release_id=? AND object_kind=? AND object_id=?',
@@ -498,12 +645,18 @@ class SourceReleaseService:
                         db.execute('UPDATE source_release_objects SET physical_json=? WHERE release_id=? AND object_kind=? AND object_id=?',
                             (encoded,auth['releaseId'],item['object_kind'],item['object_id']))
                     return result
-                filesystem.remove_one(auth,expected,item,persist,effect)
+                filesystem.remove_one(auth,expected,item,persist,effect,namespace=cached['namespace'])
                 return True
+            # Terminal and restart checkpoints revalidate the WHOLE immutable
+            # closure and namespace once, never once per target object.
+            with self.store.queue._db() as db:
+                records=validate_retained_journal(self.store,db,release_keys=self.settings.keys,release_id=auth['releaseId'])
+                if len(records)!=1:raise Conflict('source release terminal journal unavailable')
+            filesystem.audit(auth,records[0]['objects'],preserved,namespace=cached['namespace'])
             receipt=dict(schemaVersion=1,protocol='ltds-source-release-receipt-v1',
                 coordinatorAuthorityId=self.store.queue.authority_id,jobId=auth['jobId'],generation=auth['generation'],
                 environment=auth['environment'],principalId=auth['principalId'],releaseId=auth['releaseId'],
-                authorizationSha256=row['request_sha256'],sourceSnapshotId=auth['sourceSnapshotId'],
+                authorizationSha256=cached['request_sha'],sourceSnapshotId=auth['sourceSnapshotId'],
                 sourceSnapshotSha256=auth['sourceSnapshotSha256'],workerObservationAckSha256=auth['workerObservationAckSha256'],
                 eligibleClosureSha256=auth['eligibleClosureSha256'],preservedClosureSha256=p.digest(preserved),
                 removedObjectCount=len(auth['eligibleObjects']),removedBytes=sum(obj['byteSize'] for obj in auth['eligibleObjects']),

@@ -37,24 +37,34 @@ def crash_release(directory,boundary):
     case.ready_for_physical_phase()
     state=dict(config=case.config,request=case.request,principal=case.principal,spool=str(case.spool.root))
     path=Path(directory)/'resume-synthetic.json';path.write_bytes(p.canonical_json(state));path.chmod(0o600)
+    def advance():
+        for _ in range(len(case.auth['eligibleObjects'])+4):case.service.run_once()
     if boundary in ('before_rename','after_rename'):
         original=SourceReleaseFilesystem._rename_owned
         def rename(instance,*args):
             if boundary=='before_rename':os._exit(42)
             original(instance,*args);os._exit(42)
-        with patch.object(SourceReleaseFilesystem,'_rename_owned',autospec=True,side_effect=rename):case.service.run_once()
+        with patch.object(SourceReleaseFilesystem,'_rename_owned',autospec=True,side_effect=rename):advance()
     elif boundary=='after_unlink':
         original=os.unlink
         def unlink(name,*args,**kwargs):
             result=original(name,*args,**kwargs)
             if kwargs.get('dir_fd') is not None and str(name).endswith('.blob'):os._exit(42)
             return result
-        with patch('processing.source_release_filesystem.os.unlink',side_effect=unlink):case.service.run_once()
+        with patch('processing.source_release_filesystem.os.unlink',side_effect=unlink):advance()
     elif boundary=='after_removed_commit':
         original=SourceReleaseFilesystem.remove_one
         def removed(instance,*args,**kwargs):
             original(instance,*args,**kwargs);os._exit(42)
-        with patch.object(SourceReleaseFilesystem,'remove_one',autospec=True,side_effect=removed):case.service.run_once()
+        with patch.object(SourceReleaseFilesystem,'remove_one',autospec=True,side_effect=removed):advance()
+    elif boundary=='after_unlinking_phase_before_intent':
+        original=SourceReleaseFilesystem.remove_one
+        def phase_gap(instance,auth,obj,row,persist,effect,**kwargs):
+            def capture(phase,physical):
+                persist(phase,physical)
+                if phase=='unlinking':os._exit(42)
+            return original(instance,auth,obj,row,capture,effect,**kwargs)
+        with patch.object(SourceReleaseFilesystem,'remove_one',autospec=True,side_effect=phase_gap):advance()
     elif boundary=='after_terminal_commit':
         for _ in range(len(case.auth['eligibleObjects'])+3):
             case.service.run_once()
@@ -232,6 +242,7 @@ class SourceReleaseBackendTests(unittest.TestCase):
         from processing.source_release_filesystem import SourceReleaseFilesystem
         from processing.coordinator_freeze import CoordinatorFrozen
         self.ready_for_physical_phase()
+        self.service.run_once()  # Seal the one initial inode/namespace inventory.
         entered,resume,wrote=threading.Event(),threading.Event(),threading.Event()
         errors=[]
         if kind=='rename':
@@ -274,9 +285,64 @@ class SourceReleaseBackendTests(unittest.TestCase):
     def test_blocked_unlink_does_not_hold_global_queue(self):self._assert_blocked_io('unlink')
     def test_blocked_directory_fsync_does_not_hold_global_queue(self):self._assert_blocked_io('fsync')
 
+    def test_batch_stops_next_effect_on_freeze_intent_and_retires_actual_pins(self):
+        from processing.source_release_filesystem import SourceReleaseFilesystem
+        self.ready_for_physical_phase();self.service.run_once()
+        gate=self.queue._coordinator_freeze;plan=str(uuid.uuid4())
+        def change(action,**kwargs):
+            return gate.transition(dict(requestId=str(uuid.uuid4()),planId=plan,action=action,
+                expectedRevision=gate.status()['revision'],startupId=self.queue.startup_id),
+                owner_secret='synthetic-release-freeze',**kwargs)
+        original=SourceReleaseFilesystem._rename_owned
+        def race(instance,*args):
+            change('intent');return original(instance,*args)
+        with patch.object(SourceReleaseFilesystem,'_rename_owned',autospec=True,side_effect=race),patch('processing.source_release_filesystem.os.unlink') as unlink:
+            self.service.run_io_batch();unlink.assert_not_called()
+        self.assertEqual(gate.status()['operations'],0)
+        self.assertEqual(self.store.source_readers().active_count(self.auth['jobId'],1),0)
+        with self.queue._db() as db:
+            rows=db.execute('SELECT phase,physical_json FROM source_release_objects ORDER BY object_kind,object_id').fetchall()
+            self.assertEqual(rows[0]['phase'],'quarantining')
+            self.assertEqual(json.loads(rows[0]['physical_json'])['effectIntent']['outcome'],'completed')
+            self.assertTrue(all(row['phase']=='listed' for row in rows[1:]))
+        change('drain');self.assertEqual(change('seal')['phase'],'frozen')
+        change('resume',healthy=True)
+        self.service.run_io_batch()
+        self.assertEqual(self.lookup()['state'],'released')
+
+    def test_batch_reuses_one_real_operation_and_bounded_release_pin_journal(self):
+        self.ready_for_physical_phase();self.service.run_once()
+        gate=self.queue._coordinator_freeze
+        with patch.object(gate,'_quota',wraps=gate._quota) as admission:
+            self.service.run_io_batch()
+            self.assertEqual(admission.call_count,1)
+        self.assertEqual(self.lookup()['state'],'released')
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM coordinator_operation_pins').fetchone()[0],0)
+            self.assertEqual(db.execute("SELECT count(*) FROM source_reader_pins WHERE operation='source-release'").fetchone()[0],1)
+
+    def test_reusable_release_pin_never_overwrites_uncertain_live_handle(self):
+        self.ready_for_physical_phase();self.service.run_once()
+        readers=self.store.source_readers()
+        with self.queue.coordinator_operation('source-release'):
+            handle=readers.reserve_release(self.auth['jobId'],1,self.auth['releaseId'],authorize=lambda db:None)
+            try:
+                # A stale durable released marker cannot override this process's
+                # still-owned uncertain outcome; no second handle is exposed.
+                with self.queue._db() as db:
+                    db.execute("UPDATE source_reader_pins SET state='released' WHERE reference=?",(handle.reference,))
+                handle.uncertain=True
+                with self.assertRaisesRegex(SourceReaderError,'source_operation_busy'):
+                    readers.reserve_release(self.auth['jobId'],1,self.auth['releaseId'],authorize=lambda db:None)
+                self.assertIs(readers._handles[handle.reference],handle)
+            finally:
+                # Test-only resolution: no descriptor or physical effect existed.
+                handle.uncertain=False;handle.close()
+
     def test_hold_after_rename_intent_blocks_unlink_and_retains_exact_journal(self):
         from processing.source_release_filesystem import SourceReleaseFilesystem
         self.ready_for_physical_phase()
+        self.service.run_once()
         original=SourceReleaseFilesystem._rename_owned
         def race(instance,*args):
             # Commit after the per-effect authority intent, while FS is outside DB.
@@ -293,7 +359,7 @@ class SourceReleaseBackendTests(unittest.TestCase):
 
     def _assert_permanent_failure_before_terminal(self,missing):
         self.ready_for_physical_phase()
-        for _ in self.auth['eligibleObjects']:self.service.run_once()
+        for _ in range(len(self.auth['eligibleObjects'])+1):self.service.run_once()
         with self.queue._db() as db:
             self.assertIsNone(db.execute("SELECT 1 FROM source_release_objects WHERE phase!='removed'").fetchone())
             preserved=json.loads(db.execute('SELECT preserved_json FROM source_releases').fetchone()[0])
@@ -313,7 +379,7 @@ class SourceReleaseBackendTests(unittest.TestCase):
         from processing.prototype import Queue
         from processing.reference_store import ReferenceStore
         from processing.source_spool import SourceSpool
-        for boundary in ('before_rename','after_rename','after_unlink','after_removed_commit','after_terminal_commit'):
+        for boundary in ('before_rename','after_rename','after_unlink','after_unlinking_phase_before_intent','after_removed_commit','after_terminal_commit'):
             with self.subTest(boundary=boundary),tempfile.TemporaryDirectory() as directory:
                 child=subprocess.run([sys.executable,'-B','-c',
                     'from tests.test_source_release_backend import crash_release; import sys; crash_release(sys.argv[1],sys.argv[2])',
@@ -344,6 +410,71 @@ class SourceReleaseBackendTests(unittest.TestCase):
                         self.assertEqual(claimed['id'],unrelated['id'])
                         queue.complete(claimed['id'],dict(claimToken=claimed['claimToken'],status='succeeded',result={}))
                     finally:queue.close()
+
+    def test_missing_copy_after_unlinking_phase_without_issued_intent_is_not_success(self):
+        from processing.prototype import Queue
+        from processing.reference_store import ReferenceStore
+        from processing.source_spool import SourceSpool
+        with tempfile.TemporaryDirectory() as directory:
+            child=subprocess.run([sys.executable,'-B','-c',
+                'from tests.test_source_release_backend import crash_release; import sys; crash_release(sys.argv[1],sys.argv[2])',
+                directory,'after_unlinking_phase_before_intent'],capture_output=True,text=True,timeout=20)
+            self.assertEqual(child.returncode,42,child.stderr)
+            state=json.loads((Path(directory)/'resume-synthetic.json').read_text())
+            with patch('processing.source_spool.os.path.ismount',return_value=True):
+                queue=Queue(directory,reference_enabled=True)
+                try:
+                    store=ReferenceStore(queue);auth=state['request']['authorization']
+                    spool=SourceSpool(state['spool'],mount_id='a'*64,safety_floor_bytes=0,max_object_bytes=1024,chunk_bytes=3)
+                    with queue._db() as db:
+                        item=db.execute("SELECT * FROM source_release_objects WHERE phase='unlinking'").fetchone()
+                        self.assertNotIn('effectIntent',json.loads(item['physical_json']))
+                    # Deliberate unexpected loss of one owned synthetic copy.
+                    name=item['object_kind']+'-'+hashlib.sha256(item['object_id'].encode()).hexdigest()+'.blob'
+                    copy_path=spool.root/auth['jobId']/'1'/('.ltds-release-'+auth['releaseId'])/name
+                    copy_path.unlink()
+                    self.assertEqual(store.reconcile_source_spool(spool)['held'],1)
+                    settings=ReleaseSettings(state['config'],viewer_bearers={VIEWER_BEARER:'staging'},spool=spool)
+                    service=SourceReleaseService(store,spool,settings,monotonic_ns=lambda:1_000_000_000)
+                    service.run_once()
+                    result=service.lookup(auth['jobId'],auth['releaseId'],principal=state['principal'])
+                    self.assertEqual(result['state'],'held');self.assertIsNone(result['receipt'])
+                    self.assertTrue(any((Path(directory)/'viewer-originals').iterdir()))
+                finally:queue.close()
+
+    def _seed_timer_headers(self,count):
+        """Metadata-only clock fixtures, not additional accepted physical jobs.
+
+        Their missing execution lineage would fail the full I/O validator. Only
+        the scalar timer batch is exercised; no source files are synthesized.
+        """
+        from processing.source_release import TABLE_COLUMNS
+        columns=TABLE_COLUMNS['source_releases']
+        with self.queue._db() as db:
+            template=dict(db.execute('SELECT * FROM source_releases WHERE release_id=?',(self.auth['releaseId'],)).fetchone())
+            for _ in range(count):
+                row=dict(template,job_id=str(uuid.uuid4()),release_id=str(uuid.uuid4()))
+                auth=copy.deepcopy(self.auth);auth.update(jobId=row['job_id'],providerTaskId=row['job_id'],releaseId=row['release_id'])
+                request=self.sign(auth)
+                row.update(request_json=p.canonical_json(request).decode('ascii'),request_sha256=request['authorizationSha256'],
+                    request_canonical_sha256=p.digest(request),remaining_ns=MINIMUM_NS,clock_ns=self.clock[0],
+                    namespace_json=None,state='waiting_policy',hold_reason=None)
+                db.execute('INSERT INTO source_releases('+','.join(columns)+') VALUES('+','.join('?' for _ in columns)+')',tuple(row[name] for name in columns))
+
+    def test_151_waiting_timers_progress_in_one_bounded_batch_independent_of_io_lock(self):
+        self.assertEqual(self.post().status,201)
+        self._seed_timer_headers(150)
+        self.service._mutex.acquire()  # Model another cleanup operation waiting on NAS.
+        try:
+            for _ in range(288):
+                self.clock[0]+=300*1_000_000_000
+                self.service.checkpoint_timers()
+        finally:self.service._mutex.release()
+        with self.queue._db() as db:
+            rows=db.execute('SELECT remaining_ns FROM source_releases').fetchall()
+            self.assertEqual(len(rows),151)
+            self.assertTrue(all(row['remaining_ns']==0 for row in rows))
+            self.assertEqual(db.execute('SELECT count(*) FROM source_release_objects WHERE phase!=\'planned\'').fetchone()[0],0)
 
     def _runtime(self,enabled=True):
         from dataclasses import replace
@@ -397,6 +528,7 @@ class SourceReleaseBackendTests(unittest.TestCase):
                 self.assertTrue(entered.wait(4))
                 source_thread=runtime._source_release_thread
                 delivery_thread=runtime._viewer_transfer_thread
+                timer_thread=runtime._source_timer_thread
                 self.assertIsNot(source_thread,delivery_thread)
                 self.assertTrue(delivered.wait(3),'Viewer delivery stalled behind cleanup I/O')
                 with self.assertRaises(RuntimeConfigurationError):runtime.close()
@@ -406,6 +538,7 @@ class SourceReleaseBackendTests(unittest.TestCase):
             finally:
                 resume.set();runtime.close()
             self.assertFalse(source_thread.is_alive());self.assertFalse(delivery_thread.is_alive())
+            self.assertFalse(timer_thread.is_alive())
             self.assertTrue(server.closed)
             self.assertTrue(runtime._source_readers._closed)
             self.assertEqual(runtime._source_readers._handles,{})
@@ -414,7 +547,9 @@ class SourceReleaseBackendTests(unittest.TestCase):
         self.assertEqual(self.post().status,201)
         runtime,server=self._runtime(enabled=False)
         runtime.start()
-        try:self.assertIsNone(runtime._source_release_thread)
+        try:
+            self.assertIsNone(runtime._source_release_thread)
+            self.assertIsNone(runtime._source_timer_thread)
         finally:runtime.close()
         self.assertTrue(server.closed)
 
