@@ -498,7 +498,7 @@ class ReferenceDriverTests(unittest.TestCase):
     def reserve_gate(self):
         with NodeGate('engine') as gate:
             receipt = uuid.uuid4().hex
-            gate.reserve(self.worker.node_id, self.worker.origin, self.worker.authority_id, self.worker.gate_generation, receipt)
+            gate.reserve(self.worker.node_id, self.worker.origin, self.worker.authority_id, gate.snapshot()['generation'], receipt)
         return receipt
 
     def test_crash_after_prepared_keeps_capacity_then_ends_on_the_coordinator_word(self):
@@ -661,6 +661,60 @@ class ReferenceDriverTests(unittest.TestCase):
 
     def test_death_before_the_checkpoint_resumes_to_delivery_after_the_gate_is_resolved(self):
         self.assert_owed_result_resumes_to_delivery(self.die_after_poll)
+
+    def resolve_another_job(self):
+        receipt, other = self.reserve_gate(), str(uuid.uuid4())
+        with NodeGate('engine') as gate:
+            gate.bind(receipt, dict(id=other, workerId=self.worker.worker_id, nodeId=self.worker.node_id,
+                authorityId=self.worker.authority_id))
+        self.resolve_gate()
+        return receipt, other
+
+    def assert_result_delivers_past_a_later_resolve(self, die):
+        job = self.submit()
+        die(job)
+        self.resolve_gate()
+        receipt, other = self.resolve_another_job()
+        with NodeGate('engine') as gate:
+            self.assertEqual(gate.snapshot()['lastResolution']['reservation']['receiptId'], receipt)
+        self.driver = self.make_driver()
+        self.advance(job, 'awaiting_acceptance')
+        self.assertEqual(self.completion(job), ('acknowledged',))
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'succeeded')
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], 'delivered')
+        mine = self.worker._row(job['jobId'])['receipt']
+        self.driver._save(job['jobId'], 'completed', self.data(job)[1])
+        with NodeGate('engine') as gate:
+            self.assertFalse(gate.resolved(mine, job['jobId']))
+            self.assertTrue(gate.resolved(receipt, other))
+
+    def test_death_inside_poll_delivers_past_a_later_resolve(self):
+        self.assert_result_delivers_past_a_later_resolve(self.die_inside_poll)
+
+    def test_death_before_the_checkpoint_delivers_past_a_later_resolve(self):
+        self.assert_result_delivers_past_a_later_resolve(self.die_after_poll)
+
+    def test_sealed_failure_delivers_past_a_later_resolve(self):
+        job = self.submit()
+        self.die_sealing_failure(job)
+        self.resolve_gate()
+        self.resolve_another_job()
+        self.driver = self.make_driver()
+        self.advance(job, 'awaiting_failure_acceptance')
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], 'failure_delivered')
+        self.assertEqual(self.store.get(job['jobId'], private=True)['status'], 'failed')
+
+    def test_a_never_resolved_receipt_stays_blocked_on_a_clear_gate(self):
+        job = self.submit()
+        self.die_inside_poll(job)
+        self.resolve_gate()
+        with self.worker._db() as db:
+            db.execute('UPDATE executions SET receipt=? WHERE job=?', ('f' * 32, job['jobId']))
+        self.driver = self.make_driver()
+        for _ in range(2):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertEqual(self.data(job)[0], 'executing')
+        self.assert_result_owed(job)
 
     def die_sealing_failure(self, job, stage='failure_delivering'):
         self.transport.code = 30

@@ -10,6 +10,12 @@ Provision explicitly before use: ``python -m processing.node_gate provision``.
 Handover needs an idle reservation, current generation and stopped-old-worker
 attestation. A new coordinator using a separate database has a separate authority
 UUID and cannot use the old binding merely because its node slug matches.
+
+resolutions.json sits beside gate.json, whose shape it leaves alone. It keeps one
+entry per abandoned receipt, because a delivery may still be owed long after a
+later resolve replaced lastResolution. An entry leaves when its job completes or
+an operator retires it, never by age or count: a full file refuses the next
+resolve instead of erasing evidence.
 """
 
 import argparse
@@ -27,6 +33,7 @@ import uuid
 SLUG = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
 ENGINE = re.compile(r'[A-Za-z0-9][A-Za-z0-9:._-]{0,255}\Z')
 RECEIPT = re.compile(r'[0-9a-f]{32}\Z')
+MAX_RESOLUTIONS = 64
 
 
 class GateError(Exception):
@@ -192,13 +199,16 @@ class NodeGate:
             raise GateError('node gate state requires operator inspection') from None
 
     def _save(self, state):
+        self._write('gate.json', state)
+
+    def _write(self, name, value):
         self._check_lock()
         temporary = self.root / ('gate-' + uuid.uuid4().hex + '.tmp')
         with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
-            json.dump(state, stream, sort_keys=True, allow_nan=False)
+            json.dump(value, stream, sort_keys=True, allow_nan=False)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, self.root / 'gate.json')
+        os.replace(temporary, self.root / name)
         if os.name != 'nt':
             descriptor = os.open(self.root, os.O_RDONLY)
             try:
@@ -319,6 +329,54 @@ class NodeGate:
         last = self.snapshot().get('lastResolution')
         return type(last) is dict and type(last.get('reservation')) is dict and last['reservation'].get('receiptId') == receipt_id
 
+    def resolutions(self):
+        """Closed per-receipt evidence: {receiptId: {jobId, generation}}."""
+        self._check_lock()
+        path = self.root / 'resolutions.json'
+        if not os.path.lexists(path):
+            return {}
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 16384:
+                raise ValueError()
+            entries = json.loads(path.read_bytes())
+            if type(entries) is not dict or len(entries) > MAX_RESOLUTIONS:
+                raise ValueError()
+            for receipt, entry in entries.items():
+                if (not RECEIPT.fullmatch(receipt) or type(entry) is not dict or set(entry) != {'jobId', 'generation'}
+                        or type(entry['generation']) is not int or entry['generation'] < 1
+                        or not (entry['jobId'] is None or _uuid(entry['jobId']))):
+                    raise ValueError()
+            return entries
+        except Exception:
+            raise GateError('node gate resolutions require operator inspection') from None
+
+    def resolved(self, receipt_id, job_id):
+        """Whether an operator abandoned exactly this job's receipt, so nothing is left to complete on it.
+
+        A death inside resolve leaves an entry while the reservation still stands;
+        that is no resolution. The entry's generation must have been superseded too.
+        """
+        state = self.snapshot()
+        held = state['reservation']
+        entry = self.resolutions().get(receipt_id)
+        return (entry is not None and entry['jobId'] == job_id and entry['generation'] < state['generation']
+                and (held is None or held['receiptId'] != receipt_id))
+
+    def retire_job(self, job_id):
+        """A completed job owes nothing on any receipt; idempotent."""
+        entries = self.resolutions()
+        kept = {receipt: entry for receipt, entry in entries.items() if entry['jobId'] != job_id}
+        if len(kept) != len(entries):
+            self._write('resolutions.json', kept)
+
+    def retire_resolution(self, receipt_id, *, delivery_abandoned):
+        """Operator-only: nothing will ever deliver on this receipt, so stop holding room for it."""
+        entries = self.resolutions()
+        if delivery_abandoned is not True or receipt_id not in entries:
+            raise GateError('retirement requires a resolved receipt and abandoned delivery')
+        del entries[receipt_id]
+        self._write('resolutions.json', entries)
+
     def resolve(self, receipt_id, expected_generation, *, old_worker_stopped,
                 coordinator_resolved, note):
         """Operator-only abandonment after independent local AND remote checks.
@@ -333,6 +391,12 @@ class NodeGate:
         if (old_worker_stopped is not True or coordinator_resolved is not True
                 or not isinstance(note, str) or not 1 <= len(note) <= 256):
             raise GateError('resolution requires stopped worker, reconciled coordinator and note')
+        entries = self.resolutions()
+        if receipt_id not in entries and len(entries) >= MAX_RESOLUTIONS:
+            raise GateError('resolved receipts must complete or be retired first')
+        job = reservation['job']
+        entries[receipt_id] = {'jobId': job['id'] if job else None, 'generation': state['generation']}
+        self._write('resolutions.json', entries)  # Evidence first: it means nothing until the state below lands.
         state['lastResolution'] = {'outcome': 'operator_abandoned',
                                    'generation': state['generation'],
                                    'reservation': reservation, 'note': note}
@@ -346,6 +410,10 @@ def main(argv=None):
     parser.add_argument('--engine-id', required=True, help='Independently inspected local Docker Engine ID')
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('status')
+    commands.add_parser('resolutions')
+    retire = commands.add_parser('retire-resolution')
+    retire.add_argument('--receipt-id', required=True)
+    retire.add_argument('--delivery-abandoned', required=True, action='store_true')
     resolve = commands.add_parser('resolve')
     resolve.add_argument('--receipt-id', required=True)
     resolve.add_argument('--expected-generation', required=True, type=int)
@@ -366,6 +434,11 @@ def main(argv=None):
         with NodeGate(args.engine_id) as gate:
             if args.command == 'status':
                 state = gate.snapshot()
+            elif args.command == 'resolutions':
+                state = gate.resolutions()
+            elif args.command == 'retire-resolution':
+                gate.retire_resolution(args.receipt_id, delivery_abandoned=args.delivery_abandoned)
+                state = gate.resolutions()
             elif args.command == 'provision':
                 state = gate.provision(args.node_id, args.coordinator, args.authority_id)
             elif args.command == 'resolve':
