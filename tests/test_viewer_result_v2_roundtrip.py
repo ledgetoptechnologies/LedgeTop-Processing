@@ -118,7 +118,9 @@ class _NativeTransport:
 
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "Viewer V2 durable result storage requires Linux directory fsync")
-@unittest.skipUnless(os.environ.get("LTDS_VIEWER_WORKTREE"), "set LTDS_VIEWER_WORKTREE to Viewer V2 checkout")
+@unittest.skipUnless(os.environ.get("LTDS_VIEWER_WORKTREE")
+                     or os.environ.get("LTDS_RUN_CONTROLLED_CONVERSION_QUALIFICATION") == "1",
+                     "set LTDS_VIEWER_WORKTREE to Viewer V2 checkout")
 class ViewerResultV2RoundTripTests(unittest.TestCase):
     def test_actual_viewer_source_intake_result_copy_lost_ack_and_worker_cleanup(self):
         self._roundtrip(source_range_v2_enabled=False)
@@ -137,10 +139,18 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
         self._roundtrip(source_range_v2_enabled=False, controlled_conversion=True)
 
     def _roundtrip(self, *, source_range_v2_enabled, controlled_conversion=False):
-        viewer = Path(os.environ["LTDS_VIEWER_WORKTREE"]).resolve()
+        requested = os.environ.get("LTDS_RUN_CONTROLLED_CONVERSION_QUALIFICATION") == "1"
+        viewer_root = os.environ.get("LTDS_VIEWER_WORKTREE")
+        if not viewer_root:
+            if requested:
+                self.fail("controlled qualification requested but LTDS_VIEWER_WORKTREE is not configured")
+            self.skipTest("Viewer V2 checkout is unavailable")
+        viewer = Path(viewer_root).resolve()
         viewer_app = viewer / "apps" / "viewer"
         node = os.environ.get("LTDS_NODE") or shutil.which("node")
         if not (viewer_app / "server" / "sourceIntakeClientV2.js").is_file() or not node:
+            if requested:
+                self.fail("controlled qualification requested but Viewer V2 checkout or Node.js is unavailable")
             self.skipTest("Viewer V2 checkout or Node.js unavailable")
 
         with tempfile.TemporaryDirectory(prefix="ltds-viewer-result-roundtrip-") as temp:
