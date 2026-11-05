@@ -165,7 +165,15 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             source_put = (self.command == "PUT" and re.fullmatch(
                 r"/ltds/v2/jobs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}/source/"
                 r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\?generation=[1-9][0-9]{0,8}", self.path))
-            if "#" in self.path or ("?" in self.path and not source_put):
+            log_get = False
+            if self.command == 'GET' and '?' in self.path:
+                from .reference_logs import request as log_request
+                try:
+                    log_get = any(log_request(self.path, prefix) is not None
+                                  for prefix in ('/ltds/v1', '/ltds/worker/v1'))
+                except ValueError:
+                    pass
+            if "#" in self.path or ("?" in self.path and not source_put and not log_get):
                 self._error(400, "invalid_request_target")
                 return
             if self.headers.get_all("Transfer-Encoding"):

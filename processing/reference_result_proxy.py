@@ -168,6 +168,56 @@ class ResultProxy:
         self._open = opener or build_opener(_NoRedirects(), HTTPSHandler(context=context)).open
         self.timeout = timeout
 
+    def logs(self, job, *, after, limit):
+        """Read one bound JSON page from the fixed assigned worker origin."""
+        from . import reference_logs as logs
+        lease, response, entered = None, None, False
+        try:
+            logs.bounds(job['generation'], after, limit)
+            protocol._slug(job['jobId'], 'job ID')
+            protocol._uuid(job['attemptId'], 'attempt ID')
+            protocol._environment(job['environment'])
+            node = job['nodeId']
+            if type(node) is not str or node not in self._origins:
+                raise ValueError('unknown worker')
+            lease = self._admit_read(dict(nodeId=node, jobId=job['jobId'], generation=job['generation'],
+                environment=job['environment'], byteSize=logs.MAX_LOG_BYTES, bufferBytes=logs.MAX_LOG_BYTES))
+            lease.__enter__()
+            entered = True
+            url = self._origins[node] + RESULT_PREFIX + job['jobId'] + '/logs?generation=%d&after=%d&limit=%d' % (job['generation'], after, limit)
+            request = Request(url, method='GET', headers={'Authorization': 'Bearer ' + self._tokens[node],
+                'Accept-Encoding': 'identity', 'X-Log-Environment': job['environment'], 'X-Log-Attempt': job['attemptId']})
+            try:
+                response = self._open(request, timeout=self.timeout)
+            except HTTPError as error:
+                error.close()
+                raise ValueError('worker unavailable') from None
+            if (response.status != 200 or response.geturl() != url
+                    or response.headers.get('Content-Encoding', 'identity').lower() != 'identity'
+                    or response.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json'):
+                raise ValueError('invalid log response')
+            raw = response.read(logs.MAX_LOG_BYTES + 1)
+            if type(raw) is not bytes or len(raw) > logs.MAX_LOG_BYTES:
+                raise ValueError('oversized log response')
+            value = protocol.decode_submission(raw)
+            return logs.validate(value, job, after, limit)
+        except Exception:
+            raise ResultProxyError('worker execution logs unavailable') from None
+        finally:
+            close_failed = False
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    close_failed = True
+            if entered:
+                try:
+                    lease.__exit__(None, None, None)
+                except Exception:
+                    close_failed = True
+            if close_failed:
+                raise ResultProxyError('worker execution logs close failed') from None
+
     def open(self, job, result_manifest, object_id, *, range_header=None):
         """Open one exact sealed result from its configured assigned worker node."""
         lease, entered, response = None, False, None

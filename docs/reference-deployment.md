@@ -15,6 +15,28 @@ for V2 source jobs or treat its V1 receipt path as the V2 accepted-copy workflow
 This configuration option is candidate code, not evidence that the installed
 coordinator or Viewer uses it.
 
+The candidate coordinator exposes authenticated
+`GET /ltds/v1/jobs/{jobId}/logs?generation={n}&after={cursor}&limit={1..200}`
+through its existing assigned-worker result reader and read credential. Pages
+bind the environment, job, attempt, generation and assigned node; an unassigned
+queued job returns an empty bound page. An assigned job whose local execution
+or engine task cannot be verified returns unavailable, rather than empty output.
+TreeDar output remains unavailable until a corresponding adapter is implemented.
+
+ODM output uses the existing loopback NativeEngine adapter, with a bounded JSON
+string-array prefix reader because NodeODM returns every line after its cursor.
+The reader validates a page plus one lookahead line and closes the remaining
+response; it does not buffer the entire log tail. EOF pages require a closed
+array and clean EOF. Both the consumed prefix and public JSON page are bounded
+to 256 KiB; pages can contain fewer than the requested limit to preserve that
+bound. An individually oversized line or malformed prefix remains unavailable.
+`nextCursor` advances by the number of returned lines and `hasMore` reflects
+validated lookahead; each displayed message is bounded to 4,000 characters.
+Reads verify the current physical engine and persisted engine task identity
+under the existing node gate, perform no engine mutation, and drain before an
+owned reader session closes. These candidate tests do not qualify installed
+engine output, Viewer UI behavior or live NAS custody.
+
 ## Current installation — October 28, 2026
 
 The sole coordinator now runs source `e2ccf489ab41160acff3f90e2b4bcd568f72cf24`,

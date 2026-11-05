@@ -134,6 +134,49 @@ class ReferenceEngineWorker:
         with self._db() as db:
             db.execute('UPDATE executions SET phase=? WHERE job=?', (phase, job_id))
 
+    def log_metadata(self, job_id):
+        """Resolve only this worker's persisted execution; no caller engine UUID."""
+        p._slug(job_id, 'job ID')
+        row = self._row(job_id)
+        job = json.loads(row['identity'])['job']
+        if job['jobId'] != job_id or job['nodeId'] != self.node_id:
+            raise WorkerHeld('execution_logs_unavailable')
+        submission = job['submission']
+        if submission['pipeline']['treedar']['requested']:
+            raise WorkerHeld('execution_logs_unsupported')
+        return dict(jobId=job_id, attemptId=submission['submissionId'], generation=job['generation'],
+                    environment=job['environment'], nodeId=self.node_id)
+
+    def read_logs(self, job_id, *, generation, environment, attempt_id, after, limit):
+        """Read bounded NodeODM output under the existing physical engine gate."""
+        from . import reference_logs as logs
+        logs.bounds(generation, after, limit)
+        with NodeGate(self.engine_id) as gate:
+            state = gate.snapshot()
+            if (state['nodeId'], state['coordinatorOrigin'], state['authorityId'], state['generation']) != (
+                    self.node_id, self.origin, self.authority_id, self.gate_generation):
+                raise WorkerHeld('execution_logs_unavailable')
+            job = self.log_metadata(job_id)
+            if (job['generation'], job['environment'], job['attemptId']) != (generation, environment, attempt_id):
+                raise WorkerHeld('execution_logs_binding_mismatch')
+            self._verify_local_engine()
+            info = self.engine.read('/task/' + job_id + '/info', limit=64 * 1024)
+            if type(info) is not dict or info.get('uuid') != job_id:
+                raise WorkerHeld('execution_logs_unavailable')
+            output, has_more = self.engine.output_page(job_id, line=after, limit=limit)
+            if (type(output) is not list or any(type(line) is not str for line in output)
+                    or type(has_more) is not bool or len(output) > limit
+                    or len(p.canonical_json(output)) > logs.MAX_LOG_BYTES):
+                raise WorkerHeld('execution_logs_unavailable')
+            self._verify_local_engine()
+            lines = []
+            for text in output[:limit]:
+                candidate = lines + [dict(level='info', message=text[:4000])]
+                if logs.encoded_size(logs.page(job, candidate, after, has_more or len(output) > len(candidate))) > logs.MAX_LOG_BYTES:
+                    break
+                lines = candidate
+            return logs.validate(logs.page(job, lines, after, has_more or len(output) > len(lines)), job, after, limit)
+
     def _verify_local_engine(self):
         try:
             observed = self.engine_probe(time.monotonic() + 2)

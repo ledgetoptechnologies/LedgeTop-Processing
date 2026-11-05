@@ -72,6 +72,28 @@ class ReferenceResultAPI:
         if reader is None:
             return self._error(401, "unauthorized")
         try:
+            from . import reference_logs as logs
+            log_request = logs.request(path, PREFIX) if type(path) is str else None
+            if log_request is not None:
+                if method != 'GET' or body not in (b'', ''):
+                    return self._error(400, 'invalid_log_request')
+                job_id, generation, after, limit = log_request
+                metadata = self.results.log_metadata(job_id)
+                if metadata['environment'] not in reader['environments']:
+                    return self._error(404, 'not_found')
+                expected = {}
+                for name in ('X-Log-Environment', 'X-Log-Attempt'):
+                    values = self._values(headers, name)
+                    if len(values) != 1 or type(values[0]) is not str:
+                        return self._error(400, 'invalid_log_binding')
+                    expected[name] = values[0]
+                if (metadata['generation'], metadata['environment'], metadata['attemptId']) != (
+                        generation, expected['X-Log-Environment'], expected['X-Log-Attempt']):
+                    return self._error(409, 'log_binding_mismatch')
+                if reader['share_policy'](dict(copy.deepcopy(metadata), requestedResource='logs')) is not True:
+                    return self._error(403, 'result_not_shared')
+                return Response(200, self.results.logs(job_id, generation=generation,
+                    environment=metadata['environment'], attempt_id=metadata['attemptId'], after=after, limit=limit))
             match = re.fullmatch(re.escape(PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/results/([A-Za-z0-9][A-Za-z0-9_-]{0,127})", path) if type(path) is str else None
             if method != "GET" or not match:
                 return self._error(404, "not_found")

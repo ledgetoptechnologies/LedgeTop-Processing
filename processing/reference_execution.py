@@ -396,6 +396,18 @@ class ExecutionRouter:
         local,_=self._local_row(route,self.worker_for(job_id))
         return local
 
+    def log_metadata(self,job_id):
+        route=self._route(job_id)
+        if route['kind']!='odm':
+            raise RouteConflict('execution_logs_unsupported')
+        worker=self.worker_for(job_id,for_execution=True)
+        self._local_row(route,worker)
+        return worker.log_metadata(job_id)
+
+    def read_logs(self,job_id,**binding):
+        self.log_metadata(job_id)
+        return self.worker_for(job_id,for_execution=True).read_logs(job_id,**binding)
+
     def _file(self,reservation,relative,expected_size=None,expected_sha=None):
         with self.ledger._transaction() as db:
             reserved=self.ledger._reservation(db,reservation)

@@ -5,6 +5,7 @@ explicit sharing decision. Viewer acceptance is deliberately not a read gate:
 the Viewer must first download a result before it can acknowledge storage.
 """
 from dataclasses import dataclass
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -186,6 +187,25 @@ class ReferenceResults:
             if not isinstance(reader_session, ReaderSession) or reader_session.ledger is not self.ledger:
                 raise ValueError('result reader session ledger differs')
         self.reader_session = reader_session
+
+    def log_metadata(self, job_id):
+        try:
+            if self.reader_session is not None:
+                self.reader_session.check()
+            return self.worker.log_metadata(job_id)
+        except Exception:
+            raise ResultUnavailable() from None
+
+    def logs(self, job_id, **binding):
+        try:
+            # No scratch file is read or pinned. Drain this short engine read
+            # before an owned reader session can close/release its process lease.
+            with self.reader_session._mutex if self.reader_session is not None else nullcontext():
+                if self.reader_session is not None:
+                    self.reader_session.check()
+                return self.worker.read_logs(job_id, **binding)
+        except Exception:
+            raise ResultUnavailable() from None
 
     def _load(self, job_id):
         protocol._slug(job_id, "job ID")

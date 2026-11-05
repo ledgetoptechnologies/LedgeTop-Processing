@@ -63,6 +63,27 @@ class NativeEngine:
         except (OSError, ValueError, http.client.HTTPException):
             raise EngineUnavailable('engine_read_unavailable') from None
 
+    def output_page(self, identifier, *, line, limit):
+        """Read only a bounded output prefix; NodeODM has no tail limit query."""
+        from . import reference_logs as logs
+        from .reference_protocol import _slug
+        try:
+            _slug(identifier, 'persisted engine task')
+            logs.bounds(1, line, limit)
+            target = self.origin + self.route('/task/' + identifier + '/output', line=line)
+            request = Request(target, headers={'Accept-Encoding': 'identity'})
+            with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=5) as response:
+                if (response.status != 200 or response.geturl() != target
+                        or response.headers.get('Content-Encoding', 'identity').lower() != 'identity'
+                        or response.headers.get('Content-Type', '').split(';', 1)[0].strip().lower() != 'application/json'):
+                    raise ValueError('invalid engine output response')
+                return logs.read_output_prefix(response, limit)
+        except HTTPError as error:
+            error.close()
+            raise EngineUnavailable('engine_output_unavailable') from None
+        except (OSError, ValueError, UnicodeError, http.client.HTTPException):
+            raise EngineUnavailable('engine_output_unavailable') from None
+
     def initialize(self, task):
         fields = {'name': task['name'], 'options': json.dumps(task['options'])}
         if task['outputs'] is not None:

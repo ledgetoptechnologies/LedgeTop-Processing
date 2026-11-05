@@ -127,6 +127,25 @@ class ReferenceAPI:
         if method == "GET" and path in (protocol.PREFIX + "/capabilities", "/ltds/v2/capabilities"):
             return Response(200, self._capabilities(environment, source_intake=path == "/ltds/v2/capabilities"))
         try:
+            from . import reference_logs as logs
+            log_request = logs.request(path, protocol.PREFIX)
+            if log_request is not None:
+                if method != 'GET' or body not in (b'', ''):
+                    return self._error(400, 'invalid_log_request')
+                job_id, generation, after, limit = log_request
+                job = self._job(job_id, environment)
+                if job is None:
+                    return self._error(404, 'not_found')
+                if generation != job['generation']:
+                    return self._error(409, 'log_binding_mismatch')
+                if job['nodeId'] is None and job['status'] == 'queued':
+                    return Response(200, logs.page(job, [], after))
+                if self.result_proxy is None:
+                    return self._error(503, 'execution_logs_unavailable')
+                try:
+                    return Response(200, self.result_proxy.logs(job, after=after, limit=limit))
+                except Exception:
+                    return self._error(503, 'execution_logs_unavailable')
             if method == "POST" and path == "/ltds/v2/jobs":
                 if (self.source_spool is None or self.source_attestation_keys is None
                         or not self.authority_id):

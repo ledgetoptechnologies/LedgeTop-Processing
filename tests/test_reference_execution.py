@@ -131,6 +131,42 @@ class ExecutionRouterTests(unittest.TestCase):
         self.assertEqual((self.fixture.docker.calls,self.transport.calls),before)
         self.assertIs(self.router.worker_for(self.fixture.job['jobId']),self.tree)
 
+    def test_existing_result_api_routes_bounded_logs_to_current_odm_only(self):
+        from processing.reference_result_api import ReferenceResultAPI
+        tree_job,_=self.finish_tree()
+        job,_,reservation,paths=self.new_odm()
+        self.odm.start(job,reservation_id=reservation,input_paths=paths)
+        self.router=self.open()
+        results=ReferenceResults(self.router)
+        token='synthetic-existing-result-log-reader'
+        api=ReferenceResultAPI(results,bearer_readers={token:dict(node_id='main',worker_id=self.router.worker_id,
+            environments=('staging',),share_policy=lambda metadata:metadata['environment']=='staging')})
+        def request(identifier):
+            return api.handle('GET','/ltds/worker/v1/jobs/'+identifier+'/logs?generation=1&after=0&limit=2',
+                {'Authorization':'Bearer '+token,'X-Log-Environment':'staging',
+                 'X-Log-Attempt':job['submission']['submissionId']},protected_transport=True)
+        def output(identifier,**kwargs):
+            self.assertEqual(identifier,job['jobId'])
+            self.assertEqual(kwargs,dict(limit=2,line=0))
+            return ['Starting opensfm','second'],True
+        with patch.object(self.native,'output_page',side_effect=output):
+            response=request(job['jobId'])
+            self.assertEqual(response.status,200)
+            self.assertEqual(response.body['nodeId'],'main')
+            self.assertEqual((response.body['nextCursor'],response.body['hasMore']),(2,True))
+            self.assertEqual(request(tree_job['jobId']).status,409)
+            from processing.reference_readers import ReaderSession
+            with ReaderSession(self.ledger) as session:
+                owned=ReferenceResults(self.router,reader_session=session)
+                self.assertEqual(owned.logs(job['jobId'],generation=1,environment='staging',
+                    attempt_id=job['submission']['submissionId'],after=0,limit=2)['nextCursor'],2)
+                self.assertEqual(session.active_count,0)
+            from processing.reference_results import ResultUnavailable
+            with self.assertRaises(ResultUnavailable):
+                owned.logs(job['jobId'],generation=1,environment='staging',attempt_id=job['submission']['submissionId'],after=0,limit=2)
+        self.odm.version='changed-runtime'
+        self.assertEqual(request(job['jobId']).status,409)
+
     def test_alternating_engines_retained_results_and_receipts_route_per_job(self):
         tree_job,_=self.finish_tree()
         odm_job,_,_=self.finish_odm()
