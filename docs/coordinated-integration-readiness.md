@@ -61,6 +61,15 @@ modules and served health HTTP 200 as UID 10001; its listener was joined and
 the task-owned container removed. This proves image construction and basic
 startup only, not configured reference execution or installed services.
 
+Runtime follow-up `d05d100` permits an explicit schema-6
+`"viewerAcceptance": {}` for the new Viewer pull/copy-ACK path. It avoids
+constructing the incompatible legacy push sender while still requiring source
+and copy-receipt pins; schemas 4/5 keep their nonempty push-target requirement.
+The affected runtime suite passed **38/38 on Ubuntu** without skips, and an
+independent read-only review found no actionable defect. The new assembly test
+mocks TLS and mount qualification. The image above predates this follow-up;
+it must not be described as containing the configuration change.
+
 The production worker daemon already assembles `ReferenceResults` and
 `ReferenceResultAPI` on its HTTPS listener. A full synthetic source → worker →
 result download → actual Viewer outbox/signer → Store ACK → cleanup test is
