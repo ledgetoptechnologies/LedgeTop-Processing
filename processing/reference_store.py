@@ -22,7 +22,7 @@ from . import reference_protocol as protocol
 from .viewer_result_manifest import derive_viewer_result_manifest, validate_viewer_acceptance
 from .prototype import PROFILE as TREEDAR_PROFILE, VIEWER_PROFILE
 from .reference_source_intake_store import ReferenceSourceIntakeMethods
-from .reference_worker_hold import HOLD_REASONS, queue_status, stored_record
+from .reference_worker_hold import HOLD_REASONS, claim_refused, queue_status, stored_record
 
 PROFILE = "reference-pipeline-v1"
 PHASES = {
@@ -591,6 +591,9 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                         job_id, node_id, worker_id, worker_instance_id):
                     raise Conflict("claim request belongs to different worker binding")
                 return self._record(row, True)
+            if claim_refused(db, job_id, claim_request_id, node_id=node_id, worker_id=worker_id,
+                             worker_instance_id=worker_instance_id):
+                return None
             self.queue._refresh_nodes(db)
             if row["phase"] not in ("queued", "waiting_capacity"):
                 raise Conflict("reference phase cannot be claimed")

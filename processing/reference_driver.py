@@ -61,6 +61,11 @@ SCRATCH_CONFLICTS = {'insufficient unreserved scratch': 'scratch_capacity_unavai
     'lease expired before engine mutation': 'reservation_expired', 'invalid engine transition': 'reservation_expired',
     'allocation outside reservation': 'reservation_expired', 'result exceeds output budget': 'result_over_budget'}
 ENGINE_OBSERVATIONS = {'missing': 'engine_task_missing', 'unreachable': 'node_lost'}
+# Closed reply states that prove one unanswered claim request can never admit.
+CLAIM_RETIRED = {'dropped': frozenset(('running', 'held', 'succeeded', 'failed', 'cancelled')), 'refused': frozenset(('queued',))}
+# Any of these in the row means something already happened for this request.
+CLAIM_EFFECTS = ('claim', 'reservation', 'originalCombinedClaim', 'grant', 'inputPaths', 'fetchAttempts',
+    'failure', 'failureOutboxId', 'outboxId', 'hold', 'watch')
 
 
 def _hold_code(reason):
@@ -859,7 +864,7 @@ class ReferenceDriver:
                 code = 'worker_reconciliation_required'
             if code not in HOLD_REASONS:
                 self._observe(self._active_job, stage, data, code)
-                return dict(held, observing=code)
+                return held
             watch = data.pop('watch', None) or {}
             data.setdefault('hold', dict(holdId=watch.get('holdId') or str(uuid4()), reasonCode=code, reason=reason,
                 sequence=watch.get('sequence', -1) + 1, observation=None, engineStatusCode=None, ack=None))
@@ -929,6 +934,47 @@ class ReferenceDriver:
         # An unbound reservation may be this job's crash between reserve and bind.
         return reservation is not None and (reservation['job'] is None or reservation['job']['id'] == job_id)
 
+    def _no_local_effect(self, job_id, data):
+        """Absence census for an unstarted claim row; anything unknown is an effect."""
+        if any(key in data for key in CLAIM_EFFECTS):
+            return False
+        try:
+            with self.ledger._transaction() as db:
+                reserved = db.execute('SELECT 1 FROM reservations WHERE job=? LIMIT 1', (job_id,)).fetchone()
+            if reserved is not None or self._physically_live(job_id):
+                return False
+            self.worker._row(job_id)
+        except WorkerHeld:
+            return True
+        except Exception:
+            pass
+        return False
+
+    def _overtaken_reply(self, job_id, request_id):
+        """Withdraw a request only once the queue offers this node something else.
+
+        Waiting behind nothing is not starvation, and the request stays live. An
+        admission that won the race stands and the next replay returns its claim.
+        """
+        _, offered = self._request('GET', '/next')
+        head = offered.get('job')
+        if head is None or head.get('jobId') == job_id:
+            return None
+        status, reply = self._request('POST', '/claim-withdrawal', {'jobId': job_id, 'claimRequestId': request_id})
+        if status == 409 or (set(reply) == {'jobId', 'status', 'claimState'} and reply['claimState'] == 'admitted'
+                and reply['jobId'] == job_id):
+            return None
+        return reply
+
+    def _claim_retirable(self, job_id, data, reply):
+        """Only an exact closed refusal, or the exact replay of a since-ended claim."""
+        if 'claimState' in reply:
+            allowed = CLAIM_RETIRED.get(reply['claimState']) if type(reply['claimState']) is str else None
+            closed = set(reply) == {'jobId', 'status', 'claimState'} and allowed is not None and reply['status'] in allowed
+        else:
+            closed = type(reply.get('claimToken')) is str and reply.get('status') in ('succeeded', 'failed', 'cancelled')
+        return closed and reply['jobId'] == job_id and self._no_local_effect(job_id, data)
+
     def _terminal_status(self, job_id, data):
         """Exact authenticated terminal word for this claim, else None (keep trying)."""
         claim = data['claim']
@@ -969,12 +1015,21 @@ class ReferenceDriver:
             self._save(job_id, stage, data)
             return dict(result, state='held', reconciliation='physical_reservation_retained',
                 holdReport=self._post_report(job_id, stage, data, 'fence'))
+        if 'fence' in data:
+            fence = data['fence']
+            if fence['reasonCode'] is not None:
+                fence.update(reasonCode=None, sequence=fence['sequence'] + 1, ack=None)
+                self._save(job_id, stage, data)
+            if self._post_report(job_id, stage, data, 'fence') == 'pending':
+                return dict(result, state='held', reconciliation='physical_reservation_clearing')
         data['operatorTerminal'] = dict(status=status, reasonCode=record['reasonCode'], stage=stage)
         self._save(job_id, 'completed', data)
         return dict(result, state='operator_terminal')
 
     def _observe(self, job_id, stage, data, code, observation=None):
         """Show a transient condition; never changes the job or the row's retry."""
+        if self.combined_preparation is not None:
+            return None
         watch = data.get('watch') or dict(holdId=str(uuid4()), sequence=-1, reasonCode=None, observation=None,
             engineStatusCode=None, ack=None, stage=stage)
         if (watch['reasonCode'], watch['observation'], watch['stage']) != (code, observation, stage):
@@ -1219,14 +1274,17 @@ class ReferenceDriver:
                 return {'state': 'not_ready', 'jobId': job_id}
             status, claim = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
             if status == 409:
-                return {'state': 'claim_pending', 'jobId': job_id}
-            if (claim.get('claimState') == 'dropped' or claim['status'] in ('succeeded', 'failed', 'cancelled')) and 'reservation' not in data:
-                # Nothing was reserved or started for this row. Without this the
-                # row would be selected first forever and starve the next job.
+                claim = self._overtaken_reply(job_id, request_id)
+                if claim is None:
+                    return {'state': 'claim_pending', 'jobId': job_id}
+            if self._claim_retirable(job_id, data, claim):
+                # The coordinator has made this request unadmittable and nothing
+                # local exists. Without this the row would be selected first
+                # forever and starve the next job. Timeouts never reach here.
                 with self._db() as db:
                     db.execute("DELETE FROM driver_jobs WHERE job=? AND stage='claim_pending'", (job_id,))
                 return {'state': 'claim_dropped', 'jobId': job_id}
-            if claim['status'] != 'running':
+            if 'claimState' in claim or claim['status'] != 'running':
                 raise DriverHeld('unstarted_claim_requires_reconciliation')
             if self.combined_preparation is None:
                 # The coordinator shows running from here, so a bind refusal must be reportable.
