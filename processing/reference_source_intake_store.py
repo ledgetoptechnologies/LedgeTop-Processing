@@ -225,7 +225,11 @@ class ReferenceSourceIntakeMethods:
 
     @staticmethod
     def _source_renewal_node_ready(db, node_id):
-        """A drain lets running work finish; an update or hold issues nothing."""
+        """Renewal continues an exact existing claim, so a drain allows it.
+
+        Maintenance waits for active transfers and work, and a drained node
+        still admits no new claim. An update or a hold issues nothing.
+        """
         node = db.execute('SELECT state FROM nodes WHERE id=?', (node_id,)).fetchone()
         if node is None or node['state'] not in ('active', 'scheduled', 'draining'):
             raise Conflict('renewal_authority_unavailable')
@@ -334,8 +338,8 @@ class ReferenceSourceIntakeMethods:
             if ((previous.get('generation'), previous.get('environment'), previous.get('manifestSha256'))
                     != (binding['generation'], binding['environment'], binding['manifestSha256'])):
                 raise Conflict('source renewal authority unavailable')
+            self._source_renewal_node_ready(db, worker['node_id'])
             return {'binding': binding,
-                    'nodeState': self._source_renewal_node_ready(db, worker['node_id']),
                     'ranges': self._source_range_ledger(db, job_id, binding['generation'])}
 
         def custody(db, job_id):
