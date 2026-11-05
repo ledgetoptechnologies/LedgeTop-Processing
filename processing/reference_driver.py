@@ -62,7 +62,8 @@ SCRATCH_CONFLICTS = {'insufficient unreserved scratch': 'scratch_capacity_unavai
     'allocation outside reservation': 'reservation_expired', 'result exceeds output budget': 'result_over_budget'}
 ENGINE_OBSERVATIONS = {'missing': 'engine_task_missing', 'unreachable': 'node_lost'}
 # Closed reply states that prove one unanswered claim request can never admit.
-CLAIM_RETIRED = {'dropped': frozenset(('running', 'held', 'succeeded', 'failed', 'cancelled')), 'refused': frozenset(('queued',))}
+CLAIM_RETIRED = {'dropped': frozenset(('running', 'held', 'succeeded', 'failed', 'cancelled')), 'refused': frozenset(('queued',)),
+    'ended': frozenset(('succeeded', 'failed', 'cancelled'))}
 # Any of these in the row means something already happened for this request.
 CLAIM_EFFECTS = ('claim', 'reservation', 'originalCombinedClaim', 'grant', 'inputPaths', 'fetchAttempts',
     'failure', 'failureOutboxId', 'outboxId', 'hold', 'watch')
@@ -967,13 +968,10 @@ class ReferenceDriver:
         return reply
 
     def _claim_retirable(self, job_id, data, reply):
-        """Only an exact closed refusal, or the exact replay of a since-ended claim."""
-        if 'claimState' in reply:
-            allowed = CLAIM_RETIRED.get(reply['claimState']) if type(reply['claimState']) is str else None
-            closed = set(reply) == {'jobId', 'status', 'claimState'} and allowed is not None and reply['status'] in allowed
-        else:
-            closed = type(reply.get('claimToken')) is str and reply.get('status') in ('succeeded', 'failed', 'cancelled')
-        return closed and reply['jobId'] == job_id and self._no_local_effect(job_id, data)
+        """Only the exact closed reply; a claim-shaped body proves nothing, whatever it says."""
+        allowed = CLAIM_RETIRED.get(reply.get('claimState')) if type(reply.get('claimState')) is str else None
+        return (set(reply) == {'jobId', 'status', 'claimState'} and allowed is not None and type(reply['status']) is str and reply['status'] in allowed
+            and reply['jobId'] == job_id and self._no_local_effect(job_id, data))
 
     def _terminal_status(self, job_id, data):
         """Exact authenticated terminal word for this claim, else None (keep trying)."""

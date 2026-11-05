@@ -368,8 +368,41 @@ class WorkerHoldTests(unittest.TestCase):
             worker_instance_id='instance', claim_request_id=request_id)
         self.queue.operator(first['jobId'], 'hold', dict(note='synthetic'))
         self.queue.operator(first['jobId'], 'resolve', dict(note='synthetic', workerStopped=True))
+        response = self.post_claim(first, request_id); status, reply = response.status, response.body
+        self.assertEqual((status, set(reply), reply['claimState']), (200, {'jobId', 'status', 'claimState'}, 'ended'))
         self.assertEqual(self.driver.step()['state'], 'claim_dropped')
         self.advance(second, 'claimed')
+
+    def test_same_job_claim_shaped_terminal_replies_never_retire_the_intent(self):
+        job = self.submit()
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        request_id = self.claim_request()
+        self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+            worker_instance_id='instance', claim_request_id=request_id)
+        record = self.store.get(job['jobId'], private=True)
+        ended = dict(jobId=job['jobId'], status='cancelled', claimState='ended')
+        without = lambda *keys: {key: value for key, value in dict(record, status='cancelled').items() if key not in keys}
+        for reply in (dict(jobId=job['jobId'], status='cancelled', claimToken='synthetic'),
+                      dict(jobId=job['jobId'], status='cancelled', claimToken='synthetic', arbitrary=True),
+                      dict(record, status='cancelled'), without('environment'), without('generation'), without('submission'),
+                      dict(ended, status='running'), dict(ended, status='held'), dict(ended, claimToken='synthetic'),
+                      dict(ended, claimState=None), dict(ended, status=['cancelled'])):
+            self.assertFalse(self.driver._claim_retirable(job['jobId'], {}, reply), reply)
+            self.reply((200, reply))
+            self.assertNotEqual(self.driver.step()['state'], 'claim_dropped', reply)
+            self.assertEqual(self.row(job)[0], 'claim_pending')
+        self.assertTrue(self.driver._claim_retirable(job['jobId'], {}, ended))
+
+    def test_running_replay_stays_the_full_private_claim(self):
+        job = self.submit()
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        request_id = self.claim_request()
+        self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
+            worker_instance_id='instance', claim_request_id=request_id)
+        reply = self.post_claim(job, request_id).body
+        self.assertNotIn('claimState', reply)
+        self.assertEqual(reply['status'], 'running')
+        self.assertIn('claimToken', reply)
 
     def test_queued_job_that_is_briefly_unclaimable_keeps_its_row(self):
         first = self.submit()
