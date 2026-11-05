@@ -22,6 +22,41 @@ candidate, pending installed qualification. See
 [the acceptance plan](coordinated-release-acceptance-plan.md) for the current
 dependency order and explicit per-host concurrency rule.
 
+### Actual Viewer source contract follow-up
+
+The exact clean Viewer candidate checked on November 4 is
+`b25d3234a5875be2be95c99302dfac3605999be4`. Its request includes `viewerTaskId`
+and a signed `sourceAttestation`; the historical intake import did not accept
+those fields. New source-proof verifier `dff4f44` validates a configured signer
+pin, principal/environment, queue authority and exact task/manifest/pipeline
+bindings, including the top-level Viewer task ID. A verified proof does not
+establish physical NAS custody or grant cleanup authority.
+
+The Viewer signs the pipeline digest using ECMAScript/JCS serialization.
+Python's existing V1 JSON digest differs for legal options such as `1e-7`,
+`1e-6` and negative zero. V2-only helper `63c6a3b` uses pinned `rfc8785==0.1.4`;
+V1 hashing/history remains unchanged. Its upstream implementation is
+[rfc8785.py](https://github.com/trailofbits/rfc8785.py).
+
+The combined focused validator/protocol/proof/canonical suite passed 36/36 on
+Windows with Node 24.16 and Python 3.13. It explicitly selected that actual
+Viewer checkout and paired its exported domain/shape and canonicalization code
+with Python verification, including ten numeric-option vectors. On Ubuntu,
+34 passed and two optional Node-dependent cases skipped. These are isolated
+proof/hash tests, not full application admission, physical custody, or installed
+runtime acceptance. The Store/HTTP/runtime wiring is still in progress.
+
+### Read-only installed-state refresh
+
+At 2026-11-05T02:30Z, SSH succeeded to both processing PCs. Both user worker
+units reported `LoadState=not-found`, `ActiveState=inactive` and no fragment;
+neither expected private worker configuration file exists. The existing
+coordinator reported healthy. Main NodeODX and both ingress containers are up.
+Cluster's engine candidate exposes container port 3000 only on loopback port
+13001; its name alone does not establish qualification or current ownership.
+No units, containers, configuration, client jobs or NAS files were changed by
+these observations. The new reference workflow is not installed.
+
 Identity follow-up `572cf56` integrates duplicate-origin/daemon-ID checks and
 requires daemon bindings for multi-node startup. It preserves schema-v3/v4
 result-delivery configuration while requiring their recovery bindings too.
