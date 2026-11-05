@@ -76,7 +76,7 @@ DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp/obj2tiles-bundle
 
 The derivative guard requires more than 5 GiB free, so use an adequately sized
 owned disposable disk volume. Run `tests.test_viewer_result_v2_roundtrip`; all
-three cases must execute without skips. Explicitly requesting qualification
+five whole/range, GCP and controlled-conversion cases must execute without skips. Explicitly requesting qualification
 with missing converter/Viewer/Node configuration must fail, not report a green
 skip. Normal staged-only tests do not require an installed converter.
 

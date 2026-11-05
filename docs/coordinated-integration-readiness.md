@@ -6,6 +6,15 @@ approval. Runtime acceptance remains incomplete.
 
 ## Latest combined and native-host preparation checkpoint
 
+Both PCs subsequently prepared inactive source `e11231a` and passed **130/130
+native synthetic tests each, no skips**. This adds private job-parent creation
+independent of the shell umask; the initial cluster attempt at `89c3dc4` exposed
+two cleanup refusals under umask `0002`. Existing unsafe directories remain
+refused. No worker, container or NAS change was made. See
+`evidence/native-private-source-preparation-20261105.md` for artifact identity,
+host versions and exact boundaries. The full combined checkpoint below remains
+`89c3dc4`; the local image remains `51cff44`.
+
 Processing `89c3dc4` passed **542/542 selected Linux tests, no skips**, in
 146.084 seconds across 35 modules. This combines the observation/recovery path
 below with receipt-bound ordinary V2 GCP execution admission in Driver, Router
