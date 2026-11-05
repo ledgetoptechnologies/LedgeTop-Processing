@@ -6,6 +6,16 @@ approval. Runtime acceptance remains incomplete.
 
 ## Latest combined and native-host preparation checkpoint
 
+Processing `7b33720` with Viewer `3426fa69` passed **178/178 Linux tests** across
+18 selected modules in 177.992 seconds, then **26/26 focused Viewer tests**;
+no skips. This includes the signed 24-hour cleanup round trip, permanent GCP
+preservation, an ordinary rerun, real Viewer process-death/terminal-hold repair,
+and the independently reviewed default-off legacy read-only archive lifecycle.
+Owned resources were removed. See
+`evidence/integrated-release-legacy-rerun-20261105.md` for scope and remaining
+installed/NAS/transport/TreeDar/UI gates. The bounded live predecessor metadata
+diagnostic also now passes; it is not full custody or activation approval.
+
 At `ac8f4fe`, integrated source-release, exact replay, predecessor census and
 all eight actual Viewer pairings passed **156/156 Linux tests, no skips**, in
 142.949 seconds. Viewer is exact `fe49d665`, including retained GCP byte fixes
