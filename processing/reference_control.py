@@ -26,3 +26,7 @@ class ReferenceControlAPI:
         api = self.worker if (isinstance(path, str) and
             (path.startswith(WORKER_PREFIX + '/') or path.startswith(OBJECT_PREFIX))) else self.viewer
         return api.handle(method, path, headers, body, protected_transport=protected_transport)
+
+    def stream_source_object(self, path, headers, reader, content_length, *, protected_transport=False):
+        return self.viewer.stream_source_object(path, headers, reader, content_length,
+            protected_transport=protected_transport)

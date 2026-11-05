@@ -78,7 +78,7 @@ class ReferenceAPI:
                 environment = bound_environment
         return environment
 
-    def _capabilities(self, environment):
+    def _capabilities(self, environment, *, source_intake=False):
         result={"protocol": "ltds-reference-v1", "schemaVersion": 1,
                 "environment": environment, "capabilityFingerprint": self.capability_fingerprint,
                 "limits": {"metadataBytes": protocol.MAX_BODY_BYTES, "objects": protocol.MAX_OBJECTS,
@@ -87,11 +87,14 @@ class ReferenceAPI:
                             "treedar": {"available": self.treedar_available,
                                         "admissionVersion": protocol.TREEDAR_ADMISSION_VERSION},
                             "gaussian_splat": {"available": False, "enabled": False}}}
+        if not source_intake:
+            return result
+        result['viewerAcceptance']={'enabled': bool(self.viewer_receipt_keys)}
         if self.source_spool is not None and self.source_attestation_keys is not None and self.authority_id:
             from .reference_limits import V2_SOURCE_INTAKE_BYTES
             result['sourceIntake']={**self.store.source_capacity(self.source_spool),
                                     'maxMetadataBytes': V2_SOURCE_INTAKE_BYTES, 'enabled': True}
-        elif self.source_spool is not None:
+        else:
             result['sourceIntake']={'enabled': False}
         return result
 
@@ -122,7 +125,7 @@ class ReferenceAPI:
         if type(method) is not str or type(path) is not str:
             return self._error(404, "not_found")
         if method == "GET" and path in (protocol.PREFIX + "/capabilities", "/ltds/v2/capabilities"):
-            return Response(200, self._capabilities(environment))
+            return Response(200, self._capabilities(environment, source_intake=path == "/ltds/v2/capabilities"))
         try:
             if method == "POST" and path == "/ltds/v2/jobs":
                 if (self.source_spool is None or self.source_attestation_keys is None

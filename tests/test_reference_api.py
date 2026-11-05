@@ -101,6 +101,18 @@ class ReferenceAPITests(unittest.TestCase):
         self.assertEqual(response.body, self.fixture["capabilities"])
         self.assertEqual(response.headers["Cache-Control"], "no-store")
 
+    def test_v2_discovery_advertises_receipt_verification_only_with_pinned_keys(self):
+        from tests.viewer_receipt_signer import SyntheticViewerSigner
+        headers = {"Authorization": "Bearer " + STAGING}
+        self.api.viewer_receipt_keys = {}
+        response = self.api.handle("GET", "/ltds/v2/capabilities", headers, protected_transport=True)
+        self.assertEqual(response.body["viewerAcceptance"], {"enabled": False})
+        self.assertEqual(response.body["sourceIntake"], {"enabled": False})
+        self.api.viewer_receipt_keys = SyntheticViewerSigner().trusted_keys
+        response = self.api.handle("GET", "/ltds/v2/capabilities", headers, protected_transport=True)
+        self.assertEqual(response.body["viewerAcceptance"], {"enabled": True})
+        self.assertEqual(self.request("GET", "/capabilities").body, self.fixture["capabilities"])
+
     def test_submission_idempotency_environment_scoping_and_no_private_data(self):
         job = self.submit()
         replay = self.request("POST", "/jobs", self.fixture["submission"])
