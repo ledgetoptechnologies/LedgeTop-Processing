@@ -93,6 +93,38 @@ class InventoryTests(unittest.TestCase):
         with self.queue._db() as db:
             self.assertFalse(db.execute("SELECT 1 FROM sqlite_master WHERE name='processing_node_inventory'").fetchone())
 
+    def test_inventory_history_counts_exactly_and_replay_survives_full_budget(self):
+        from processing.node_inventory import metadata_bytes
+        store = self.open(('small', 'large'))
+        with self.queue._db() as db:
+            before = store._metadata_used_bytes(db)
+        self.pin(store, ('small', 'large'))
+        with self.queue._db() as db:
+            one = metadata_bytes(db)
+            self.assertEqual(store._metadata_used_bytes(db), before + one)
+        self.pin(store, ('large', 'small'))
+        with self.queue._db() as db:
+            two = metadata_bytes(db)
+            used = store._metadata_used_bytes(db)
+            self.assertEqual(two, 2 * one)
+            saved = [tuple(row) for row in db.execute('SELECT * FROM processing_node_inventory ORDER BY revision')]
+        store.max_metadata_bytes = used - 1
+        # Existing exact replay is a read of the pin, not another allocation.
+        self.pin(store, ('large', 'small'))
+        with self.assertRaisesRegex(Conflict, 'metadata quota'):
+            self.pin(store, ('small', 'large'))
+        with self.queue._db() as db:
+            self.assertEqual([tuple(row) for row in db.execute('SELECT * FROM processing_node_inventory ORDER BY revision')], saved)
+            self.assertEqual(metadata_bytes(db), two)
+
+    def test_first_inventory_over_budget_is_atomic(self):
+        store = self.open(('small',))
+        store.max_metadata_bytes = 1
+        with self.assertRaisesRegex(Conflict, 'metadata quota'):
+            self.pin(store, ('small',))
+        with self.queue._db() as db:
+            self.assertFalse(db.execute("SELECT 1 FROM sqlite_master WHERE name='processing_node_inventory'").fetchone())
+
     @unittest.skipUnless(sys.platform.startswith('linux'), 'real signed V2 receipt fixture')
     def test_rebinding_requires_actual_validated_worker_observation_not_row_presence(self):
         from tests.test_reference_acceptance_observed import AcceptanceObservationStoreTests

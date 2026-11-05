@@ -16,6 +16,15 @@ def _table(db, name):
     return bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone())
 
 
+def metadata_bytes(db):
+    """Charge every retained revision to the shared metadata budget."""
+    if not _table(db, 'processing_node_inventory'):
+        return 0
+    return db.execute('''SELECT COALESCE(SUM(length(CAST(revision AS TEXT))
+        +length(CAST(inventory_json AS BLOB))+length(CAST(inventory_sha256 AS BLOB))
+        +length(CAST(created_at AS BLOB))),0) FROM processing_node_inventory''').fetchone()[0]
+
+
 def _closed_node(db, node):
     if db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1", (node,)).fetchone():
         raise Conflict('inventory change has an occupied or held node')
@@ -105,5 +114,11 @@ def pin_reference_inventory(store, config, settings):
                 if lookup(store, job_id) is None:
                     raise Conflict('inventory retirement requires verified worker observation')
         if old is None or old['inventory_json'] != wire:
-            db.execute('INSERT INTO processing_node_inventory(revision,inventory_json,inventory_sha256) VALUES(?,?,?)',
-                       (old['revision'] + 1 if old else 1, wire, p.digest(document)))
+            revision = old['revision'] + 1 if old else 1
+            digest = p.digest(document)
+            created_at = db.execute('SELECT CURRENT_TIMESTAMP').fetchone()[0]
+            extra = sum(len(str(value).encode('utf-8')) for value in (revision, wire, digest, created_at))
+            store._quota(db, extra)
+            db.execute('''INSERT INTO processing_node_inventory
+                (revision,inventory_json,inventory_sha256,created_at) VALUES(?,?,?,?)''',
+                       (revision, wire, digest, created_at))

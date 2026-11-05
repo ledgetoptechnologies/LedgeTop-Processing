@@ -88,3 +88,39 @@ the exact valid ACK permits rebind and retains the completed job.
 The receipt fixture is a synthetic dataset and signed local test peer. These
 checks do not prove installed multi-PC configuration, actual heavy processing,
 live Viewer UI scheduling, arbitrary-host onboarding or production readiness.
+
+## Metadata quota followup and update-census compatibility
+
+All retained `processing_node_inventory` revisions now contribute their exact
+stored revision, UTF-8 JSON, digest and timestamp bytes to the existing shared
+ReferenceStore metadata quota. The next revision reserves that exact byte cost
+before insertion in the same transaction. Replaying the unchanged inventory is
+read-only and remains possible at an exhausted budget. New-revision and initial
+pin quota failures roll back without changing history. Focused tests cover
+historical accounting, exact replay above budget and atomic refusal.
+
+Read-only audit of the integrated updater at `5914409` found the existing
+`ops/update_reference_coordinator.py` still intentionally rejects these newer
+schemas. Its closed table allowlist (lines 136–139, checked at 169 and 205) does
+not recognize `processing_node_inventory`. Existing current-V2 features also
+introduce unsupported `reference_source_intakes`,
+`reference_source_object_receipts`, `reference_source_grant_tokens`,
+`reference_source_grant_renewals`, `reference_source_range_usage`,
+`reference_source_range_requests`, `reference_source_object_pins`,
+`reference_recovery_startup`, `reference_recovery_receipts`,
+`reference_worker_acceptance_observations`, and the four `source_reader_*`
+tables (`binding`, `epochs`, `pins`, `fences`). A real empty ReferenceStore
+confirmed the first three source tables already exceed that allowlist.
+
+The same updater's path allowlist at line 145 rejects `source-readers` and its
+`lease` file; nonempty Viewer/spool trees also exceed its reviewed empty-native
+baseline. Its generic zero-row fence at lines 216–218 would reject nonempty
+reference claims/recovery/observation histories even if their table names were
+added. `compatible()` lines 267–292 recognizes only the reviewed owned-schedule
+and Viewer-acceptance schema additions, so it has no inventory schema migration
+exception. The per-file 64 MiB census bound (line 148) is separate from logical
+metadata quota; logical bytes do not prove a SQLite file fits that size because
+of page overhead. These are updater limitations, not grounds to bypass census.
+No updater guard, file bound, zero-row check or rollback compatibility rule was
+weakened by this patch; updating a current-V2 populated coordinator needs a
+separately reviewed exact census/backup/rollback qualification.
