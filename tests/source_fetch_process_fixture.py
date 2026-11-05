@@ -69,6 +69,10 @@ class FileEngine(NativeEngine):
     def action(self, action, job):
         self.call(action)
 
+    def output_page(self, identifier, *, line, limit):
+        """Output exists only once a commit was sent, like a task that really began."""
+        return (['synthetic output'] if 'commit' in self.log.read_text().split() else []), False
+
     def read(self, route, **_kwargs):
         if route == '/info':
             return {'engine': 'odx', 'engineVersion': 'pinned-engine-1', 'version': 'wrapper', 'taskQueueCount': 0, 'maxImages': None}

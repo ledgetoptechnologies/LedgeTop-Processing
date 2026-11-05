@@ -36,9 +36,9 @@ SOURCE_REQUEST_FIELDS=('schemaVersion','requestId','coordinatorEpoch','expectedN
 # stays the fetch wire, and each phase takes exactly one of the two.
 SOURCE_UNSTARTED_REQUEST_FIELDS=SOURCE_REQUEST_FIELDS+('executionPhase','engineClass')
 SOURCE_UNSTARTED_PHASES=('awaiting_transfer','processing')
-SOURCE_ENGINE_CLASSES=('unstarted',)
-# Starting an already claimed job on a draining node matches a run with no restart.
-# Drop 'draining' here to make such a job wait for an operator instead.
+SOURCE_ENGINE_CLASSES=('unstarted','started')
+# An exact claim may finish on a draining node, after this recovery and every gate,
+# runtime, reservation and engine check. Updating, held, failed or frozen stops it.
 SOURCE_UNSTARTED_NODE_STATES=('active','scheduled','draining')
 SOURCE_CLAIM_FIELDS=('jobId','generation','environment','nodeId','workerId','workerInstanceId','authorityId',
                      'claimRequestId','claimTokenSha256','manifestSha256','pipelineDigest','reservationId','inputBytes')
@@ -237,7 +237,8 @@ class ClaimRecoveryService:
     def _source_request(value):
         unstarted=type(value) is dict and value.get('schemaVersion')==3
         p._closed(value,SOURCE_UNSTARTED_REQUEST_FIELDS if unstarted else SOURCE_REQUEST_FIELDS,'source fetch recovery request')
-        if unstarted and (value['executionPhase'] not in SOURCE_UNSTARTED_PHASES or value['engineClass'] not in SOURCE_ENGINE_CLASSES):
+        if unstarted and (value['executionPhase'] not in SOURCE_UNSTARTED_PHASES or value['engineClass'] not in SOURCE_ENGINE_CLASSES
+                or value['engineClass']=='started' and value['executionPhase']!='processing'):
             raise ValueError('source recovery class required')
         p._uuid(value['requestId'],'recovery request');p._uuid(value['coordinatorEpoch'],'startup epoch')
         for key in ('expectedNodeRevision','renewalSequence','committedRanges','committedBytes'):

@@ -30,7 +30,7 @@ class Transport(driver_tests.EngineTransport):
 
     def __init__(self):
         super().__init__()
-        self.code, self.version, self.down, self.die_on = 20, 'pinned-engine-1', False, None
+        self.code, self.version, self.down, self.die_on, self.output = 20, 'pinned-engine-1', False, None, []
         self.options = [dict(name='numeric-probe', type='float', value=1, help='Numeric setting.')]
 
     def initialize(self, task):
@@ -53,6 +53,10 @@ class Transport(driver_tests.EngineTransport):
             raise OSError('synthetic engine outage')
         return super().read(route, **kwargs)
 
+    def output_page(self, job, *, line, limit):
+        self.calls.append(('output', job))
+        return self.output[line:line + limit], False
+
     def starts(self):
         return sum(call[0] == 'initialize' for call in self.calls)
 
@@ -68,7 +72,7 @@ class ProcessingHarness(fetch_tests.StepHarness):
             physical.provision('cluster', GATE_ORIGIN, self.queue.authority_id)
         self.transport = Transport()
         self.native = NativeEngine('http://127.0.0.1:3001')
-        for method in ('initialize', 'upload', 'action', 'read', 'download'):
+        for method in ('initialize', 'upload', 'action', 'read', 'download', 'output_page'):
             patched = patch.object(self.native, method, side_effect=getattr(self.transport, method))
             patched.start()
             self.addCleanup(patched.stop)
@@ -232,20 +236,179 @@ class PhaseTableTests(ProcessingHarness):
         self.assertEqual((self.receipts(), self.transport.starts()), ([], 0))
         self.assertEqual(self.status(), ('held', 'coordinator_restart'))
 
-    def test_a_started_row_is_left_to_poll_and_asks_for_nothing(self):
-        self.to_execution_pending()
-        self.step('executing')
-        self.restart_coordinator()
-        self.assertEqual(self.driver.step()['state'], 'executing')
-        self.assertEqual((self.receipts(), self.transport.starts()), ([], 1))
-        self.assertEqual(self.status(), ('held', 'coordinator_restart'))
-
     def test_poll_outlives_a_coordinator_outage(self):
         self.to_execution_pending()
         self.step('executing')
         self.down.update(('claim-state', 'recovery-state', 'recover', 'claim'))
         self.assertEqual(self.driver.step()['state'], 'executing')
         self.assertEqual(self.transport.starts(), 1)
+
+
+class StartedRecoveryTests(ProcessingHarness):
+    """A running engine stays visible across a restart; nothing here can start one."""
+
+    def started(self, *, restart=True):
+        self.to_execution_pending()
+        self.step('executing')
+        if restart:
+            self.restart_coordinator()
+
+    def assert_started_receipt(self, count=1):
+        receipts = self.receipts()
+        self.assertEqual(len(receipts), count)
+        self.assertEqual((receipts[-1]['schemaVersion'], receipts[-1]['executionPhase'], receipts[-1]['engineClass']),
+            (3, 'processing', 'started'))
+        self.assertEqual(self.status(), ('running', None))
+        self.assertEqual(self.transport.starts(), 1)
+
+    def assert_polls_on_unrecovered(self):
+        """Refused evidence never holds the row or stops the poll."""
+        for _ in range(3):
+            self.assertEqual(self.driver.step(), {'state': 'executing', 'jobId': self.job_id})
+        self.assertEqual((self.receipts(), self.status(), self.transport.starts()), ([], ('held', 'coordinator_restart'), 1))
+        self.assertNotIn('hold', self.row()[1])
+
+    def test_a_running_task_returns_to_running_and_starts_nothing(self):
+        self.started()
+        self.step('executing')
+        self.assert_started_receipt()
+
+    def test_second_restart_recovers_again(self):
+        self.started()
+        self.step('executing')
+        self.restart_coordinator()
+        self.step('executing')
+        self.assert_started_receipt(2)
+        self.assertEqual(self.row()[1]['sourceRecovery'], {'attempts': 0, 'pending': None})
+
+    def test_a_worker_death_at_each_point_replays_the_same_intent(self):
+        self.started()
+        self.down.add('recover')
+        self.step('executing')
+        request = self.row()[1]['sourceRecovery']['pending']['request']
+        self.new_worker()
+        self.down.clear()
+        self.lose_reply.add('recover')
+        self.step('executing')
+        self.assertEqual(self.status(), ('running', None))
+        self.new_worker()
+        self.step('executing')
+        self.assert_started_receipt()
+        self.assertEqual(self.receipts()[0]['requestId'], request['requestId'])
+
+    def test_a_finished_task_needs_no_recovery_to_reach_delivery(self):
+        self.started()
+        self.transport.tasks[self.job_id] = 40
+        self.assertEqual(self.driver.step()['state'], 'delivering')
+        self.assertEqual((self.receipts(), self.transport.starts()), ([], 1))
+
+    def test_no_restart_asks_for_nothing(self):
+        self.started(restart=False)
+        for _ in range(3):
+            self.step('executing')
+        self.assertEqual(self.receipts(), [])
+
+    def test_status_20_with_a_commit_pending_row_and_no_output_is_not_started(self):
+        self.to_execution_pending()
+        self.transport.die_on = 'commit'
+        self.driver.step()
+        self.transport.die_on = None
+        self.new_worker()
+        self.step_to_executing()
+        self.restart_coordinator()
+        self.assert_polls_on_unrecovered()
+
+    def test_commit_pending_with_output_is_started(self):
+        self.to_execution_pending()
+        self.transport.die_on = 'commit'
+        self.driver.step()
+        self.transport.die_on = None
+        self.new_worker()
+        self.step_to_executing()
+        self.transport.output = ['synthetic engine line']
+        self.restart_coordinator()
+        self.step('executing')
+        self.assert_started_receipt()
+
+    def step_to_executing(self):
+        self.assertEqual(self.driver.worker._row(self.job_id)['phase'], 'commit_pending')
+        self.assertEqual(self.row()[0], 'execution_pending')
+        self.step('executing')
+
+    def test_changed_gate_receipt_is_not_started(self):
+        self.started()
+        with self.driver.worker._db() as db:
+            db.execute('UPDATE executions SET receipt=?', ('c' * 32,))
+        self.assert_polls_on_unrecovered()
+
+    def test_a_prepared_completion_is_not_started(self):
+        self.started()
+        with self.driver.worker._db() as db:
+            receipt = db.execute('SELECT receipt FROM executions').fetchone()[0]
+        with NodeGate('engine') as gate:
+            gate.prepare_completion(receipt, {'synthetic': True})
+        self.assert_polls_on_unrecovered()
+
+    def test_a_ledger_not_engine_started_is_not_started(self):
+        self.started()
+        with self.ledger._transaction() as db:
+            db.execute("UPDATE reservations SET state='uncertain'")
+        self.assert_polls_on_unrecovered()
+
+    def test_changed_row_identity_is_not_started(self):
+        self.started()
+        row = self.driver.worker._row(self.job_id)
+        with self.driver.worker._db() as db:
+            db.execute('UPDATE executions SET identity=?', (json.dumps(dict(json.loads(row['identity']), reservation='other')),))
+        self.assert_polls_on_unrecovered()
+
+    def test_engine_outage_spends_nothing_and_polling_outlives_it(self):
+        self.started()
+        with self.proof_sees('unreachable'):
+            self.assert_polls_on_unrecovered()
+        self.assertNotIn('sourceRecovery', self.row()[1])
+
+    def test_a_missing_task_is_not_started(self):
+        self.started()
+        with self.proof_sees('missing'):
+            self.assert_polls_on_unrecovered()
+
+    def proof_sees(self, observed):
+        """Only the proof's read changes: the poll beside it still sees its task."""
+        real = self.driver._source_started_proof
+        worker = self.driver.worker
+
+        def proof(job_id, data):
+            with patch.object(worker, 'task_observation', return_value=(observed, None)):
+                return real(job_id, data)
+        return patch.object(self.driver, '_source_started_proof', side_effect=proof)
+
+    def test_coordinator_outage_during_visibility_keeps_polling(self):
+        self.started()
+        self.down.update(('claim-state', 'recovery-state', 'recover'))
+        self.assert_polls_on_unrecovered()
+        self.down.clear()
+        self.step('executing')
+        self.assert_started_receipt()
+
+    def test_operator_hold_is_never_cleared(self):
+        self.started()
+        self.execute("UPDATE jobs SET held_reason='operator_hold' WHERE id=?", self.job_id)
+        for _ in range(3):
+            self.assertEqual(self.driver.step()['state'], 'executing')
+        self.assertEqual(self.receipts(), [])
+        self.assertEqual(self.status(), ('held', 'operator_hold'))
+
+    def test_updating_node_stops_visibility_and_not_polling(self):
+        self.started()
+        self.execute("UPDATE nodes SET state='updating',revision=revision+1 WHERE id=?", 'cluster')
+        self.assert_polls_on_unrecovered()
+
+    def test_draining_node_recovers_the_exact_claim(self):
+        self.started()
+        self.execute("UPDATE nodes SET state='draining',revision=revision+1 WHERE id=?", 'cluster')
+        self.step('executing')
+        self.assert_started_receipt()
 
 
 class WorkerDeathTests(ProcessingHarness):
@@ -769,9 +932,21 @@ class ProcessingWireTests(fetch_tests.RecoveryHarness):
         self.complete()
         self.assert_refused(self.unstarted(grantSha256=None))
 
-    def test_started_is_not_a_class_yet(self):
+    def test_control_started_is_accepted_in_processing(self):
         self.complete()
-        self.assert_refused(self.unstarted(engineClass='started'))
+        self.assertEqual(self.resume(self.unstarted(engineClass='started'))['engineClass'], 'started')
+
+    def test_started_is_refused_before_the_transfer(self):
+        with self.assertRaises(ValueError):
+            ClaimRecoveryService._request(dict(self.unstarted_shape(), executionPhase='awaiting_transfer', engineClass='started'))
+
+    def test_an_unknown_class_is_refused(self):
+        self.complete()
+        self.assert_refused(self.unstarted(engineClass='adopted'))
+
+    def unstarted_shape(self):
+        self.complete()
+        return self.unstarted()
 
     def test_a_worker_short_of_the_served_ranges_is_refused(self):
         self.complete()

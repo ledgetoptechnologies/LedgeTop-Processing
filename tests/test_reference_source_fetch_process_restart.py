@@ -193,7 +193,19 @@ class ProcessRestartTests(unittest.TestCase):
         self.assertIsNone(self.receipts()[0]['grantSha256'])
         self.assert_started_once(worker)
 
-    def assert_died_in_engine(self, call, *, starts):
+    def test_a_running_engine_is_visible_again_after_both_processes_die(self):
+        coordinator = self.spawn('coordinator')
+        worker = self.spawn('worker')
+        self.fetched(worker)
+        self.assert_started_once(worker)
+        self.restart_both(worker, coordinator)
+        worker = self.spawn('worker')
+        self.advance(worker, 'executing')
+        self.assertEqual(self.status(), ('running', None))
+        self.assertEqual(self.receipts()[0]['engineClass'], 'started')
+        self.assert_started_once(worker)
+
+    def assert_died_in_engine(self, call, *, starts, receipts=0):
         coordinator = self.spawn('coordinator')
         dying = self.spawn('worker', SOURCE_ENGINE_DIE=call)
         self.fetched(dying)
@@ -205,7 +217,8 @@ class ProcessRestartTests(unittest.TestCase):
         for _ in range(4):
             self.step(worker)
         self.assertEqual(self.engine_calls().count('initialize'), starts)
-        self.assertEqual((self.receipts(), self.status()), ([], ('held', 'coordinator_restart')))
+        self.assertEqual(len(self.receipts()), receipts)
+        self.assertEqual(self.status(), ('running', None) if receipts else ('held', 'coordinator_restart'))
 
     def test_killed_inside_initialize_is_never_started_again(self):
         self.assert_died_in_engine('initialize', starts=1)
@@ -214,7 +227,8 @@ class ProcessRestartTests(unittest.TestCase):
         self.assert_died_in_engine('upload', starts=1)
 
     def test_killed_inside_commit_is_never_started_again(self):
-        self.assert_died_in_engine('commit', starts=1)
+        # Output proves this commit reached the engine, so it is visible, never restarted.
+        self.assert_died_in_engine('commit', starts=1, receipts=1)
 
     def test_both_processes_killed_mid_fetch_resume_the_original_claim(self):
         coordinator, worker = self.spawn('coordinator'), None
