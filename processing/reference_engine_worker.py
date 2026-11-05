@@ -148,6 +148,7 @@ class ReferenceEngineWorker:
     def start(self, job, *, reservation_id, input_paths):
         """A ready, already claimed job and externally admitted scratch are required."""
         submission = job['submission']
+        from .reference_source_intake_canonical import pipeline_digest_for_job
         manifest, pipeline = submission['manifest'], submission['pipeline']
         if (job['status'] != 'running' or job['nodeId'] != self.node_id
                 or not pipeline['odm']['requested'] or pipeline['treedar']['requested']
@@ -158,7 +159,7 @@ class ReferenceEngineWorker:
             raise WorkerHeld('job is unsupported or lacks an active local claim')
         if (p.manifest_sha256(manifest) != job['manifestSha256']
                 or manifest['sha256'] != job['manifestSha256']
-                or p.digest(pipeline) != job['pipelineDigest']):
+                or pipeline_digest_for_job(job) != job['pipelineDigest']):
             raise WorkerHeld('job metadata integrity changed')
         with self.ledger._transaction() as db:
             reserved = self.ledger._reservation(db, reservation_id)

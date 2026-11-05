@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler,HTTPSHandler,ProxyHandler,Request,build_opener
 
 from . import reference_protocol as p
+from .reference_source_intake_canonical import pipeline_digest_for_job
 from .node_gate import NodeGate
 from .reference_pipeline import PipelineJournal,PipelineOperationLease
 from .reference_sender import decode_receipt
@@ -238,7 +239,7 @@ class DriverClaimTokens:
                     or not hmac.compare_digest(hashlib.sha256(token.encode()).hexdigest(),parent['claimTokenSha256'])
                     or data['reservation']['reservationId']!=parent['reservationId']
                     or p.manifest_sha256(job['submission']['manifest'])!=parent['manifestSha256']
-                    or p.digest(job['submission']['pipeline'])!=parent['pipelineDigest']
+                    or pipeline_digest_for_job(job)!=parent['pipelineDigest']
                     or job['submission']['manifest']['totalBytes']!=parent['inputBytes']):raise ValueError()
             self.check();return token
         except ParentGuardHeld:raise

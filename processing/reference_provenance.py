@@ -92,6 +92,7 @@ class LidarProvenanceClient:
         return now
 
     def _bindings(self,job,grant):
+        from .reference_source_intake_canonical import pipeline_digest_for_job
         if not isinstance(grant,ValidatedGrant) or self.broker.origin!=self.origin:
             raise ProvenanceUnavailable('configured_provenance_grant_required')
         _now(lambda:grant.expires)
@@ -101,7 +102,7 @@ class LidarProvenanceClient:
         p._slug(job['jobId'],'job ID');p._integer(job['generation'],'generation');p._environment(job['environment'])
         pipeline,manifest=job['submission']['pipeline'],job['submission']['manifest']
         if (not pipeline['treedar']['requested'] or pipeline['gaussian_splat']['requested']
-                or p.digest(pipeline)!=job['pipelineDigest']
+                or pipeline_digest_for_job(job)!=job['pipelineDigest']
                 or p.manifest_sha256(manifest)!=job['manifestSha256'] or manifest['sha256']!=job['manifestSha256']):
             raise ProvenanceUnavailable('provenance_job_binding_changed')
         receipt_id=pipeline['treedar']['provenanceReceiptId'];p._slug(receipt_id,'provenance receipt ID')

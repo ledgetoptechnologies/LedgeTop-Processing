@@ -258,6 +258,7 @@ class TreeDarEngine:
               provenance, allow_synthetic=False):
         """One launch attempt. Returned pending phases never authorize a retry."""
         p._uuid(job['jobId'], 'jobId')
+        from .reference_source_intake_canonical import pipeline_digest_for_job
         pipeline, manifest = job['submission']['pipeline'], job['submission']['manifest']
         if (job['status'] != 'running' or job['nodeId'] != 'main'
                 or pipeline['odm']['requested'] or not pipeline['treedar']['requested']
@@ -267,7 +268,7 @@ class TreeDarEngine:
                 or pipeline['treedar']['inputObjectIds'] != [input_object['id']]
                 or pipeline['treedar']['provenanceReceiptId'] != provenance.get('receiptId')
                 or p.manifest_sha256(manifest) != job['manifestSha256']
-                or p.digest(pipeline) != job['pipelineDigest']):
+                or pipeline_digest_for_job(job) != job['pipelineDigest']):
             raise TreeDarHeld('unsupported_or_unbound_treedar_job')
         checked = _provenance(provenance, self.verifier, job_id=job['jobId'],
             generation=job['generation'], environment=job['environment'], object_id=input_object['id'],

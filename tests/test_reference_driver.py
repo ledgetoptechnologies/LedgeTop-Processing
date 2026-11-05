@@ -560,6 +560,23 @@ class ReferenceDriverTests(unittest.TestCase):
         self.driver._ready()
         self.assertEqual(self.worker.allowed_options, frozenset(('new-flag',)))
 
+    def test_v2_numeric_digest_validates_against_live_option_definition(self):
+        from processing.reference_source_intake_canonical import pipeline_digest
+        self.transport.options = [dict(name='scale', type='float', value=0.1, help='Synthetic float option.')]
+        self.assertTrue(self.driver._ready())
+        raw = copy.deepcopy(self.fixture['submission'])
+        raw['pipeline']['odm']['options'] = {'scale': 1e-7}
+        normalized = validate_submission(raw, environment='staging', capability_fingerprint=raw['capabilityFingerprint'],
+                                        allowed_odm_options=self.worker.allowed_options)
+        normalized.update(sourceIntakeVersion=2, pipelineDigest=pipeline_digest(normalized['pipeline']))
+        job = dict(submission=normalized, environment='staging', nodeId='cluster', sourceIntakeVersion=2,
+                   manifestSha256=normalized['manifestSha256'], pipelineDigest=normalized['pipelineDigest'])
+        self.driver._validate_job(job)
+        changed = copy.deepcopy(job)
+        changed['submission']['pipeline']['odm']['options']['scale'] = 2e-7
+        with self.assertRaises(DriverHeld):
+            self.driver._validate_job(changed)
+
     def test_unknown_retained_task_readiness_scan_is_bounded_per_poll(self):
         self.submit()
         self.transport.tasks = {str(uuid.uuid4()): 40 for _ in range(5)}

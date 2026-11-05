@@ -105,6 +105,10 @@ class ReferenceDriver:
                 checked = p.validate_submission(raw, environment=identity['environment'],
                     capability_fingerprint=raw['capabilityFingerprint'], available_engines=('odm','treedar'),
                     allowed_odm_options=set(raw['pipeline']['odm']['options']))
+                from .reference_source_intake_canonical import bind_validated_submission, pipeline_digest_for_job
+                checked = bind_validated_submission(checked, submission)
+                if pipeline_digest_for_job(claim) != identity['pipelineDigest']:
+                    raise DriverHeld('migration_driver_submission_changed')
                 if (p.canonical_json(checked) != p.canonical_json(submission)
                         or checked['manifestSha256'] != identity['manifestSha256']
                         or checked['pipelineDigest'] != identity['pipelineDigest']):
@@ -500,6 +504,10 @@ class ReferenceDriver:
         checked = p.validate_submission(raw, environment=job['environment'],
             capability_fingerprint=raw['capabilityFingerprint'], available_engines=('odm', 'treedar') if self.execution_router or self._combined_policy else ('odm',),
             allowed_odm_options=self.worker.allowed_options)
+        from .reference_source_intake_canonical import bind_validated_submission, pipeline_digest_for_job
+        checked = bind_validated_submission(checked, submission)
+        if pipeline_digest_for_job(job) != job['pipelineDigest']:
+            raise DriverHeld('unsupported_worker_submission')
         if (job['environment'] not in self.allowed_environments or job['nodeId'] != self.node_id
                 or p.canonical_json(checked) != p.canonical_json(submission)
                 or checked['manifestSha256'] != job['manifestSha256']

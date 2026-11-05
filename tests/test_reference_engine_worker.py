@@ -114,6 +114,17 @@ class ReferenceEngineWorkerTests(unittest.TestCase):
     def start(self):
         return self.worker.start(self.job, reservation_id='reservation-1', input_paths=self.input_paths)
 
+    def test_v2_numeric_pipeline_digest_reaches_engine_under_existing_gate(self):
+        from processing.reference_source_intake_canonical import pipeline_digest
+        submission = self.job['submission']
+        submission['pipeline']['odm']['options'] = {'scale': 1e-7}
+        submission['sourceIntakeVersion'] = self.job['sourceIntakeVersion'] = 2
+        submission['pipelineDigest'] = self.job['pipelineDigest'] = pipeline_digest(submission['pipeline'])
+        self.worker = self.make_worker(allowed_odm_options=('scale',))
+        self.assertEqual(self.start(), 'processing')
+        self.assertEqual(self.engine.calls.count('initialize'), 1)
+        self.assertEqual(self.engine.calls.count('commit'), 1)
+
     def test_real_gate_ledger_archive_checksum_outbox_and_metadata_ack(self):
         self.assertEqual(self.start(), 'processing')
         self.assertEqual(self.start(), 'processing')

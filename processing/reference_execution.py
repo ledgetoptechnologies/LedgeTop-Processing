@@ -278,13 +278,14 @@ class ExecutionRouter:
         return {key:job[key] for key in ('jobId','generation','environment','manifestSha256','pipelineDigest','nodeId')}
 
     def bind(self,job):
+        from .reference_source_intake_canonical import pipeline_digest_for_job
         self._physical_check()
         binding=self._identity(job)
         if binding['nodeId']!=self.node_id:
             raise RouteConflict('execution_node_mismatch')
         submission=job['submission']
         pipeline,manifest=submission['pipeline'],submission['manifest']
-        if (p.digest(pipeline)!=job['pipelineDigest'] or p.manifest_sha256(manifest)!=job['manifestSha256']
+        if (pipeline_digest_for_job(job)!=job['pipelineDigest'] or p.manifest_sha256(manifest)!=job['manifestSha256']
                 or manifest['sha256']!=job['manifestSha256'] or pipeline['gaussian_splat']['requested'] is not False):
             raise RouteConflict('execution_submission_binding_changed')
         odm,tree=pipeline['odm']['requested'],pipeline['treedar']['requested']

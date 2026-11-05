@@ -6,10 +6,25 @@ import subprocess
 import unittest
 
 from processing import reference_protocol as p
-from processing.reference_source_intake_canonical import pipeline_digest
+from processing.reference_source_intake_canonical import (
+    pipeline_digest, pipeline_digest_for_job, bind_validated_submission)
 
 
 class V2PipelineDigestTests(unittest.TestCase):
+    def test_job_and_nested_submission_require_same_explicit_digest_version(self):
+        pipeline = {"odm": {"options": {"scale": 1e-7}}}
+        legacy = {"pipeline": pipeline, "pipelineDigest": p.digest(pipeline)}
+        modern = {**legacy, "sourceIntakeVersion": 2, "pipelineDigest": pipeline_digest(pipeline)}
+        self.assertEqual(pipeline_digest_for_job({"submission": legacy}), p.digest(pipeline))
+        self.assertEqual(pipeline_digest_for_job({"submission": modern, "sourceIntakeVersion": 2}), modern["pipelineDigest"])
+        self.assertEqual(bind_validated_submission(legacy, modern), modern)
+        for job in ({"submission": modern}, {"submission": legacy, "sourceIntakeVersion": 2},
+                    {"submission": legacy, "sourceIntakeVersion": True},
+                    {"submission": legacy, "sourceIntakeVersion": None},
+                    {"submission": legacy, "sourceIntakeVersion": 3}):
+            with self.subTest(job=job), self.assertRaises(p.ProtocolError):
+                pipeline_digest_for_job(job)
+
     def test_exponent_fixed_point_negative_zero_and_integral_float(self):
         for value, encoded in ((1e-7, "1e-7"), (1e-6, "0.000001"), (-0.0, "0"), (1.0, "1"),
                                (0.1, "0.1"), (1.25, "1.25"), (9007199254740991, "9007199254740991")):
