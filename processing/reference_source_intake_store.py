@@ -94,6 +94,58 @@ def _ensure_source_range_schema(queue):
 
 
 class ReferenceSourceIntakeMethods:
+    def source_readers(self):
+        """One Linux source-reader lease per existing coordinator authority."""
+        from .reference_source_readers import SourceReaders, SourceReaderError
+        import os
+        if self.queue._creator_pid != os.getpid():
+            raise SourceReaderError('source_reader_owner_process_required')
+        with self.queue._lifecycle_lock:
+            if self.queue._lock.closed:
+                raise SourceReaderError('source_reader_coordinator_closed')
+            readers = getattr(self.queue, '_source_reader_registry', None)
+            if readers is None or readers._closed:
+                readers = SourceReaders(self).start()
+                self.queue._source_reader_registry = readers
+            return readers
+
+    @staticmethod
+    def _source_reader_unfenced(db, job_id, generation):
+        from .reference_source_readers import SourceReaders
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='source_reader_fences'").fetchone():
+            SourceReaders._unfenced(db, job_id, generation)
+
+    def _source_read_authorizer(self, job_id, generation, token_sha, grant_json, *, range_only=False, clock=None):
+        expiry = datetime.fromisoformat(json.loads(grant_json)['expiresAt'].replace('Z', '+00:00')).timestamp()
+        previous_now = None
+        def authorize(db):
+            nonlocal previous_now
+            now = (clock or time.time)()
+            if (type(now) not in (int, float) or not math.isfinite(now) or now >= expiry
+                    or (previous_now is not None and now < previous_now)):
+                raise Conflict('source grant expired before read admission')
+            previous_now = now
+            job = self._row(db, job_id)
+            grant = db.execute('SELECT grant_json FROM reference_transfer_grants WHERE job_id=?', (job_id,)).fetchone()
+            token = db.execute('SELECT job_id,generation FROM reference_source_grant_tokens WHERE token_sha256=?', (token_sha,)).fetchone()
+            if (job['generation'] != generation or job['status'] != 'running'
+                    or job['phase'] not in (('fetching',) if range_only else ('fetching', 'processing'))
+                    or job['source_state'] != 'accepted' or job['derived_state'] != 'accepted'
+                    or not grant or grant['grant_json'] != grant_json
+                    or not token or (token['job_id'], token['generation']) != (job_id, generation)):
+                raise Conflict('source grant changed before read admission')
+        return authorize
+
+    def _registered_source_reader(self, *, job_id, generation, object_id, authorize, open_reader):
+        handle = self.source_readers().reserve(job_id, generation, object_id, authorize=authorize, quota=self._quota)
+        try:
+            reader, metadata = open_reader()
+            return handle.attach(reader, authorize=authorize), metadata
+        except Exception:
+            if not handle.closed and not handle.uncertain:
+                handle.close()
+            raise
+
     def _source_range_metadata_bytes(self, db):
         """Account every persisted source-range journal field in the queue quota."""
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -169,6 +221,7 @@ class ReferenceSourceIntakeMethods:
 
         def capture(db, job_id):
             row = self._row(db, job_id)
+            self._source_reader_unfenced(db, job_id, row['generation'])
             claim = db.execute('''SELECT request_id,job_id,node_id,worker_id,instance_id,token
                 FROM reference_claims WHERE job_id=?''', (job_id,)).fetchone()
             receipts = db.execute('''SELECT generation,object_id,object_kind,byte_size,sha256,mount_id,storage_key,receipt_json
@@ -185,6 +238,9 @@ class ReferenceSourceIntakeMethods:
         job_id = previous.get('jobId')
         protocol._slug(job_id, 'job ID')
         with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current_job = self._row(db, job_id)
+            self._source_reader_unfenced(db, job_id, current_job['generation'])
             # Exact retries, including retries after a lost response, get the
             # same already-minted successor. Never mint on a changed request.
             prior = db.execute('''SELECT request_json,request_sha256,previous_grant_sha256,
@@ -200,7 +256,6 @@ class ReferenceSourceIntakeMethods:
                 successor = json.loads(prior[0]['successor_grant_json'])
                 return {'protocol':'source-range-v2-renewal','renewalId':request['renewalId'],
                     'sequence':sequence,'previousGrantSha256':previous_sha,'grant':successor}
-            db.execute('BEGIN')
             row, claim, receipt_rows, grant_row, pin_rows = capture(db, job_id)
             latest = db.execute('SELECT COALESCE(MAX(sequence),0) FROM reference_source_grant_renewals WHERE job_id=?',
                                 (job_id,)).fetchone()[0]
@@ -346,9 +401,10 @@ class ReferenceSourceIntakeMethods:
                 raise Conflict('source renewal ACK binding changed')
             response = {'protocol':'source-range-v2-renewal-ack','renewalId':request['renewalId'],
                 'sequence':request['sequence'],'grantSha256':request['grantSha256']}
+            current = self._row(db, job_id)
+            self._source_reader_unfenced(db, job_id, current['generation'])
             if row['acked']:
                 return response
-            current = self._row(db, job_id)
             claim = db.execute('SELECT token FROM reference_claims WHERE job_id=?',(job_id,)).fetchone()
             if (current['status'] != 'running' or current['phase'] != 'fetching'
                     or claim is None or claim['token'] != current['private_claim_token']
@@ -485,12 +541,20 @@ class ReferenceSourceIntakeMethods:
         # minting, and the worker verifies the assembled full-object digest
         # before use. Here enforce no-follow, regular inode, owner, mount, link,
         # and size checks without rereading a 50GB object for every 8MB range.
-        try:
+        def open_reader():
             reader,file_identity=_open_pinned_source(source_spool,token_row['job_id'],job['generation'],object_id,pin_row)
             import os
-            os.lseek(reader.fileno(),range_start,os.SEEK_SET)
+            try:
+                os.lseek(reader.fileno(),range_start,os.SEEK_SET)
+            except Exception:
+                reader.close()
+                raise
             return reader, {'byteSize':item.byte_size,'rangeStart':range_start,'rangeLength':range_length,
                 'sha256':item.sha256,'fileIdentity':file_identity}
+        try:
+            return self._registered_source_reader(job_id=token_row['job_id'], generation=job['generation'],
+                object_id=object_id, authorize=self._source_read_authorizer(token_row['job_id'],
+                    job['generation'], token_sha, grant_row['grant_json'], range_only=True, clock=clock), open_reader=open_reader)
         except Exception:
             raise Conflict('source_storage_unavailable') from None
 
@@ -1016,6 +1080,7 @@ class ReferenceSourceIntakeMethods:
 
         def capture(db):
             row = self._row(db, job_id)
+            self._source_reader_unfenced(db, job_id, row['generation'])
             claim = db.execute('''SELECT request_id,job_id,node_id,worker_id,instance_id,token
                 FROM reference_claims WHERE job_id=?''', (job_id,)).fetchone()
             receipts = db.execute('''SELECT generation,object_id,object_kind,byte_size,sha256,mount_id,storage_key,receipt_json
@@ -1273,7 +1338,10 @@ class ReferenceSourceIntakeMethods:
             if (receipt['byte_size'], receipt['sha256'], receipt['mount_id']) != (
                     item.byte_size, item.sha256, source_spool.mount_id):
                 raise Conflict('source object receipt changed')
-            return source_spool.open_verified_object(job_id=row['job_id'], generation=row['generation'],
-                object_id=object_id, byte_size=item.byte_size, sha256=item.sha256)
+        return self._registered_source_reader(job_id=row['job_id'], generation=row['generation'],
+            object_id=object_id, authorize=self._source_read_authorizer(row['job_id'],
+                row['generation'], token_sha, grant_row['grant_json'], clock=clock),
+            open_reader=lambda: source_spool.open_verified_object(job_id=row['job_id'], generation=row['generation'],
+                object_id=object_id, byte_size=item.byte_size, sha256=item.sha256))
 
 

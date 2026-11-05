@@ -28,14 +28,17 @@ class _SourceBrokerStream:
         self.closed = False
 
     def chunks(self):
-        while self.remaining:
-            chunk = self.reader.read(min(64 * 1024, self.remaining))
-            if not isinstance(chunk, bytes) or not chunk or len(chunk) > self.remaining:
-                raise OSError("source stream changed during delivery")
-            self.remaining -= len(chunk)
-            yield chunk
-        if self.reader.read(1):
-            raise OSError("source stream exceeded its receipt")
+        try:
+            while self.remaining:
+                chunk = self.reader.read(min(64 * 1024, self.remaining))
+                if not isinstance(chunk, bytes) or not chunk or len(chunk) > self.remaining:
+                    raise OSError("source stream changed during delivery")
+                self.remaining -= len(chunk)
+                yield chunk
+            if self.reader.read(1):
+                raise OSError("source stream exceeded its receipt")
+        finally:
+            self.close()
 
     def close(self):
         if not self.closed:
@@ -49,17 +52,26 @@ class _SourceRangeBrokerStream(_SourceBrokerStream):
         self.file_identity = file_identity
 
     def chunks(self):
-        while self.remaining:
-            chunk=self.reader.read(min(64*1024,self.remaining))
-            if not isinstance(chunk,bytes) or not chunk or len(chunk)>self.remaining:
-                raise OSError('source range changed during delivery')
-            self.remaining-=len(chunk)
-            yield chunk
-        info = __import__('os').fstat(self.reader.fileno())
-        identity = (info.st_dev,info.st_ino,info.st_size,info.st_mode,info.st_nlink,
-                    info.st_uid,info.st_mtime_ns,info.st_ctime_ns)
-        if identity != self.file_identity:
-            raise OSError('source object changed during range delivery')
+        try:
+            while self.remaining:
+                chunk=self.reader.read(min(64*1024,self.remaining))
+                if not isinstance(chunk,bytes) or not chunk or len(chunk)>self.remaining:
+                    raise OSError('source range changed during delivery')
+                self.remaining-=len(chunk)
+                yield chunk
+            check_identity = getattr(self.reader, 'verify_identity', None)
+            if check_identity is not None:
+                check_identity(self.file_identity)
+            else:
+                # Plain file support is retained for isolated stream fixtures only;
+                # Store-created production source responses are registered readers.
+                info = __import__('os').fstat(self.reader.fileno())
+                identity = (info.st_dev,info.st_ino,info.st_size,info.st_mode,info.st_nlink,
+                            info.st_uid,info.st_mtime_ns,info.st_ctime_ns)
+                if identity != self.file_identity:
+                    raise OSError('source object changed during range delivery')
+        finally:
+            self.close()
 
 
 class ReferenceWorkerAPI:

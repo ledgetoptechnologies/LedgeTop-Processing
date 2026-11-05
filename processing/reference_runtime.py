@@ -390,6 +390,7 @@ class ReferenceRuntime:
         self.queue, self.config, self.settings = queue, config, settings
         self._server_factory = server_factory or create_reference_http_server
         self._server, self._thread = None, None
+        self._source_readers = None
         self._viewer_transfer_worker, self._viewer_transfer_thread = None, None
         self._viewer_transfer_stop = threading.Event()
         try:
@@ -430,6 +431,8 @@ class ReferenceRuntime:
                 node_limits=node_limits,
                 node_option_validator=self._node_options_valid)
             self.source_reconciliation=self.store.reconcile_source_spool(settings.source_spool)
+            if settings.source_spool is not None:
+                self._source_readers = self.store.source_readers()
             self._streams = threading.BoundedSemaphore(settings.stream_budget["maxConcurrent"])
             proxy = ResultProxy({node: worker["resultOrigin"] for node, worker in settings.workers.items()},
                 worker_bearers={node: worker["resultBearer"] for node, worker in settings.workers.items()},
@@ -517,6 +520,8 @@ class ReferenceRuntime:
     def start(self):
         if self._server is not None:
             return
+        if self.settings.source_spool is not None:
+            self._source_readers = self.store.source_readers()
         self._viewer_transfer_stop.clear()
         listener = self.settings.listener
         server = self._server_factory(self.api, listener["host"], listener["port"], ssl_context=self._server_context)
@@ -556,10 +561,11 @@ class ReferenceRuntime:
         if self._viewer_transfer_thread is not None:
             self._viewer_transfer_thread.join()
             self._viewer_transfer_thread = None
-        if self._server is None:
-            return
-        server, thread = self._server, self._thread
-        self._server, self._thread = None, None
-        server.shutdown()
-        server.server_close()
-        thread.join()
+        if self._server is not None:
+            server, thread = self._server, self._thread
+            self._server, self._thread = None, None
+            server.shutdown()
+            server.server_close()
+            thread.join()
+        if self._source_readers is not None:
+            self._source_readers.close()

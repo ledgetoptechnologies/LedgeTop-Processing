@@ -289,6 +289,7 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         return result
 
     def _metadata_used_bytes(self, db):
+        from .reference_source_readers import metadata_bytes as source_reader_metadata_bytes
         used = db.execute("""SELECT COALESCE(SUM(length(CAST(input_json AS BLOB))+
           COALESCE(length(CAST(transfer_json AS BLOB)),0)+COALESCE(length(CAST(result_json AS BLOB)),0)),0)
           FROM reference_jobs""").fetchone()[0]
@@ -318,6 +319,7 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         # the existing source-intake mixin so all quota decisions share one
         # calculation, including range requests, custody pins and renewals.
         used += self._source_range_metadata_bytes(db)
+        used += source_reader_metadata_bytes(db)
         return used
 
     def _quota(self, db, extra_bytes=0):

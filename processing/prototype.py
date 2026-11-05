@@ -102,6 +102,11 @@ class Queue(Maintenance):
         with self._lifecycle_lock:
             if self._database_users:
                 raise RuntimeError('coordinator transaction still active')
+            readers = getattr(self, '_source_reader_registry', None)
+            if readers is not None:
+                # Refused shutdown retains both leases; live/uncertain source
+                # descriptors must never outlive coordinator authority.
+                readers.close()
             self._lock.close()
 
     def node_profiles(self, node_id):
