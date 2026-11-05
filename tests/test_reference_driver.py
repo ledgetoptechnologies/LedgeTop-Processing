@@ -613,6 +613,33 @@ class ReferenceDriverTests(unittest.TestCase):
         with self.assertRaises(DriverHeld):
             self.driver._validate_job(changed)
 
+    def test_v2_large_manifest_reaches_worker_validation_without_raising_v1_limit(self):
+        from processing import reference_protocol as protocol
+        from processing.reference_limits import V2_SOURCE_INTAKE_BYTES
+        from processing.reference_source_intake_canonical import pipeline_digest
+        self.assertTrue(self.driver._ready())
+        raw = copy.deepcopy(self.fixture['submission'])
+        original = raw['manifest']['objects'][0]
+        objects = [{**original, 'id': f'00000000-0000-4000-8000-{i:012d}',
+                    'name': f'image-{i:05d}-' + 'x' * 239 + '.jpg'} for i in range(10000)]
+        raw['manifest'].update(objects=objects, objectCount=len(objects),
+            totalBytes=sum(obj['byteSize'] for obj in objects),
+            inputCounts=dict(images=len(objects), lidarObjects=0, points=0))
+        raw['manifest']['sha256'] = manifest_sha256(raw['manifest'])
+        self.assertGreater(len(protocol.canonical_json(raw)), protocol.MAX_BODY_BYTES)
+        normalized = validate_submission(raw, environment='staging',
+            capability_fingerprint=raw['capabilityFingerprint'], allowed_odm_options=self.worker.allowed_options,
+            max_body_bytes=V2_SOURCE_INTAKE_BYTES)
+        normalized.update(sourceIntakeVersion=2, pipelineDigest=pipeline_digest(normalized['pipeline']))
+        job = dict(submission=normalized, environment='staging', nodeId='cluster', sourceIntakeVersion=2,
+                   manifestSha256=normalized['manifestSha256'], pipelineDigest=normalized['pipelineDigest'])
+        self.driver._validate_job(job)
+        del job['sourceIntakeVersion']
+        del job['submission']['sourceIntakeVersion']
+        with self.assertRaises(protocol.ProtocolError):
+            self.driver._validate_job(job)
+        self.assertFalse(any(call[0] == 'initialize' for call in self.transport.calls))
+
     def test_unknown_retained_task_readiness_scan_is_bounded_per_poll(self):
         self.submit()
         self.transport.tasks = {str(uuid.uuid4()): 40 for _ in range(5)}

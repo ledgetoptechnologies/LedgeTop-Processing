@@ -43,6 +43,14 @@ def bind_validated_submission(checked, original):
     return checked
 
 
+def submission_metadata_limit(submission):
+    """Select the structural validator budget from the persisted intake marker."""
+    if _source_version(submission) == 2:
+        from .reference_limits import V2_SOURCE_INTAKE_BYTES
+        return V2_SOURCE_INTAKE_BYTES
+    return p.MAX_BODY_BYTES
+
+
 def pipeline_digest_for_job(job):
     """Require matching envelope/submission versions; never try both hashes."""
     version = _source_version(job)

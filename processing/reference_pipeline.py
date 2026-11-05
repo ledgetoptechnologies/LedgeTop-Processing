@@ -117,11 +117,12 @@ def seal_stage_proof(value):
 
 
 def _submission(value,environment):
-    from .reference_source_intake_canonical import bind_validated_submission
+    from .reference_source_intake_canonical import bind_validated_submission, submission_metadata_limit
     raw={key:value[key] for key in RAW_SUBMISSION}
     checked=p.validate_submission(raw,environment=environment,capability_fingerprint=raw['capabilityFingerprint'],
         available_engines=('odm','treedar'),options_fingerprint=raw['pipeline']['odm']['optionsFingerprint'],
-        allowed_odm_options=set(raw['pipeline']['odm']['options']))
+        allowed_odm_options=set(raw['pipeline']['odm']['options']),
+        max_body_bytes=submission_metadata_limit(value))
     checked=bind_validated_submission(checked,value)
     if checked!=value:raise PipelineHeld('normalized_parent_submission_required')
     manifest,pipeline=checked['manifest'],checked['pipeline']

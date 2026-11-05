@@ -101,11 +101,13 @@ class ReferenceDriver:
                 if identity['nodeId'] != physical_binding['nodeId']:
                     raise DriverHeld('migration_driver_identity_changed')
                 submission = claim['submission']
+                from .reference_source_intake_canonical import (
+                    bind_validated_submission, pipeline_digest_for_job, submission_metadata_limit)
                 raw = {key:submission[key] for key in ('schemaVersion','submissionId','manifest','pipeline','capabilityFingerprint')}
                 checked = p.validate_submission(raw, environment=identity['environment'],
                     capability_fingerprint=raw['capabilityFingerprint'], available_engines=('odm','treedar'),
-                    allowed_odm_options=set(raw['pipeline']['odm']['options']))
-                from .reference_source_intake_canonical import bind_validated_submission, pipeline_digest_for_job
+                    allowed_odm_options=set(raw['pipeline']['odm']['options']),
+                    max_body_bytes=submission_metadata_limit(submission))
                 checked = bind_validated_submission(checked, submission)
                 if pipeline_digest_for_job(claim) != identity['pipelineDigest']:
                     raise DriverHeld('migration_driver_submission_changed')
@@ -500,12 +502,14 @@ class ReferenceDriver:
 
     def _validate_job(self, job):
         submission = job['submission']
+        from .reference_source_intake_canonical import (
+            bind_validated_submission, pipeline_digest_for_job, submission_metadata_limit)
         raw = {key: submission[key] for key in ('schemaVersion', 'submissionId', 'manifest', 'pipeline', 'capabilityFingerprint')}
         kind = self._pipeline_kind(submission)
         checked = p.validate_submission(raw, environment=job['environment'],
             capability_fingerprint=raw['capabilityFingerprint'], available_engines=('odm', 'treedar') if self.execution_router or self._combined_policy else ('odm',),
-            allowed_odm_options=self.worker.allowed_options)
-        from .reference_source_intake_canonical import bind_validated_submission, pipeline_digest_for_job
+            allowed_odm_options=self.worker.allowed_options,
+            max_body_bytes=submission_metadata_limit(submission))
         checked = bind_validated_submission(checked, submission)
         if pipeline_digest_for_job(job) != job['pipelineDigest']:
             raise DriverHeld('unsupported_worker_submission')
