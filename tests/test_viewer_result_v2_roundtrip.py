@@ -407,6 +407,13 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                     self.assertEqual(len(captured_uploads[1]['body']), derived['byteSize'])
                     self.assertIn(b'photo.jpg', captured_uploads[1]['body'])
                     self.assertNotIn(b'control.csv', captured_uploads[1]['body'])
+                    gcp_lines = captured_uploads[1]['body'].decode('utf-8').strip().splitlines()
+                    self.assertEqual(gcp_lines[0], 'EPSG:6318+5703(GEOID18)')
+                    self.assertEqual(len(gcp_lines), 2)
+                    correspondence = gcp_lines[1].split()
+                    self.assertEqual(correspondence[:2], ['-88.1', '44.5'])
+                    self.assertAlmostEqual(float(correspondence[2]), 10 * 1200 / 3937, places=7)
+                    self.assertEqual(correspondence[3:], ['25', '75', 'photo.jpg'])
                     self.assertEqual(current['submission']['manifest']['inputCounts']['images'], 1)
                     self.assertEqual(len(current['submission']['manifest']['objects']), 2)
                     raw_csv = next(item for item in current['sourceReceipt']['objects'] if item['sourceType'] == 'gcp_source_csv')
@@ -472,6 +479,10 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                     self.assertTrue(qualified["revokedTokenRejected"])
                     self.assertTrue(qualified["privateObjRejected"])
                 self.assertEqual(accepted["drop_count"], 1)
+                if with_gcp:
+                    self.assertEqual(hashlib.sha256((root / 'control.csv').read_bytes()).hexdigest(), raw_csv['sha256'])
+                    retained_raw = spool.root / spool.storage_key(current['jobId'], current['generation'], raw_csv['id'])
+                    self.assertEqual(hashlib.sha256(retained_raw.read_bytes()).hexdigest(), raw_csv['sha256'])
                 self.assertEqual(transport.calls.count(("initialize", state["providerTaskId"])), 1,
                                  "accepted-copy retry and cleanup must not duplicate engine task execution")
             finally:
