@@ -104,6 +104,10 @@ class WorkerHoldTests(unittest.TestCase):
         self.advance(job, 'fetching')
         return job
 
+    def unfenced(self):
+        """Only an unfenced lease can lapse; a transfer fence, where present, replaces its deadline."""
+        return patch.object(self.ledger, 'begin_transfer', create=True)
+
     def expire_reservation(self):
         with self.ledger._transaction() as db:
             db.execute('UPDATE reservations SET expires=1')
@@ -291,7 +295,8 @@ class WorkerHoldTests(unittest.TestCase):
             row = json.loads(db.execute('SELECT data FROM driver_jobs').fetchone()[0])
             row['fetchAttempts'] = {obj['id']: 3 for obj in row['claim']['submission']['manifest']['objects']}
             db.execute('UPDATE driver_jobs SET data=?', (json.dumps(row),))
-        self.driver.step()
+        with self.unfenced():
+            self.driver.step()
         self.assert_observing(job, 'source_transfer_unavailable')
         watch = self.row(job)[1]['watch']
         self.expire_reservation()
@@ -666,7 +671,8 @@ class WorkerHoldTests(unittest.TestCase):
 
     def test_expired_lease_is_refused_before_the_gate_so_nothing_is_stranded(self):
         job = self.submit()
-        self.advance(job, 'execution_pending')
+        with self.unfenced():
+            self.advance(job, 'execution_pending')
         self.expire_reservation()
         self.steps(2)
         self.assert_public_held(job, 'reservation_expired')
