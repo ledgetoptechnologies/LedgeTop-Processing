@@ -18,8 +18,9 @@ import unittest
 from unittest.mock import patch
 
 from processing import reference_protocol as protocol
+from processing.node_gate import NodeGate
 from processing.source_spool import SourceSpool
-from tests.source_fetch_process_fixture import CLAIM_REQUEST
+from tests.source_fetch_process_fixture import CLAIM_REQUEST, ENGINE_LOG, GATE_ORIGIN
 from tests import test_reference_source_intake as intake
 from tests.test_viewer_result_v2_roundtrip import _write_tls_material
 
@@ -49,6 +50,8 @@ class ProcessRestartTests(unittest.TestCase):
         authority = queue.authority_id
         self.database = Path(queue.path)
         queue.close()
+        with patch('processing.node_gate.canonical_gate_path', return_value=self.root / 'gate'), NodeGate('engine') as gate:
+            gate.provision('cluster', GATE_ORIGIN, authority)
         key, cert = _write_tls_material(self.root)
         with closing(socket.socket()) as probe:
             probe.bind(('127.0.0.1', 0))
@@ -116,6 +119,102 @@ class ProcessRestartTests(unittest.TestCase):
             self.assertIn(self.step(worker)['state'], ('fetching', 'processing_pending'))
         self.advance(worker, 'execution_pending')
         self.assertEqual(self.read(self.root / 'ledger.sqlite', 'SELECT COUNT(*) FROM reservations'), [(1,)])
+
+    def engine_calls(self):
+        log = self.root / ENGINE_LOG
+        return log.read_text().split() if log.exists() else []
+
+    def fetched(self, worker):
+        self.to_first_object(worker)
+        while self.journal()[0] == 'fetching':
+            self.assertIn(self.step(worker)['state'], ('fetching', 'processing_pending'))
+
+    def restart_both(self, worker, coordinator):
+        self.kill(worker)
+        self.kill(coordinator)
+        self.spawn('coordinator')
+        self.assertEqual(self.status(), ('held', 'coordinator_restart'))
+
+    def assert_started_once(self, worker):
+        """Stops at the first polls: FileEngine reports status 20 and never finishes."""
+        for _ in range(8):
+            if self.journal()[0] == 'executing':
+                break
+            result = self.step(worker)
+            self.assertNotIn(result['state'], ('held', 'retry_wait'), result)
+        self.assertEqual(self.journal()[0], 'executing')
+        for _ in range(3):
+            self.assertEqual(self.step(worker)['state'], 'executing')
+        self.assertEqual(self.status(), ('running', None))
+        self.assertEqual(self.engine_calls().count('initialize'), 1)
+        self.assertEqual(self.engine_calls().count('commit'), 1)
+
+    def test_control_no_restart_starts_once(self):
+        self.spawn('coordinator')
+        worker = self.spawn('worker')
+        self.fetched(worker)
+        self.assert_started_once(worker)
+        self.assertEqual(self.receipts(), [])
+
+    def test_killed_at_execution_pending_recovers_and_starts_once(self):
+        coordinator = self.spawn('coordinator')
+        worker = self.spawn('worker')
+        self.fetched(worker)
+        self.advance(worker, 'execution_pending')
+        self.restart_both(worker, coordinator)
+        worker = self.spawn('worker')
+        self.advance(worker, 'execution_pending')
+        self.assertEqual(self.engine_calls(), [])
+        self.assertEqual(self.receipts()[0]['engineClass'], 'unstarted')
+        self.assert_started_once(worker)
+
+    def test_killed_once_processing_committed_recovers_and_starts_once(self):
+        coordinator = self.spawn('coordinator')
+        dying = self.spawn('worker', SOURCE_FETCH_DIE='after_processing_phase')
+        self.to_first_object(dying)
+        while self.journal()[0] == 'fetching':
+            self.assertEqual(self.step(dying)['jobId'], self.job_id)
+        self.assertIsNone(self.step(dying))
+        self.assertEqual(self.journal()[0], 'processing_pending')
+        self.restart_both(dying, coordinator)
+        worker = self.spawn('worker')
+        self.advance(worker, 'processing_pending')
+        self.assertEqual(self.receipts()[0]['executionPhase'], 'processing')
+        self.assert_started_once(worker)
+
+    def test_killed_before_the_first_byte_recovers_and_starts_once(self):
+        coordinator = self.spawn('coordinator')
+        worker = self.spawn('worker')
+        self.advance(worker, 'awaiting_grant')
+        self.restart_both(worker, coordinator)
+        worker = self.spawn('worker')
+        self.advance(worker, 'awaiting_grant')
+        self.assertEqual(self.receipts()[0]['executionPhase'], 'awaiting_transfer')
+        self.assertIsNone(self.receipts()[0]['grantSha256'])
+        self.assert_started_once(worker)
+
+    def assert_died_in_engine(self, call, *, starts):
+        coordinator = self.spawn('coordinator')
+        dying = self.spawn('worker', SOURCE_ENGINE_DIE=call)
+        self.fetched(dying)
+        self.advance(dying, 'execution_pending')
+        self.assertIsNone(self.step(dying))
+        self.assertEqual(dying.wait(), -9)
+        self.restart_both(dying, coordinator)
+        worker = self.spawn('worker')
+        for _ in range(4):
+            self.step(worker)
+        self.assertEqual(self.engine_calls().count('initialize'), starts)
+        self.assertEqual((self.receipts(), self.status()), ([], ('held', 'coordinator_restart')))
+
+    def test_killed_inside_initialize_is_never_started_again(self):
+        self.assert_died_in_engine('initialize', starts=1)
+
+    def test_killed_inside_upload_is_never_started_again(self):
+        self.assert_died_in_engine('upload', starts=1)
+
+    def test_killed_inside_commit_is_never_started_again(self):
+        self.assert_died_in_engine('commit', starts=1)
 
     def test_both_processes_killed_mid_fetch_resume_the_original_claim(self):
         coordinator, worker = self.spawn('coordinator'), None
