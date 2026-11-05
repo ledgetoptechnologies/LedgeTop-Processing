@@ -24,10 +24,18 @@ OPERATOR = 'maintenance-operator-private-test-credential'
 class Adapter:
     def __init__(self):
         self.current, self.calls, self.busy = OLD, [], False
+        self.worker_mode = 'legacy'
+        self.expected_version = 'old-version'
         self.bad_health, self.uncertain, self.missing = False, False, False
 
     def inspect(self):
         return {'Image': self.current}
+
+    def observed_engine_version(self):
+        return 'old-version' if self.current == OLD else 'new-version'
+
+    def bind_engine_version(self, version):
+        self.expected_version = version
 
     def idle(self):
         return not self.busy
@@ -46,7 +54,7 @@ class Adapter:
         self.image(image)
 
     def healthy(self, image):
-        return self.current == image and not (self.bad_health and image == NEW)
+        return self.current == image and self.expected_version == self.observed_engine_version() and not (self.bad_health and image == NEW)
 
 
 class MaintenanceUpdateTests(unittest.TestCase):
@@ -75,7 +83,7 @@ class MaintenanceUpdateTests(unittest.TestCase):
         return self.operator.json('POST', '/v1/prototype/nodes/cluster/schedule', {
             'expectedRevision': self.queue.get_node('cluster')['revision'],
             'drainAt': stamp.isoformat(), 'notBefore': stamp.isoformat(),
-            'afterJobId': None, 'targetImage': NEW})['node']
+            'afterJobId': None, 'targetImage': NEW, 'targetEngineVersion': 'new-version'})['node']
 
     def run_update(self):
         return execute(self.api, self.operator, self.adapter, 'cluster', self.work,
@@ -92,6 +100,36 @@ class MaintenanceUpdateTests(unittest.TestCase):
         with self.assertRaises(UpdateError):
             self.run_update()
         self.assertEqual(self.adapter.calls, [NEW])
+
+    def test_unbound_version_refuses_before_any_adapter_mutation(self):
+        self.plan()
+        with self.queue._db() as db:
+            db.execute("UPDATE nodes SET target_engine_version=NULL WHERE id='cluster'")
+        with self.assertRaisesRegex(UpdateError,'target_engine_version_unbound'):
+            self.run_update()
+        self.assertEqual(self.adapter.calls,[])
+        self.assertFalse((self.work/'update.json').exists())
+        self.assertEqual(self.queue.get_node('cluster')['state'],'draining')
+
+    def test_missing_or_reference_worker_mode_never_updates(self):
+        self.plan()
+        for mode,reason in ((None,'worker_mode_unbound'),('reference','reference_worker_handover_unimplemented')):
+            with self.subTest(mode=mode):
+                self.adapter.worker_mode=mode
+                with self.assertRaisesRegex(UpdateError,reason):
+                    self.run_update()
+                self.assertEqual(self.adapter.calls,[])
+                self.assertEqual(self.queue.get_node('cluster')['state'],'draining')
+
+    def test_target_image_with_wrong_version_rolls_back_and_keeps_gate(self):
+        self.plan()
+        original=self.adapter.observed_engine_version
+        self.adapter.observed_engine_version=lambda: 'unexpected' if self.adapter.current==NEW else original()
+        result=self.run_update()
+        self.assertEqual(result['status'],'failed')
+        self.assertEqual(self.adapter.calls,[NEW,OLD])
+        self.assertTrue(result['rollbackHealthy'])
+        self.assertEqual(self.queue.get_node('cluster')['state'],'failed')
 
     def test_frozen_plan_refuses_a_cancelled_and_rescheduled_operation(self):
         original = self.plan()
@@ -201,7 +239,7 @@ class MaintenanceUpdateTests(unittest.TestCase):
         self.assertEqual(self.queue.get_node('cluster')['state'],'updating')
         self.assertNotIn('updateToken',result)
         return plan,dict(healthy=True,image=NEW,previousImage=OLD,composePinUpdateRequired=False,
-            persistentComposePin=NEW,ingress='open')
+            persistentComposePin=NEW,ingress='open',engineVersion='new-version')
 
     def test_deferred_success_retains_capacity_until_exact_idempotent_finish(self):
         plan,proof=self.deferred()
@@ -381,6 +419,7 @@ class ComposeBoundaryTests(unittest.TestCase):
         with self.assertRaises(UpdateError):ComposeNode(self.args,Path(self.temp.name))
         self.args.upload_layout='var-www-tmp-v1';self.args.process_layout='node-var-www-v1'
         adapter=ComposeNode(self.args,Path(self.temp.name))
+        adapter.bind_engine_version(backend.engine_version)
         self.item['NetworkSettings']['Ports']['3000/tcp'][0]['HostPort']=str(urlsplit(backend.origin).port)
         def docker(command,**kwargs):
             if command[1]=='exec':

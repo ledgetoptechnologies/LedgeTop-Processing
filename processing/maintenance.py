@@ -15,6 +15,7 @@ class Conflict(Exception):
 
 STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)\Z")
 IMAGE = re.compile(r"sha256:[0-9a-f]{64}\Z")
+ENGINE_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,79}\Z")
 SCHEDULE_FIELDS = ('expectedRevision','drainAt','notBefore','afterJobId','targetImage')
 
 
@@ -50,6 +51,11 @@ class Maintenance:
             revision INTEGER NOT NULL DEFAULT 0, plan_id TEXT, drain_at TEXT,
             not_before TEXT, after_job_id TEXT, target_image TEXT, result TEXT,
             update_hash TEXT, finish_status TEXT)""")
+        columns = {row['name'] for row in db.execute('PRAGMA table_info(nodes)')}
+        if 'target_engine_version' not in columns:
+            # Historical scheduled/updating plans remain unbound. Never infer
+            # their target from whichever container happens to answer /info.
+            db.execute('ALTER TABLE nodes ADD COLUMN target_engine_version TEXT')
         for node in self.node_ids:
             db.execute("INSERT OR IGNORE INTO nodes(id) VALUES(?)", (node,))
         db.execute("""UPDATE nodes SET state='held', revision=revision+1,
@@ -64,6 +70,7 @@ class Maintenance:
                 "planId": row["plan_id"], "drainAt": row["drain_at"],
                 "notBefore": row["not_before"], "afterJobId": row["after_job_id"],
                 "targetImage": row["target_image"],
+                "targetEngineVersion": row["target_engine_version"],
                 "result": json.loads(row["result"]) if row["result"] else None}
 
     def _known_node(self, identifier):
@@ -104,19 +111,24 @@ class Maintenance:
 
     @staticmethod
     def _validate_schedule(payload):
+        if not isinstance(payload, dict):
+            raise ValueError('maintenance schedule must be an object')
         drain, drain_text = utc_stamp(payload["drainAt"])
         earliest, earliest_text = utc_stamp(payload["notBefore"])
         if earliest < drain:
             raise ValueError("notBefore cannot precede drainAt")
         if not isinstance(payload["targetImage"], str) or not IMAGE.fullmatch(payload["targetImage"]):
             raise ValueError("targetImage must be an immutable sha256 image ID")
+        version = payload.get('targetEngineVersion')
+        if version is not None and (type(version) is not str or not ENGINE_VERSION.fullmatch(version)):
+            raise ValueError('targetEngineVersion must be an exact engine version pin')
         after = payload["afterJobId"]
         if after is not None and not isinstance(after, str):
             raise ValueError("afterJobId must be null or an exact running job ID")
-        return drain,drain_text,earliest_text,after
+        return drain,drain_text,earliest_text,after,version
 
     def _schedule_node(self,db,identifier,payload,validated):
-        drain,drain_text,earliest_text,after=validated
+        drain,drain_text,earliest_text,after,version=validated
         self._refresh_nodes(db)
         row = self._node(db, identifier)
         self._cas(row, payload)
@@ -127,13 +139,14 @@ class Maintenance:
             raise Conflict("afterJobId is not currently running on this node")
         state = "draining" if after is not None or drain <= self._now() else "scheduled"
         db.execute("""UPDATE nodes SET state=?,revision=revision+1,plan_id=?,drain_at=?,
-            not_before=?,after_job_id=?,target_image=?,result=NULL,update_hash=NULL,
+            not_before=?,after_job_id=?,target_image=?,target_engine_version=?,result=NULL,update_hash=NULL,
             finish_status=NULL WHERE id=?""", (state, str(uuid.uuid4()), drain_text,
-            earliest_text, after, payload["targetImage"], identifier))
+            earliest_text, after, payload["targetImage"], version, identifier))
         return self._node_public(self._node(db, identifier))
 
     def schedule_node(self, identifier, payload):
-        self.fields(payload,SCHEDULE_FIELDS)
+        expected = set(SCHEDULE_FIELDS) | ({'targetEngineVersion'} if isinstance(payload, dict) and 'targetEngineVersion' in payload else set())
+        self.fields(payload, expected)
         validated=self._validate_schedule(payload)
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -141,7 +154,10 @@ class Maintenance:
 
     def schedule_node_owned(self,identifier,payload):
         self._known_node(identifier)
-        self.fields(payload,('schemaVersion','requestId','authorityId',*SCHEDULE_FIELDS))
+        expected = ('schemaVersion','requestId','authorityId',*SCHEDULE_FIELDS)
+        if isinstance(payload, dict) and 'targetEngineVersion' in payload:
+            expected = (*expected, 'targetEngineVersion')
+        self.fields(payload,expected)
         if type(payload['schemaVersion']) is not int or payload['schemaVersion']!=1:
             raise ValueError('owned schedule schemaVersion must be 1')
         canonical_uuid(payload['requestId']);canonical_uuid(payload['authorityId'])
@@ -165,6 +181,8 @@ class Maintenance:
                 requestSha256=request_sha,expectedRevision=payload['expectedRevision'],revision=node['revision'],
                 planId=node['planId'],state=node['state'],drainAt=node['drainAt'],notBefore=node['notBefore'],
                 afterJobId=node['afterJobId'],targetImage=node['targetImage'])
+            if 'targetEngineVersion' in payload:
+                receipt['targetEngineVersion'] = node['targetEngineVersion']
             receipt['receiptSha256']=hashlib.sha256(canonical(receipt).encode()).hexdigest()
             db.execute('INSERT INTO owned_maintenance_schedules VALUES(?,?,?,?,?,?)',
                 (payload['requestId'],identifier,self.authority_id,request_sha,request_json,canonical(receipt)))
@@ -213,14 +231,20 @@ class Maintenance:
         if (not isinstance(payload["updateToken"], str) or not 1 <= len(payload["updateToken"]) <= 128
                 or payload["status"] not in ("succeeded", "failed") or not isinstance(payload["result"], dict)):
             raise ValueError("invalid maintenance completion")
-        if payload["status"] == "succeeded" and payload["result"].get("healthy") is not True:
-            raise ValueError("successful update requires healthy:true")
+        if payload["status"] == "succeeded":
+            if payload["result"].get("healthy") is not True:
+                raise ValueError("successful update requires healthy:true")
         result = json.dumps(payload["result"], sort_keys=True, separators=(",", ":"), allow_nan=False)
         if len(result.encode()) > 4096:
             raise ValueError("maintenance result exceeds limit")
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._node(db, identifier)
+            row_version = row['target_engine_version']
+            if payload['status'] == 'succeeded' and (
+                    type(row_version) is not str or not ENGINE_VERSION.fullmatch(row_version)
+                    or payload['result'].get('engineVersion') != row_version):
+                raise Conflict('target_engine_version_unbound_or_mismatched')
             hashed = hashlib.sha256(payload["updateToken"].encode()).hexdigest()
             if (payload["planId"] != row["plan_id"] or not row["update_hash"]
                     or not hmac.compare_digest(hashed, row["update_hash"])):

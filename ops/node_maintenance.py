@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from processing.container_update import (ComposeNode,execute,lock,UpdateError,deferred_receipt,
-                                         finalize_deferred,finish_matches)
+                                         finalize_deferred,finish_matches,exact_engine_version,reviewed_worker_mode)
 from processing.node_gate import NodeGate, GateBusy, GateError as NodeGateError
 from processing.odx_smoke_worker import Client, SmokeError
 from ops.node_ingress import Ingress, GateError, locked, save
@@ -60,6 +60,7 @@ def adapter_args(root,settings,ingress):
     return SimpleNamespace(project=settings['project'],service=settings['service'],compose_file=str(root/'compose.json'),
         node_origin='http://127.0.0.1:'+str(ingress.config['backendPort']),docker_engine_id=ingress.config['engineId'],
         node_port=settings.get('nodePort',3000),node_token=ingress.config.get('backendToken',''),expected_engine=engine,
+        worker_mode=settings.get('workerMode'),
         upload_layout=settings.get('uploadLayout'),process_layout=settings.get('processLayout'))
 
 
@@ -71,7 +72,7 @@ def compose_base(source,service):
 def operation_binding(api,settings,ingress,args):
     return dict(nodeId=settings['nodeId'],project=settings['project'],service=settings['service'],coordinator=api.origin,
         backendName=ingress.config['backendName'],backendPort=ingress.config['backendPort'],engineId=args.docker_engine_id,
-        expectedEngine=args.expected_engine,nodePort=args.node_port,
+        expectedEngine=args.expected_engine,nodePort=args.node_port,workerMode=args.worker_mode,
         proxyName=ingress.config['proxyName'],proxyImage=ingress.config['proxyImage'],listenPort=ingress.config['listenPort'])
 
 
@@ -92,6 +93,8 @@ def owned_open_proof(ingress,state):
             or set(current.get('oldWorkers',[])) & ingress.workers(proxy)):
         raise GateError('owned ingress open state is not proven')
     backend=ingress.backend(state['targetImage'])
+    if backend.get('engineVersion') != exact_engine_version(state.get('targetEngineVersion')):
+        raise GateError('target engine version changed at ingress')
     status,public=ingress.http(ingress.config['listenPort'])
     if status!=200 or not isinstance(public,dict) or any(public.get(key)!=backend.get(key)
             for key in ('engine','engineVersion','version')):
@@ -100,6 +103,14 @@ def owned_open_proof(ingress,state):
 
 
 def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,*,already_finished=False):
+    reviewed_worker_mode(settings.get('workerMode'))
+    version = exact_engine_version(state.get('targetEngineVersion'))
+    adapter.bind_engine_version(version)
+    current_node = api.json('GET','/v1/prototype/nodes/'+settings['nodeId'])['node']
+    if current_node.get('planId') != state['planId'] or current_node.get('targetImage') != state['targetImage'] or current_node.get('targetEngineVersion') != version:
+        raise GateError('version-bound maintenance plan changed before reopen')
+    if current_node.get('state') != ('active' if already_finished else 'updating'):
+        raise GateError('maintenance state changed before reopen')
     private=deferred_receipt(receipt,settings['nodeId'],expected_plan_id=state['planId'],expected_target=state['targetImage'])
     source=json.loads((root/'compose.json').read_text())
     service=settings['service'];pin=source['services'][service]['image']
@@ -114,6 +125,8 @@ def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,dr
     sync_compose(root)
     if not (adapter.serving(state['targetImage']) if already_finished else adapter.healthy(state['targetImage'])):
         raise GateError('pinned replacement health changed')
+    if ingress.backend(state['targetImage']).get('engineVersion') != version:
+        raise GateError('target engine version changed before ingress reopen')
     if state['stage'] in ('update_returned','compose_pin_pending','compose_pinned'):
         state['stage']='compose_pinned';save(receipt/'managed-update.json',state)
         closed=json.loads((ingress.root/'state.json').read_text())
@@ -131,6 +144,7 @@ def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,dr
     state.update(stage='finish_pending',openedIngress=proof)
     save(receipt/'managed-update.json',state)
     result=dict(healthy=True,image=state['targetImage'],previousImage=private['oldImage'],
+        engineVersion=version,
         composePinUpdateRequired=False,persistentComposePin=state['targetImage'],ingress='open')
     result=finalize_deferred(api,operator,settings['nodeId'],receipt,expected_plan_id=state['planId'],
         expected_target=state['targetImage'],result=result)
@@ -142,6 +156,7 @@ def finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,dr
 def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_plan_id=None,expected_target=None):
     settings = json.loads((root / 'maintenance.json').read_text())
     node_id = settings['nodeId']
+    reviewed_worker_mode(settings.get('workerMode'))
     if (expected_plan_id is None)!=(expected_target is None):
         raise GateError('frozen plan and target must be supplied together')
     def fence(value):
@@ -162,11 +177,16 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_
                     'compose_pin_pending','compose_pinned','ingress_open_pending','finish_pending','completed')):
                 raise GateError('frozen managed operation binding changed')
             fence(state)
+            version=exact_engine_version(state.get('targetEngineVersion'))
+            adapter.bind_engine_version(version)
             private=deferred_receipt(receipt,node_id,expected_plan_id=state['planId'],expected_target=state['targetImage'])
             final=dict(healthy=True,image=state['targetImage'],previousImage=private['oldImage'],
+                engineVersion=version,
                 composePinUpdateRequired=False,persistentComposePin=state['targetImage'],ingress='open')
             node=api.json('GET','/v1/prototype/nodes/'+node_id)['node']
             fence(node)
+            if node.get('targetEngineVersion') != version:
+                raise GateError('frozen target engine version changed')
             if finish_matches(node,private,final):
                 return finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,already_finished=True)
             if (node.get('state')!='updating' or node.get('revision')!=private['reservedRevision']
@@ -194,6 +214,7 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_
             fence(node)
             if node['state'] not in ('scheduled', 'draining'):
                 return {'status': 'not_eligible', 'nodeState': node['state']}
+            version=exact_engine_version(node.get('targetEngineVersion'))
             due = datetime.fromisoformat(node['notBefore'].replace('Z', '+00:00')) <= datetime.now(timezone.utc)
             if node['state'] == 'draining' and due:
                 break
@@ -208,7 +229,7 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_
         source=json.loads((root/'compose.json').read_text())
         if source['services'][settings['service']]['image']!=item['Image']:
             raise GateError('authoritative Compose pin differs from current backend')
-        state = dict(stage='waiting_for_jobs',planId=node['planId'],targetImage=node['targetImage'],binding=binding,
+        state = dict(stage='waiting_for_jobs',planId=node['planId'],targetImage=node['targetImage'],targetEngineVersion=version,binding=binding,
             oldImage=item['Image'],composeBaseSha256=compose_base(source,settings['service']))
         save(receipt / 'managed-update.json', state)
         # The coordinator is already draining and prevents new node claims.
@@ -222,7 +243,7 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_
                 raise GateError('host gate binding/reservation mismatch')
             current = api.json('GET', '/v1/prototype/nodes/' + node_id)['node']
             fence(current)
-            if current['planId'] != node['planId'] or current['targetImage'] != node['targetImage']:
+            if current['planId'] != node['planId'] or current['targetImage'] != node['targetImage'] or current.get('targetEngineVersion') != version:
                 raise GateError('maintenance plan changed while closing ingress')
             def close_reserved(reserved):
                 current=api.json('GET','/v1/prototype/nodes/'+node_id)['node']
@@ -232,6 +253,8 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60,*,expected_
                         or reserved['nodeId']!=node_id or reserved['planId']!=state['planId']
                         or reserved['targetImage']!=state['targetImage']):
                     raise GateError('owned reservation changed before ingress close')
+                if current.get('targetEngineVersion') != version or reserved.get('targetEngineVersion') != version:
+                    raise GateError('owned target engine version changed before ingress close')
                 state['stage']='ingress_close_pending';save(receipt/'managed-update.json',state)
                 closed=ingress.change(True,seconds=drain_seconds)
                 if (type(closed) is not dict or closed.get('state')!='closed' or closed.get('oldWorkersDrained') is not True
@@ -257,6 +280,7 @@ def main():
     actions.add_parser('status')
     schedule = actions.add_parser('schedule')
     schedule.add_argument('--target-image', required=True)
+    schedule.add_argument('--target-engine-version', required=True)
     schedule.add_argument('--drain-at', required=True)
     schedule.add_argument('--not-before', required=True)
     schedule.add_argument('--after-job-id')
@@ -287,6 +311,7 @@ def main():
             ComposeNode(receipt_args, root).image(args.target_image)
             result = operator.json('POST', '/v1/prototype/nodes/' + settings['nodeId'] + '/schedule', {
                 'expectedRevision': node['revision'], 'targetImage': args.target_image,
+                'targetEngineVersion': exact_engine_version(args.target_engine_version),
                 'drainAt': args.drain_at, 'notBefore': args.not_before, 'afterJobId': args.after_job_id})
         else:
             result = run(root, api, operator, private_directory(args.receipt), args.wait_seconds, args.drain_seconds)

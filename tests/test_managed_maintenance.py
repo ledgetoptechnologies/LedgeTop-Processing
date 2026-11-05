@@ -18,13 +18,13 @@ class ManagedMaintenanceTests(unittest.TestCase):
         (self.root / 'ingress').mkdir()
         self.receipt = self.root / 'receipt'
         self.receipt.mkdir()
-        save(self.root / 'maintenance.json', {'nodeId': 'main', 'project': 'owned', 'service': 'node'})
+        save(self.root / 'maintenance.json', {'nodeId': 'main', 'project': 'owned', 'service': 'node', 'workerMode': 'legacy'})
         self.old = 'sha256:' + 'a' * 64
         self.new = 'sha256:' + 'b' * 64
         save(self.root / 'compose.json', {'services': {'node': {'image': self.old}}})
         self.api = MagicMock(origin='http://127.0.0.1:18080')
         self.node = {'state': 'draining', 'notBefore': '2020-01-01T00:00:00Z',
-                     'planId': 'original-plan', 'targetImage': self.new,'revision':1}
+                     'planId': 'original-plan', 'targetImage': self.new,'revision':1,'targetEngineVersion':'pin'}
         self.api.json.side_effect = lambda method, path: (
             {'jobs': []} if path.endswith('/jobs') else
             {'authorityId': 'authority'} if path.endswith('/authority') else {'node': self.node})
@@ -57,7 +57,7 @@ class ManagedMaintenanceTests(unittest.TestCase):
         gate = stack.enter_context(patch('ops.node_maintenance.NodeGate'))
         gate.return_value.__enter__.return_value = self.gate
         stack.enter_context(patch('ops.node_maintenance.deferred_receipt',return_value=dict(oldImage=self.old,reservedRevision=1,
-            nodeId='main',planId='original-plan',targetImage=self.new)))
+            nodeId='main',planId='original-plan',targetImage=self.new,targetEngineVersion='pin')))
         stack.enter_context(patch('ops.node_maintenance.finalize_deferred',side_effect=lambda *args,**kwargs:
             dict(status='succeeded',nodeId='main',**kwargs['result'])))
         return stack
@@ -71,7 +71,7 @@ class ManagedMaintenanceTests(unittest.TestCase):
     def executed(self,result):
         def invoke(*args,**kwargs):
             self.node.update(state='updating',revision=2)
-            kwargs['on_reserved'](dict(nodeId='main',planId='original-plan',targetImage=self.new,reservedRevision=2))
+            kwargs['on_reserved'](dict(nodeId='main',planId='original-plan',targetImage=self.new,targetEngineVersion='pin',reservedRevision=2))
             return result
         return invoke
 

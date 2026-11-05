@@ -25,7 +25,7 @@ class ManagedFinalizationTests(unittest.TestCase):
         gate_patch.start();self.addCleanup(gate_patch.stop)
         with NodeGate('synthetic-engine') as gate:gate.provision('cluster',self.api.origin,self.fixture.queue.authority_id)
         save(self.root/'maintenance.json',dict(nodeId='cluster',project='owned',service='node',expectedEngine='odm',
-            uploadLayout='var-www-tmp-v1',processLayout='node-var-www-v1'))
+            uploadLayout='var-www-tmp-v1',processLayout='node-var-www-v1',workerMode='legacy'))
         save(self.root/'compose.json',{'services':{'node':{'image':update_fixture.OLD,'mem_limit':'4g'}}})
         self.ingress_root=self.root/'ingress';self.ingress_root.mkdir(mode=0o700)
         owner=self
@@ -41,7 +41,7 @@ class ManagedFinalizationTests(unittest.TestCase):
             def workers(self,item):return {2}
             def backend(self,expected):
                 if not owner.adapter.serving(expected):raise GateError('synthetic unhealthy backend')
-                return dict(engine='odm',engineVersion='pinned',version='2.4.0')
+                return dict(engine='odm',engineVersion='new-version',version='2.4.0')
             def http(self,port):
                 state=json.loads((self.root/'state.json').read_text())
                 return (200,self.backend(update_fixture.NEW)) if state['state']=='open' else (503,None)
@@ -104,6 +104,15 @@ class ManagedFinalizationTests(unittest.TestCase):
         self.assertFalse((self.receipt/'managed-update.json').exists())
         self.assertEqual(self.fixture.queue.get_node('cluster')['planId'],peer['planId'])
         self.assertEqual(json.loads((self.root/'compose.json').read_text())['services']['node']['image'],update_fixture.OLD)
+
+    def test_ingress_backend_parity_with_wrong_target_version_never_reopens(self):
+        with patch.object(self.ingress,'backend',return_value=dict(engine='odm',engineVersion='wrong',version='2.4.0')):
+            with self.assertRaisesRegex(GateError,'target engine version'):
+                self.run_update()
+        self.assertEqual(self.ingress.opens,0)
+        self.assertEqual(self.fixture.queue.get_node('cluster')['state'],'updating')
+        self.assertEqual(json.loads((self.ingress.root/'state.json').read_text())['state'],'closed')
+        self.assertEqual(self.adapter.calls,[update_fixture.NEW])
 
     def begin_cancel(self,reschedule):
         original=self.operator.json

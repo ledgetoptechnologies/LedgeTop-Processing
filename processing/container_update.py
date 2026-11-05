@@ -20,6 +20,7 @@ from .odx_smoke_worker import Client, SmokeError, exact_origin
 
 PIN = re.compile(r'sha256:[0-9a-f]{64}\Z')
 NAME = re.compile(r'[a-z0-9][a-z0-9_-]{0,62}\Z')
+VERSION = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.+-]{0,79}\Z')
 
 
 class UpdateError(Exception):
@@ -32,6 +33,30 @@ class Uncertain(UpdateError):
 
 class PreflightError(UpdateError):
     """No replacement command was issued; recreating the old service is wrong."""
+
+
+def exact_engine_version(value):
+    if type(value) is not str or not VERSION.fullmatch(value):
+        raise UpdateError('target_engine_version_unbound')
+    return value
+
+
+def reviewed_worker_mode(value, *, home=None):
+    if value == 'reference':
+        raise UpdateError('reference_worker_handover_unimplemented')
+    if value != 'legacy':
+        raise UpdateError('worker_mode_unbound')
+    # An explicit legacy declaration does not override known reference-worker
+    # installation evidence. Absence is never used to infer legacy mode.
+    host_home = Path.home() if home is None else Path(home)
+    for relative in ('.config/ledgetop-processing/reference-worker.json',
+                     '.config/systemd/user/ledgetop-processing-reference-worker.service'):
+        try:
+            (host_home / relative).lstat()
+        except FileNotFoundError:
+            continue
+        raise UpdateError('reference_worker_handover_unimplemented')
+    return value
 
 
 def save(path, value):
@@ -77,6 +102,8 @@ class ComposeNode:
     def __init__(self, args, root):
         self.args, self.root = args, root
         self.expected_engine = getattr(args,'expected_engine','odx')
+        self.worker_mode = getattr(args, 'worker_mode', None)
+        self.expected_engine_version = None
         upload,process = getattr(args,'upload_layout',None),getattr(args,'process_layout',None)
         if (self.expected_engine not in ('odx','odm')
                 or (self.expected_engine=='odm' and (upload is None or process is None))
@@ -221,13 +248,24 @@ class ComposeNode:
             raise PreflightError('replacement validation failed before container mutation') from None
         self.docker(command, timeout=120)
 
+    def bind_engine_version(self, version):
+        self.expected_engine_version = exact_engine_version(version)
+
+    def observed_engine_version(self):
+        info = self.node.json('GET', '/info')
+        if not isinstance(info, dict) or info.get('engine') != self.expected_engine:
+            raise UpdateError('engine identity unavailable')
+        return exact_engine_version(info.get('engineVersion'))
+
     def serving(self, image):
         item = self.inspect()
         if (item['Image'] != image or not item['State']['Running'] or item['State'].get('OOMKilled')
                 or item['State'].get('Health', {}).get('Status', 'healthy') != 'healthy'):
             return False
         info = self.node.json('GET', '/info')
-        return isinstance(info, dict) and info.get('engine') == self.expected_engine
+        return (isinstance(info, dict) and info.get('engine') == self.expected_engine
+                and self.expected_engine_version is not None
+                and info.get('engineVersion') == self.expected_engine_version)
 
     def healthy(self, image):
         return self.serving(image) and self.idle()
@@ -254,6 +292,7 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
         raise UpdateError('explicit completion policy required')
     if on_reserved is not None and not callable(on_reserved):
         raise UpdateError('trusted reservation callback required')
+    reviewed_worker_mode(getattr(adapter, 'worker_mode', None))
     if path.exists() or path.is_symlink():
         raise UpdateError('existing update receipt; never replay an uncertain update')
     deadline = time.monotonic() + wait_seconds
@@ -264,6 +303,7 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
             raise UpdateError('maintenance plan changed; do not adopt another operation')
         if node['state'] not in ('scheduled', 'draining'):
             return {'status': 'not_eligible', 'nodeState': node['state']}
+        target_version = exact_engine_version(node.get('targetEngineVersion'))
         due = datetime.fromisoformat(node['notBefore'].replace('Z', '+00:00')) <= datetime.now(timezone.utc)
         if node['state'] == 'draining' and due and adapter.idle():
             jobs = coordinator.json('GET', '/v1/prototype/jobs')['jobs']
@@ -273,6 +313,8 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
             return {'status': 'waiting', 'nodeState': node['state']}
         time.sleep(min(poll_seconds, max(0, deadline - time.monotonic())))
     old = adapter.inspect()['Image']
+    old_version = adapter.observed_engine_version()
+    adapter.bind_engine_version(target_version)
     target = node['targetImage']
     adapter.image(old)
     adapter.image(target)
@@ -280,7 +322,8 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
     adapter.prepare(target)
     adapter.prepare(old)
     receipt = {'stage': 'begin_pending', 'nodeId': node_id, 'planId': node['planId'],
-               'oldImage': old, 'targetImage': target, 'startedAt': datetime.now(timezone.utc).isoformat()}
+               'oldImage': old, 'targetImage': target, 'targetEngineVersion': target_version,
+               'oldEngineVersion': old_version, 'startedAt': datetime.now(timezone.utc).isoformat()}
     save(path, receipt)
     # Both the queue fence and private intent exist before any container mutation.
     begun = operator.json('POST', '/v1/prototype/nodes/' + node_id + '/begin',
@@ -294,6 +337,7 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
         # Deliberately outside replacement/rollback handling: an uncertain
         # ingress drain must never recreate either container or finish success.
         on_reserved(dict(nodeId=node_id,planId=receipt['planId'],targetImage=target,
+            targetEngineVersion=target_version,
             reservedRevision=receipt['reservedRevision']))
         if not adapter.idle():
             raise UpdateError('engine changed while reserved ingress drained; inspect without replacement')
@@ -306,6 +350,7 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
         if not wait_healthy(adapter, target, health_seconds):
             raise UpdateError('replacement health failed')
         status, result = 'succeeded', {'healthy': True, 'image': target, 'previousImage': old,
+                                       'engineVersion': target_version,
                                        'composePinUpdateRequired': True}
     except Uncertain:
         # The Docker daemon may still be acting. Rollback here could race it.
@@ -316,6 +361,7 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
     except (UpdateError, SmokeError):
         receipt['stage'] = 'rollback_pending'
         save(path, receipt)
+        adapter.bind_engine_version(old_version)
         adapter.replace(old)
         restored = wait_healthy(adapter, old, health_seconds)
         status, result = 'failed', {'healthy': False, 'rollbackHealthy': restored, 'restoredImage': old}
@@ -344,6 +390,9 @@ def deferred_receipt(root, node_id, *, expected_plan_id, expected_target):
             or type(receipt.get('oldImage')) is not str or not PIN.fullmatch(receipt['oldImage'])
             or receipt.get('stage') not in ('finalization_pending','finish_pending','completed')
             or receipt.get('result',{}).get('image')!=expected_target
+            or type(receipt.get('targetEngineVersion')) is not str
+            or not VERSION.fullmatch(receipt['targetEngineVersion'])
+            or receipt.get('result',{}).get('engineVersion') != receipt['targetEngineVersion']
             or receipt['result'].get('healthy') is not True
             or type(receipt.get('reservedRevision')) is not int):
         raise UpdateError('definite owned replacement success required')
@@ -353,6 +402,7 @@ def deferred_receipt(root, node_id, *, expected_plan_id, expected_target):
 def finish_matches(node,receipt,result):
     return (node.get('id')==receipt['nodeId'] and node.get('planId')==receipt['planId']
         and node.get('targetImage')==receipt['targetImage'] and node.get('state')=='active'
+        and node.get('targetEngineVersion')==receipt.get('targetEngineVersion')
         and type(node.get('revision')) is int and node['revision']==receipt['reservedRevision']+1 and node.get('result')==result)
 
 
@@ -363,11 +413,13 @@ def finalize_deferred(coordinator,operator,node_id,root,*,expected_plan_id,expec
     health and owned reopened ingress. Replays reconcile only this final CAS.
     """
     receipt=deferred_receipt(root,node_id,expected_plan_id=expected_plan_id,expected_target=expected_target)
-    if (type(result) is not dict or set(result)!={'healthy','image','previousImage','composePinUpdateRequired','persistentComposePin','ingress'}
+    if (type(result) is not dict or set(result)!={'healthy','image','previousImage','composePinUpdateRequired','persistentComposePin','ingress','engineVersion'}
             or result.get('healthy') is not True or result.get('image')!=expected_target
             or result.get('previousImage')!=receipt['oldImage'] or result.get('composePinUpdateRequired') is not False
             or result.get('persistentComposePin')!=expected_target or result.get('ingress')!='open'):
         raise UpdateError('verified managed finalization proof required')
+    if result.get('engineVersion') != receipt['targetEngineVersion']:
+        raise UpdateError('target engine version changed before finalization')
     if receipt.get('finishResult') is not None and receipt['finishResult']!=result:
         raise UpdateError('final completion cannot change')
     node=coordinator.json('GET','/v1/prototype/nodes/'+node_id)['node']
@@ -375,6 +427,8 @@ def finalize_deferred(coordinator,operator,node_id,root,*,expected_plan_id,expec
         if (node.get('state')!='updating' or node.get('revision')!=receipt['reservedRevision']
                 or node.get('planId')!=receipt['planId'] or node.get('targetImage')!=expected_target):
             raise UpdateError('maintenance plan/revision changed before finalization')
+        if node.get('targetEngineVersion') != receipt['targetEngineVersion']:
+            raise UpdateError('target engine version changed before finalization')
         receipt.update(stage='finish_pending',finishResult=result)
         save(Path(root)/'update.json',receipt)
         try:
@@ -401,6 +455,7 @@ def main():
                         help='Attest all engine writers/uploads are fenced through this coordinator')
     parser.add_argument('--node-port', type=int, choices=range(1, 65536), default=3000)
     parser.add_argument('--expected-engine',choices=('odx','odm'),default='odx')
+    parser.add_argument('--worker-mode', choices=('legacy', 'reference'))
     parser.add_argument('--upload-layout',choices=('var-www-tmp-v1',))
     parser.add_argument('--process-layout',choices=('node-var-www-v1',))
     parser.add_argument('--wait-seconds', type=int, choices=range(0, 86401), default=0)

@@ -79,6 +79,16 @@ class OwnedScheduleTests(unittest.TestCase):
             with self.assertRaises(HTTPError) as caught:self.lookup(payload,token=token)
             self.assertEqual(caught.exception.code,401)
 
+    def test_owned_version_binding_is_immutable_and_replays_exactly(self):
+        payload = dict(self.payload(),targetEngineVersion='3.8.5')
+        first = self.post(payload)[1]
+        self.assertEqual(first['receipt']['targetEngineVersion'],'3.8.5')
+        self.assertEqual(self.post(payload)[1], first)
+        with self.assertRaises(HTTPError) as caught:
+            self.post(dict(payload,targetEngineVersion='3.8.6'))
+        self.assertEqual(caught.exception.code,409)
+        self.assertEqual(self.lookup(payload)[1],first)
+
     def test_same_request_concurrent_http_has_one_plan_and_one_revision(self):
         payload=self.payload()
         with ThreadPoolExecutor(max_workers=6) as pool:

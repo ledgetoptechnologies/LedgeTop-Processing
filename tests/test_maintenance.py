@@ -26,7 +26,7 @@ class MaintenanceTests(unittest.TestCase):
         return self.queue.schedule_node(node, {'expectedRevision': current['revision'],
             'drainAt': (self.now + timedelta(seconds=seconds)).isoformat(),
             'notBefore': (self.now + timedelta(seconds=seconds + wait)).isoformat(),
-            'afterJobId': after, 'targetImage': IMAGE})
+            'afterJobId': after, 'targetImage': IMAGE, 'targetEngineVersion': '3.8.5'})
 
     def submit(self, name='one'):
         return self.queue.submit({'requestId': name, 'profile': PROFILE, 'environment': 'staging'})[0]
@@ -38,7 +38,7 @@ class MaintenanceTests(unittest.TestCase):
     def finish(self, claim, node='cluster', status='succeeded', result=None):
         return self.queue.finish_node_update(node, {'planId': claim['node']['planId'],
             'updateToken': claim['updateToken'], 'status': status,
-            'result': {'healthy': True} if result is None else result})
+            'result': {'healthy': True, 'engineVersion': '3.8.5'} if result is None else result})
 
     def test_cutoff_admission_is_serialized_with_claim(self):
         scheduled = self.schedule(seconds=10)
@@ -50,6 +50,28 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(claims, [None] * 8)
         self.assertEqual(self.queue.get_node('cluster')['state'], 'draining')
         self.assertEqual(self.queue.get_node('cluster')['revision'], scheduled['revision'] + 1)
+
+    def test_unbound_historical_plan_cannot_finish_success_or_reopen(self):
+        current = self.queue.get_node('cluster')
+        stamp = self.now.isoformat()
+        old = self.queue.schedule_node('cluster', dict(expectedRevision=current['revision'],
+            drainAt=stamp,notBefore=stamp,afterJobId=None,targetImage=IMAGE))
+        self.assertIsNone(old['targetEngineVersion'])
+        begun = self.begin()
+        with self.assertRaisesRegex(Conflict, 'target_engine_version_unbound'):
+            self.finish(begun)
+        self.assertEqual(self.queue.get_node('cluster')['state'], 'updating')
+        self.submit()
+        self.assertIsNone(self.queue.claim(dict(workerId='blocked',nodeId='cluster')))
+
+    def test_exact_plan_version_is_required_even_when_healthy(self):
+        plan = self.schedule()
+        self.assertEqual(plan['targetEngineVersion'], '3.8.5')
+        begun = self.begin()
+        for version in (None,'3.8.4','3.8.5 '):
+            with self.subTest(version=version), self.assertRaises(Conflict):
+                self.finish(begun,result=dict(healthy=True,engineVersion=version))
+        self.assertEqual(self.finish(begun)['state'],'active')
 
     def test_existing_job_finishes_but_node_takes_no_new_work(self):
         self.submit()
