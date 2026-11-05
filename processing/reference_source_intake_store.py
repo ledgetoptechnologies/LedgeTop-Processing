@@ -236,6 +236,28 @@ class ReferenceSourceIntakeMethods:
         return node['state']
 
     @staticmethod
+    def _source_claim_custody(db, job_id):
+        """Claim fields that must hold across NAS I/O; cheap enough per object."""
+        state = db.execute('''SELECT r.generation,r.phase,r.node_id,r.environment,r.manifest_sha,
+            j.status,j.node_id AS queue_node,j.worker_id AS queue_worker,j.claim_hash,
+            c.request_id,c.node_id AS claim_node,c.worker_id AS claim_worker,c.instance_id,c.token,
+            s.source_state,s.derived_state,g.digest
+            FROM reference_jobs r JOIN jobs j ON j.id=r.job_id
+            LEFT JOIN reference_claims c ON c.job_id=r.job_id
+            LEFT JOIN reference_source_intakes s ON s.job_id=r.job_id
+            LEFT JOIN reference_transfer_grants g ON g.job_id=r.job_id
+            WHERE r.job_id=?''', (job_id,)).fetchone()
+        return dict(state) if state else None
+
+    def _source_claim_still_owned(self, job_id, node_id, claim_custody, changed):
+        """Reader authorizer: the claim snapshotted before NAS I/O still holds."""
+        def still_owned(db):
+            self._source_renewal_node_ready(db, node_id)
+            if self._source_claim_custody(db, job_id) != claim_custody:
+                raise Conflict(changed)
+        return still_owned
+
+    @staticmethod
     def _source_range_ledger(db, job_id, generation):
         """Aggregate the durable range journal; one row per range would be unbounded."""
         usage = db.execute('''SELECT reservation_id,requests_used,bytes_used,attempts_used
@@ -342,19 +364,6 @@ class ReferenceSourceIntakeMethods:
             return {'binding': binding,
                     'ranges': self._source_range_ledger(db, job_id, binding['generation'])}
 
-        def custody(db, job_id):
-            """Claim fields that must hold across NAS I/O; cheap enough per object."""
-            state = db.execute('''SELECT r.generation,r.phase,r.node_id,r.environment,r.manifest_sha,
-                j.status,j.node_id AS queue_node,j.worker_id AS queue_worker,j.claim_hash,
-                c.request_id,c.node_id AS claim_node,c.worker_id AS claim_worker,c.instance_id,c.token,
-                s.source_state,s.derived_state,g.digest
-                FROM reference_jobs r JOIN jobs j ON j.id=r.job_id
-                LEFT JOIN reference_claims c ON c.job_id=r.job_id
-                LEFT JOIN reference_source_intakes s ON s.job_id=r.job_id
-                LEFT JOIN reference_transfer_grants g ON g.job_id=r.job_id
-                WHERE r.job_id=?''', (job_id,)).fetchone()
-            return dict(state) if state else None
-
         def replay(db, job_id, job):
             # Exact retries, including retries after a lost response, get the
             # same already-minted successor. Never mint on a changed request.
@@ -392,7 +401,7 @@ class ReferenceSourceIntakeMethods:
                 raise Conflict('source renewal sequence conflict')
             snapshot = {'row': dict(row), 'claim': claim, 'receipts': receipt_rows,
                         'grant': grant_row, 'pins': pin_rows, 'latest': latest, 'authority': authority}
-            claim_custody = custody(db, job_id)
+            claim_custody = self._source_claim_custody(db, job_id)
             db.commit()
 
         request_now = now()
@@ -445,11 +454,8 @@ class ReferenceSourceIntakeMethods:
             if len(pins_by_id)!=len(pin_rows) or set(pins_by_id)!=granted_ids:
                 raise Conflict('source renewal pins unavailable')
 
-            def still_owned(db):
-                self._source_renewal_node_ready(db, worker['node_id'])
-                if custody(db, job_id) != claim_custody:
-                    raise Conflict('source renewal authority changed during verification')
-
+            still_owned = self._source_claim_still_owned(job_id, worker['node_id'], claim_custody,
+                'source renewal authority changed during verification')
             for item in old.objects:
                 stored = by_id[item.id]
                 if (stored['generation'] != row['generation'] or stored['byte_size'] != item.byte_size
