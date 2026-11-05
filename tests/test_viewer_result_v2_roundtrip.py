@@ -165,7 +165,7 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="ltds-viewer-result-roundtrip-") as temp:
             root = Path(temp)
             queue_dir, spool_root, scratch_root = root / "queue", root / "spool", root / "scratch"
-            queue_dir.mkdir(); spool_root.mkdir(mode=0o700); scratch_root.mkdir(mode=0o700)
+            queue_dir.mkdir(mode=0o700); spool_root.mkdir(mode=0o700); scratch_root.mkdir(mode=0o700)
             marker = spool_root / ".ltds-source-spool-id"
             marker.write_text("c" * 64, encoding="ascii")
             if os.name != "nt": marker.chmod(0o600)

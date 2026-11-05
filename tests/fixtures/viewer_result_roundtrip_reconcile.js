@@ -15,6 +15,7 @@ const { processReconcile } = viewerRequire('./server/processingWorker');
 const { createViewerReceiptV2SignerCandidate } = viewerRequire('./server/referenceReceiptV2Candidate');
 
 const config = JSON.parse(fs.readFileSync(process.env.LTDS_PAIRING_CONFIG, 'utf8'));
+const environment = config.environment || 'staging';
 const expectedBytes = Buffer.from(config.resultBytesBase64, 'base64');
 const modelRoot = path.resolve(config.modelsRoot);
 fs.mkdirSync(modelRoot, { recursive: true });
@@ -28,7 +29,7 @@ try {
   const task = processing.getTask(attempt.taskId);
   const provider = processing.getProvider(attempt.providerId);
   const client = new SourceIntakeClientV2({ origin: config.origin, bearerToken: config.viewerBearer,
-    environment: 'staging', outbox, timeoutMs: 5000, transferTimeoutMs: 10000 });
+    environment, outbox, timeoutMs: 5000, transferTimeoutMs: 10000 });
   const privateKey = crypto.createPrivateKey(config.copyPrivateKeyPem);
   const signer = createViewerReceiptV2SignerCandidate({ issuerId: 'pairing-copy-issuer',
     keyId: 'pairing-copy-key', privateKeyPem: config.copyPrivateKeyPem });
@@ -49,7 +50,7 @@ try {
   };
   const job = { id: config.reconcileJobId, attempt_id: attempt.id, lease_owner: config.reconcileOwner };
   const dependencies = { processing, config: { referenceSourceIntake: {
-    enabled: true, providerId: provider.id, origin: provider.endpoint, environment: 'staging' } }, sourceIntake, storage };
+    enabled: true, providerId: provider.id, origin: provider.endpoint, environment } }, sourceIntake, storage };
   (async () => {
     let firstCode = null;
     try { await processReconcile(job, dependencies); }

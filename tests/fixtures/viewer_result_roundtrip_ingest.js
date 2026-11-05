@@ -14,6 +14,7 @@ const { PreparedSubmissionOutbox } = viewerRequire('./server/preparedSubmissionO
 const { processIngest } = viewerRequire('./server/processingWorker');
 
 const config = JSON.parse(fs.readFileSync(process.env.LTDS_PAIRING_CONFIG, 'utf8'));
+const environment = config.environment || 'staging';
 const database = openDatabase(config.databasePath);
 
 async function main() {
@@ -46,7 +47,7 @@ async function main() {
       storage,
       config: {
         referenceSourceIntake: { enabled: true, providerId: provider.id,
-          origin: provider.endpoint, environment: 'staging' },
+          origin: provider.endpoint, environment },
         meshDerivativesEnabled: false,
         opsBaseUrl: config.ingestOpsBaseUrl,
       },

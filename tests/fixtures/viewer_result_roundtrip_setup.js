@@ -11,6 +11,8 @@ const { SourceIntakeClientV2 } = viewerRequire('./server/sourceIntakeClientV2');
 const { processSubmit } = viewerRequire('./server/processingWorker');
 
 const config = JSON.parse(require('node:fs').readFileSync(process.env.LTDS_PAIRING_CONFIG, 'utf8'));
+const environment = config.environment || 'staging';
+const principalId = config.principalId || 'viewer-staging';
 const db = openDatabase(config.databasePath);
 async function main() {
 try {
@@ -26,14 +28,14 @@ try {
   assert.ok(file);
   const outbox = new PreparedSubmissionOutbox(db);
   const client = new SourceIntakeClientV2({ origin: config.origin, bearerToken: config.viewerBearer,
-    environment: 'staging', outbox, timeoutMs: 5000, transferTimeoutMs: 10000 });
+    environment, outbox, timeoutMs: 5000, transferTimeoutMs: 10000 });
   const snapshotPrivate = crypto.createPrivateKey(config.snapshotPrivateKeyPem);
   const attestationPrivate = crypto.createPrivateKey(config.attestationPrivateKeyPem);
   await processSubmit({ id: submit.id, attempt_id: row.id, lease_owner: submit.lease_owner }, {
     processing,
     config: { referenceSourceIntake: { enabled: true, providerId: attempt.providerId,
-      origin: config.origin, authorityId: config.authorityId, principalId: 'viewer-staging',
-      environment: 'staging', snapshotIssuerId: 'pairing-snapshot-issuer', snapshotKeyId: 'pairing-snapshot-key' } },
+      origin: config.origin, authorityId: config.authorityId, principalId,
+      environment, snapshotIssuerId: 'pairing-snapshot-issuer', snapshotKeyId: 'pairing-snapshot-key' } },
     sourceIntake: { client, outbox,
       snapshotPublicKey: crypto.createPublicKey(config.snapshotPublicKeyPem),
       snapshotSigner: { issuerId: 'pairing-snapshot-issuer', keyId: 'pairing-snapshot-key',

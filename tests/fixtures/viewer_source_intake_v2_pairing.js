@@ -16,6 +16,8 @@ const ReferenceProtocol = viewerRequire('./server/referenceProtocol');
 const { createPreclaimSourceAttestation } = viewerRequire('./server/preclaimSourceAttestation');
 
 const config = JSON.parse(fs.readFileSync(process.env.LTDS_PAIRING_CONFIG, 'utf8'));
+const environment = config.environment || 'staging';
+const principalId = config.principalId || 'viewer-staging';
 const owner = 'pairing-submit-owner';
 const inputBytes = Buffer.from('synthetic-loopback-photo-bytes');
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
@@ -31,7 +33,7 @@ function open() {
 function close() { if (database) { database.close(); database = null; } }
 function makeClient(outbox) {
   return new SourceIntakeClientV2({ origin: config.origin, bearerToken: config.viewerBearer,
-    environment: 'staging', outbox, timeoutMs: 5000, transferTimeoutMs: 10000 });
+    environment, outbox, timeoutMs: 5000, transferTimeoutMs: 10000 });
 }
 
 async function main() {
@@ -73,7 +75,7 @@ async function main() {
     const localJob = processing.claimJob(owner);
     assert.equal(localJob.attempt_id, attempt.id);
     const localJobId = localJob.id;
-    const capabilities = ReferenceProtocol.createCapabilities('staging');
+    const capabilities = ReferenceProtocol.createCapabilities(environment);
     capabilities.capabilityFingerprint = config.capabilityFingerprint;
     capabilities.engines.odm.optionsFingerprint = config.optionsFingerprint;
     const snapshotPrivateKey = crypto.createPrivateKey(config.snapshotPrivateKeyPem);
@@ -104,13 +106,13 @@ async function main() {
       submission: { schemaVersion: 1, submissionId: attempt.id, manifest, pipeline,
         capabilityFingerprint: config.capabilityFingerprint } };
     const intent = outbox.persistIntent({ localJobId, owner, origin: config.origin,
-      authorityId: config.authorityId, principalId: 'viewer-staging', environment: 'staging', envelope });
+      authorityId: config.authorityId, principalId, environment, envelope });
     createHeldSourceSnapshot(processing, { datasetId: dataset.id, taskId: task.id, attemptId: attempt.id,
       signer: snapshotSigner });
     const preclaim = createPreclaimSourceAttestation({ processing, outbox, attemptId: attempt.id,
       snapshotPublicKey, expectedSnapshotIssuerId: snapshotSigner.issuerId,
       expectedSnapshotKeyId: snapshotSigner.keyId, signer: attestationSigner,
-      authorityId: config.authorityId, principalId: 'viewer-staging', environment: 'staging', capabilities });
+      authorityId: config.authorityId, principalId, environment, capabilities });
     assert.equal(preclaim.sourceIntakeRequest.pipeline.odm.options['numeric-probe'], 1e-7);
     assert.equal(preclaim.sourceAttestation.proof.issuerId, attestationSigner.issuerId);
     assert.equal(preclaim.sourceAttestation.proof.keyId, attestationSigner.keyId);
@@ -122,7 +124,7 @@ async function main() {
 
     const firstClient = makeClient(outbox);
     const discovered = await firstClient.getCapabilities();
-    assert.equal(discovered.capabilities.environment, 'staging');
+    assert.equal(discovered.capabilities.environment, environment);
     assert.equal(discovered.sourceIntake.enabled, true);
     assert.equal(discovered.viewerAcceptance.enabled, true);
     out.discovery = true;
