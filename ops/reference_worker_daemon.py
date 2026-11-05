@@ -503,6 +503,8 @@ def _build_worker(config,owner,resources):
         reader_session=session), bearer_readers={config['resultReadBearer']: dict(
         node_id=config['nodeId'], worker_id=config['workerId'], environments=tuple(permitted),
         share_policy=lambda metadata: config['shareResults'] is True and metadata['environment'] in permitted)})
+    from processing.reference_worker_catalog import WorkerCatalogAPI
+    result_api=WorkerCatalogAPI(result_api,worker,worker_instance_id=config['workerInstanceId'])
     readiness_api=None
     if 'maintenanceReadiness' in config:
         from processing.reference_worker_readiness import WorkerReadinessAPI

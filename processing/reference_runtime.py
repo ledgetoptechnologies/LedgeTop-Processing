@@ -7,7 +7,6 @@ bounded free text. Path/file options remain closed until a registered file
 workflow exists.
 """
 from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -16,8 +15,6 @@ import stat
 import threading
 
 from . import reference_protocol as p
-from .options import catalog
-from .provider import probe_node
 from .reference_api import ReferenceAPI, Response
 from .reference_control import ReferenceControlAPI
 from .reference_http import create_reference_http_server
@@ -312,10 +309,11 @@ def validate_discovered_option_values(payload, snapshot, allowed):
 
 
 class _DynamicAPI:
-    def __init__(self, control, config, settings, discover, discover_capacities):
+    def __init__(self, control, config, settings, discover, discover_capacities, discover_fleet=None):
         self.control, self.config, self.settings, self.discover = control, config, settings, discover
         self.coordinator_queue = control.coordinator_queue
         self.discover_capacities = discover_capacities
+        self.discover_fleet = discover_fleet
         self._worker_refresh_lock = threading.RLock()
 
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
@@ -332,8 +330,11 @@ class _DynamicAPI:
                 # per node so an eligible later node can still take work.
                 with self._worker_refresh_lock:
                     try:
-                        options = self.discover()
-                        capacities = self.discover_capacities()
+                        if self.discover_fleet is None:
+                            options = self.discover()
+                            capacities = self.discover_capacities()
+                        else:
+                            options, capacities = self.discover_fleet()
                         self.control.worker.store.update_fleet_snapshot(capacities, options['nodes'])
                     except Exception:
                         return Response(503, {"error": "engine_capacity_unavailable"})
@@ -494,35 +495,31 @@ class ReferenceRuntime:
                     for environment, target in settings.viewer_acceptance_targets.items()}
                 self._viewer_transfer_worker = ReferenceViewerTransferWorker(self.store,
                     EnvironmentSender(senders), trusted_receipt_keys=settings.viewer_receipt_keys)
-            discover = discover or (lambda: catalog([
-                (node.id, node.url, node.token) for node in config.node_endpoints]))
+            from .reference_worker_catalog import WorkerCatalogClient
+            self._worker_catalog = WorkerCatalogClient(settings.workers,node_ids=node_ids,
+                authority_id=queue.authority_id,ssl_context=worker_context,recovery_bindings=recovery)
+            discover_fleet = self._discover_fleet if discover is None and discover_capacities is None else None
+            discover = discover or (lambda: self._discover_fleet()[0])
             discover_capacities = discover_capacities or self._discover_capacities
-            self.api = _DynamicAPI(self.control, config, settings, discover, discover_capacities)
+            self.api = _DynamicAPI(self.control, config, settings, discover, discover_capacities,discover_fleet)
         except Exception:
             raise RuntimeConfigurationError("reference TLS runtime initialization failed") from None
 
-    def _discover_capacities(self):
-        endpoints = self.config.node_endpoints
-        with ThreadPoolExecutor(max_workers=len(endpoints)) as executor:
-            probes = list(executor.map(lambda node: probe_node(node.id, node.url, node.token), endpoints))
+    def _discover_fleet(self):
+        options, probes = self._worker_catalog.discover()
         capacities = {}
-        for node, probe in zip(endpoints, probes):
-            queue_count = probe.get("taskQueueCount")
-            max_images = probe.get("maxImages")
-            valid_max_images = (max_images is None
-                or (type(max_images) is int and max_images >= 1))
-            valid_queue_count = type(queue_count) is int and queue_count >= 0
-            capacities[node.id] = {
-                # A malformed or partial probe disables only this node. Do
-                # not let it invalidate healthy nodes' complete fleet view,
-                # and never coerce an unknown task count to idle.
-                "ready": (probe.get("ready") is True and valid_max_images
-                          and valid_queue_count),
-                "maxImages": max_images if valid_max_images else None,
-                "maxInputBytes": node.max_input_bytes,
-                "taskQueueCount": queue_count if valid_queue_count else 1,
-            }
-        return capacities
+        for node in self.config.node_endpoints:
+            probe = probes.get(node.id, {})
+            maximum, queued = probe.get('maxImages'), probe.get('taskQueueCount')
+            valid_maximum = maximum is None or type(maximum) is int and maximum >= 1
+            valid_queue = type(queued) is int and queued >= 0
+            capacities[node.id] = dict(ready=probe.get('ready') is True and valid_maximum and valid_queue,
+                maxImages=maximum if valid_maximum else None, maxInputBytes=node.max_input_bytes,
+                taskQueueCount=queued if valid_queue else 1)
+        return options, capacities
+
+    def _discover_capacities(self):
+        return self._discover_fleet()[1]
 
     def _node_options_valid(self, submission, node_snapshot):
         options = node_snapshot.get("options")

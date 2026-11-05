@@ -644,8 +644,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
             # when the provider's top-level readiness flag says true.
             'main': dict(ready=True, maxImages=None, taskQueueCount=True),
         }
-        with patch('processing.reference_runtime.probe_node',
-                   side_effect=lambda node_id, *_args: probes[node_id]):
+        with patch.object(runtime._worker_catalog, 'discover', return_value=(self.snapshot, probes)):
             capacities = runtime._discover_capacities()
         self.assertFalse(capacities['cluster']['ready'])
         self.assertIsNone(capacities['cluster']['maxImages'])

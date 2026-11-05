@@ -150,6 +150,16 @@ def catalog(nodes):
         raise ValueError('catalog requires one to eight unique node configurations')
     with ThreadPoolExecutor(max_workers=len(nodes)) as executor:
         snapshots = list(executor.map(lambda node: discover_node(*node), nodes))
+    return catalog_from_snapshots(snapshots)
+
+
+def catalog_from_snapshots(snapshots):
+    """Same intersection for freshly authenticated worker catalog snapshots."""
+    snapshots = list(snapshots)
+    if (not 1 <= len(snapshots) <= 8 or any(type(node) is not dict or
+            type(node.get('role')) is not str or not NODE_ID.fullmatch(node['role']) for node in snapshots)
+            or len({node['role'] for node in snapshots}) != len(snapshots)):
+        raise ValueError('catalog requires unique bounded node snapshots')
     configured = [node for node in snapshots if node['configured']]
     ready = bool(configured) and all(node['available'] for node in configured)
     available = [node for node in configured if node['available']]
