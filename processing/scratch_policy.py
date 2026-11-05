@@ -130,6 +130,7 @@ class ScratchLedger:
                 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS job_environments (job TEXT PRIMARY KEY, environment TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS transfer_fences (reservation TEXT PRIMARY KEY, started_at REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS unstarted_settlements (reservation TEXT PRIMARY KEY, settled_at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS reservations (
                   id TEXT PRIMARY KEY, settings TEXT NOT NULL, job TEXT NOT NULL,
                   generation INTEGER NOT NULL, environment TEXT NOT NULL,
@@ -183,7 +184,7 @@ class ScratchLedger:
             config = _json(dict(root=str(self.root), floor=self.floor, grace=self.grace))
             previous = db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
             if previous is None and any(db.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone() is not None for table in
-                    ('metadata','job_environments','reservations','results','objects','receipts','pins','cleanup_intents','control_charges','transfer_fences')):
+                    ('metadata','job_environments','reservations','results','objects','receipts','pins','cleanup_intents','control_charges','transfer_fences','unstarted_settlements')):
                 raise PolicyConflict('existing accounting configuration missing')
             db.execute("INSERT OR IGNORE INTO metadata VALUES('config',?)", (config,))
             self.validate_accounting(db)
@@ -381,7 +382,9 @@ class ScratchLedger:
         Every start path sets engine_started before its first engine mutation, so
         reserved proves no engine was told. transfer_ended is the caller's promise
         that no writer remains; until someone can say so the fence keeps the
-        budget. Later states are left alone: their engine outcome ends them.
+        budget. "unstarted" means this path ended the row, now or on an earlier
+        call. Any other state is left alone and returned, and "terminal" is one of
+        them: it is an engine outcome that may still owe a delivery.
         Input bytes on disk stay in the probe's free-space snapshot.
         """
         if transfer_ended is not True:
@@ -392,10 +395,22 @@ class ScratchLedger:
             row = db.execute("SELECT * FROM reservations WHERE id=?", (reservation_id,)).fetchone()
             if row is None:
                 return None
-            if row["state"] != "reserved":
-                return row["state"]
-            db.execute("UPDATE reservations SET state='terminal',terminal_at=?,remaining=0 WHERE id=?", (now, reservation_id))
-            return "terminal"
+            if row["state"] == "reserved":
+                db.execute("UPDATE reservations SET state='terminal',terminal_at=?,remaining=0 WHERE id=?", (now, reservation_id))
+                db.execute("INSERT INTO unstarted_settlements VALUES(?,?)", (reservation_id, now))
+                return "unstarted"
+            return "unstarted" if self._settled(db, row) else row["state"]
+
+    @staticmethod
+    def _settled(db, row):
+        return row["state"] == "terminal" and db.execute(
+            "SELECT 1 FROM unstarted_settlements WHERE reservation=?", (row["id"],)).fetchone() is not None
+
+    def never_started(self, reservation_id):
+        """Whether the ledger proves no engine outcome exists for this reservation."""
+        with self._transaction() as db:
+            row = db.execute("SELECT * FROM reservations WHERE id=?", (reservation_id,)).fetchone()
+            return row is None or row["state"] in ("reserved", "expired") or self._settled(db, row)
 
     def record_allocated(self, reservation_id, allocated_bytes):
         """Set monotonic total allocation after disk writes; never a delta."""

@@ -314,6 +314,11 @@ class NodeGate:
         state['lastAcknowledgment'] = tombstone
         self._save(state)
 
+    def resolved(self, receipt_id):
+        """Whether the latest operator abandonment was this receipt: nothing is left to complete on it."""
+        last = self.snapshot().get('lastResolution')
+        return type(last) is dict and type(last.get('reservation')) is dict and last['reservation'].get('receiptId') == receipt_id
+
     def resolve(self, receipt_id, expected_generation, *, old_worker_stopped,
                 coordinator_resolved, note):
         """Operator-only abandonment after independent local AND remote checks.

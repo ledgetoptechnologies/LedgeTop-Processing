@@ -1,4 +1,5 @@
 """Real durable components and NativeEngine with transport mocked at its edge."""
+from contextlib import closing
 import copy
 from datetime import datetime, timezone
 import hashlib
@@ -6,6 +7,7 @@ import io
 import http.client
 import json
 from pathlib import Path
+import sqlite3
 import ssl
 import os
 import sys
@@ -586,19 +588,152 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(self.driver.step()['state'], 'processing_pending')
         self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
 
-    def test_reconciliation_leaves_a_row_that_owes_a_delivery(self):
+    def completion(self, job):
+        with closing(sqlite3.connect(self.outbox.path)) as db:
+            return db.execute('SELECT state FROM completions WHERE job=?', (job['jobId'],)).fetchone()
+
+    def die_inside_poll(self, job):
+        # After the result, terminal ledger and outbox commit; before executions and the row.
+        self.advance(job, 'executing')
+        with patch.object(NodeGate, 'prepare_completion', side_effect=OSError('synthetic death')):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+
+    def die_after_poll(self, job):
+        # poll returned; only the Driver checkpoint is lost.
+        self.advance(job, 'executing')
+        original = self.driver._save
+        def lost(job_id, stage, data):
+            if stage == 'delivering':
+                raise OSError('synthetic death')
+            return original(job_id, stage, data)
+        with patch.object(self.driver, '_save', side_effect=lost):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+
+    def assert_result_owed(self, job):
+        stage, data = self.data(job)
+        self.assertNotEqual(stage, 'completed')
+        self.assertNotIn('unstartedOutcome', data)
+        self.assertEqual(self.lease(job)['state'], 'terminal')
+        self.assertEqual(self.completion(job), ('pending',))
+        reservation = self.lease(job)['id']
+        with self.ledger._transaction() as db:
+            self.assertIsNotNone(db.execute('SELECT 1 FROM results WHERE reservation=?', (reservation,)).fetchone())
+
+    def assert_ended_claim_keeps_its_owed_result(self, die):
+        job = self.submit()
+        die(job)
+        self.assertNotIn('outboxId', self.data(job)[1])
+        self.assert_result_owed(job)
+        self.end_job(job)
+        self.resolve_gate()
+        self.driver = self.make_driver()
+        held = {'state': 'held', 'reason': 'engine_reconciliation_required'}
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), held)
+        self.assert_result_owed(job)
+        self.assertEqual(self.driver.step()['state'], 'delivering')
+        self.assertEqual(self.driver.step()['state'], 'delivering')  # The ended job refuses it, and it stays owed.
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), held)
+        self.assert_result_owed(job)
+
+    def test_death_inside_poll_keeps_an_owed_result_from_an_ended_claim(self):
+        self.assert_ended_claim_keeps_its_owed_result(self.die_inside_poll)
+
+    def test_death_before_the_checkpoint_keeps_an_owed_result_from_an_ended_claim(self):
+        self.assert_ended_claim_keeps_its_owed_result(self.die_after_poll)
+
+    def assert_owed_result_resumes_to_delivery(self, die):
+        job = self.submit()
+        die(job)
+        self.assertNotIn('outboxId', self.data(job)[1])
+        self.resolve_gate()
+        self.driver = self.make_driver()
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']),
+            {'state': 'held', 'reason': 'unstarted_claim_requires_reconciliation'})
+        self.assert_result_owed(job)
+        self.advance(job, 'awaiting_acceptance')
+        self.assertEqual(self.completion(job), ('acknowledged',))
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'succeeded')
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], 'delivered')
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
+
+    def test_death_inside_poll_resumes_to_delivery_after_the_gate_is_resolved(self):
+        self.assert_owed_result_resumes_to_delivery(self.die_inside_poll)
+
+    def test_death_before_the_checkpoint_resumes_to_delivery_after_the_gate_is_resolved(self):
+        self.assert_owed_result_resumes_to_delivery(self.die_after_poll)
+
+    def die_sealing_failure(self, job, stage='failure_delivering'):
+        self.transport.code = 30
+        self.advance(job, 'executing')
+        original = self.driver._save
+        def lost(job_id, saved, data):
+            if saved == stage:
+                raise OSError('synthetic death')
+            return original(job_id, saved, data)
+        with patch.object(self.driver, '_save', side_effect=lost):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+
+    def test_death_sealing_a_failure_keeps_it_from_an_ended_claim(self):
+        job = self.submit()
+        self.die_sealing_failure(job)
+        self.assertNotIn('failureOutboxId', self.data(job)[1])
+        self.end_job(job)
+        self.resolve_gate()
+        self.driver = self.make_driver()
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'held', 'reason': 'engine_reconciliation_required'})
+        self.assertEqual(self.data(job)[0], 'executing')
+        for _ in range(3):
+            self.assertEqual(self.driver.step()['state'], 'failure_delivering')
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'held', 'reason': 'engine_reconciliation_required'})
+        self.assertEqual(self.data(job)[0], 'failure_delivering')
+
+    def test_terminal_failure_ledger_is_not_settled_as_unstarted(self):
+        self.transport.code = 30
         job = self.submit()
         self.advance(job, 'executing')
+        with patch.object(NodeGate, 'prepare_completion', side_effect=OSError('synthetic death')):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertEqual((self.data(job)[0], self.lease(job)['state']), ('failure_delivering', 'terminal'))
         self.end_job(job)
-        for key in ('outboxId', 'failureOutboxId'):
-            with self.subTest(key=key):
-                _, data = self.data(job)
-                data.pop('outboxId', None)
-                data[key] = 'owed-delivery'
-                self.driver._save(job['jobId'], 'failure_delivering', data)
-                self.assertEqual(self.driver.reconcile_unstarted(job['jobId']),
-                    {'state': 'held', 'reason': 'unstarted_reconciliation_unavailable'})
-                self.assertEqual(self.data(job)[0], 'failure_delivering')
+        self.resolve_gate()
+        self.driver = self.make_driver()
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'held', 'reason': 'engine_reconciliation_required'})
+        self.assertEqual(self.data(job)[0], 'failure_delivering')
+        self.assertNotIn('unstartedOutcome', self.data(job)[1])
+
+    def test_sealed_failure_resumes_to_delivery_after_the_gate_is_resolved(self):
+        job = self.submit()
+        self.die_sealing_failure(job)
+        self.resolve_gate()
+        self.driver = self.make_driver()
+        self.advance(job, 'awaiting_failure_acceptance')
+        self.assertEqual(self.lease(job)['state'], 'terminal')
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], 'failure_delivered')
+        self.assertEqual(self.store.get(job['jobId'], private=True)['status'], 'failed')
+
+    def test_step_path_never_settles_an_engine_terminal_ledger(self):
+        job = self.submit()
+        self.advance(job, 'execution_pending')
+        self.ledger.set_engine_state(self.lease(job)['id'], 'terminal', terminal_attested=True)
+        self.end_job(job)
+        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'engine_reconciliation_required'})
+        self.assertEqual(self.data(job)[0], 'execution_pending')
+        self.assertNotIn('unstartedOutcome', self.data(job)[1])
+
+    def test_settlement_replays_after_death_before_the_row_completes(self):
+        job = self.submit()
+        self.advance(job, 'processing_pending')
+        self.end_job(job)
+        original = self.driver._save
+        def lost(job_id, stage, data):
+            if stage == 'completed':
+                self.ledger.settle_unstarted(data['reservation']['reservationId'], transfer_ended=True)
+                raise OSError('synthetic death')
+            return original(job_id, stage, data)
+        with patch.object(self.driver, '_save', side_effect=lost), self.assertRaises(OSError):
+            self.driver.reconcile_unstarted(job['jobId'])
+        self.assertEqual(self.lease(job)['state'], 'terminal')
+        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
 
     def test_reconciliation_never_touches_a_started_engine_or_runs_beside_a_step(self):
         job = self.submit()

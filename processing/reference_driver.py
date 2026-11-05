@@ -892,10 +892,7 @@ class ReferenceDriver:
         """
         reservation = data['reservation']['reservationId']
         status = self._terminal_status(job_id, data)
-        with self.ledger._transaction() as db:
-            ledger = db.execute('SELECT state FROM reservations WHERE id=?', (reservation,)).fetchone()
-        started = ledger is not None and ledger['state'] in ('engine_started', 'uncertain')
-        retained = status is not None and not started and self._physically_live(job_id)
+        retained = status is not None and self.ledger.never_started(reservation) and self._physically_live(job_id)
         if status is None or retained:
             named = 'physical_reservation_retained' if retained else reason
             if data.get('unstartedHold') != named:
@@ -906,7 +903,8 @@ class ReferenceDriver:
         if retained:
             return {'state': 'held', 'jobId': job_id, 'reason': reason, 'terminalStatus': status,
                 'reconciliation': 'physical_reservation_retained'}
-        if self.ledger.settle_unstarted(reservation, transfer_ended=True) not in (None, 'expired', 'terminal'):
+        # The ledger decides, not this row: poll commits a result before the row hears.
+        if self.ledger.settle_unstarted(reservation, transfer_ended=True) not in (None, 'expired', 'unstarted'):
             raise DriverHeld('engine_reconciliation_required')
         data['unstartedOutcome'] = dict(reason=reason, stage=stage, terminalStatus=status)
         self._save(job_id, 'completed', data)
@@ -920,9 +918,7 @@ class ReferenceDriver:
             with self._db() as db:
                 row = db.execute('SELECT * FROM driver_jobs WHERE job=?', (job_id,)).fetchone()
             data = json.loads(row['data']) if row is not None else {}
-            if ('reservation' not in data or 'claim' not in data or row['stage'] == 'completed'
-                    or 'outboxId' in data or 'failureOutboxId' in data):
-                # An outbox means the engine ran and a delivery is owed: never unstarted.
+            if 'reservation' not in data or 'claim' not in data or row['stage'] == 'completed':
                 raise DriverHeld('unstarted_reconciliation_unavailable')
             return self._unstarted(job_id, row['stage'], data, 'unstarted_claim_requires_reconciliation')
         except DriverHeld as error:
@@ -955,7 +951,8 @@ class ReferenceDriver:
         if local['phase'] == 'failure_delivered' and self.failure_outbox.get(data['failureOutboxId'])['state'] == 'acknowledged':
             return
         with NodeGate(self.worker.engine_id) as gate:
-            if self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, self._failure_completion(data['failure'])):
+            if (gate.resolved(local['receipt'])
+                    or self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, self._failure_completion(data['failure']))):
                 return
             if gate.snapshot()['reservation'] is None:
                 if self.failure_outbox.get(data['failureOutboxId'])['state'] != 'acknowledged':
@@ -1006,7 +1003,7 @@ class ReferenceDriver:
                 completion = self._failure_completion(data['failure'])
                 ack = dict(id=job_id, workerId=self.worker_id, nodeId=self.node_id,
                     authorityId=self.worker.authority_id, **completion)
-                if not self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, completion):
+                if not gate.resolved(local['receipt']) and not self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, completion):
                     gate.acknowledge(local['receipt'], ack)
         self.worker._phase(job_id, 'failure_delivered')
         self._save(job_id, 'awaiting_failure_acceptance', data)
