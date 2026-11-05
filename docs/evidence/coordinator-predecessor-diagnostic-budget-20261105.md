@@ -8,7 +8,9 @@ The full census now checks a coarse physical envelope **before SQLite connect**:
 `8 * maxMetadataBytes + 100000 * 1024 + 1 MiB`. Its existing final page-derived
 bound still applies. The known-schema object count and byte size are checked
 before schema objects are retained. SQLite's own LENGTH limit is installed before
-schema/metadata reads. A scalar row-count/raw-cell-byte pass runs before
+schema/metadata reads. The read-only connection is also query-only and uses
+in-memory temporary storage, so diagnostics cannot spill sort/check files into
+the target filesystem. These PRAGMAs affect only the private connection. A scalar row-count/raw-cell-byte pass runs before
 `quick_check`, foreign-key checking, or full row materialization. Full rows are
 then fetched individually, and their exact ASCII JSON size is counted with bounded
 string chunks before encoded copies or retained rows are added. Unsupported
@@ -75,3 +77,8 @@ corruption, cooperative time/direct-read/database caps, and an actual isolated
 contract file present. Wrong in-memory schema bytes fail closed with sanitized
 output. This remains synthetic qualification; installed state has not been read
 through this component by this agent.
+
+Connection-only hygiene followup (`query_only=ON`, `temp_store=MEMORY`): four
+targeted Linux cases passed, no skips, in 0.317 seconds (serialized stdin probe,
+full stable/read-only census, huge-cell preflight on both paths, diagnostic
+no-bulk-read). The task container was removed and filtered inventory empty.

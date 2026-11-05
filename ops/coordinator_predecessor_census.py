@@ -313,6 +313,8 @@ def _census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
         db.set_progress_handler(progress,1000)
         _require(callable(getattr(db,'setlimit',None)), 'bounded_sqlite_reader_required')
         db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,65536)
+        db.execute('PRAGMA query_only=ON')
+        db.execute('PRAGMA temp_store=MEMORY')
         db.execute('BEGIN')
         schema = _schema(db,reviewed_schema_bytes)
         db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,max(65536,max_metadata_bytes))
