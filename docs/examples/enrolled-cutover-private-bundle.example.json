@@ -1,0 +1,329 @@
+{
+  "schemaVersion": 1,
+  "profile": "ltds-enrolled-cutover-private-deployment-v1",
+  "operationId": "00000000-0000-0000-0000-000000000001",
+  "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+  "candidateSourceCommit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "reviewedSourceRoot": "/private/reviewed-source",
+  "host": {
+    "dockerEngineId": "synthetic-engine",
+    "bootId": "00000000-0000-0000-0000-000000000002",
+    "dockerBinary": "/usr/bin/docker",
+    "dockerBinarySha256": "9999999999999999999999999999999999999999999999999999999999999999",
+    "dockerSocket": "unix:///run/docker.sock"
+  },
+  "predecessor": {
+    "containerId": "525ca6e24ad3b9e57e2a3be36567471c10745a4aaa8ebc03c7f2d2f215dfb977",
+    "imageId": "sha256:7fae9385fb5ca829783fe05eef2fdb1983abf4d491b2b9f795e55b617a5a0004",
+    "sourceCommit": "693cb7eca32295da959a4f42399f317577ef8a8a",
+    "name": "ledgetop-processing-prototype-c3fcb3a",
+    "stateVolume": "ledgetop-processing-prototype-c3fcb3a-state",
+    "leaseDirectory": "/authority-leases"
+  },
+  "recipes": {
+    "bootstrap": {
+      "schemaVersion": 1,
+      "name": "synthetic-bootstrap",
+      "imageId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "user": "10001:10001",
+      "workingDir": "/app",
+      "environmentFile": "/private/bootstrap.env",
+      "environmentSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mounts": [
+        {
+          "type": "volume",
+          "source": "ledgetop-processing-prototype-c3fcb3a-state",
+          "target": "/prototype-state",
+          "readOnly": false
+        },
+        {
+          "type": "bind",
+          "source": "/private/tls",
+          "target": "/run/processing-reference",
+          "readOnly": true
+        },
+        {
+          "type": "bind",
+          "source": "/private/leases",
+          "target": "/authority-leases",
+          "readOnly": false
+        }
+      ],
+      "ports": [],
+      "network": "none",
+      "tmpfs": {
+        "/tmp": "rw,nosuid,nodev,noexec,size=64m,mode=1777"
+      },
+      "labels": {
+        "org.ledgetop.purpose": "synthetic-test"
+      },
+      "command": [
+        "python",
+        "-m",
+        "processing.app"
+      ],
+      "entrypoint": null,
+      "readOnly": true,
+      "init": true,
+      "pidsLimit": 128,
+      "memoryBytes": 805306368,
+      "nanoCpus": 1000000000,
+      "stopSignal": "SIGTERM",
+      "stopTimeout": -1,
+      "restartPolicy": {
+        "Name": "no",
+        "MaximumRetryCount": 0
+      }
+    },
+    "final": {
+      "schemaVersion": 1,
+      "name": "synthetic-final",
+      "imageId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "user": "10001:10001",
+      "workingDir": "/app",
+      "environmentFile": "/private/final.env",
+      "environmentSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mounts": [
+        {
+          "type": "volume",
+          "source": "ledgetop-processing-prototype-c3fcb3a-state",
+          "target": "/prototype-state",
+          "readOnly": false
+        },
+        {
+          "type": "bind",
+          "source": "/private/tls",
+          "target": "/run/processing-reference",
+          "readOnly": true
+        },
+        {
+          "type": "bind",
+          "source": "/private/leases",
+          "target": "/authority-leases",
+          "readOnly": false
+        }
+      ],
+      "ports": [
+        {
+          "containerPort": "8080/tcp",
+          "hostIp": "127.0.0.1",
+          "hostPort": 18080
+        }
+      ],
+      "network": "bridge",
+      "tmpfs": {
+        "/tmp": "rw,nosuid,nodev,noexec,size=64m,mode=1777"
+      },
+      "labels": {
+        "org.ledgetop.purpose": "synthetic-test"
+      },
+      "command": [
+        "python",
+        "-m",
+        "processing.app"
+      ],
+      "entrypoint": null,
+      "readOnly": true,
+      "init": true,
+      "pidsLimit": 128,
+      "memoryBytes": 805306368,
+      "nanoCpus": 1000000000,
+      "stopSignal": "SIGTERM",
+      "stopTimeout": -1,
+      "restartPolicy": {
+        "Name": "no",
+        "MaximumRetryCount": 0
+      }
+    },
+    "holder": {
+      "schemaVersion": 1,
+      "name": "synthetic-holder",
+      "imageId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "user": "10001:10001",
+      "workingDir": "/app",
+      "environmentFile": "/private/holder.env",
+      "environmentSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "mounts": [
+        {
+          "type": "volume",
+          "source": "ledgetop-processing-prototype-c3fcb3a-state",
+          "target": "/prototype-state",
+          "readOnly": true
+        },
+        {
+          "type": "bind",
+          "source": "/private/tls",
+          "target": "/run/processing-reference",
+          "readOnly": true
+        },
+        {
+          "type": "bind",
+          "source": "/private/leases",
+          "target": "/authority-leases",
+          "readOnly": false
+        }
+      ],
+      "ports": [],
+      "network": "none",
+      "tmpfs": {
+        "/tmp": "rw,nosuid,nodev,noexec,size=64m,mode=1777"
+      },
+      "labels": {
+        "org.ledgetop.purpose": "synthetic-test"
+      },
+      "command": [
+        "python",
+        "-m",
+        "processing.app"
+      ],
+      "entrypoint": null,
+      "readOnly": true,
+      "init": false,
+      "pidsLimit": 128,
+      "memoryBytes": 805306368,
+      "nanoCpus": 1000000000,
+      "stopSignal": "SIGTERM",
+      "stopTimeout": -1,
+      "restartPolicy": {
+        "Name": "no",
+        "MaximumRetryCount": 0
+      }
+    }
+  },
+  "holderSettings": {
+    "schemaVersion": 1,
+    "operationId": "00000000-0000-0000-0000-000000000001",
+    "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+    "stateRoot": "/prototype-state",
+    "leaseDirectory": "/authority-leases"
+  },
+  "artifacts": {
+    "finalConfig": {
+      "path": "/private/finalConfig",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "finalEnvironment": {
+      "path": "/private/final.env",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "predecessorSchema": {
+      "path": "/private/predecessorSchema",
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    "policy": {
+      "path": "/private/policy",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "censusKey": {
+      "path": "/private/censusKey",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "bootstrapEnvironment": {
+      "path": "/private/bootstrap.env",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "bootstrapConfig": {
+      "path": "/private/bootstrapConfig",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "holderEnvironment": {
+      "path": "/private/holder.env",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "reviewedCounts": {
+      "path": "/private/reviewedCounts",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  },
+  "sourceHashes": {
+    "processing/coordinator_freeze.py": "6666666666666666666666666666666666666666666666666666666666666666",
+    "processing/reference_store.py": "6666666666666666666666666666666666666666666666666666666666666666",
+    "processing/node_inventory.py": "6666666666666666666666666666666666666666666666666666666666666666",
+    "processing/reference_recovery.py": "6666666666666666666666666666666666666666666666666666666666666666",
+    "processing/reference_source_readers.py": "6666666666666666666666666666666666666666666666666666666666666666",
+    "processing/reference_terminal.py": "6666666666666666666666666666666666666666666666666666666666666666",
+    "processing/reference_failure.py": "6666666666666666666666666666666666666666666666666666666666666666",
+    "processing/prototype.py": "6666666666666666666666666666666666666666666666666666666666666666",
+    "processing/reference_runtime.py": "6666666666666666666666666666666666666666666666666666666666666666",
+    "processing/config.py": "6666666666666666666666666666666666666666666666666666666666666666",
+    "processing/reference_protocol.py": "6666666666666666666666666666666666666666666666666666666666666666",
+    "processing/authority_lease.py": "6666666666666666666666666666666666666666666666666666666666666666",
+    "processing/app.py": "6666666666666666666666666666666666666666666666666666666666666666",
+    "processing/runtime_source_custody.py": "6666666666666666666666666666666666666666666666666666666666666666",
+    "processing/maintenance.py": "6666666666666666666666666666666666666666666666666666666666666666"
+  },
+  "nodeEndpoints": [
+    {
+      "id": "cluster",
+      "url": "http://192.0.2.1:3000"
+    },
+    {
+      "id": "main",
+      "url": "http://192.0.2.1:3000"
+    }
+  ],
+  "workers": [
+    {
+      "nodeId": "cluster",
+      "sshHost": "192.0.2.1",
+      "settings": {
+        "schemaVersion": 1,
+        "unitName": "synthetic-cluster.service",
+        "unitFile": "/private/worker.service",
+        "unitSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "pythonExecutable": "/usr/bin/python3",
+        "configPath": "/private/worker.json",
+        "sourceRoot": "/private/source",
+        "sourceSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "readinessOrigin": "https://127.0.0.1:1234",
+        "readinessCAFile": "/private/ca.pem"
+      },
+      "expected": {
+        "nodeId": "cluster",
+        "workerId": "worker-cluster",
+        "workerInstanceId": "instance-cluster",
+        "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+        "engineId": "synthetic-engine",
+        "gateGeneration": 1,
+        "engineVersion": "3.8.5",
+        "configSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "sourceSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "activation": null
+      }
+    },
+    {
+      "nodeId": "main",
+      "sshHost": "192.0.2.1",
+      "settings": {
+        "schemaVersion": 1,
+        "unitName": "synthetic-main.service",
+        "unitFile": "/private/worker.service",
+        "unitSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "pythonExecutable": "/usr/bin/python3",
+        "configPath": "/private/worker.json",
+        "sourceRoot": "/private/source",
+        "sourceSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "readinessOrigin": "https://127.0.0.1:1234",
+        "readinessCAFile": "/private/ca.pem"
+      },
+      "expected": {
+        "nodeId": "main",
+        "workerId": "worker-main",
+        "workerInstanceId": "instance-main",
+        "authorityId": "7131882e-38ce-4d3e-99cc-4ba5a94d2ee8",
+        "engineId": "synthetic-engine",
+        "gateGeneration": 1,
+        "engineVersion": "3.8.5",
+        "configSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "sourceSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "activation": null
+      }
+    }
+  ],
+  "qualifications": {
+    "nasQualificationSha256": null,
+    "pilotClosureSha256": null,
+    "legacyDeliverySha256": null,
+    "workerQualificationSha256": null
+  }
+}
