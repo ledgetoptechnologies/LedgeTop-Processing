@@ -15,6 +15,7 @@ from processing.reference_engine_worker import ReferenceEngineWorker, WorkerHeld
 from processing.reference_protocol import validate_submission, validate_result_manifest
 from processing.scratch_policy import ScratchLedger
 from processing.worker_outbox import WorkerOutbox
+from tests.viewer_v2_receipt_signer import SyntheticViewerCopyV2Signer
 
 
 class FakeNativeEngine:
@@ -111,6 +112,18 @@ class ReferenceEngineWorkerTests(unittest.TestCase):
             authority_id=self.authority, coordinator_origin='http://127.0.0.1:8000', gate_generation=1,
             worker_id='worker', engine_version='synthetic-v1', **kwargs)
 
+    def source_acceptance_binding(self):
+        digest = hashlib.sha256(b'synthetic-source-binding').hexdigest()
+        submission_id = self.job['submission']['submissionId']
+        return dict(coordinatorAuthorityId=self.authority,
+            viewerPrincipalId='synthetic-viewer-principal', submissionId=submission_id,
+            activationId=str(uuid.uuid4()), viewerTaskId=str(uuid.uuid4()),
+            viewerAttemptId=submission_id, providerTaskId=self.job['jobId'],
+            preparedEnvelopeSha256=digest, jobId=self.job['jobId'], generation=self.job['generation'],
+            environment=self.job['environment'], inputManifestSha256=self.job['manifestSha256'],
+            pipelineDigest=self.job['pipelineDigest'], sourceManifestSha256=digest,
+            derivedManifestSha256=digest, sourceReceiptSha256=digest, derivedReceiptSha256=digest)
+
     def start(self):
         return self.worker.start(self.job, reservation_id='reservation-1', input_paths=self.input_paths)
 
@@ -120,10 +133,83 @@ class ReferenceEngineWorkerTests(unittest.TestCase):
         submission['pipeline']['odm']['options'] = {'scale': 1e-7}
         submission['sourceIntakeVersion'] = self.job['sourceIntakeVersion'] = 2
         submission['pipelineDigest'] = self.job['pipelineDigest'] = pipeline_digest(submission['pipeline'])
+        self.job['authorityId'] = self.authority
+        self.job['sourceAcceptanceBinding'] = self.source_acceptance_binding()
+        self.job['sourceAcceptanceBinding']['pipelineDigest'] = self.job['pipelineDigest']
         self.worker = self.make_worker(allowed_odm_options=('scale',))
         self.assertEqual(self.start(), 'processing')
         self.assertEqual(self.engine.calls.count('initialize'), 1)
         self.assertEqual(self.engine.calls.count('commit'), 1)
+
+    def test_v2_source_job_without_authenticated_binding_holds_before_engine_mutation(self):
+        from processing.reference_source_intake_canonical import pipeline_digest
+        submission = self.job['submission']
+        submission['sourceIntakeVersion'] = self.job['sourceIntakeVersion'] = 2
+        submission['pipelineDigest'] = self.job['pipelineDigest'] = pipeline_digest(submission['pipeline'])
+        self.job['authorityId'] = self.authority
+        self.worker = self.make_worker()
+        with self.assertRaisesRegex(WorkerHeld, 'source_acceptance_binding_unavailable'):
+            self.start()
+        self.assertEqual(self.engine.calls, [])
+
+    def test_v2_source_binding_authority_must_match_worker_configuration(self):
+        from processing.reference_source_intake_canonical import pipeline_digest
+        submission = self.job['submission']
+        submission['sourceIntakeVersion'] = self.job['sourceIntakeVersion'] = 2
+        submission['pipelineDigest'] = self.job['pipelineDigest'] = pipeline_digest(submission['pipeline'])
+        other_authority = str(uuid.uuid4())
+        self.job['authorityId'] = other_authority
+        binding = self.source_acceptance_binding()
+        binding['coordinatorAuthorityId'] = other_authority
+        binding['pipelineDigest'] = self.job['pipelineDigest']
+        self.job['sourceAcceptanceBinding'] = binding
+        self.worker = self.make_worker()
+        with self.assertRaisesRegex(WorkerHeld, 'source_acceptance_binding_unavailable'):
+            self.start()
+        self.assertEqual(self.engine.calls, [])
+        with self.worker._db() as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM executions WHERE job=?',
+                (self.job['jobId'],)).fetchone())
+
+    def test_v2_acceptance_requires_signed_v2_copy_and_persists_verified_coverage(self):
+        from processing.reference_source_intake_canonical import pipeline_digest
+        submission = self.job['submission']
+        submission['sourceIntakeVersion'] = self.job['sourceIntakeVersion'] = 2
+        submission['pipelineDigest'] = self.job['pipelineDigest'] = pipeline_digest(submission['pipeline'])
+        self.job['authorityId'] = self.authority
+        binding = self.source_acceptance_binding()
+        binding['pipelineDigest'] = self.job['pipelineDigest']
+        self.job['sourceAcceptanceBinding'] = binding
+        signer = SyntheticViewerCopyV2Signer()
+        self.worker = self.make_worker(viewer_receipt_keys=signer.trusted_keys)
+        self.start()
+        self.worker.poll(self.job['jobId'])
+        result = json.loads(self.worker._row(self.job['jobId'])['result'])
+        acceptance = dict(schemaVersion=1, receiptId='outer-v2-acceptance',
+            storageReceiptId='outer-v2-storage', jobId=self.job['jobId'], generation=1,
+            environment='staging', inputManifestSha256=self.job['manifestSha256'],
+            pipelineDigest=self.job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
+            acceptedObjectIds=[item['id'] for item in result['objects']],
+            acceptedAt='2026-11-04T12:00:00.000Z', validationVersion='ltds-reference-v1')
+        expected = dict(binding, resultManifestSha256=result['resultManifestSha256'])
+        with self.assertRaisesRegex(WorkerHeld, 'signed V2 Viewer accepted-copy receipt required'):
+            self.worker.apply_viewer_acceptance(self.job['jobId'], [acceptance])
+        v1 = dict(schemaVersion=1, receiptId='v1-acceptance', storageReceiptId='v1-storage',
+            jobId=self.job['jobId'], generation=1, environment='staging',
+            inputManifestSha256=self.job['manifestSha256'], pipelineDigest=self.job['pipelineDigest'],
+            resultManifestSha256=result['resultManifestSha256'], acceptedObjectIds=acceptance['acceptedObjectIds'],
+            acceptedAt='2026-11-04T12:00:00Z', validationVersion='ltds-reference-v1')
+        from tests.viewer_receipt_signer import SyntheticViewerSigner
+        with self.assertRaisesRegex(WorkerHeld, 'Viewer accepted-copy signature or binding is invalid'):
+            self.worker.apply_viewer_acceptance(self.job['jobId'], [SyntheticViewerSigner().envelope(v1, result)])
+        envelope = signer.envelope(expected, acceptance, result)
+        observed = self.worker.apply_viewer_acceptance(self.job['jobId'], [envelope])
+        self.assertTrue(observed['fullyAccepted'])
+        with self.ledger._transaction() as db:
+            rows = list(db.execute('SELECT accepted_copy_verified FROM objects WHERE reservation=?',
+                ('reservation-1',)))
+        self.assertTrue(rows)
+        self.assertTrue(all(row['accepted_copy_verified'] == 1 for row in rows))
 
     def test_real_gate_ledger_archive_checksum_outbox_and_metadata_ack(self):
         self.assertEqual(self.start(), 'processing')

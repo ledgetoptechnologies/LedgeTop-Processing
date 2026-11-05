@@ -148,6 +148,22 @@ class ReferenceEngineWorker:
     def start(self, job, *, reservation_id, input_paths):
         """A ready, already claimed job and externally admitted scratch are required."""
         submission = job['submission']
+        source_binding = None
+        source_intake_version = job.get('sourceIntakeVersion', submission.get('sourceIntakeVersion'))
+        if source_intake_version == 2:
+            if (type(job.get('sourceIntakeVersion')) is not int or job.get('sourceIntakeVersion') != 2
+                    or type(submission.get('sourceIntakeVersion')) is not int
+                    or submission.get('sourceIntakeVersion') != 2):
+                raise WorkerHeld('source_acceptance_binding_unavailable')
+            try:
+                from .source_acceptance_binding import validate_source_acceptance_binding
+                source_binding = validate_source_acceptance_binding(job.get('sourceAcceptanceBinding'), job)
+                if source_binding['coordinatorAuthorityId'] != self.authority_id:
+                    raise ValueError('source authority differs from worker authority')
+            except (ImportError, TypeError, ValueError, KeyError):
+                raise WorkerHeld('source_acceptance_binding_unavailable') from None
+        elif source_intake_version is not None:
+            raise WorkerHeld('source_acceptance_binding_unavailable')
         from .reference_source_intake_canonical import pipeline_digest_for_job
         manifest, pipeline = submission['manifest'], submission['pipeline']
         if (job['status'] != 'running' or job['nodeId'] != self.node_id
@@ -175,6 +191,8 @@ class ReferenceEngineWorker:
             path, _, _ = self._file(reservation_id, input_paths[obj['id']], obj['byteSize'], obj['sha256'])
             inputs.append(dict(path=str(path), bytes=obj['byteSize'], sha256=obj['sha256'], name=obj['name']))
         identity = dict(job=job, reservation=reservation_id, paths=input_paths)
+        if source_binding is not None:
+            identity['sourceAcceptanceBinding'] = source_binding
         encoded = p.canonical_json(identity).decode()
         with NodeGate(self.engine_id) as gate:
             with self._db() as db:
@@ -319,6 +337,25 @@ class ReferenceEngineWorker:
             raise WorkerHeld('Viewer acceptance requires a durable local result')
         identity = json.loads(row['identity'])
         job, reservation = identity['job'], identity['reservation']
+        source_intake_version = job.get('sourceIntakeVersion', job.get('submission', {}).get('sourceIntakeVersion'))
+        source_binding = identity.get('sourceAcceptanceBinding')
+        if source_intake_version == 2:
+            if (type(job.get('sourceIntakeVersion')) is not int or job.get('sourceIntakeVersion') != 2
+                    or type(job.get('submission', {}).get('sourceIntakeVersion')) is not int
+                    or job.get('submission', {}).get('sourceIntakeVersion') != 2):
+                raise WorkerHeld('source_acceptance_binding_unavailable')
+            try:
+                from .source_acceptance_binding import validate_source_acceptance_binding
+                job_binding = validate_source_acceptance_binding(job.get('sourceAcceptanceBinding'), job)
+                source_binding = validate_source_acceptance_binding(source_binding, job)
+                if source_binding != job_binding:
+                    raise ValueError('persisted source binding copies differ')
+                if source_binding['coordinatorAuthorityId'] != self.authority_id:
+                    raise ValueError('source authority differs from worker authority')
+            except (ImportError, TypeError, ValueError, KeyError):
+                raise WorkerHeld('source_acceptance_binding_unavailable') from None
+        elif source_intake_version is not None or source_binding is not None:
+            raise WorkerHeld('source_acceptance_binding_unavailable')
         result = p.validate_result_manifest(json.loads(row['result']), job_id=job_id,
             generation=job['generation'], environment=job['environment'], pipeline_digest=job['pipelineDigest'])
         checked, identities, signed_identities, receipt_owners = [], {}, {}, {}
@@ -329,21 +366,30 @@ class ReferenceEngineWorker:
                 if not self.viewer_receipt_keys:
                     raise WorkerHeld('pinned Viewer receipt keys are not configured')
                 receipt, viewer_receipt = envelope['acceptance'], envelope['viewerReceipt']
+            if source_intake_version == 2 and viewer_receipt is None:
+                raise WorkerHeld('signed V2 Viewer accepted-copy receipt required')
             value = p.validate_acceptance(receipt, result_manifest=result,
                 input_manifest_sha256=job['manifestSha256'])
             if viewer_receipt is not None:
-                from .viewer_acceptance_receipt import verify_viewer_acceptance_receipt
-                expected = dict(jobId=job_id, generation=job['generation'], environment=job['environment'],
-                    inputManifestSha256=job['manifestSha256'], pipelineDigest=job['pipelineDigest'],
-                    resultManifestSha256=result['resultManifestSha256'])
                 try:
-                    signed = verify_viewer_acceptance_receipt(viewer_receipt,
-                        trusted_keys=self.viewer_receipt_keys, expected=expected,
-                        result_manifest=result, accepted_object_ids=value['acceptedObjectIds']).receipt
+                    if source_intake_version == 2:
+                        from .viewer_copy_receipt_v2 import verify_viewer_copy_receipt_v2
+                        expected = dict(source_binding, resultManifestSha256=result['resultManifestSha256'])
+                        signed = verify_viewer_copy_receipt_v2(viewer_receipt,
+                            trusted_keys=self.viewer_receipt_keys, expected=expected,
+                            result_manifest=result, acceptance=value).receipt
+                    else:
+                        from .viewer_acceptance_receipt import verify_viewer_acceptance_receipt
+                        expected = dict(jobId=job_id, generation=job['generation'], environment=job['environment'],
+                            inputManifestSha256=job['manifestSha256'], pipelineDigest=job['pipelineDigest'],
+                            resultManifestSha256=result['resultManifestSha256'])
+                        signed = verify_viewer_acceptance_receipt(viewer_receipt,
+                            trusted_keys=self.viewer_receipt_keys, expected=expected,
+                            result_manifest=result, accepted_object_ids=value['acceptedObjectIds']).receipt
                 except (TypeError, ValueError):
                     raise WorkerHeld('Viewer accepted-copy signature or binding is invalid') from None
-                bind_fields = ('jobId','generation','environment','inputManifestSha256','pipelineDigest','resultManifestSha256')
-                if (any(value[field] != signed[field] for field in bind_fields)
+                sibling_fields = ('jobId','generation','environment','inputManifestSha256','pipelineDigest','resultManifestSha256')
+                if (any(value[field] != signed[field] for field in sibling_fields)
                         or value['acceptedObjectIds'] != signed['acceptedObjectIds']
                         or {value['receiptId'], value['storageReceiptId']} & {signed['receiptId'], signed['storageReceiptId']}):
                     raise WorkerHeld('Viewer and processing acceptance bindings disagree')
@@ -373,7 +419,12 @@ class ReferenceEngineWorker:
                 result_manifest_sha256=receipt['resultManifestSha256'], accepted_object_ids=receipt['acceptedObjectIds'],
                 viewer_receipt=signed_viewer_receipt, verified_copy=signed_viewer_receipt is not None)
         with self.ledger._transaction() as db:
-            accepted = {obj['id'] for obj in db.execute(
-                'SELECT id FROM objects WHERE reservation=? AND accepted IS NOT NULL', (reservation,))}
+            if source_intake_version == 2:
+                accepted = {obj['id'] for obj in db.execute(
+                    'SELECT id FROM objects WHERE reservation=? AND accepted IS NOT NULL AND accepted_copy_verified=1',
+                    (reservation,))}
+            else:
+                accepted = {obj['id'] for obj in db.execute(
+                    'SELECT id FROM objects WHERE reservation=? AND accepted IS NOT NULL', (reservation,))}
         return {'acceptedObjectIds': sorted(accepted),
                 'fullyAccepted': accepted == {obj['id'] for obj in result['objects']}}

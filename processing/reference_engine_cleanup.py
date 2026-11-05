@@ -144,6 +144,25 @@ class EngineCacheCleanup:
             environment=job['environment'], inputManifestSha256=job['manifestSha256'], pipelineDigest=job['pipelineDigest'],
             resultManifestSha256=result['resultManifestSha256'], outboxId=row['outbox_id'],
             coordinatorReceiptSha256=p.digest(receipt), reservationId=reservation, inputs=inputs)
+        source_intake_version = job.get('sourceIntakeVersion', job.get('submission', {}).get('sourceIntakeVersion'))
+        if source_intake_version == 2:
+            if (type(job.get('sourceIntakeVersion')) is not int or job.get('sourceIntakeVersion') != 2
+                    or type(job.get('submission', {}).get('sourceIntakeVersion')) is not int
+                    or job.get('submission', {}).get('sourceIntakeVersion') != 2):
+                raise _Held('source_acceptance_binding_unavailable')
+            try:
+                from .source_acceptance_binding import validate_source_acceptance_binding
+                source_binding = validate_source_acceptance_binding(source['job'].get('sourceAcceptanceBinding'), job)
+                journal_binding = validate_source_acceptance_binding(source.get('sourceAcceptanceBinding'), job)
+                if source_binding != journal_binding:
+                    raise ValueError('persisted source binding copies differ')
+                if source_binding['coordinatorAuthorityId'] != self.worker.authority_id:
+                    raise ValueError('source authority differs from worker authority')
+            except (ImportError, TypeError, ValueError, KeyError):
+                raise _Held('source_acceptance_binding_unavailable') from None
+            identity.update(sourceIntakeVersion=2, sourceAcceptanceBinding=source_binding)
+        elif source_intake_version is not None or 'sourceAcceptanceBinding' in source['job']:
+            raise _Held('source_acceptance_binding_unavailable')
         return identity, result
 
     def _verify_inputs(self, identity):
@@ -158,6 +177,22 @@ class EngineCacheCleanup:
             raise _Held('viewer_receipt_keys_not_configured')
         if type(receipts) is not list or not 0 < len(receipts) <= p.MAX_OBJECTS:
             raise _Held('full_viewer_receipts_required')
+        source_intake_version = identity.get('sourceIntakeVersion')
+        source_binding = identity.get('sourceAcceptanceBinding')
+        if source_intake_version == 2:
+            try:
+                from .source_acceptance_binding import validate_source_acceptance_binding
+                source_binding = validate_source_acceptance_binding(source_binding,
+                    {'jobId': identity['jobId'], 'generation': identity['generation'],
+                     'environment': identity['environment'], 'manifestSha256': identity['inputManifestSha256'],
+                     'pipelineDigest': identity['pipelineDigest'], 'sourceIntakeVersion': 2,
+                     'submission': {'sourceIntakeVersion': 2}})
+                if source_binding['coordinatorAuthorityId'] != self.worker.authority_id:
+                    raise ValueError('source authority differs from worker authority')
+            except (ImportError, TypeError, ValueError, KeyError):
+                raise _Held('source_acceptance_binding_unavailable') from None
+        elif source_intake_version is not None or source_binding is not None:
+            raise _Held('source_acceptance_binding_unavailable')
         from .viewer_acceptance_receipt import verify_viewer_acceptance_receipt
         checked, seen, accepted, receipt_owners = [], {}, set(), {}
         expected = dict(jobId=identity['jobId'], generation=identity['generation'],
@@ -167,7 +202,7 @@ class EngineCacheCleanup:
             if type(envelope) is not dict or set(envelope) != {'acceptance', 'viewerReceipt'}:
                 # Legacy processing receipts remain valid job-state metadata,
                 # but never add cleanup coverage without the signed sibling.
-                if type(envelope) is dict and 'viewerReceipt' not in envelope:
+                if source_intake_version != 2 and type(envelope) is dict and 'viewerReceipt' not in envelope:
                     try:
                         legacy = p.validate_acceptance(envelope, result_manifest=result,
                             input_manifest_sha256=identity['inputManifestSha256'])
@@ -184,13 +219,20 @@ class EngineCacheCleanup:
             value = p.validate_acceptance(envelope['acceptance'], result_manifest=result,
                 input_manifest_sha256=identity['inputManifestSha256'])
             try:
-                signed = verify_viewer_acceptance_receipt(envelope['viewerReceipt'],
-                    trusted_keys=self.viewer_receipt_keys, expected=expected,
-                    result_manifest=result, accepted_object_ids=value['acceptedObjectIds']).receipt
+                if source_intake_version == 2:
+                    from .viewer_copy_receipt_v2 import verify_viewer_copy_receipt_v2
+                    expected = dict(source_binding, resultManifestSha256=identity['resultManifestSha256'])
+                    signed = verify_viewer_copy_receipt_v2(envelope['viewerReceipt'],
+                        trusted_keys=self.viewer_receipt_keys, expected=expected,
+                        result_manifest=result, acceptance=value).receipt
+                else:
+                    signed = verify_viewer_acceptance_receipt(envelope['viewerReceipt'],
+                        trusted_keys=self.viewer_receipt_keys, expected=expected,
+                        result_manifest=result, accepted_object_ids=value['acceptedObjectIds']).receipt
             except (TypeError, ValueError):
                 raise _Held('viewer_receipt_signature_or_binding_invalid') from None
-            bind_fields = ('jobId','generation','environment','inputManifestSha256','pipelineDigest','resultManifestSha256')
-            if (any(value[field] != signed[field] for field in bind_fields)
+            sibling_fields = ('jobId','generation','environment','inputManifestSha256','pipelineDigest','resultManifestSha256')
+            if (any(value[field] != signed[field] for field in sibling_fields)
                     or value['acceptedObjectIds'] != signed['acceptedObjectIds']
                     or {value['receiptId'], value['storageReceiptId']} & {signed['receiptId'], signed['storageReceiptId']}):
                 raise _Held('viewer_receipt_sibling_binding_mismatch')

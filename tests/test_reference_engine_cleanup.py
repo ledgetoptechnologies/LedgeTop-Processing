@@ -10,6 +10,7 @@ from processing.reference_engine_worker import WorkerHeld
 from processing.viewer_service import NativeEngine
 from tests.test_reference_results import ResultsFixture
 from tests.viewer_receipt_signer import SyntheticViewerSigner
+from tests.viewer_v2_receipt_signer import SyntheticViewerCopyV2Signer
 
 
 class EngineCacheCleanupFixture(ResultsFixture):
@@ -85,8 +86,76 @@ class EngineCacheCleanupFixture(ResultsFixture):
         self.metadata_ack()
         return self.viewer_acceptance()
 
+    def prepare_v2_job(self):
+        row = self.worker._row(self.job['jobId'])
+        identity = json.loads(row['identity'])
+        job = identity['job']
+        job.update(sourceIntakeVersion=2, authorityId=self.authority)
+        job['submission']['sourceIntakeVersion'] = 2
+        digest = 'a' * 64
+        submission_id = job['submission']['submissionId']
+        binding = dict(coordinatorAuthorityId=self.authority,
+            viewerPrincipalId='synthetic-viewer-principal', submissionId=submission_id,
+            activationId=str(uuid.uuid4()), viewerTaskId=str(uuid.uuid4()),
+            viewerAttemptId=submission_id, providerTaskId=job['jobId'],
+            preparedEnvelopeSha256=digest, jobId=job['jobId'], generation=job['generation'],
+            environment=job['environment'], inputManifestSha256=job['manifestSha256'],
+            pipelineDigest=job['pipelineDigest'], sourceManifestSha256='b' * 64,
+            derivedManifestSha256='c' * 64, sourceReceiptSha256='d' * 64, derivedReceiptSha256='e' * 64)
+        job['sourceAcceptanceBinding'] = binding
+        identity['sourceAcceptanceBinding'] = binding
+        with self.worker._db() as db:
+            db.execute('UPDATE executions SET identity=? WHERE job=?',
+                (json.dumps(identity, sort_keys=True, separators=(',', ':')), self.job['jobId']))
+        self.v2_signer = SyntheticViewerCopyV2Signer()
+        self.worker.viewer_receipt_keys = self.v2_signer.trusted_keys
+        self.cleanup = EngineCacheCleanup(self.worker, path=self.root / 'engine-cleanup-v2.sqlite',
+            viewer_receipt_keys=self.v2_signer.trusted_keys)
+        return binding
+
+    def v2_viewer_acceptance(self, binding):
+        result = json.loads(self.worker._row(self.job['jobId'])['result'])
+        acceptance = dict(schemaVersion=1, receiptId='outer-v2-acceptance',
+            storageReceiptId='outer-v2-storage', jobId=self.job['jobId'], generation=1,
+            environment='staging', inputManifestSha256=self.job['manifestSha256'],
+            pipelineDigest=self.job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
+            acceptedObjectIds=[item['id'] for item in result['objects']],
+            acceptedAt='2026-11-04T12:00:00.000Z', validationVersion='ltds-reference-v1')
+        expected = dict(binding, resultManifestSha256=result['resultManifestSha256'])
+        return result, self.v2_signer.envelope(expected, acceptance, result)
+
 
 class EngineCacheCleanupTests(EngineCacheCleanupFixture, unittest.TestCase):
+    def test_v2_signed_copy_receipt_is_required_and_unlocks_only_exact_cleanup(self):
+        binding = self.prepare_v2_job()
+        self.metadata_ack()
+        result, envelope = self.v2_viewer_acceptance(binding)
+        acceptance = envelope['acceptance']
+        with self.assertRaisesRegex(WorkerHeld, 'signed V2 Viewer accepted-copy receipt required'):
+            self.worker.apply_viewer_acceptance(self.job['jobId'], [acceptance])
+        self.assertEqual(self.cleanup.remove(self.job['jobId'], viewer_receipts=[acceptance])['state'], 'held')
+        self.assertEqual(self.remove_calls, [])
+        self.worker.apply_viewer_acceptance(self.job['jobId'], [envelope])
+        outcome = self.cleanup.remove(self.job['jobId'], viewer_receipts=[envelope])
+        self.assertEqual(outcome['state'], 'removed')
+        self.assertEqual(self.remove_calls, [('remove', self.job['jobId'])])
+
+    def test_v2_job_rejects_v1_signed_receipt_without_legacy_fallback(self):
+        binding = self.prepare_v2_job()
+        self.metadata_ack()
+        result = json.loads(self.worker._row(self.job['jobId'])['result'])
+        acceptance = dict(schemaVersion=1, receiptId='outer-v1-acceptance',
+            storageReceiptId='outer-v1-storage', jobId=self.job['jobId'], generation=1,
+            environment='staging', inputManifestSha256=self.job['manifestSha256'],
+            pipelineDigest=self.job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
+            acceptedObjectIds=[item['id'] for item in result['objects']],
+            acceptedAt='2026-11-04T12:00:00Z', validationVersion='ltds-reference-v1')
+        v1 = self.viewer_signer.envelope(acceptance, result)
+        with self.assertRaisesRegex(WorkerHeld, 'Viewer accepted-copy signature or binding is invalid'):
+            self.worker.apply_viewer_acceptance(self.job['jobId'], [v1])
+        self.assertEqual(self.cleanup.remove(self.job['jobId'], viewer_receipts=[v1])['state'], 'held')
+        self.assertEqual(self.remove_calls, [])
+
     def test_invalid_signature_or_unpinned_cleanup_never_removes_engine_cache(self):
         self.metadata_ack()
         valid = self.viewer_acceptance()
