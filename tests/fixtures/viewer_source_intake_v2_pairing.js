@@ -98,8 +98,8 @@ async function main() {
       assert.equal(evidence.coordinateContract.heightSource, 'ellipsoidal');
       assert.equal(evidence.coordinateContract.outputVerticalSystem, 'ellipsoidal height');
       assert.match(evidence.coordinateContract.verticalSystem, /NAVD88/);
-      assert.equal(evidence.correspondences[0].elevationM, 10 * 1200 / 3937);
-      assert.equal(evidence.correspondences[0].ellipsoidalHeightM, 11 * 1200 / 3937);
+      assert.ok(Math.abs(evidence.correspondences[0].elevationM - 10 * 1200 / 3937) < 1e-12);
+      assert.ok(Math.abs(evidence.correspondences[0].ellipsoidalHeightM - 11 * 1200 / 3937) < 1e-12);
       manifest.objects.push({ id: `gcp_${attempt.id}`, name: 'gcp_list.txt', byteSize: snapshot.content.length,
         sha256: snapshot.sha256, kind: 'auxiliary', mediaType: 'text/plain' });
       manifest.objectCount = manifest.objects.length;

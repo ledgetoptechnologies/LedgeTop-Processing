@@ -40,6 +40,7 @@ const config = JSON.parse(fs.readFileSync(process.env.LTDS_PAIRING_CONFIG, 'utf8
     if (config.sourceReleasePhase === 'rerun') {
       const original = processing.getAttempt(attemptId);
       const next = processing.createAttempt({ taskId: original.taskId, providerId: original.providerId,
+        gcpHeightSource: processing.getAttemptGcpEvidence(attemptId)?.coordinateContract?.heightSource,
         options: original.options, capabilityFingerprint: config.capabilityFingerprint });
       assert.notEqual(next.id, original.id);
       assert.equal(processing.getTask(original.taskId).activeAttemptId, next.id);
