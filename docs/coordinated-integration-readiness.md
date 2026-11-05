@@ -6,6 +6,14 @@ approval. Runtime acceptance remains incomplete.
 
 ## Latest combined and native-host preparation checkpoint
 
+Existing V2 admission replay no longer depends on a fresh fleet catalog.
+`1025e44` + `3346383` passed **104/104 selected Linux tests**, no skips, in
+10.890 seconds, including ten focused identity/revocation/CAS/TLS regressions
+and the existing large metadata case. New requests still require fresh
+admission validation. See `evidence/source-catalog-replay-recovery-20261105.md`.
+The matching Viewer `5caf5d88` is frozen for paired qualification; the previous
+paired checkpoint below uses Viewer `6718d1b` and is not its replacement proof.
+
 Processing `65ecd4e` passed **112/112 selected Linux tests, no skips**, in
 96.263 seconds across nine modules. This includes all eight actual Viewer/Python
 paired cases (whole/range/GCP, signed source replay, provider admission, controlled
