@@ -98,6 +98,8 @@ before insertion in the same transaction. Replaying the unchanged inventory is
 read-only and remains possible at an exhausted budget. New-revision and initial
 pin quota failures roll back without changing history. Focused tests cover
 historical accounting, exact replay above budget and atomic refusal.
+The same bounded four-module Linux regression command passed **85/85 tests in
+2.504s** after this quota followup; its owned container was auto-removed.
 
 Read-only audit of the integrated updater at `5914409` found the existing
 `ops/update_reference_coordinator.py` still intentionally rejects these newer
