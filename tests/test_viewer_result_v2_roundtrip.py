@@ -546,13 +546,13 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
 
     def _qualify_source_release(self, root, config, config_path, environment, node, viewer_app,
                                 store, spool, service, clock, requests, responses, drops, state):
-        def viewer(phase):
+        def viewer(phase, expected_exit=0):
             config["sourceReleasePhase"] = phase
             config_path.write_text(json.dumps(config), encoding="utf-8")
             completed = subprocess.run([node, str(Path(__file__).parent / "fixtures" /
                 "viewer_source_release_roundtrip.js")], cwd=viewer_app, env=environment,
                 capture_output=True, text=True, timeout=45, check=False)
-            self.assertEqual(completed.returncode, 0,
+            self.assertEqual(completed.returncode, expected_exit,
                 f"Viewer source-release {phase} failed: {completed.stderr[-3500:]} {completed.stdout[-1000:]}")
             return json.loads(completed.stdout.strip().splitlines()[-1])
 
@@ -567,7 +567,8 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
         self.assertEqual(drops["count"], 1)
         self.assertEqual(len(requests), 1, "restart must find the committed authorization without another POST")
         auth = json.loads(requests[0])["authorization"]
-        from processing.source_release_contract import closure, digest
+        from processing.source_release_contract import closure
+        from processing.reference_protocol import digest
         with store.queue._db() as db:
             row = store._row(db, auth["jobId"])
             retained = closure(json.loads(row["source_manifest_json"]), json.loads(row["derived_manifest_json"]), retained=True)
@@ -590,9 +591,12 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
         clock[0] += 300_000_000_000
         service.checkpoint_timers()
         for _ in range(len(paths) + 6): service.run_once()
+        interrupted = viewer("terminal-crash", expected_exit=42)
+        self.assertTrue(interrupted["snapshotReleaseInterrupted"])
         terminal = viewer("terminal")
         self.assertEqual(terminal["state"], "released")
         self.assertEqual(terminal["preservedClosureSha256"], digest(retained))
+        self.assertEqual(terminal["receiptSha256"], interrupted["receiptSha256"])
         replay = viewer("terminal-replay")
         self.assertEqual(replay["receiptSha256"], terminal["receiptSha256"])
         self.assertEqual(len(requests), 1)
