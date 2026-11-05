@@ -170,8 +170,9 @@ def validate_source_intake(payload, *, environment, capability_fingerprint,
         "pipeline": payload["pipeline"],
         "capabilityFingerprint": payload["capabilityFingerprint"],
     }
-    if provider_task_id is not None:
-        v1_payload["providerTaskId"] = provider_task_id
+    # providerTaskId is a V2 admission identity, validated above and bound by
+    # the complete V2 request digest below. Keep the V1 validator's closed
+    # wire format unchanged while validating the shared pipeline contents.
     checked = p.validate_submission(v1_payload, environment=environment,
         capability_fingerprint=capability_fingerprint,
         options_fingerprint=options_fingerprint,
