@@ -113,15 +113,18 @@ class BoundaryProbe:
         """Census every local container, including bind aliases of original data."""
         old=self.docker.inspect(self.plan['predecessor']['containerId'])
         original=[m for m in old['Mounts'] if m['Destination']=='/prototype-state']
-        require(len(original)==1 and original[0].get('Name')==self.bundle['predecessor']['stateVolume'],
+        require(len(original)==1 and original[0].get('Type')=='volume' and
+                original[0].get('Name')==self.bundle['predecessor']['stateVolume'] and
+                type(original[0].get('Source')) is str and original[0]['Source'].startswith('/'),
                 'original_volume_identity_changed')
         source=original[0]['Source'];rows=[]
-        for identity in self.docker.matching([]):
+        for item in self.docker.writer_inventory():
+            identity=item['Id']
             if identity==target:continue
-            item=self.docker.inspect(identity)
             shares=any(m.get('Name')==self.bundle['predecessor']['stateVolume'] or
                        m.get('Source')==source or str(m.get('Source','')).startswith(source+'/') or
-                       type(m.get('Source')) is str and source.startswith(m['Source'].rstrip('/')+'/')
+                       type(m.get('Source')) is str and m['Source'].startswith('/') and
+                       source.startswith(m['Source'].rstrip('/')+'/')
                        for m in item.get('Mounts',()))
             if not shares:continue
             state=item['State']

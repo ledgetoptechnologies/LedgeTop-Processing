@@ -205,6 +205,61 @@ class DockerCLI:
                 'bounded_exact_container_inventory_required')
         return lines
 
+    def writer_inventory(self):
+        """Fresh complete mount/owner census in one bounded projected inspect.
+
+        Do not preselect by volume or cache an earlier list: bind ancestors and
+        children can alias the original volume. Environment/configuration data
+        are deliberately absent from this projection.
+        """
+        def identities():
+            raw=self.command('container','ls','--all','--no-trunc','--format','{{.ID}}',
+                             output_limit=65536,timeout=30)
+            try:values=raw.decode('ascii').splitlines()
+            except UnicodeError:raise TransportHeld('bounded_writer_inventory_required') from None
+            require(len(values)<=512 and len(set(values))==len(values) and
+                    all(ID.fullmatch(value) for value in values),'bounded_writer_inventory_required')
+            return values
+        before=identities();rows=[]
+        if before:
+            projection=('{"Id":{{json .Id}},"Mounts":{{json .Mounts}},"State":{'
+                '"Running":{{json .State.Running}},"Pid":{{json .State.Pid}},'
+                '"FinishedAt":{{json .State.FinishedAt}}}}')
+            raw=self.command('container','inspect','--format',projection,'--',*before,
+                             output_limit=16*1024**2,timeout=30)
+            require(type(raw) is bytes and len(raw)<=16*1024**2,'bounded_writer_projection_required')
+            try:lines=raw.decode('utf8').splitlines()
+            except UnicodeError:raise TransportHeld('closed_writer_projection_required') from None
+            require(len(lines)==len(before),'complete_writer_projection_required')
+            for line in lines:
+                value=decode(line.encode(),16*1024**2)
+                require(type(value) is dict and set(value)=={'Id','Mounts','State'} and
+                        type(value['Id']) is str and ID.fullmatch(value['Id']), 'closed_writer_projection_required')
+                state=value['State'];mounts=value['Mounts']
+                require(type(state) is dict and set(state)=={'Running','Pid','FinishedAt'} and
+                        type(state['Running']) is bool and type(state['Pid']) is int and
+                        0<=state['Pid']<2**31 and (state['Pid']>0 if state['Running'] else state['Pid']==0) and
+                        type(state['FinishedAt']) is str and len(state['FinishedAt'])<=128,
+                        'closed_writer_state_required')
+                require(type(mounts) is list and len(mounts)<=4096,'bounded_writer_mounts_required')
+                for mount in mounts:
+                    require(type(mount) is dict and {'Type','Source','Destination','RW'}<=set(mount) and
+                            not set(mount)-{'Type','Name','Source','Destination','Driver','Mode','RW','Propagation'} and
+                            mount['Type'] in ('bind','volume','tmpfs') and type(mount['RW']) is bool and
+                            all(type(item) is str and len(item)<=4096 for name,item in mount.items() if name!='RW') and
+                            mount['Destination'].startswith('/') and
+                            all(ord(character)>=32 and ord(character)!=127 for character in mount['Source']) and
+                            (mount['Source'].startswith('/') if mount['Type']=='volume' else
+                             (mount['Source'].startswith('/') or re.match(r'^[A-Za-z]:[/\\]',mount['Source']) is not None)
+                             if mount['Type']=='bind' else mount['Source']==''),
+                            'closed_writer_mount_required')
+                rows.append(value)
+            found=[value['Id'] for value in rows]
+            require(len(set(found))==len(found) and set(found)==set(before),'complete_writer_projection_required')
+        after=identities()
+        require(set(after)==set(before),'writer_inventory_changed_during_observation')
+        return sorted(rows,key=lambda value:value['Id'])
+
     def stop(self, identifier):
         require(type(identifier) is str and ID.fullmatch(identifier), 'exact_container_identity_required')
         # Docker's -1 daemon timeout never escalates to SIGKILL. A client timeout

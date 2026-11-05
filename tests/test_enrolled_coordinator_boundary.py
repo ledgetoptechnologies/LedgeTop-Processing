@@ -22,12 +22,12 @@ class BoundaryTests(unittest.TestCase):
 
     def test_writer_census_rejects_running_parent_bind_alias(self):
         value,plan=bundle();original=dict(Id=plan['predecessor']['containerId'],
-            Mounts=[dict(Destination='/prototype-state',Name=value['predecessor']['stateVolume'],Source='/volumes/original')],
+            Mounts=[dict(Type='volume',Destination='/prototype-state',Name=value['predecessor']['stateVolume'],Source='/volumes/original')],
             State=dict(Running=False,Pid=0,FinishedAt='known'))
         alias=dict(Id='b'*64,Mounts=[dict(Source='/volumes')],State=dict(Running=True,Pid=123,FinishedAt=''))
         class Docker:
             def inspect(self,key):return original if key==original['Id'] else alias
-            def matching(self,filters):return [original['Id'],alias['Id']]
+            def writer_inventory(self):return [original,alias]
         probe=b.BoundaryProbe(plan,value,Docker(),None)
         with self.assertRaises(t.TransportHeld):probe.writers('a'*64)
         alias['State']=dict(Running=False,Pid=0,FinishedAt='stopped')
