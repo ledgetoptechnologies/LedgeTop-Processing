@@ -288,7 +288,7 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                               sourceAcceptanceBinding=self._source_acceptance_binding(row))
         return result
 
-    def _quota(self, db, extra_bytes=0):
+    def _metadata_used_bytes(self, db):
         used = db.execute("""SELECT COALESCE(SUM(length(CAST(input_json AS BLOB))+
           COALESCE(length(CAST(transfer_json AS BLOB)),0)+COALESCE(length(CAST(result_json AS BLOB)),0)),0)
           FROM reference_jobs""").fetchone()[0]
@@ -314,6 +314,14 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             used += db.execute('''SELECT COALESCE(SUM(length(request_id)+length(job_id)+length(epoch_id)+length(request_sha256)
                 +length(CAST(request_json AS BLOB))+length(CAST(receipt_json AS BLOB))),0)
                 FROM reference_recovery_receipts''').fetchone()[0]
+        # Source range metadata is introduced additively and is accounted by
+        # the existing source-intake mixin so all quota decisions share one
+        # calculation, including range requests, custody pins and renewals.
+        used += self._source_range_metadata_bytes(db)
+        return used
+
+    def _quota(self, db, extra_bytes=0):
+        used = self._metadata_used_bytes(db)
         if used + extra_bytes > self.max_metadata_bytes:
             raise Conflict("reference metadata quota reached")
 

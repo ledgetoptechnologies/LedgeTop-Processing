@@ -147,6 +147,32 @@ class ReferenceSourceRangeBrokerTests(unittest.TestCase):
                 self.assertEqual(response_headers.get('Content-Encoding','identity'),'identity')
             finally:
                 https_server.shutdown(); https_server.server_close(); https_thread.join(2)
+            # New range journal rows are charged before mutation. Set the limit
+            # to exactly current usage and prove the next distinct range holds.
+            next_obj=objects[1]
+            next_length=min(validated.chunk_bytes,next_obj.byte_size)
+            next_request_id=_request_id(identity_json,next_obj,0,next_length)
+            with queue._db() as db:
+                used_bytes=store._metadata_used_bytes(db)
+                before_usage=db.execute('SELECT requests_used,bytes_used,attempts_used FROM reference_source_range_usage WHERE job_id=? AND generation=?',
+                    (job['jobId'],job['generation'])).fetchone()
+                before_requests=db.execute('SELECT COUNT(*) FROM reference_source_range_requests WHERE job_id=? AND generation=?',
+                    (job['jobId'],job['generation'])).fetchone()[0]
+            previous_limit=store.max_metadata_bytes
+            store.max_metadata_bytes=used_bytes
+            try:
+                from processing.maintenance import Conflict
+                with self.assertRaisesRegex(Conflict,'metadata quota'):
+                    store.source_range_for_grant(grant['token'],next_obj.id,range_start=0,range_length=next_length,
+                        request_id=next_request_id,if_match='"sha256-'+next_obj.sha256+'"',source_spool=spool,
+                        clock=lambda:now[0])
+                with queue._db() as db:
+                    self.assertEqual(tuple(db.execute('SELECT requests_used,bytes_used,attempts_used FROM reference_source_range_usage WHERE job_id=? AND generation=?',
+                        (job['jobId'],job['generation'])).fetchone()),tuple(before_usage))
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_source_range_requests WHERE job_id=? AND generation=?',
+                        (job['jobId'],job['generation'])).fetchone()[0],before_requests)
+            finally:
+                store.max_metadata_bytes=previous_limit
             probe_id=_request_id(identity_json,objects[0],0,min(validated.chunk_bytes,objects[0].byte_size))
             from urllib.request import Request
             probe=Request('https://broker.invalid'+OBJECT_PREFIX+objects[0].id,method='GET',headers={
@@ -172,6 +198,21 @@ class ReferenceSourceRangeBrokerTests(unittest.TestCase):
             renewal={'protocol':'source-range-v2-renewal','renewalId':'renewal-range-test',
                 'sequence':1,'previousGrantSha256':previous_sha,'previousGrant':old}
             renewal_body=protocol.canonical_json(renewal)
+            with queue._db() as db:
+                used_bytes=store._metadata_used_bytes(db)
+                renewal_count=db.execute('SELECT COUNT(*) FROM reference_source_grant_renewals WHERE job_id=?',
+                    (job['jobId'],)).fetchone()[0]
+            previous_limit=store.max_metadata_bytes
+            store.max_metadata_bytes=used_bytes
+            try:
+                from processing.maintenance import Conflict
+                with self.assertRaisesRegex(Conflict,'metadata quota'):
+                    store.renew_source_transfer_grant(renewal,source_spool=spool,clock=lambda:now[0])
+                with queue._db() as db:
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_source_grant_renewals WHERE job_id=?',
+                        (job['jobId'],)).fetchone()[0],renewal_count)
+            finally:
+                store.max_metadata_bytes=previous_limit
             lost=_ControlOpener(control,drop=RENEWAL_PATH)
             with patch('processing.reference_source_intake_store.time.time',side_effect=lambda:now[0]):
                 with self.assertRaises(Exception):
@@ -237,12 +278,17 @@ class ReferenceSourceRangeBrokerTests(unittest.TestCase):
                 capability_fingerprint='a'*64,options_fingerprint=source_case.payload['pipeline']['odm']['optionsFingerprint'],
                 allowed_odm_options={'numeric-probe'},source_spool=spool,
                 source_attestation_keys=source_case.trusted_keys,authority_id=queue.authority_id)
+            with queue._db() as db:
+                ack_replay_quota=store._metadata_used_bytes(db)
+            store.max_metadata_bytes=ack_replay_quota
             with patch('processing.reference_source_intake_store.time.time',side_effect=lambda:now[0]):
                 replay_ack=_ControlOpener(control).open(__import__('urllib.request').request.Request(
                     'https://broker.invalid'+RENEWAL_ACK_PATH,data=ack_body,method='POST',
                     headers={'Content-Type':'application/json'}))
             self.assertEqual(json.loads(replay_ack.read()),{'protocol':'source-range-v2-renewal-ack',
                 'renewalId':'renewal-range-test','sequence':1,'grantSha256':ack['grantSha256']})
+            with queue._db() as db:
+                self.assertEqual(store._metadata_used_bytes(db),ack_replay_quota)
             revoked=validated_new
             denied_request=Request('https://broker.invalid'+OBJECT_PREFIX+objects[0].id,method='GET',headers={
                 'Authorization':'Bearer '+revoked.token,'Range':f'bytes=0-{objects[0].byte_size-1}',

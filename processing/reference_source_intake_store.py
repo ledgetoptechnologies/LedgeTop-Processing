@@ -25,6 +25,12 @@ def _json(value):
     return protocol.canonical_json(value).decode("utf-8")
 
 
+def _metadata_field_bytes(*values):
+    """Count bounded SQLite text/integer metadata using UTF-8 field lengths."""
+    return sum(len(value) if isinstance(value, bytes) else len(str(value).encode('utf-8'))
+               for value in values if value is not None)
+
+
 def _open_pinned_source(source_spool, job_id, generation, object_id, expected):
     """Open one pinned spool inode without hashing it again for each range."""
     import os
@@ -88,6 +94,38 @@ def _ensure_source_range_schema(queue):
 
 
 class ReferenceSourceIntakeMethods:
+    def _source_range_metadata_bytes(self, db):
+        """Account every persisted source-range journal field in the queue quota."""
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        queries = {
+            'reference_source_grant_renewals': '''SELECT COALESCE(SUM(
+                length(CAST(job_id AS BLOB))+length(CAST(sequence AS TEXT))+length(CAST(renewal_id AS BLOB))+
+                length(CAST(request_json AS BLOB))+length(CAST(request_sha256 AS BLOB))+
+                length(CAST(previous_grant_sha256 AS BLOB))+length(CAST(successor_grant_json AS BLOB))+
+                length(CAST(successor_sha256 AS BLOB))+length(CAST(acked AS TEXT))+length(CAST(created_at AS BLOB))),0)
+                FROM reference_source_grant_renewals''',
+            'reference_source_range_usage': '''SELECT COALESCE(SUM(length(CAST(job_id AS BLOB))+
+                length(CAST(generation AS TEXT))+length(CAST(reservation_id AS BLOB))+
+                length(CAST(requests_used AS TEXT))+length(CAST(bytes_used AS TEXT))+
+                length(CAST(attempts_used AS TEXT))),0) FROM reference_source_range_usage''',
+            'reference_source_range_requests': '''SELECT COALESCE(SUM(length(CAST(job_id AS BLOB))+
+                length(CAST(generation AS TEXT))+length(CAST(request_id AS BLOB))+
+                length(CAST(object_id AS BLOB))+length(CAST(range_start AS TEXT))+
+                length(CAST(range_length AS TEXT))+length(CAST(attempts_used AS TEXT))),0)
+                FROM reference_source_range_requests''',
+            'reference_source_object_pins': '''SELECT COALESCE(SUM(length(CAST(job_id AS BLOB))+
+                length(CAST(generation AS TEXT))+length(CAST(object_id AS BLOB))+
+                length(CAST(byte_size AS TEXT))+length(CAST(sha256 AS BLOB))+length(CAST(mount_id AS BLOB))+
+                length(CAST(device AS BLOB))+length(CAST(inode AS BLOB))+length(CAST(mode AS TEXT))+
+                length(CAST(link_count AS TEXT))+length(CAST(owner_uid AS TEXT))+
+                length(CAST(mtime_ns AS TEXT))+length(CAST(ctime_ns AS TEXT))),0)
+                FROM reference_source_object_pins''',
+            'reference_source_grant_tokens': '''SELECT COALESCE(SUM(length(CAST(token_sha256 AS BLOB))+
+                length(CAST(job_id AS BLOB))+length(CAST(generation AS TEXT))+length(CAST(created_at AS BLOB))),0)
+                FROM reference_source_grant_tokens''',
+        }
+        return sum(db.execute(query).fetchone()[0] for table, query in queries.items() if table in tables)
+
     def renew_source_transfer_grant(self, request, *, source_spool, clock=None):
         """Create or replay one durable, claim-bound V2 grant successor."""
         _ensure_source_range_schema(self.queue)
@@ -267,6 +305,9 @@ class ReferenceSourceIntakeMethods:
                                 (job_id,)).fetchone()[0]
             if latest + 1 != sequence:
                 raise Conflict('source renewal sequence conflict')
+            renewal_metadata = _metadata_field_bytes(job_id, sequence, request['renewalId'], request_encoded,
+                request_sha, previous_sha, successor_encoded, successor_sha, 0, '0000-00-00 00:00:00')
+            self._quota(db, renewal_metadata)
             db.execute('''INSERT INTO reference_source_grant_renewals
                 (job_id,sequence,renewal_id,request_json,request_sha256,previous_grant_sha256,
                  successor_grant_json,successor_sha256) VALUES(?,?,?,?,?,?,?,?)''',
@@ -321,8 +362,13 @@ class ReferenceSourceIntakeMethods:
                                (job_id,request['sequence'])).fetchone()
             if current_grant is None or protocol.digest(json.loads(current_grant['grant_json'])) != renew['previous_grant_sha256']:
                 raise Conflict('source renewal predecessor changed')
+            successor_encoded = _json(successor)
+            token_metadata = _metadata_field_bytes(token_sha, job_id, current['generation'],
+                '0000-00-00 00:00:00')
+            self._quota(db, max(0, len(successor_encoded.encode('utf-8'))-
+                                len(current_grant['grant_json'].encode('utf-8'))) + token_metadata)
             db.execute('UPDATE reference_transfer_grants SET grant_json=?,digest=? WHERE job_id=?',
-                       (_json(successor),row['successor_sha256'],job_id))
+                       (successor_encoded,row['successor_sha256'],job_id))
             db.execute('INSERT INTO reference_source_grant_tokens(token_sha256,job_id,generation) VALUES(?,?,?)',
                        (token_sha,job_id,current['generation']))
             db.execute('UPDATE reference_source_grant_renewals SET acked=1 WHERE job_id=? AND sequence=?',
@@ -372,12 +418,8 @@ class ReferenceSourceIntakeMethods:
                 raise Conflict('source range request identity mismatch')
             usage = db.execute('SELECT requests_used,bytes_used,attempts_used,reservation_id FROM reference_source_range_usage WHERE job_id=? AND generation=?',
                                (token_row['job_id'],job['generation'])).fetchone()
-            if usage is None:
-                db.execute('INSERT INTO reference_source_range_usage(job_id,generation,reservation_id) VALUES(?,?,?)',
-                           (token_row['job_id'],job['generation'],grant['reservationId']))
-                used = (0,0,0,grant['reservationId'])
-            else:
-                used = tuple(usage)
+            usage_exists = usage is not None
+            used = tuple(usage) if usage_exists else (0,0,0,grant['reservationId'])
             if used[3] != grant['reservationId']:
                 raise Conflict('source range reservation changed')
             prior = db.execute('SELECT object_id,range_start,range_length,attempts_used FROM reference_source_range_requests WHERE job_id=? AND generation=? AND request_id=?',
@@ -390,16 +432,38 @@ class ReferenceSourceIntakeMethods:
                 if used[0]+1 > grant['requestBudget'] or used[1]+range_length > grant['byteBudget']:
                     raise Conflict('source range budget exhausted')
                 attempts = 1
-                db.execute('INSERT INTO reference_source_range_requests(job_id,generation,request_id,object_id,range_start,range_length,attempts_used) VALUES(?,?,?,?,?,?,0)',
-                           (token_row['job_id'],job['generation'],request_id,object_id,range_start,range_length))
-                db.execute('UPDATE reference_source_range_usage SET requests_used=requests_used+1,bytes_used=bytes_used+? WHERE job_id=? AND generation=?',
-                           (range_length,token_row['job_id'],job['generation']))
             if used[2]+1 > grant['attemptBudget']:
                 raise Conflict('source range attempt budget exhausted')
-            db.execute('UPDATE reference_source_range_requests SET attempts_used=? WHERE job_id=? AND generation=? AND request_id=?',
-                       (attempts,token_row['job_id'],job['generation'],request_id))
-            db.execute('UPDATE reference_source_range_usage SET attempts_used=attempts_used+1 WHERE job_id=? AND generation=?',
-                       (token_row['job_id'],job['generation']))
+            next_requests = used[0] + (0 if prior else 1)
+            next_bytes = used[1] + (0 if prior else range_length)
+            next_attempts = used[2] + 1
+            if usage_exists:
+                usage_growth = (_metadata_field_bytes(next_requests, next_bytes, next_attempts)
+                                - _metadata_field_bytes(*used[:3]))
+            else:
+                usage_growth = _metadata_field_bytes(token_row['job_id'], job['generation'],
+                    grant['reservationId'], next_requests, next_bytes, next_attempts)
+            if prior:
+                request_growth = _metadata_field_bytes(attempts)-_metadata_field_bytes(prior['attempts_used'])
+            else:
+                request_growth = _metadata_field_bytes(token_row['job_id'],job['generation'],request_id,
+                    object_id,range_start,range_length,attempts)
+            self._quota(db, max(0,usage_growth) + max(0,request_growth))
+            if not usage_exists:
+                db.execute('INSERT INTO reference_source_range_usage(job_id,generation,reservation_id,requests_used,bytes_used,attempts_used) VALUES(?,?,?,?,?,?)',
+                    (token_row['job_id'],job['generation'],grant['reservationId'],next_requests,next_bytes,next_attempts))
+            elif not prior:
+                db.execute('UPDATE reference_source_range_usage SET requests_used=?,bytes_used=?,attempts_used=? WHERE job_id=? AND generation=?',
+                    (next_requests,next_bytes,next_attempts,token_row['job_id'],job['generation']))
+            else:
+                db.execute('UPDATE reference_source_range_usage SET attempts_used=? WHERE job_id=? AND generation=?',
+                    (next_attempts,token_row['job_id'],job['generation']))
+            if not prior:
+                db.execute('INSERT INTO reference_source_range_requests(job_id,generation,request_id,object_id,range_start,range_length,attempts_used) VALUES(?,?,?,?,?,?,?)',
+                           (token_row['job_id'],job['generation'],request_id,object_id,range_start,range_length,attempts))
+            else:
+                db.execute('UPDATE reference_source_range_requests SET attempts_used=? WHERE job_id=? AND generation=? AND request_id=?',
+                    (attempts,token_row['job_id'],job['generation'],request_id))
             receipt_row = db.execute('''SELECT byte_size,sha256,mount_id,storage_key,receipt_json FROM reference_source_object_receipts
                 WHERE job_id=? AND generation=? AND object_id=?''',(token_row['job_id'],job['generation'],object_id)).fetchone()
             pin = db.execute('''SELECT byte_size,sha256,mount_id,device,inode,mode,link_count,owner_uid,mtime_ns,ctime_ns
@@ -1163,7 +1227,9 @@ class ReferenceSourceIntakeMethods:
             encoded = _json(grant)
             digest = protocol.digest(grant)
             token_sha = hashlib.sha256(grant['token'].encode('ascii')).hexdigest()
-            self._quota(db, len(encoded.encode('utf-8')))
+            token_metadata = _metadata_field_bytes(token_sha, job_id, current['generation'],
+                '0000-00-00 00:00:00')
+            self._quota(db, len(encoded.encode('utf-8')) + token_metadata)
             db.execute('INSERT INTO reference_transfer_grants VALUES(?,?,?)', (job_id, encoded, digest))
             db.execute('INSERT INTO reference_source_grant_tokens(token_sha256,job_id,generation) VALUES(?,?,?)',
                        (token_sha, job_id, current['generation']))
