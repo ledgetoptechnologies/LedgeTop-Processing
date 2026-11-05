@@ -52,6 +52,14 @@ def bundle():
 
 
 class DeploymentBundleTests(unittest.TestCase):
+    def test_worker_unit_normal_service_is_accepted_and_backslash_is_rejected_directly(self):
+        value,plan=bundle();worker=copy.deepcopy(value['workers'][0])
+        worker['settings']['unitName']='normal.service'
+        d.worker(worker,plan['authorityId'])
+        for unit in ('normal\\xservice','normal\\.service','normalXservice'):
+            worker['settings']['unitName']=unit
+            with self.assertRaises(d.TransportHeld):d.worker(worker,plan['authorityId'])
+
     def test_exact_bundle_consumes_existing_plan_and_has_no_hash_fixed_point(self):
         value,plan=bundle();result=d.validate_bundle(value,plan)
         self.assertEqual(result,value);self.assertNotIn('planSha256',result['holderSettings'])

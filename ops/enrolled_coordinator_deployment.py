@@ -71,7 +71,7 @@ def worker(value, authority):
             'fixed_existing_worker_host_required')
     settings=value['settings'];closed(settings,WORKER_SETTINGS,'existing_worker_handover_settings_required')
     require(type(settings['schemaVersion']) is int and settings['schemaVersion']==1,'worker_settings_version_required')
-    require(type(settings['unitName']) is str and re.fullmatch('[A-Za-z0-9_.-]{1,128}\\.service',settings['unitName']),
+    require(type(settings['unitName']) is str and re.fullmatch(r'[A-Za-z0-9_.-]{1,128}\.service',settings['unitName']),
             'existing_worker_unit_required')
     for name in ('unitFile','pythonExecutable','configPath','sourceRoot','readinessCAFile'):_absolute_path(settings[name])
     for name in ('unitSha256','sourceSha256'):hash_value(settings[name])
