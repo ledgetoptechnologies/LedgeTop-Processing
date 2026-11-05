@@ -9,8 +9,11 @@ from datetime import datetime
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -21,11 +24,15 @@ from processing import reference_protocol as protocol
 from processing import reference_source_intake_store as intake_store
 from processing.coordinator_freeze import CoordinatorFrozen
 from processing.maintenance import Conflict
+from processing.prototype import Queue
+from processing.reference_control import ReferenceControlAPI
 from processing.reference_driver import DriverHeld, DriverWait, ReferenceDriver
+from processing.reference_source_readers import SourceReaderError
 from processing.reference_source_intake_store import SOURCE_RANGE_GRANT_TTL_SECONDS
+from processing.reference_store import PROFILE, ReferenceStore
 from processing.reference_transfer import TransferError
-from processing.source_range_transfer import (RENEWAL_ACK_PATH, RENEWAL_PATH, SourceRangeClient,
-    _request_id, validate_source_grant)
+from processing.source_range_transfer import (MAX_RENEWAL_SEQUENCE, RENEWAL_ACK_PATH, RENEWAL_PATH,
+    SourceRangeClient, _request_id, validate_source_grant)
 from processing.source_spool import SourceSpool
 from tests.test_reference_source_range_broker import _ControlOpener, _Response
 
@@ -49,8 +56,45 @@ class _Outage(_ControlOpener):
         return super().open(request, timeout=timeout)
 
 
-class SourceGrantRenewalTests(unittest.TestCase):
+class _BlockedClose:
+    """A real descriptor whose close stalls the way a hung NAS mount can."""
+
+    def __init__(self, reader, entered, release, finished):
+        self.reader, self.entered, self.release, self.finished = reader, entered, release, finished
+
+    def fileno(self):
+        return self.reader.fileno()
+
+    def close(self):
+        self.entered.set()
+        if not self.release.wait(5):
+            raise AssertionError('blocked close was not released')
+        self.reader.close()
+        self.finished.set()
+
+
+class _UnknownClose:
+    """The descriptor is gone but the close reports no usable outcome."""
+
+    def __init__(self, reader):
+        self.reader = reader
+
+    def fileno(self):
+        return self.reader.fileno()
+
+    def close(self):
+        self.reader.close()
+        raise OSError('synthetic close outcome unknown')
+
+
+class RenewalHarness(unittest.TestCase):
+    chunk_bytes = None
+
     def setUp(self):
+        if self.chunk_bytes is not None:
+            chunk = patch('processing.source_range_transfer.CHUNK_BYTES', self.chunk_bytes)
+            chunk.start()
+            self.addCleanup(chunk.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
@@ -59,6 +103,7 @@ class SourceGrantRenewalTests(unittest.TestCase):
         case.setUp()
         case.payload['manifest']['id'] = 'dataset-grant-renewal'
         case.rehash()
+        self.case = case
         spool_root = self.root / 'spool'
         spool_root.mkdir(mode=0o700)
         marker = spool_root / '.ltds-source-spool-id'
@@ -72,17 +117,15 @@ class SourceGrantRenewalTests(unittest.TestCase):
             max_object_bytes=1024, chunk_bytes=3)
         self.queue, self.store, self.control, job, self.claim_token = case._make_reserved_source_job(
             self.directory.name, self.spool, 'renewal', source_range_v2=True)
-        self.addCleanup(self.queue.close)
+        self.addCleanup(lambda: self.queue.close())
         self.job_id = job['jobId']
         self.first_grant = self.store.mint_source_transfer_grant(self.job_id, source_spool=self.spool)
         self.store.update_phase(self.job_id, 'fetching')
         self.claim = self.store.get(self.job_id, private=True)
         self.lease = stamp(self.claim['transferRequest']['expiresAt'])
         self.now = [stamp(self.first_grant['expiresAt']) - 60]
-        for name in ('renew_source_transfer_grant', 'acknowledge_source_transfer_grant', 'source_range_for_grant'):
-            real = getattr(self.store, name)
-            setattr(self.store, name, lambda *args, real=real, **kwargs: real(
-                *args, **{'clock': lambda: self.now[0], **kwargs}))
+        self.bind_clock()
+        self.plan = str(uuid.uuid4())
         self.worker = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
             claim_token=self.claim_token)
         self.client = SourceRangeClient('https://broker.invalid', self.root / 'worker-ledger.sqlite',
@@ -93,6 +136,31 @@ class SourceGrantRenewalTests(unittest.TestCase):
         self.driver = SimpleNamespace(clock=lambda: self.now[0], source_range_client=self.client,
             _save=lambda *_args: self.saved.append(copy.deepcopy(self.data)))
         self.driver._source_range_grant = lambda *args: ReferenceDriver._source_range_grant(self.driver, *args)
+
+    def bind_clock(self):
+        for name in ('renew_source_transfer_grant', 'acknowledge_source_transfer_grant', 'source_range_for_grant'):
+            real = getattr(self.store, name)
+            setattr(self.store, name, lambda *args, real=real, **kwargs: real(
+                *args, **{'clock': lambda: self.now[0], **kwargs}))
+
+    def restart_coordinator(self):
+        self.queue.close()
+        self.queue = Queue(self.directory.name)
+        self.queue.allowed_profiles.add(PROFILE)
+        self.store = ReferenceStore(self.queue)
+        self.control = ReferenceControlAPI(self.store, viewer_bearers={'synthetic-staging-token': 'staging'},
+            worker_bearers={WORKER_TOKEN: dict(node_id='cluster', worker_id='worker', worker_instance_id='instance')},
+            capability_fingerprint='a' * 64, options_fingerprint=self.case.payload['pipeline']['odm']['optionsFingerprint'],
+            allowed_odm_options={'numeric-probe'}, source_spool=self.spool,
+            source_attestation_keys=self.case.trusted_keys, authority_id=self.queue.authority_id)
+        self.bind_clock()
+        self.opener(_ControlOpener(self.control))
+
+    def freeze(self, action, **kwargs):
+        gate = self.queue._coordinator_freeze
+        return gate.transition(dict(requestId=str(uuid.uuid4()), planId=self.plan, action=action,
+            expectedRevision=gate.status()['revision'], startupId=self.queue.startup_id),
+            owner_secret='synthetic-freeze-owner', **kwargs)
 
     def credentials(self, route, _payload):
         headers = {'Authorization': 'Bearer ' + WORKER_TOKEN}
@@ -175,6 +243,8 @@ class SourceGrantRenewalTests(unittest.TestCase):
             return tuple(db.execute('''SELECT requests_used,bytes_used,attempts_used
                 FROM reference_source_range_usage WHERE job_id=?''', (self.job_id,)).fetchone())
 
+
+class SourceGrantRenewalTests(RenewalHarness):
     # Coordinator disconnect longer than the TTL.
 
     def test_disconnect_longer_than_ttl_issues_one_successor_to_the_claim_owner(self):
@@ -421,6 +491,12 @@ class SourceGrantRenewalTests(unittest.TestCase):
         self.renew()
         self.assertEqual([(row['sequence'], row['acked']) for row in self.journal()], [(1, 1)])
 
+    def test_drain_starting_during_verification_does_not_refuse_the_claim(self):
+        self.after_lease()
+        with self.during_verification(lambda: self.execute("UPDATE nodes SET state='draining' WHERE id=?", 'cluster')):
+            self.renew_directly()
+        self.assertEqual(len(self.journal()), 1)
+
     def test_draining_node_lets_an_existing_claim_finish(self):
         self.after_lease()
         self.execute("UPDATE nodes SET state='draining' WHERE id=?", 'cluster')
@@ -436,19 +512,11 @@ class SourceGrantRenewalTests(unittest.TestCase):
 
     def test_coordinator_freeze_during_renewal_defers_the_exact_request(self):
         self.after_lease()
-        gate = self.queue._coordinator_freeze
-        plan = str(uuid.uuid4())
-
-        def change(action, **kwargs):
-            gate.transition(dict(requestId=str(uuid.uuid4()), planId=plan, action=action,
-                expectedRevision=gate.status()['revision'], startupId=self.queue.startup_id),
-                owner_secret='synthetic-freeze-owner', **kwargs)
-
-        with self.during_verification(lambda: change('intent')):
+        with self.during_verification(lambda: self.freeze('intent')):
             with self.assertRaises(CoordinatorFrozen):
                 self.renew_directly()
         self.assertEqual(self.journal(), [])
-        change('abort', healthy=True)
+        self.freeze('abort', healthy=True)
         self.renew_directly()
         self.assertEqual(len(self.journal()), 1)
 
@@ -497,6 +565,424 @@ class SourceGrantRenewalTests(unittest.TestCase):
             self.job_id, object_id)
         with self.assertRaises(Conflict):
             self.renew_directly()
+        self.assertEqual(self.journal(), [])
+
+
+class ExhaustedBoundsTests(RenewalHarness):
+    """There is no wall-clock limit; finite budgets end in a hold, never a delete."""
+
+    def setUp(self):
+        super().setUp()
+        self.first = validate_source_grant(self.first_grant, job=self.claim, clock=lambda: self.now[0])
+        self.kept = self.root / 'fetched-input.bin'
+        self.client.download_object(grant=self.first, object_id=self.first.objects[0].id, destination=self.kept)
+        self.after_lease()
+        self.before = self.retained()
+
+    def retained(self):
+        """Everything either side would lose if an exhausted bound cleaned up."""
+        tables = ('reference_source_object_receipts', 'reference_source_object_pins', 'reference_transfer_grants')
+        with self.queue._db() as db:
+            rows = {table: [tuple(row) for row in db.execute(f'SELECT * FROM {table} WHERE job_id=?', (self.job_id,))]
+                    for table in tables}
+            status = tuple(db.execute('SELECT status,held_reason FROM jobs WHERE id=?', (self.job_id,)).fetchone())
+        spool = {path.name: path.read_bytes() for path in self.spool.root.rglob('*') if path.is_file()}
+        worker = sorted(item.name for item in self.root.glob('*.bin'))
+        return rows, status, spool, self.kept.read_bytes(), worker
+
+    def assert_held_with_nothing_deleted(self, reason):
+        for _attempt in range(2):
+            with self.assertRaisesRegex(DriverHeld, reason):
+                self.renew()
+            self.assertEqual(self.retained(), self.before)
+            self.assertEqual(self.journal(), [])
+            self.assertEqual(self.data['grant'], self.first_grant)
+
+    def test_spent_attempt_budget_holds(self):
+        budget = self.first.attempt_budget
+        self.execute('UPDATE reference_source_range_usage SET attempts_used=? WHERE job_id=?', budget, self.job_id)
+        self.execute('UPDATE reference_source_range_requests SET attempts_used=? WHERE job_id=?', budget, self.job_id)
+        self.assert_held_with_nothing_deleted('source_renewal_rejected')
+
+    def test_spent_byte_budget_holds(self):
+        over = self.first.byte_budget + 1
+        self.execute('UPDATE reference_source_range_usage SET bytes_used=? WHERE job_id=?', over, self.job_id)
+        self.execute('UPDATE reference_source_range_requests SET range_length=? WHERE job_id=?', over, self.job_id)
+        self.assert_held_with_nothing_deleted('source_renewal_rejected')
+
+    def test_spent_request_budget_holds(self):
+        extra = self.first.request_budget
+        for index in range(extra):
+            self.execute('INSERT INTO reference_source_range_requests VALUES(?,?,?,?,?,?,?)', self.job_id,
+                self.first_grant['generation'], f'extra-{index}', self.first.objects[0].id, 0, 0, 1)
+        self.execute('''UPDATE reference_source_range_usage SET requests_used=requests_used+?,
+            attempts_used=attempts_used+? WHERE job_id=?''', extra, extra, self.job_id)
+        self.assert_held_with_nothing_deleted('source_renewal_rejected')
+
+    def test_spent_renewal_sequence_holds_without_asking_the_coordinator(self):
+        self.data['sourceRenewalSequence'] = MAX_RENEWAL_SEQUENCE
+        self.opener(lambda *_args, **_kwargs: self.fail('an exhausted sequence must not reach the coordinator'))
+        self.assert_held_with_nothing_deleted('source_renewal_sequence_exhausted')
+
+    def test_coordinator_refuses_a_sequence_past_the_bound(self):
+        with self.assertRaisesRegex(Conflict, 'sequence invalid'):
+            self.renew_directly(self.request(sequence=MAX_RENEWAL_SEQUENCE + 1))
+        self.assertEqual(self.retained(), self.before)
+
+    def test_time_alone_is_not_a_bound(self):
+        self.now[0] += 10 * 365 * 24 * 3600
+        self.assertEqual(self.fetch(self.renew(), 1), b'1,2,3\n')
+
+
+class RenewalRestartTests(RenewalHarness):
+    """A real restart holds every running job, so the journal must outlast the hold.
+
+    Nothing resumes a v2 job in fetching today: claim recovery accepts only
+    processing. ``lift_restart_hold`` stands in for that missing step.
+    """
+
+    def lift_restart_hold(self):
+        self.execute("UPDATE jobs SET status='running',held_reason=NULL WHERE id=? AND held_reason='coordinator_restart'",
+            self.job_id)
+
+    def held_reason(self):
+        with self.queue._db() as db:
+            return tuple(db.execute('SELECT status,held_reason FROM jobs WHERE id=?', (self.job_id,)).fetchone())
+
+    def test_restart_holds_the_claim_and_renewal_issues_nothing_new(self):
+        self.after_lease()
+        self.restart_coordinator()
+        self.assertEqual(self.held_reason(), ('held', 'coordinator_restart'))
+        with self.assertRaisesRegex(DriverHeld, 'source_renewal_rejected'):
+            self.renew()
+        self.assertEqual(self.journal(), [])
+        self.lift_restart_hold()
+        self.assertEqual(self.fetch(self.renew(), 0), b'abc')
+
+    def test_lost_renewal_reply_replays_the_same_successor_after_a_restart(self):
+        self.after_lease()
+        self.opener(_ControlOpener(self.control, drop=RENEWAL_PATH))
+        with self.assertRaises(DriverWait):
+            self.renew()
+        minted = self.journal()
+        intent = copy.deepcopy(self.data['sourceRenewal'])
+        self.restart_coordinator()
+        with self.assertRaisesRegex(DriverHeld, 'source_renewal_rejected'):
+            self.renew()
+        self.assertEqual(self.data['sourceRenewal'], intent)
+        self.lift_restart_hold()
+        renewed = self.renew()
+        self.assertEqual(hashlib.sha256(protocol.canonical_json(self.data['grant'])).hexdigest(),
+            minted[0]['successor_sha256'])
+        self.assertEqual([(row['sequence'], row['acked']) for row in self.journal()], [(1, 1)])
+        self.assertEqual(self.fetch(renewed, 0), b'abc')
+
+    def test_lost_ack_reply_replays_after_a_restart_but_reads_wait_for_the_hold(self):
+        self.after_lease()
+        self.opener(_ControlOpener(self.control, drop=RENEWAL_ACK_PATH))
+        with self.assertRaises(DriverWait):
+            self.renew()
+        self.restart_coordinator()
+        renewed = self.renew()
+        self.assertEqual([(row['sequence'], row['acked']) for row in self.journal()], [(1, 1)])
+        with self.assertRaises(Conflict):
+            self.read_range(renewed.token, renewed)
+        self.lift_restart_hold()
+        self.assertEqual(self.fetch(renewed, 1), b'1,2,3\n')
+
+    def test_replay_after_a_restart_still_needs_the_claim_owner(self):
+        self.after_lease()
+        self.renew_directly()
+        self.restart_coordinator()
+        self.lift_restart_hold()
+        self.assertEqual(self.post(RENEWAL_PATH, self.request(), {}).status, 401)
+        with self.assertRaises(Conflict):
+            self.renew_directly(worker_instance_id='replacement')
+        self.assertEqual(self.renew_directly()['sequence'], 1)
+
+    def test_claim_recovery_cannot_resume_a_source_range_transfer_yet(self):
+        from processing.reference_recovery import ClaimRecoveryService, RecoveryNodeBinding
+        self.restart_coordinator()
+        binding = RecoveryNodeBinding('cluster', 'physical-cluster', self.queue.authority_id,
+            'http://127.0.0.1:18080', 1, 1000)
+        service = ClaimRecoveryService(self.store, {'cluster': binding})
+        identity = {key: self.worker[key] for key in ('node_id', 'worker_id', 'worker_instance_id')}
+        with self.assertRaisesRegex((Conflict, ValueError), 'original transfer reservation'):
+            service.state(self.job_id, identity=identity, claim_token=self.claim_token)
+
+
+class RenewalAcrossRangesTests(RenewalHarness):
+    """One object over several ranges, with the canonical chunk scaled down."""
+    chunk_bytes = 2
+
+    def test_one_object_resumes_at_its_next_range_after_renewal_past_the_lease(self):
+        first = validate_source_grant(self.first_grant, job=self.claim, clock=lambda: self.now[0])
+        commit = self.client._commit_range
+
+        def commit_then_outlive(key, object_id, request_id, start, length, digest):
+            commit(key, object_id, request_id, start, length, digest)
+            if start == 0:
+                self.after_lease()
+
+        with patch.object(self.client, '_commit_range', side_effect=commit_then_outlive):
+            self.assertEqual(self.fetch(first, 0), b'abc')
+        self.assertEqual(self.data['sourceRenewalSequence'], 1)
+        self.assertEqual(self.usage(), (2, 3, 2))
+        with self.queue._db() as db:
+            served = [tuple(row) for row in db.execute('''SELECT range_start,range_length,attempts_used
+                FROM reference_source_range_requests WHERE job_id=? ORDER BY range_start''', (self.job_id,))]
+        self.assertEqual(served, [(0, 2, 1), (2, 1, 1)])
+
+
+class RenewalSourceIoTests(RenewalHarness):
+    """Verification's NAS descriptors under the coordinator's own lifecycle."""
+
+    def setUp(self):
+        super().setUp()
+        self.generation = self.first_grant['generation']
+        self.after_lease()
+        self.readers = self.store.source_readers()
+
+    def renew_in_background(self):
+        outcome = []
+
+        def run():
+            try:
+                outcome.append(self.renew_directly())
+            except BaseException as error:
+                outcome.append(error)
+        thread = threading.Thread(target=run)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        return thread, outcome
+
+    @contextmanager
+    def blocked_open(self):
+        real = intake_store._open_pinned_source
+        entered, release = threading.Event(), threading.Event()
+
+        def stalled(*args, **kwargs):
+            if not entered.is_set():
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError('blocked open was not released')
+            return real(*args, **kwargs)
+        with patch.object(intake_store, '_open_pinned_source', side_effect=stalled):
+            try:
+                yield entered, release
+            finally:
+                release.set()
+
+    @contextmanager
+    def blocked_close(self):
+        real = intake_store._open_pinned_source
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        wrapped = []
+
+        def opened(*args, **kwargs):
+            reader, identity = real(*args, **kwargs)
+            if not wrapped:
+                wrapped.append(True)
+                reader = _BlockedClose(reader, entered, release, finished)
+            return reader, identity
+        with patch.object(intake_store, '_open_pinned_source', side_effect=opened):
+            try:
+                yield entered, release, finished
+            finally:
+                release.set()
+
+    def finish(self, thread, outcome):
+        thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(outcome), 1)
+        return outcome[0]
+
+    def assert_one_commit_or_none(self, result):
+        self.assertEqual(len(self.journal()), 0 if isinstance(result, BaseException) else 1, repr(result))
+
+    def seal_when_drained(self):
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                return self.freeze('seal')
+            except Conflict:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.02)
+
+    def test_blocked_open_keeps_freeze_from_sealing(self):
+        with self.blocked_open() as (entered, release):
+            thread, outcome = self.renew_in_background()
+            self.assertTrue(entered.wait(2))
+            self.freeze('intent')
+            self.freeze('drain')
+            with self.assertRaises(Conflict):
+                self.freeze('seal')
+            release.set()
+            self.assertIsInstance(self.finish(thread, outcome), CoordinatorFrozen)
+        self.assertEqual(self.journal(), [])
+        self.assertEqual(self.seal_when_drained()['phase'], 'frozen')
+        self.freeze('resume', healthy=True)
+
+    def test_blocked_open_keeps_release_from_starting(self):
+        with self.blocked_open() as (entered, release):
+            thread, outcome = self.renew_in_background()
+            self.assertTrue(entered.wait(2))
+            self.readers.fence(self.job_id, self.generation, 'renewal-release')
+            with self.assertRaisesRegex(SourceReaderError, 'source_operation_busy'):
+                self.readers.reserve_release(self.job_id, self.generation, 'renewal-release', authorize=lambda _db: None)
+            release.set()
+            result = self.finish(thread, outcome)
+        self.assertIsInstance(result, SourceReaderError)
+        self.assertEqual(self.journal(), [])
+        self.assertEqual(self.readers.active_count(self.job_id, self.generation), 0)
+        self.readers.reserve_release(self.job_id, self.generation, 'renewal-release', authorize=lambda _db: None).close()
+
+    def test_blocked_open_keeps_coordinator_authority(self):
+        with self.blocked_open() as (entered, release):
+            thread, outcome = self.renew_in_background()
+            self.assertTrue(entered.wait(2))
+            with self.assertRaises(SourceReaderError):
+                self.queue.close()
+            release.set()
+            self.assertFalse(isinstance(self.finish(thread, outcome), BaseException))
+        self.assertEqual(len(self.journal()), 1)
+
+    def test_blocked_close_is_drained_before_freeze_seals(self):
+        with self.blocked_close() as (entered, release, finished):
+            thread, outcome = self.renew_in_background()
+            self.assertTrue(entered.wait(2))
+            sealed = []
+
+            def freeze():
+                self.freeze('intent')
+                self.freeze('drain')
+                self.seal_when_drained()
+                sealed.append(finished.is_set())
+            freezer = threading.Thread(target=freeze)
+            freezer.start()
+            self.addCleanup(freezer.join, 10)
+            freezer.join(0.5)
+            self.assertTrue(freezer.is_alive(), 'freeze sealed with a source close outstanding')
+            release.set()
+            result = self.finish(thread, outcome)
+            freezer.join(10)
+        self.assertEqual(sealed, [True])
+        self.assert_one_commit_or_none(result)
+        self.freeze('resume', healthy=True)
+
+    def test_blocked_close_is_drained_before_release_starts(self):
+        with self.blocked_close() as (entered, release, finished):
+            thread, outcome = self.renew_in_background()
+            self.assertTrue(entered.wait(2))
+            started = []
+
+            def run_release():
+                self.readers.fence(self.job_id, self.generation, 'renewal-release')
+                deadline = time.monotonic() + 5
+                while True:
+                    try:
+                        handle = self.readers.reserve_release(self.job_id, self.generation, 'renewal-release',
+                            authorize=lambda _db: None)
+                    except SourceReaderError:
+                        if time.monotonic() > deadline:
+                            raise
+                        time.sleep(0.02)
+                        continue
+                    started.append(finished.is_set())
+                    handle.close()
+                    return
+            releaser = threading.Thread(target=run_release)
+            releaser.start()
+            self.addCleanup(releaser.join, 10)
+            releaser.join(0.5)
+            self.assertTrue(releaser.is_alive(), 'release started with a source close outstanding')
+            release.set()
+            result = self.finish(thread, outcome)
+            releaser.join(10)
+        self.assertEqual(started, [True])
+        self.assert_one_commit_or_none(result)
+
+    def test_blocked_close_is_drained_before_queue_close(self):
+        with self.blocked_close() as (entered, release, finished):
+            thread, outcome = self.renew_in_background()
+            self.assertTrue(entered.wait(2))
+            closing = []
+
+            def close_queue():
+                try:
+                    self.queue.close()
+                    closing.append(('closed', finished.is_set()))
+                except (SourceReaderError, RuntimeError, CoordinatorFrozen):
+                    closing.append(('refused', finished.is_set()))
+            closer = threading.Thread(target=close_queue)
+            closer.start()
+            self.addCleanup(closer.join, 10)
+            closer.join(0.5)
+            self.assertTrue(closer.is_alive(), 'Queue.close returned with a source close outstanding')
+            release.set()
+            self.finish(thread, outcome)
+            closer.join(10)
+        self.assertTrue(closing[0][1], closing)
+
+    def test_unknown_close_retains_the_pin_and_coordinator_authority(self):
+        real, wrapped = intake_store._open_pinned_source, []
+
+        def opened(*args, **kwargs):
+            reader, identity = real(*args, **kwargs)
+            if not wrapped:
+                wrapped.append(True)
+                reader = _UnknownClose(reader)
+            return reader, identity
+        with patch.object(intake_store, '_open_pinned_source', side_effect=opened):
+            with self.assertRaisesRegex(Conflict, 'renewal_authority_unavailable'):
+                self.renew_directly()
+        self.assertEqual(self.journal(), [])
+        self.assertEqual(self.readers.active_count(self.job_id, self.generation), 1)
+        held = [handle for handle in self.readers._handles.values() if handle.uncertain]
+        self.assertEqual(len(held), 1)
+        with self.assertRaises(SourceReaderError):
+            self.queue.close()
+        self.readers.fence(self.job_id, self.generation, 'renewal-release')
+        with self.assertRaisesRegex(SourceReaderError, 'source_operation_busy'):
+            self.readers.reserve_release(self.job_id, self.generation, 'renewal-release', authorize=lambda _db: None)
+        # Only the process owner's exit may retire this in production. Reconcile
+        # by hand so cleanup can close the coordinator this test still owns.
+        held[0].uncertain, held[0]._known_closed = False, True
+        held[0].close()
+
+    def test_exact_retry_after_an_unknown_close_keeps_that_pin(self):
+        real, wrapped = intake_store._open_pinned_source, []
+
+        def opened(*args, **kwargs):
+            reader, identity = real(*args, **kwargs)
+            if not wrapped:
+                wrapped.append(True)
+                reader = _UnknownClose(reader)
+            return reader, identity
+        with patch.object(intake_store, '_open_pinned_source', side_effect=opened):
+            with self.assertRaises(Conflict):
+                self.renew_directly()
+        self.renew_directly()
+        self.assertEqual(len(self.journal()), 1)
+        self.assertEqual(self.readers.active_count(self.job_id, self.generation), 1)
+        held = [handle for handle in self.readers._handles.values() if handle.uncertain]
+        held[0].uncertain, held[0]._known_closed = False, True
+        held[0].close()
+
+    def test_failed_reauthorization_after_open_closes_the_descriptor(self):
+        real, opened_files = intake_store._open_pinned_source, []
+
+        def opened(*args, **kwargs):
+            reader, identity = real(*args, **kwargs)
+            opened_files.append(reader)
+            self.set_job_status('cancelled')
+            return reader, identity
+        with patch.object(intake_store, '_open_pinned_source', side_effect=opened):
+            with self.assertRaises(Conflict):
+                self.renew_directly()
+        self.assertTrue(opened_files[0].closed)
+        self.assertEqual(self.readers.active_count(self.job_id, self.generation), 0)
         self.assertEqual(self.journal(), [])
 
 

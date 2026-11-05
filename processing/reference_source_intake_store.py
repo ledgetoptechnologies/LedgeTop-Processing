@@ -225,7 +225,11 @@ class ReferenceSourceIntakeMethods:
 
     @staticmethod
     def _source_renewal_node_ready(db, node_id):
-        """A drain lets running work finish; an update or hold issues nothing."""
+        """Renewal continues an exact existing claim, so a drain allows it.
+
+        Maintenance waits for active transfers and work, and a drained node
+        still admits no new claim. An update or a hold issues nothing.
+        """
         node = db.execute('SELECT state FROM nodes WHERE id=?', (node_id,)).fetchone()
         if node is None or node['state'] not in ('active', 'scheduled', 'draining'):
             raise Conflict('renewal_authority_unavailable')
@@ -275,6 +279,7 @@ class ReferenceSourceIntakeMethods:
         import hmac
         import math
         from datetime import datetime, timezone
+        from .coordinator_freeze import CoordinatorFrozen
         from .source_range_transfer import MAX_RENEWAL_SEQUENCE, validate_source_grant
 
         if source_spool is None or type(request) is not dict:
@@ -333,9 +338,22 @@ class ReferenceSourceIntakeMethods:
             if ((previous.get('generation'), previous.get('environment'), previous.get('manifestSha256'))
                     != (binding['generation'], binding['environment'], binding['manifestSha256'])):
                 raise Conflict('source renewal authority unavailable')
+            self._source_renewal_node_ready(db, worker['node_id'])
             return {'binding': binding,
-                    'nodeState': self._source_renewal_node_ready(db, worker['node_id']),
                     'ranges': self._source_range_ledger(db, job_id, binding['generation'])}
+
+        def custody(db, job_id):
+            """Claim fields that must hold across NAS I/O; cheap enough per object."""
+            state = db.execute('''SELECT r.generation,r.phase,r.node_id,r.environment,r.manifest_sha,
+                j.status,j.node_id AS queue_node,j.worker_id AS queue_worker,j.claim_hash,
+                c.request_id,c.node_id AS claim_node,c.worker_id AS claim_worker,c.instance_id,c.token,
+                s.source_state,s.derived_state,g.digest
+                FROM reference_jobs r JOIN jobs j ON j.id=r.job_id
+                LEFT JOIN reference_claims c ON c.job_id=r.job_id
+                LEFT JOIN reference_source_intakes s ON s.job_id=r.job_id
+                LEFT JOIN reference_transfer_grants g ON g.job_id=r.job_id
+                WHERE r.job_id=?''', (job_id,)).fetchone()
+            return dict(state) if state else None
 
         def replay(db, job_id, job):
             # Exact retries, including retries after a lost response, get the
@@ -374,6 +392,7 @@ class ReferenceSourceIntakeMethods:
                 raise Conflict('source renewal sequence conflict')
             snapshot = {'row': dict(row), 'claim': claim, 'receipts': receipt_rows,
                         'grant': grant_row, 'pins': pin_rows, 'latest': latest, 'authority': authority}
+            claim_custody = custody(db, job_id)
             db.commit()
 
         request_now = now()
@@ -425,6 +444,12 @@ class ReferenceSourceIntakeMethods:
             pins_by_id = {pin['object_id']:pin for pin in pin_rows if pin['generation']==row['generation']}
             if len(pins_by_id)!=len(pin_rows) or set(pins_by_id)!=granted_ids:
                 raise Conflict('source renewal pins unavailable')
+
+            def still_owned(db):
+                self._source_renewal_node_ready(db, worker['node_id'])
+                if custody(db, job_id) != claim_custody:
+                    raise Conflict('source renewal authority changed during verification')
+
             for item in old.objects:
                 stored = by_id[item.id]
                 if (stored['generation'] != row['generation'] or stored['byte_size'] != item.byte_size
@@ -437,8 +462,13 @@ class ReferenceSourceIntakeMethods:
                         != (job_id,row['generation'],item.id,item.byte_size,item.sha256,
                             source_spool.mount_id,stored['storage_key'])):
                     raise Conflict('source renewal receipt changed')
-                reader,_identity = _open_pinned_source(source_spool,job_id,row['generation'],item.id,pins_by_id[item.id])
-                reader.close()
+                # Each NAS descriptor is a registered read, so freeze, release
+                # and Queue.close wait for it and an unknown close keeps its pin.
+                handle,_metadata = self._registered_source_reader(job_id=job_id, generation=row['generation'],
+                    object_id=item.id, authorize=still_owned,
+                    open_reader=lambda item=item: (_open_pinned_source(source_spool,job_id,row['generation'],
+                        item.id,pins_by_id[item.id])[0], None))
+                handle.close()
             verified_at = now()
             expiry = verified_at + SOURCE_RANGE_GRANT_TTL_SECONDS
             if reservation_expiry > verified_at:
@@ -449,7 +479,7 @@ class ReferenceSourceIntakeMethods:
             successor = dict(previous)
             successor.update(expiresAt=grant_expiry, token=secrets.token_urlsafe(32))
             validate_source_grant(successor, job=private, clock=lambda: verified_at, past_reservation=True)
-        except Conflict:
+        except (Conflict, CoordinatorFrozen):
             raise
         except Exception:
             raise Conflict('renewal_authority_unavailable') from None
