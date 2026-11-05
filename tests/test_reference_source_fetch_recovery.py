@@ -8,6 +8,8 @@ import copy
 import hashlib
 import json
 import os
+import threading
+import time
 from unittest.mock import patch
 import uuid
 
@@ -17,8 +19,9 @@ from processing.maintenance import Conflict
 from processing.reference_driver import DriverHeld, DriverWait, SOURCE_RECOVERY_ATTEMPTS
 from processing.reference_recovery import (SOURCE_RECEIPT_PROTOCOL, SOURCE_STATE_PROTOCOL,
     SOURCE_TRANSFER_MAX_BYTES, ClaimRecoveryService)
+from processing.scratch_policy import ScratchLedger
 from processing.source_range_transfer import RENEWAL_ACK_PATH, RENEWAL_PATH, validate_source_grant
-from tests.test_reference_source_grant_renewal import RenewalHarness, _ControlOpener
+from tests.test_reference_source_grant_renewal import RenewalHarness, WORKER_TOKEN, _ControlOpener, stamp
 
 RECORD_TABLES = ('jobs', 'reference_jobs', 'reference_claims', 'reference_transfer_grants',
     'reference_source_grant_renewals', 'reference_source_grant_tokens', 'reference_source_range_usage',
@@ -658,6 +661,114 @@ class RecoveryManyObjectTests(RecoveryHarness):
             with self.assertRaises(Conflict):
                 self.state()
         self.assertEqual(self.status(), ('held', 'coordinator_restart'))
+
+
+class StepThroughRecoveryTests(RecoveryHarness):
+    """step() from the driver's own reservation to execution_pending, through a restart.
+
+    Real step, recovery, routed v2 coordinator, fenced ledger, range client and
+    journal; the reservation is the one step() built and posted, never a copy from
+    the coordinator. Gate, engine and TLS are absent: nothing here reaches them.
+    """
+    harness_reserves = False
+
+    def start_transfer(self):
+        self.now = [time.time()]
+
+    def first_journal(self):
+        return {}
+
+    def real_driver(self):
+        driver = super().real_driver()
+        del driver._save
+        (self.root / 'scratch').mkdir(mode=0o700)
+        self.ledger = ScratchLedger(self.root / 'ledger.sqlite', self.root / 'scratch',
+            capacity_probe=lambda _: 10**9, safety_floor_bytes=0)
+        self.ledger.clock = lambda: self.now[0]
+        driver.ledger, driver._lock, driver._bearer = self.ledger, threading.Lock(), WORKER_TOKEN
+        driver._state_owner = driver.execution_router = driver.combined_preparation = None
+        driver._combined_preparation_initial = driver._active_step = driver._active_job = None
+        driver.source_range_v2_enabled, driver.output_budget, driver.transfer_ttl = True, 1000, 300
+        self.client.renewal_headers = driver._source_renewal_headers
+        _, claim = self.worker_request('POST', '/claim', {'jobId': self.job_id, 'claimRequestId': 'source-claim-renewal'})
+        driver._save(self.job_id, 'claimed', {'claim': claim})
+        return driver
+
+    def row(self):
+        with self.driver._db() as db:
+            stage, data = db.execute('SELECT stage,data FROM driver_jobs WHERE job=?', (self.job_id,)).fetchone()
+        return stage, json.loads(data)
+
+    def step(self, state):
+        result = self.driver.step()
+        self.assertEqual(result, {'state': state, 'jobId': self.job_id})
+
+    def to_fetching(self):
+        for state in ('awaiting_grant', 'fetching_pending', 'fetching'):
+            self.step(state)
+        return self.row()[1]['reservation']
+
+    def fenced(self, reservation):
+        with self.ledger._transaction() as db:
+            row = self.ledger._reservation(db, reservation['reservationId'])
+            fence = db.execute('SELECT 1 FROM transfer_fences WHERE reservation=?', (reservation['reservationId'],)).fetchone()
+            count = db.execute('SELECT COUNT(*) FROM reservations').fetchone()[0]
+        return row['state'], fence is not None, count
+
+    def assert_bound(self, reservation, stage):
+        """The coordinator and the receipt name the digest of what step() posted."""
+        digest = protocol.digest(reservation)
+        self.assertEqual(self.row()[0], stage)
+        self.assertEqual(self.receipts()[0]['transferRequestSha256'], digest)
+        with self.queue._db() as db:
+            wire = db.execute('SELECT transfer_json FROM reference_jobs WHERE job_id=?', (self.job_id,)).fetchone()[0]
+        self.assertEqual(protocol.digest(json.loads(wire)), digest)
+        self.assertEqual(self.status(), ('running', None))
+        self.assertEqual(self.fenced(reservation), ('reserved', True, 1))
+        self.assertEqual(self.row()[1]['sourceRecovery'], {'attempts': 1, 'pending': None})
+
+    def test_mid_fetch_restart_past_the_lease_resumes_the_drivers_own_reservation(self):
+        reservation = self.to_fetching()
+        self.step('fetching')
+        self.assertEqual(len(self.row()[1]['inputPaths']), 1)
+        self.now[0] = stamp(reservation['expiresAt']) + 3600
+        self.restart_coordinator()
+        self.assertEqual(self.status(), ('held', 'coordinator_restart'))
+        self.assertTrue(self.state()['eligible'])
+        self.assertEqual(self.state()['reservation']['transferRequestSha256'], protocol.digest(reservation))
+        self.step('fetching')
+        self.assert_bound(reservation, 'fetching')
+        _stage, data = self.row()
+        self.assertEqual(len(data['inputPaths']), 2)
+        self.assertGreater(self.receipts()[0]['committedBytes'], 0)
+        self.step('processing_pending')
+        self.step('execution_pending')
+        for relative in self.row()[1]['inputPaths'].values():
+            self.assertTrue((self.root / 'scratch' / relative).is_file())
+
+    def test_restart_after_the_last_object_resumes_with_no_get_left(self):
+        reservation = self.to_fetching()
+        self.step('fetching')
+        self.step('fetching')
+        self.step('processing_pending')
+        self.restart_coordinator()
+        self.step('processing_pending')
+        self.assert_bound(reservation, 'processing_pending')
+        self.step('execution_pending')
+
+    def test_a_reservation_that_is_not_the_posted_one_is_held_and_reported(self):
+        reservation = self.to_fetching()
+        self.restart_coordinator()
+        stage, data = self.row()
+        data['reservation'] = dict(reservation, nonce='another-nonce')
+        self.driver._save(self.job_id, stage, data)
+        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'source_recovery_state_changed'})
+        self.assertEqual(self.receipts(), [])
+        self.assertEqual(self.status(), ('held', 'coordinator_restart'))
+        stage, data = self.row()
+        self.assertNotIn('inputPaths', data)
+        self.assertEqual((data['watch']['reasonCode'], data['watch']['ack']['reasonCode']),
+            ('source_transfer_unavailable', 'source_transfer_unavailable'))
 
 
 def patch_limit(value):

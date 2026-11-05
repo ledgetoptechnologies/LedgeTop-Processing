@@ -105,7 +105,7 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
         self.payload["manifest"]["totalBytes"] = len(image_bytes) + len(derived_bytes)
         self.rehash()
 
-    def _make_reserved_source_job(self, directory, spool, claim_suffix, *, source_range_v2=False):
+    def _make_reserved_source_job(self, directory, spool, claim_suffix, *, source_range_v2=False, reserve=True):
         worker_token = "synthetic-worker-token-012345"
         queue = Queue(directory)
         queue.allowed_profiles.add(PROFILE)
@@ -147,6 +147,8 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
             protected_transport=True)
         self.assertEqual(claim.status, 200, claim.body)
         claim_token = claim.body["claimToken"]
+        if not reserve:
+            return queue, store, control, job, claim_token
         expires = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(
             timespec="milliseconds").replace("+00:00", "Z")
         reservation = {"reservationId": "source-reservation-" + claim_suffix,

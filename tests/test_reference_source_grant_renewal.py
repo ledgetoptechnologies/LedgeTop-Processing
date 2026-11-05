@@ -91,6 +91,7 @@ class _UnknownClose:
 class RenewalHarness(unittest.TestCase):
     chunk_bytes = None
     extra_objects = 0
+    harness_reserves = True
 
     def setUp(self):
         if self.chunk_bytes is not None:
@@ -119,14 +120,10 @@ class RenewalHarness(unittest.TestCase):
         self.spool = SourceSpool(spool_root, mount_id='a' * 64, safety_floor_bytes=0,
             max_object_bytes=1024, chunk_bytes=3)
         self.queue, self.store, self.control, job, self.claim_token = case._make_reserved_source_job(
-            self.directory.name, self.spool, 'renewal', source_range_v2=True)
+            self.directory.name, self.spool, 'renewal', source_range_v2=True, reserve=self.harness_reserves)
         self.addCleanup(lambda: self.queue.close())
         self.job_id = job['jobId']
-        self.first_grant = self.store.mint_source_transfer_grant(self.job_id, source_spool=self.spool)
-        self.store.update_phase(self.job_id, 'fetching')
-        self.claim = self.store.get(self.job_id, private=True)
-        self.lease = stamp(self.claim['transferRequest']['expiresAt'])
-        self.now = [stamp(self.first_grant['expiresAt']) - 60]
+        self.start_transfer()
         self.bind_clock()
         self.plan = str(uuid.uuid4())
         self.worker = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
@@ -134,11 +131,21 @@ class RenewalHarness(unittest.TestCase):
         self.client = SourceRangeClient('https://broker.invalid', self.root / 'worker-ledger.sqlite',
             opener=_ControlOpener(self.control), clock=lambda: self.now[0])
         self.client.renewal_headers = self.credentials
-        self.data = {'grant': copy.deepcopy(self.first_grant), 'claim': self.claim,
-            'reservation': self.claim['transferRequest']}
+        self.data = self.first_journal()
         self.saved, self.saved_stages = [], []
         self.down, self.lose_reply, self.requests = set(), set(), []
         self.driver = self.real_driver()
+
+    def start_transfer(self):
+        self.first_grant = self.store.mint_source_transfer_grant(self.job_id, source_spool=self.spool)
+        self.store.update_phase(self.job_id, 'fetching')
+        self.claim = self.store.get(self.job_id, private=True)
+        self.lease = stamp(self.claim['transferRequest']['expiresAt'])
+        self.now = [stamp(self.first_grant['expiresAt']) - 60]
+
+    def first_journal(self):
+        return {'grant': copy.deepcopy(self.first_grant), 'claim': self.claim,
+            'reservation': self.claim['transferRequest']}
 
     def add_objects(self, case):
         """Synthetic extra photos, so the transfer wire scales with the manifest."""
@@ -175,8 +182,10 @@ class RenewalHarness(unittest.TestCase):
         driver._request = self.worker_request
         driver._save = self.save
         with driver._db() as db:
-            db.execute('CREATE TABLE driver_jobs(job TEXT PRIMARY KEY,claim_request TEXT NOT NULL)')
-            db.execute('INSERT INTO driver_jobs VALUES(?,?)', (self.job_id, 'source-claim-renewal'))
+            db.execute('''CREATE TABLE driver_jobs(created INTEGER PRIMARY KEY AUTOINCREMENT,job TEXT UNIQUE NOT NULL,
+                claim_request TEXT UNIQUE NOT NULL,stage TEXT NOT NULL,data TEXT NOT NULL)''')
+            db.execute("INSERT INTO driver_jobs(job,claim_request,stage,data) VALUES(?,?,'claimed','{}')",
+                (self.job_id, 'source-claim-renewal'))
         return driver
 
     def save(self, _job_id, stage, data):
