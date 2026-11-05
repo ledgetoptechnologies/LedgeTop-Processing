@@ -1390,8 +1390,13 @@ class ReferenceDriver:
                 raise DriverWait('source_recovery_refused')
             if not state['eligible']:
                 raise DriverHeld('source_recovery_ineligible')
-            # The epoch, node or closure moved on, so that request can never commit.
-            journal['pending'] = None
+            # The epoch, node or closure moved on, so that request can never commit
+            # now, but it may have before. Its replay returns a stored receipt and
+            # nothing else: that resolves it, and a refusal leaves it unresolved.
+            if not settle(request):
+                journal['pending'] = None
+                data['sourceRecovery'] = journal
+                self._save(job_id, stage, data)
         if running:
             return
         if not state['eligible']:
