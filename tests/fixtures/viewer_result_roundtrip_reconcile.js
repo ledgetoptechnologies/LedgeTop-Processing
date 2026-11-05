@@ -49,7 +49,7 @@ try {
   };
   const job = { id: config.reconcileJobId, attempt_id: attempt.id, lease_owner: config.reconcileOwner };
   const dependencies = { processing, config: { referenceSourceIntake: {
-    enabled: true, providerId: provider.id, environment: 'staging' } }, sourceIntake, storage };
+    enabled: true, providerId: provider.id, origin: provider.endpoint, environment: 'staging' } }, sourceIntake, storage };
   (async () => {
     let firstCode = null;
     try { await processReconcile(job, dependencies); }

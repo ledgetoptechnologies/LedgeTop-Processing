@@ -16,7 +16,6 @@ import sys
 import tempfile
 import threading
 import unittest
-import zipfile
 from unittest.mock import patch
 
 from cryptography import x509
@@ -78,16 +77,12 @@ def _write_tls_material(directory: Path):
 
 
 class _NativeTransport:
-    def __init__(self, before_remove):
-        import io
+    def __init__(self, before_remove, archive_bytes):
         self.calls = []
         self.tasks = {}
         self.before_remove = before_remove
         self.options = [dict(name="numeric-probe", type="float", value=0.0, help="Synthetic option.")]
-        stream = io.BytesIO()
-        with zipfile.ZipFile(stream, "w") as archive:
-            archive.writestr("synthetic-result.txt", b"synthetic ODM archive result")
-        self.archive = stream.getvalue()
+        self.archive = archive_bytes
 
     def initialize(self, task):
         self.calls.append(("initialize", task["engine_uuid"]))
@@ -170,7 +165,7 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
             servers, threads, originals = [], [], []
             try:
                 spool = SourceSpool(spool_root, mount_id="c" * 64, safety_floor_bytes=0,
-                                    max_object_bytes=1024, chunk_bytes=256)
+                                    max_object_bytes=1024 * 1024, chunk_bytes=64 * 1024)
                 store = ReferenceStore(queue)
                 worker = ReferenceEngineWorker(root / "worker.sqlite",
                     ledger=ScratchLedger(root / "ledger.sqlite", scratch_root, capacity_probe=lambda _: 10**9,
@@ -181,7 +176,18 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                     worker_id="roundtrip-worker", engine_version="synthetic-engine-1",
                     allowed_odm_options={"numeric-probe"}, viewer_receipt_keys=viewer_receipt_keys,
                     engine_probe=lambda _deadline: "roundtrip-engine")
-                transport = _NativeTransport(lambda: None)
+                archive_path = root / "synthetic-odm-result.zip"
+                archive_environment = os.environ.copy()
+                archive_environment.pop("NODE_PATH", None)
+                archive_environment["LTDS_VIEWER_APP_ROOT"] = str(viewer_app)
+                archive_build = subprocess.run([node, str(Path(__file__).parent / "fixtures" /
+                    "viewer_result_roundtrip_archive.js"), str(archive_path)], cwd=viewer_app,
+                    env=archive_environment, capture_output=True, text=True, timeout=30, check=False)
+                self.assertEqual(archive_build.returncode, 0,
+                    f"archive cwd={root}, viewer={viewer_app}, node={node}: {archive_build.stderr[-3000:]}")
+                result_archive = archive_path.read_bytes()
+                self.assertGreater(len(result_archive), 0)
+                transport = _NativeTransport(lambda: None, result_archive)
                 result_bytes = transport.archive
                 engine_patches = []
                 for method in ("initialize", "upload", "action", "read", "download"):
@@ -281,7 +287,11 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                     "snapshotPrivateKeyPem": _pem_private(snapshot_key), "snapshotPublicKeyPem": _pem_public(snapshot_key),
                     "attestationPrivateKeyPem": _pem_private(source_key), "attestationPublicKeyPem": _pem_public(source_key),
                     "copyPrivateKeyPem": _pem_private(viewer_copy_key), "copyPublicKeyPem": _pem_public(viewer_copy_key),
-                    "modelsRoot": str(stored_path), "resultBytesBase64": __import__('base64').b64encode(result_bytes).decode()}
+                    "modelsRoot": str(stored_path), "resultBytesBase64": __import__('base64').b64encode(result_bytes).decode(),
+                    "datasetMount": str(root / "datasets"), "cacheMount": str(root / "cache"),
+                    "trashMount": str(root / "trash"), "ingestOpsBaseUrl": "http://operations.test"}
+                for directory in (config["datasetMount"], config["cacheMount"], config["trashMount"]):
+                    Path(directory).mkdir(parents=True, exist_ok=True)
                 config_path = root / "pairing-config.json"
                 config_path.write_text(json.dumps(config), encoding="utf-8")
                 if os.name != "nt": config_path.chmod(0o600)
@@ -347,6 +357,21 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                 self.assertEqual(driver_result["state"], "completed")
                 self.assertTrue(any(call[0] == "remove" and call[1] == state["providerTaskId"] for call in transport.calls))
                 self.assertTrue(any(path.is_file() for path in stored_path.rglob("*.bin")), "worker cleanup must not remove Viewer copy")
+                ingest = subprocess.run([node, str(Path(__file__).parent / "fixtures" /
+                    "viewer_result_roundtrip_ingest.js")], cwd=viewer_app, env=environment,
+                    capture_output=True, text=True, timeout=60, check=False)
+                self.assertEqual(ingest.returncode, 0, ingest.stderr[-4000:])
+                ingested = json.loads(ingest.stdout.strip().splitlines()[-1])
+                self.assertEqual(ingested["attemptStatus"], "derivatives")
+                self.assertEqual(ingested["outputStatus"], "staged")
+                self.assertEqual(ingested["derivativeStatus"], "pending")
+                self.assertEqual(ingested["derivativeType"], "mesh_tiles")
+                self.assertFalse(ingested["derivativeOptional"])
+                self.assertTrue(ingested["trustedInputSnapshot"])
+                self.assertEqual(set(ingested["assetKinds"]), {"ept", "glb", "obj"})
+                self.assertEqual(ingested["eptFileCount"], 3)
+                self.assertTrue(ingested["assetsHaveDigests"])
+                self.assertFalse(ingested["published"])
                 self.assertEqual(accepted["drop_count"], 1)
                 self.assertEqual(transport.calls.count(("initialize", state["providerTaskId"])), 1,
                                  "accepted-copy retry and cleanup must not duplicate engine task execution")

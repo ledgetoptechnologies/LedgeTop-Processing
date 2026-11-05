@@ -109,9 +109,15 @@ async function main() {
     ({ processing, outbox } = open());
     const replayedIntent = outbox.getIntent(attempt.id);
     const resumedClient = makeClient(outbox);
-    const acceptedIntent = await resumedClient.createOrReplay(replayedIntent, { localJobId, owner });
-    const binding = acceptedIntent.remoteBinding;
+    const binding = await resumedClient.createOrReplay(replayedIntent, { localJobId, owner });
+    const persistedBinding = outbox.getIntent(attempt.id).remoteBinding;
+    assert.deepEqual(binding, persistedBinding,
+      'createOrReplay returns the durable binding directly, matching the outbox replay state');
     assert.equal(binding.jobId, attempt.providerTaskId);
+    assert.equal(binding.coordinatorAuthorityId, config.authorityId);
+    assert.equal(binding.attemptId, attempt.id);
+    assert.equal(binding.providerTaskId, attempt.providerTaskId);
+    assert.equal(binding.generation, persistedBinding.generation);
     assert.equal(binding.requestSha256, afterLostPost.sourceIntakeSha256);
     assert.equal(outbox.getIntent(attempt.id).sourceIntakeCanonical, preclaim.sourceIntakeCanonical);
     out.lostPostReplay = true;
