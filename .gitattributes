@@ -1,4 +1,5 @@
 # Shared wire fixture hashes identify exact bytes across Windows and Linux.
+.github/workflows/processing.yml text eol=lf
 contracts/reference-v1.contract.json text eol=lf
 contracts/source-retention-v1.contract.json text eol=lf
 contracts/reference-broker-budget-candidate/reference-range-budget-policy-vectors.json text eol=lf

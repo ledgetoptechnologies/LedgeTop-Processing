@@ -2,9 +2,8 @@ name: Processing checks and private packages
 
 on:
   push:
-    branches:
-    - main
-  workflow_dispatch: null
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,7 +14,7 @@ concurrency:
 
 jobs:
   checks:
-    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') }}
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     steps:
@@ -36,7 +35,9 @@ jobs:
 
   publish:
     needs: checks
-    if: ${{ github.ref == 'refs/heads/main' && (github.repository == 'ledgetoptechnologies/LedgeTop-Processing' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request') }}
+    if: >-
+      github.repository == 'ledgetoptechnologies/LedgeTop-Processing' &&
+      github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
