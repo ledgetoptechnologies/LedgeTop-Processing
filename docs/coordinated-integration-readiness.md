@@ -662,16 +662,20 @@ are not operational.
    reservation per physical host before enabling concurrent dispatch. The
    configured identity checks are integrated in `572cf56`; they do not provide
    live daemon verification or physical-host attestation.
-2. **NAS source custody:** implement the authenticated source producer, immutable
-   source generation/manifest, physical capacity reservation, writer/purge fence,
-   independently verified custody, recovery and explicit source release. Ops
-   issue #427 owns this missing path. Beau controls all TrueNAS changes. The
-   selected spool subfolder under existing Model-Viewer Storage is not yet
-   provisioned or ACL-qualified.
-3. **Source pairing:** the current #429/#430 broker and integrated Python client
-   are paired synthetically as recorded above. Qualify authenticated source
-   production, grant renewal and source custody as one installed path; the
-   passing range test does not establish those missing upstream components.
+2. **NAS source custody:** qualify the implemented authenticated V2 intake,
+   immutable source generation/manifests, reserved transfer, retained receipts,
+   recovery and source-reader leases against the installed NAS-backed path.
+   The combined synthetic tests above prove code paths, not server/export
+   durability, ACL isolation or physical-host power-loss behavior. Authenticated
+   explicit source release/deletion and Viewer operational-hold retirement
+   remain unimplemented. Beau controls all TrueNAS changes. The selected spool
+   subfolder under existing Model-Viewer Storage is not yet provisioned or
+   ACL-qualified.
+3. **Source pairing:** the V2 signed-intake, whole/range transfer and receipt
+   pairing are exercised with actual Viewer/Python code in the combined tests
+   above. Qualify source production, grant renewal and custody as one installed
+   path; synthetic pairing does not establish the NAS or installed-service
+   boundaries. The historical #429/#430 evidence is an earlier checkpoint.
 4. **Result custody and cleanup:** qualify runtime credentials, persistent mounts,
    exact acknowledgement replay, disconnected delivery, disk-full/corruption
    handling and cleanup against the actual installed services. Source release
