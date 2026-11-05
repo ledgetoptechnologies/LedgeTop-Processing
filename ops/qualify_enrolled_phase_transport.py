@@ -515,9 +515,10 @@ class LocalWorkerReadinessFixtures:
                     packet=probe(manifest,str(uuid.uuid4()),control=LocalControl())
                     break
                 except HTTPError as error:
-                    if error.code==503 and time.monotonic()<deadline:
+                    code=error.code;error.close()
+                    if code==503 and time.monotonic()<deadline:
                         time.sleep(0.02);continue
-                    raise
+                    require(False,'actual_fixture_worker_unready')
             value=packet['readiness'];stamp=packet['process']['startTime']
             result.append(dict(nodeId=instance['node'],configSha256=value['configSha256'],
                 sourceSha256=value['sourceSha256'],engineVersion=value['engineVersion'],
