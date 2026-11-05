@@ -6,6 +6,47 @@ approval. Runtime acceptance remains incomplete.
 
 ## November 4 worker integration checkpoint
 
+### Actual client and host preparation checkpoint
+
+Code `39e0825` passed the expanded **273/273** Ubuntu/pilot combined suite with
+no skips, including the V2 metadata budget, worker validation, grant broker,
+outside-lock verification/CAS, runtime and service-unit checks. Later source
+grant corruption/clock hardening `c45e8b3` passed its 18-test intake module on
+Ubuntu; it rejects orphan token history before scanning and at final CAS.
+
+Actual Viewer candidate `b6f03f31208dce2b98314183b7fbc5d5aab45e26` paired with
+Processing test integration `e06ccc1` passed once on Windows (Node 24.16/Python
+3.13) and once on Ubuntu (Node 24.22.2/Python 3.12), with no skips in either
+pair. The test uses real Viewer SQLite migrations, ProcessingRepository,
+PreparedSubmissionOutbox, preclaim signing and SourceIntakeClientV2 against the
+actual loopback HTTPS control/API/Store/spool. Lost replies after committed POST,
+PUT and source completion recover with exact immutable request replay, ACK-based
+upload resume, strict persisted receipt replay and the `1e-7` option. The spool's
+mount check is explicitly simulated: this proves the wire/persistence seam, not
+NAS custody. Listener/child cleanup is asserted; the temporary Linux Node export
+container and binary were removed after testing.
+
+The same code/dependency profile `39e0825` is privately staged, inactive, under
+`~/.local/share/ledgetop-processing-reference/dependency-candidates/39e0825` on
+both PCs. Its source archive SHA-256 is
+`d8024c99a411ab646fbba8974d68c8e0d1867ed9104c4cf23df58c74971f4e5e`.
+Main Python 3.10.12 and cluster Python 3.14.4 both imported the worker/daemon and
+passed 25 selected validator tests with two explicit optional Node checks skipped
+(27 total per host). Private dependencies are cryptography 50.0.2, cffi 2.1.1,
+rfc8785 0.1.4, and pycparser 2.23 on main / 3.12 on cluster. No system Python
+packages, running containers, active-version symlinks, service units or NAS
+configuration were changed. These are preparation artifacts, not active workers.
+
+**Next result-path mismatch:** the current Viewer emits signed
+`ltds-viewer-accepted-copy-v2` receipts, while Processing Store acceptance and
+engine cleanup still use the strict V1 verifier. The intake pair does not execute
+an engine or prove result return, Viewer accepted-copy acknowledgement or
+cleanup. Add the exact V2 verifier and authenticated source/preclaim binding to
+the existing acceptance chain; never translate away V2 fields or accept unsigned
+metadata as V2 copy custody. Until that path is paired on the combined revision,
+the photo workflow remains unqualified for client work. Large transfer lease
+renewal, installed NAS qualification and real-data processing remain open too.
+
 ### Combined intake/worker checkpoint
 
 Code `e7d63c6` combines source intake `2ba927e`, pinned live-engine worker

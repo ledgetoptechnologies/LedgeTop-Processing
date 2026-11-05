@@ -24,6 +24,16 @@ the host, then bind it into the single coordinator container.
 
 ## Evidence needed before activation
 
+The first operator check is read-only, in the TrueNAS system shell:
+
+```sh
+sudo midclt call filesystem.getacl /mnt/Plugins/App_Data/Model-Viewer/Storage false true
+```
+
+This requests the advanced ACL with resolved owner/group IDs; it does not set
+permissions. The parameter order is documented in the
+[TrueNAS 25.10 getacl API](https://api.truenas.com/v25.10/api_methods_filesystem.getacl.html).
+
 1. Inspect the actual parent and proposed path ACL and share scope. Preserve
    administrative recovery access. A private directory mode or share ACL alone
    does not prove isolation from Viewer, whose existing parent mount is writable.
