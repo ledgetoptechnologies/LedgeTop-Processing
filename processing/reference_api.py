@@ -12,6 +12,7 @@ from types import MappingProxyType
 
 from .maintenance import Conflict
 from . import reference_protocol as protocol
+from .source_spool import SourceSpoolCloseUncertain, SourceSpoolError
 
 
 @dataclass(frozen=True)
@@ -261,6 +262,10 @@ class ReferenceAPI:
                 grant = protocol.decode_submission(body)
                 return Response(200, self.store.receive_transfer_grant(job_id, grant))
             return self._error(405, "method_not_allowed")
+        except SourceSpoolCloseUncertain:
+            return self._error(503, 'source_descriptor_retirement_uncertain')
+        except SourceSpoolError as error:
+            return self._source_spool_error(error)
         except (protocol.ProtocolError, ValueError, TypeError):
             return self._error(400, "invalid_request")
         except Conflict:
@@ -275,6 +280,10 @@ class ReferenceAPI:
         values=[value for key,value in headers.items() if type(key) is str and key.lower()==name.lower()]
         if len(values)!=1 or type(values[0]) is not str:raise ValueError("invalid source transfer header")
         return values[0]
+
+    def _source_spool_error(self,error):
+        status=413 if error.code=="source_object_too_large" else 507 if error.code=="spool_capacity_unavailable" else 503 if error.code in ("spool_mount_unavailable","spool_mount_changed") else 409 if error.code in ("source_object_conflict","source_object_receipt_mismatch") else 400
+        return self._error(status,error.code)
 
     def stream_source_object(self,path,headers,reader,content_length,*,protected_transport=False):
         if protected_transport is not True:return self._error(503,"protected_transport_required")
@@ -297,18 +306,17 @@ class ReferenceAPI:
             if expected["environment"]!=environment:return self._error(404,"not_found")
             if content_length!=expected["byteSize"] or digest!=expected["sha256"]:return self._error(409,"source_manifest_mismatch")
             if expected["byteSize"]>self.source_spool.max_object_bytes:return self._error(413,"source_object_too_large")
-            receipt,replay=self.source_spool.receive_object(job_id=job_id,generation=expected["generation"],
-                object_id=object_id,byte_size=expected["byteSize"],sha256=expected["sha256"],reader=reader,
-                reserved_bytes=expected["otherReservedBytes"])
-            created=self.store.record_source_object_receipt(job_id,receipt,source_spool=self.source_spool)
+            with self.store.source_operation(job_id,generation=expected["generation"],
+                    operation='source-put',receiving_only=True):
+                receipt,replay=self.source_spool.receive_object(job_id=job_id,generation=expected["generation"],
+                    object_id=object_id,byte_size=expected["byteSize"],sha256=expected["sha256"],reader=reader,
+                    reserved_bytes=expected["otherReservedBytes"])
+                created=self.store.record_source_object_receipt(job_id,receipt,source_spool=self.source_spool)
             return Response(201 if created else 200,{"jobId":job_id,"generation":expected["generation"],
                 "objectId":object_id,"byteSize":expected["byteSize"],"sha256":expected["sha256"],
                 "objectKind":expected["objectKind"],"received":True,"replayed":replay or not created})
         except Conflict:return self._error(409,"reference_conflict")
+        except SourceSpoolCloseUncertain:return self._error(503,"source_descriptor_retirement_uncertain")
+        except SourceSpoolError as error:return self._source_spool_error(error)
         except (ValueError,TypeError):return self._error(400,"invalid_request")
-        except Exception as error:
-            from .source_spool import SourceSpoolError
-            if isinstance(error,SourceSpoolError):
-                status=413 if error.code=="source_object_too_large" else 507 if error.code=="spool_capacity_unavailable" else 503 if error.code in ("spool_mount_unavailable","spool_mount_changed") else 409 if error.code in ("source_object_conflict","source_object_receipt_mismatch") else 400
-                return self._error(status,error.code)
-            return self._error(500,"internal_error")
+        except Exception:return self._error(500,"internal_error")

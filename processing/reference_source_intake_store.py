@@ -6,6 +6,7 @@ import math
 import secrets
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from .maintenance import Conflict
@@ -94,6 +95,39 @@ def _ensure_source_range_schema(queue):
 
 
 class ReferenceSourceIntakeMethods:
+    @contextmanager
+    def source_operation(self, job_id, *, generation, operation, receiving_only=False):
+        """Pin one synchronous source writer/auditor in the existing read lease.
+
+        The owning call must close its internal descriptors before returning.
+        Fences may win during I/O; the pin drains before release can proceed,
+        and a final authority check prevents acknowledging work past the fence.
+        """
+        if operation not in ('source-put', 'source-receipt', 'source-complete', 'source-audit'):
+            raise ValueError('invalid source operation')
+        def authorize(db):
+            row = self._row(db, job_id)
+            allowed = ('receiving',) if receiving_only else ('receiving', 'accepted')
+            if (row['generation'] != generation or row['source_state'] not in allowed
+                    or row['derived_state'] not in allowed):
+                raise Conflict('source operation custody changed')
+        readers = self.source_readers()
+        handle = readers.reserve(job_id, generation, operation,
+            authorize=authorize, quota=self._quota, operation=operation)
+        try:
+            with readers.operation_scope(handle):
+                handle.check_authority(authorize=authorize)
+                yield
+                handle.check_authority(authorize=authorize)
+        except BaseException as error:
+            from .source_spool import SourceSpoolCloseUncertain
+            if isinstance(error, SourceSpoolCloseUncertain):
+                handle.uncertain = True
+            raise
+        finally:
+            if not handle.uncertain:
+                handle.close()
+
     def source_readers(self):
         """One Linux source-reader lease per existing coordinator authority."""
         from .reference_source_readers import SourceReaders, SourceReaderError
@@ -107,6 +141,7 @@ class ReferenceSourceIntakeMethods:
             if readers is None or readers._closed:
                 readers = SourceReaders(self).start()
                 self.queue._source_reader_registry = readers
+            readers.check()
             return readers
 
     @staticmethod
@@ -141,7 +176,10 @@ class ReferenceSourceIntakeMethods:
         try:
             reader, metadata = open_reader()
             return handle.attach(reader, authorize=authorize), metadata
-        except Exception:
+        except Exception as error:
+            from .source_spool import SourceSpoolCloseUncertain
+            if isinstance(error, SourceSpoolCloseUncertain):
+                handle.uncertain = True
             if not handle.closed and not handle.uncertain:
                 handle.close()
             raise
@@ -842,27 +880,39 @@ class ReferenceSourceIntakeMethods:
             objects = [{"id": obj['id'], "byteSize": obj['byteSize'], "sha256": obj['sha256']}
                        for obj in source['objects'] + derived['objects']]
             try:
-                found = source_spool.audit_job(job_id=job_id, generation=generation,
-                    expected_objects=objects)
-                by_id = {item['object_id']: item for item in recorded[job_id]}
-                if len(by_id) != len(recorded[job_id]):
-                    raise Conflict('duplicate source receipt')
-                if any(object_id not in found for object_id in by_id):
-                    raise Conflict('durable source receipt has no exact file')
-                for object_id, receipt in found.items():
-                    old = by_id.get(object_id)
-                    if old is not None and (old['generation'] != receipt['generation']
-                            or old['byte_size'] != receipt['byteSize'] or old['sha256'] != receipt['sha256']
-                            or old['mount_id'] != receipt['mountId'] or old['storage_key'] != receipt['storageKey']):
-                        raise Conflict('durable source receipt changed')
-                    if old is None:
-                        self.record_source_object_receipt(job_id, receipt, source_spool=source_spool)
-                        adopted += 1
-                expected_count = len(objects)
-                if (row['source_state'] == 'accepted' or row['derived_state'] == 'accepted') and len(found) != expected_count:
-                    raise Conflict('retained source closure is incomplete')
+                with self.source_operation(job_id, generation=generation, operation='source-audit'):
+                    found = source_spool.audit_job(job_id=job_id, generation=generation,
+                        expected_objects=objects)
+                    by_id = {item['object_id']: item for item in recorded[job_id]}
+                    if len(by_id) != len(recorded[job_id]):
+                        raise Conflict('duplicate source receipt')
+                    if any(object_id not in found for object_id in by_id):
+                        raise Conflict('durable source receipt has no exact file')
+                    for object_id, receipt in found.items():
+                        old = by_id.get(object_id)
+                        if old is not None and (old['generation'] != receipt['generation']
+                                or old['byte_size'] != receipt['byteSize'] or old['sha256'] != receipt['sha256']
+                                or old['mount_id'] != receipt['mountId'] or old['storage_key'] != receipt['storageKey']):
+                            raise Conflict('durable source receipt changed')
+                        if old is None:
+                            self.record_source_object_receipt(job_id, receipt, source_spool=source_spool)
+                            adopted += 1
+                    expected_count = len(objects)
+                    if (row['source_state'] == 'accepted' or row['derived_state'] == 'accepted') and len(found) != expected_count:
+                        raise Conflict('retained source closure is incomplete')
             except Exception as error:
                 from .source_spool import SourceSpoolError
+                from .reference_source_readers import SourceReaderError
+                from .source_spool import SourceSpoolCloseUncertain
+                if isinstance(error, SourceSpoolCloseUncertain):
+                    raise
+                if isinstance(error, SourceReaderError):
+                    if str(error) not in ('source_release_fenced', 'source_operation_busy'):
+                        raise
+                    # An authorized future release owns custody after its fence.
+                    # Do not touch files or overwrite that custody with audit drift.
+                    held += 1
+                    continue
                 if isinstance(error, SourceSpoolError) and error.code in (
                         'spool_mount_unavailable', 'spool_mount_changed'):
                     raise RuntimeError('source spool mount unavailable during reconciliation') from None
@@ -903,6 +953,13 @@ class ReferenceSourceIntakeMethods:
                     "otherReservedBytes": total_reserved - current_reservation}
 
     def record_source_object_receipt(self, job_id, receipt, *, source_spool):
+        if type(receipt) is not dict:
+            raise ValueError('invalid source object receipt')
+        with self.source_operation(job_id, generation=receipt.get('generation'),
+                operation='source-receipt', receiving_only=True):
+            return self._record_source_object_receipt(job_id, receipt, source_spool=source_spool)
+
+    def _record_source_object_receipt(self, job_id, receipt, *, source_spool):
         """Persist a spool receipt after re-opening and rehashing its object."""
         fields = {"schemaVersion", "jobId", "generation", "objectId", "storageKey",
                   "byteSize", "sha256", "mountId"}
@@ -926,6 +983,7 @@ class ReferenceSourceIntakeMethods:
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, job_id)
+            self._source_reader_unfenced(db, job_id, receipt['generation'])
             expected_matches = []
             for obj in json.loads(row['source_manifest_json'])['objects']:
                 if obj['id'] == receipt['objectId']:
@@ -959,6 +1017,14 @@ class ReferenceSourceIntakeMethods:
 
     def complete_source_intake(self, job_id, *, generation, source_manifest_sha256,
                                derived_manifest_sha256, pipeline_manifest_sha256, source_spool):
+        with self.source_operation(job_id, generation=generation, operation='source-complete'):
+            return self._complete_source_intake(job_id, generation=generation,
+                source_manifest_sha256=source_manifest_sha256,
+                derived_manifest_sha256=derived_manifest_sha256,
+                pipeline_manifest_sha256=pipeline_manifest_sha256, source_spool=source_spool)
+
+    def _complete_source_intake(self, job_id, *, generation, source_manifest_sha256,
+                               derived_manifest_sha256, pipeline_manifest_sha256, source_spool):
         """Retain both closed manifests only after every persisted object re-verifies."""
         protocol._integer(generation, 'generation')
         for digest in (source_manifest_sha256, derived_manifest_sha256, pipeline_manifest_sha256):
@@ -967,6 +1033,7 @@ class ReferenceSourceIntakeMethods:
             raise ValueError('configured source spool required')
         with self.queue._db() as db:
             row = self._row(db, job_id)
+            self._source_reader_unfenced(db, job_id, generation)
             if row['generation'] != generation:
                 raise Conflict('source generation changed')
             if (row['source_manifest_sha'] != source_manifest_sha256
@@ -988,24 +1055,28 @@ class ReferenceSourceIntakeMethods:
                 (job_id, generation)).fetchall()
             if len(receipts) != len(expected) or row['reserved_bytes'] != 0:
                 raise Conflict('source intake is incomplete')
+            completion_binding = {key: row[key] for key in ('source_manifest_json',
+                'derived_manifest_json', 'source_manifest_sha', 'derived_manifest_sha',
+                'pipeline_manifest_sha')}
+            receipt_binding = _json([dict(receipt) for receipt in receipts])
             by_id = {receipt['object_id']: receipt for receipt in receipts}
             if len(by_id) != len(receipts):
                 raise Conflict('source object receipt set is invalid')
-            verified = []
-            for obj, kind in expected:
-                receipt_row = by_id.get(obj['id'])
-                if (receipt_row is None or receipt_row['object_kind'] != kind
-                        or receipt_row['byte_size'] != obj['byteSize']
-                        or receipt_row['sha256'] != obj['sha256']
-                        or receipt_row['mount_id'] != source_spool.mount_id):
-                    raise Conflict('source receipt set differs from manifest')
-                receipt = json.loads(receipt_row['receipt_json'])
-                expected_receipt = source_spool.verify_object(job_id=job_id,
-                    generation=generation, object_id=obj['id'], byte_size=obj['byteSize'],
-                    sha256=obj['sha256'])
-                if _json(receipt) != _json(expected_receipt) or receipt_row['storage_key'] != expected_receipt['storageKey']:
-                    raise Conflict('source object receipt no longer verifies')
-                verified.append(receipt['objectId'])
+        verified = []
+        for obj, kind in expected:
+            receipt_row = by_id.get(obj['id'])
+            if (receipt_row is None or receipt_row['object_kind'] != kind
+                    or receipt_row['byte_size'] != obj['byteSize']
+                    or receipt_row['sha256'] != obj['sha256']
+                    or receipt_row['mount_id'] != source_spool.mount_id):
+                raise Conflict('source receipt set differs from manifest')
+            receipt = json.loads(receipt_row['receipt_json'])
+            expected_receipt = source_spool.verify_object(job_id=job_id,
+                generation=generation, object_id=obj['id'], byte_size=obj['byteSize'],
+                sha256=obj['sha256'])
+            if _json(receipt) != _json(expected_receipt) or receipt_row['storage_key'] != expected_receipt['storageKey']:
+                raise Conflict('source object receipt no longer verifies')
+            verified.append(receipt['objectId'])
         from datetime import datetime, timezone
         retained_at = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
         source_receipt = {
@@ -1032,12 +1103,15 @@ class ReferenceSourceIntakeMethods:
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, job_id)
+            self._source_reader_unfenced(db, job_id, generation)
             if (row['generation'] != generation or row['source_state'] not in ('receiving', 'accepted')
                     or row['derived_state'] not in ('receiving', 'accepted') or row['reserved_bytes'] != 0):
                 raise Conflict('source intake changed during verification')
-            receipt_count = db.execute('''SELECT COUNT(*) FROM reference_source_object_receipts
-                WHERE job_id=? AND generation=?''', (job_id, generation)).fetchone()[0]
-            if receipt_count != len(verified):
+            current_receipts = db.execute('''SELECT * FROM reference_source_object_receipts
+                WHERE job_id=? AND generation=? ORDER BY object_kind,object_id''',
+                (job_id, generation)).fetchall()
+            if (any(row[key] != value for key, value in completion_binding.items())
+                    or _json([dict(receipt) for receipt in current_receipts]) != receipt_binding):
                 raise Conflict('source receipt set changed during verification')
             if row['source_receipt_json'] or row['derived_receipt_json']:
                 if (row['source_receipt_json'] != source_receipt_json

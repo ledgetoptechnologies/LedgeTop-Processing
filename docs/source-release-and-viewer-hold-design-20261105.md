@@ -1,8 +1,9 @@
 # Authenticated source release and Viewer operational holds: review proposal
 
 Status: design only. Baseline Processing `c217d98`; Viewer read-only baseline
-`6718d1b`. No release executor is enabled, no storage is changed, and no retention
-window or automatic deletion has been approved. Reader fencing and durable worker
+`6718d1b`. No release executor is enabled and no storage is changed. Beau approved
+the gate: verified Viewer outputs ready plus 24 hours, verified delivery, and no
+active readers/uploads. Reader fencing and durable worker
 observation are prerequisites, not deletion authority.
 
 ## Existing evidence and concrete gaps
@@ -53,13 +54,14 @@ observation are prerequisites, not deletion authority.
 
 ## Policy decisions still required
 
-Beau must approve (1) the required Viewer output milestone and (2) minimum age of
-redundant NAS source copies. Options for the milestone are verified ready for
-review or publication; a signed accepted copy alone does not prove usable Viewer
-outputs. Requiring manual publication could hold large input copies indefinitely.
-No default duration is inferred from trash retention or worker scratch cleanup.
+Beau approved release only AFTER Viewer outputs are verified ready plus 24 hours,
+with verified delivery and no active readers/uploads. Actual derived-output readiness
+must be proved; ingestion alone, unpublished conversion-pending outputs, or an
+accepted-copy ACK alone is insufficient. Viewer originals, accepted results, and
+raw GCP CSVs remain retained. This policy decision does not qualify storage or
+approve unsafe deletion. No unrelated trash retention is reused.
 
-Production release stays disabled until that decision and filesystem qualification.
+Production release stays disabled until the approved policy has a qualified implementation and filesystem qualification.
 Synthetic tests can inject an explicitly test-only zero-delay policy. A positive
 minimum duration needs conservative elapsed-time accounting: only within-process
 monotonic progress under verified ownership counts, persisted checkpoints survive

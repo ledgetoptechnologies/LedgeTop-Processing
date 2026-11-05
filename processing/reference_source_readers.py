@@ -1,5 +1,6 @@
-"""Coordinator-local, Linux lease ownership for NAS source read descriptors.
+"""Coordinator-local Linux lease ownership for NAS source I/O operations.
 
+Read descriptors and synchronous write/audit operations share this registry.
 This is a deletion prerequisite, not deletion authority. Fences are permanent,
 per job/generation and must only be installed by a future authenticated release
 transaction. No timeout retires a reader. Only acquisition of the exact private
@@ -43,7 +44,9 @@ def metadata_bytes(db):
     # Reserve each row's longest state so releasing/retiring a reader never
     # needs additional quota merely to represent its terminal state.
     used += db.execute('SELECT COALESCE(SUM(length(epoch)+10),0) FROM source_reader_epochs').fetchone()[0]
-    used += db.execute('SELECT COALESCE(SUM(length(reference)+length(epoch)+length(job_id)+length(CAST(generation AS TEXT))+length(object_id)+10),0) FROM source_reader_pins').fetchone()[0]
+    columns = {row[1] for row in db.execute('PRAGMA table_info(source_reader_pins)')}
+    operation_bytes = 'length(operation)' if 'operation' in columns else '4'
+    used += db.execute('SELECT COALESCE(SUM(length(reference)+length(epoch)+length(job_id)+length(CAST(generation AS TEXT))+length(object_id)+10+' + operation_bytes + '),0) FROM source_reader_pins').fetchone()[0]
     used += db.execute('SELECT COALESCE(SUM(length(job_id)+length(CAST(generation AS TEXT))+length(release_id)),0) FROM source_reader_fences').fetchone()[0]
     return used
 
@@ -57,6 +60,7 @@ class SourceReaders:
         self._mutex = threading.RLock()
         self._fd = self._pid = self.epoch = self.binding = None
         self._handles = {}
+        self._operations = threading.local()
         self._closed = False
 
     def _process(self):
@@ -132,8 +136,13 @@ class SourceReaders:
                     db.execute('BEGIN IMMEDIATE')
                     db.execute('CREATE TABLE IF NOT EXISTS source_reader_binding(id INTEGER PRIMARY KEY CHECK(id=1),binding TEXT NOT NULL,epoch TEXT NOT NULL)')
                     db.execute('CREATE TABLE IF NOT EXISTS source_reader_epochs(epoch TEXT PRIMARY KEY,state TEXT NOT NULL)')
-                    db.execute('CREATE TABLE IF NOT EXISTS source_reader_pins(reference TEXT PRIMARY KEY,epoch TEXT NOT NULL,job_id TEXT NOT NULL,generation INTEGER NOT NULL,object_id TEXT NOT NULL,state TEXT NOT NULL)')
+                    db.execute('CREATE TABLE IF NOT EXISTS source_reader_pins(reference TEXT PRIMARY KEY,epoch TEXT NOT NULL,job_id TEXT NOT NULL,generation INTEGER NOT NULL,object_id TEXT NOT NULL,state TEXT NOT NULL,operation TEXT NOT NULL DEFAULT "read")')
                     db.execute('CREATE TABLE IF NOT EXISTS source_reader_fences(job_id TEXT NOT NULL,generation INTEGER NOT NULL,release_id TEXT NOT NULL,PRIMARY KEY(job_id,generation))')
+                    columns = {row[1] for row in db.execute('PRAGMA table_info(source_reader_pins)')}
+                    if 'operation' not in columns:
+                        self.store._quota(db, 0)
+                        db.execute("ALTER TABLE source_reader_pins ADD COLUMN operation TEXT NOT NULL DEFAULT 'read'")
+                    db.execute('CREATE INDEX IF NOT EXISTS source_reader_job_activity ON source_reader_pins(job_id,generation,state,operation)')
                     old = db.execute('SELECT * FROM source_reader_binding WHERE id=1').fetchone()
                     if old and old['binding'] != _json(self.binding):
                         raise SourceReaderError('source_reader_lease_binding_changed')
@@ -157,6 +166,8 @@ class SourceReaders:
 
     def check(self):
         self._process()
+        if not sys.platform.startswith('linux'):
+            raise SourceReaderError('linux_source_readers_required')
         if self._pid != os.getpid() or self._fd is None or self._closed:
             raise SourceReaderError('source_reader_owner_process_required')
         self._paths()
@@ -191,24 +202,55 @@ class SourceReaders:
         if db.execute('SELECT 1 FROM source_reader_fences WHERE job_id=? AND generation=?', (job_id, generation)).fetchone():
             raise SourceReaderError('source_release_fenced')
 
-    def reserve(self, job_id, generation, object_id, *, authorize, quota=None):
+    def _admit_operation(self, db, job_id, generation, operation):
+        owned = tuple(getattr(self._operations, 'handles', ()))
+        references = {handle.reference for handle in owned
+            if handle.session is self and not handle.closed and not handle.uncertain
+            and self._handles.get(handle.reference) is handle}
+        for pin in db.execute("SELECT reference,operation FROM source_reader_pins WHERE job_id=? AND generation=? AND state IN ('active','uncertain')", (job_id, generation)):
+            if (pin['reference'] in references and operation != 'read'
+                    and (pin['operation'] == operation or operation == 'source-receipt')):
+                continue
+            if operation == 'source-audit' or pin['operation'] == 'source-audit':
+                raise SourceReaderError('source_operation_busy')
+
+    @contextmanager
+    def operation_scope(self, handle):
+        """Only actual synchronous same-thread nesting may reuse audit custody."""
+        self._process()
+        with self._mutex:
+            if (handle.session is not self or handle.closed or handle.uncertain
+                    or handle.operation == 'read' or handle.thread_id != threading.get_ident()
+                    or self._handles.get(handle.reference) is not handle):
+                raise SourceReaderError('source_operation_scope_invalid')
+            previous = tuple(getattr(self._operations, 'handles', ()))
+            self._operations.handles = previous + (handle,)
+        try:
+            yield
+        finally:
+            self._operations.handles = previous
+
+    def reserve(self, job_id, generation, object_id, *, authorize, quota=None, operation='read'):
         self._process()
         for value in (job_id, object_id):
             protocol._slug(value, 'source reader identity')
         protocol._integer(generation, 'source reader generation')
+        if operation not in ('read', 'source-put', 'source-receipt', 'source-complete', 'source-audit'):
+            raise ValueError('invalid source operation')
         with self.queue._lifecycle_lock, self._mutex:
             self.check()
             reference = secrets.token_hex(24)
-            handle = SourceReadHandle(self, reference, job_id, generation, object_id)
+            handle = SourceReadHandle(self, reference, job_id, generation, object_id, operation)
             self._handles[reference] = handle
             wrote = False
             try:
                 with self._db() as db:
                     self._unfenced(db, job_id, generation)
+                    self._admit_operation(db, job_id, generation, operation)
                     authorize(db)
-                    (quota or self.store._quota)(db, sum(len(str(x)) for x in (reference, self.epoch, job_id, generation, object_id, 'superseded')))
+                    (quota or self.store._quota)(db, sum(len(str(x)) for x in (reference, self.epoch, job_id, generation, object_id, 'superseded', operation)))
                     wrote = True
-                    db.execute("INSERT INTO source_reader_pins VALUES(?,?,?,?,?,'active')", (reference, self.epoch, job_id, generation, object_id))
+                    db.execute("INSERT INTO source_reader_pins(reference,epoch,job_id,generation,object_id,state,operation) VALUES(?,?,?,?,?,'active',?)", (reference, self.epoch, job_id, generation, object_id, operation))
                 return handle
             except Exception:
                 # A failed commit could have published a pin. Retain ownership
@@ -261,11 +303,31 @@ class SourceReaders:
 
 
 class SourceReadHandle:
-    def __init__(self, session, reference, job_id, generation, object_id):
+    def __init__(self, session, reference, job_id, generation, object_id, operation='read'):
         self.session, self.reference = session, reference
         self.job_id, self.generation, self.object_id = job_id, generation, object_id
+        self.operation = operation
+        self.thread_id = threading.get_ident()
         self._reader = self.file_identity = None
         self.uncertain = self.closed = self._known_closed = False
+
+    def check_authority(self, *, authorize):
+        """Recheck a synchronous operation before effects/acknowledgement.
+
+        A descriptorless pin is valid only while its owning synchronous call
+        remains on the stack. No background task or descriptor may escape it.
+        """
+        self.session._process()
+        with self.session.queue._lifecycle_lock, self.session._mutex:
+            if self.closed or self.uncertain:
+                raise SourceReaderError('source_reader_not_active')
+            with self.session._db() as db:
+                pin = db.execute('SELECT epoch,state FROM source_reader_pins WHERE reference=?', (self.reference,)).fetchone()
+                if not pin or (pin['epoch'], pin['state']) != (self.session.epoch, 'active'):
+                    raise SourceReaderError('source_reader_pin_changed')
+                self.session._unfenced(db, self.job_id, self.generation)
+                self.session._admit_operation(db, self.job_id, self.generation, self.operation)
+                authorize(db)
 
     def attach(self, reader, *, authorize):
         self.session._process()

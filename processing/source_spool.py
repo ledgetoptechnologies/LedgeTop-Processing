@@ -26,6 +26,19 @@ class SourceSpoolError(ValueError):
         self.code = code
 
 
+class SourceSpoolCloseUncertain(SourceSpoolError):
+    """An owned close did not prove descriptor retirement; never retry its FD."""
+    def __init__(self):
+        super().__init__('spool_descriptor_close_uncertain')
+
+
+def _close_owned_fd(fd):
+    try:
+        os.close(fd)
+    except OSError:
+        raise SourceSpoolCloseUncertain() from None
+
+
 class SourceSpool:
     def __init__(self, root: str | os.PathLike, *, mount_id: str,
                  mount_path: str | os.PathLike | None = None,
@@ -99,7 +112,7 @@ class SourceSpool:
                 observed = os.fstat(fd)
                 value = os.read(fd, 129)
             finally:
-                os.close(fd)
+                _close_owned_fd(fd)
         except OSError:
             raise SourceSpoolError("spool_marker_invalid") from None
         if ((observed.st_dev, observed.st_ino) != (marker_info.st_dev, marker_info.st_ino)
@@ -185,9 +198,13 @@ class SourceSpool:
                     if count > expected_size:
                         return False
                     digest.update(chunk)
-                return count == expected_size and digest.hexdigest() == expected_sha256
+                after = os.fstat(fd)
+                fields = ('st_dev', 'st_ino', 'st_size', 'st_mode', 'st_nlink',
+                          'st_uid', 'st_mtime_ns', 'st_ctime_ns')
+                return (count == expected_size and digest.hexdigest() == expected_sha256
+                    and all(getattr(info, field) == getattr(after, field) for field in fields))
             finally:
-                os.close(fd)
+                _close_owned_fd(fd)
         except OSError:
             return False
 
@@ -280,11 +297,11 @@ class SourceSpool:
             return os.fdopen(fd, "rb"), expected
         except SourceSpoolError:
             if "fd" in locals():
-                os.close(fd)
+                _close_owned_fd(fd)
             raise
         except OSError:
             if "fd" in locals():
-                os.close(fd)
+                _close_owned_fd(fd)
             raise SourceSpoolError("source_object_receipt_mismatch") from None
 
     def audit_root(self, expected_job_ids):
@@ -394,6 +411,8 @@ class SourceSpool:
                 target = self.root / storage_key
                 target.parent.parent.mkdir(mode=0o700, exist_ok=True)
                 directory = self._directory(job_id, generation)
+            except SourceSpoolCloseUncertain:
+                raise
             except SourceSpoolError:
                 raise
             except OSError:
@@ -454,7 +473,7 @@ class SourceSpool:
                 if digest.hexdigest() != sha256:
                     raise SourceSpoolError("source_digest_mismatch")
                 os.fsync(fd)
-                os.close(fd)
+                _close_owned_fd(fd)
                 fd = None
                 self._assert_mount()
                 try:
@@ -467,21 +486,23 @@ class SourceSpool:
                 receipt = self.verify_object(job_id=job_id, generation=generation,
                     object_id=object_id, byte_size=byte_size, sha256=sha256)
                 return receipt, False
+            except SourceSpoolCloseUncertain:
+                raise
             except SourceSpoolError:
                 if fd is not None:
-                    os.close(fd)
+                    _close_owned_fd(fd)
                 if created:
                     self._remove_owned_partial(temporary)
                 raise
             except OSError:
                 if fd is not None:
-                    os.close(fd)
+                    _close_owned_fd(fd)
                 if created:
                     self._remove_owned_partial(temporary)
                 raise SourceSpoolError("spool_write_failed") from None
             except Exception:
                 if fd is not None:
-                    os.close(fd)
+                    _close_owned_fd(fd)
                 if created:
                     self._remove_owned_partial(temporary)
                 raise SourceSpoolError("source_stream_failed") from None
@@ -495,7 +516,7 @@ class SourceSpool:
         try:
             os.fsync(fd)
         finally:
-            os.close(fd)
+            _close_owned_fd(fd)
 
     def _remove_owned_partial(self, path: Path):
         try:
@@ -505,6 +526,8 @@ class SourceSpool:
                 self._fsync_directory(path.parent)
         except FileNotFoundError:
             pass
+        except SourceSpoolCloseUncertain:
+            raise
         except (OSError, SourceSpoolError):
             # An uncertain partial is left in place; cleanup cannot authorize
             # an object receipt or delete an unexpected filesystem entry.

@@ -362,7 +362,7 @@ class SourceReaderTests(unittest.TestCase):
                 readers = store.source_readers()
                 self.assertEqual(readers.active_count(result['jobId'], 1), 0)
                 with queue._db() as db:
-                    self.assertEqual(db.execute("SELECT state FROM source_reader_pins").fetchone()[0], 'superseded')
+                    self.assertEqual(db.execute("SELECT state FROM source_reader_pins WHERE state='superseded'").fetchone()[0], 'superseded')
             finally:
                 queue.close()
 
