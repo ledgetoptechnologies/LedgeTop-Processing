@@ -6,6 +6,14 @@ approval. Runtime acceptance remains incomplete.
 
 ## Latest combined and native-host preparation checkpoint
 
+Source `8f64e18` adds shared upload/receipt/completion/audit operation pins,
+audit exclusion, stable hash identity, uncertain descriptor-close retention and
+correct capacity/mount/conflict HTTP responses. Its isolated predecessor passed
+53/53 Linux tests; the final additive activity index has schema smoke evidence.
+The integrated full pipeline has **not yet been rerun** with this patch. Source
+release/deletion, the approved verified-ready plus 24-hour timer and Viewer hold
+retirement remain unimplemented; no source bytes are deleted by these pins.
+
 Processing `3cfcf46` passed **582/582 selected Linux tests, no skips**, in
 193.601 seconds across 36 modules. This repeats the complete 542-test scope with
 the private scratch-directory fix and adds all 40 scratch-policy cases. Frozen
