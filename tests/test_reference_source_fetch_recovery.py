@@ -77,6 +77,94 @@ class RecoveryHarness(RenewalHarness):
         return (self.data.get('sourceRecovery') or {}).get('attempts', 0)
 
 
+class RetainedCustodyTests(RecoveryHarness):
+    """The closure covers every retained object, including inputs a grant excludes."""
+
+    def setUp(self):
+        super().setUp()
+        self.restart_coordinator()
+        self.raw = next(item['id'] for item in json.loads(self.intake('source_manifest_json'))['objects']
+            if item['id'] not in set(self.first_grant['objectIds']))
+        self.held_body = self.body()
+
+    def intake(self, column):
+        with self.queue._db() as db:
+            return db.execute(f'SELECT {column} FROM reference_source_intakes WHERE job_id=?', (self.job_id,)).fetchone()[0]
+
+    def receipt(self):
+        with self.queue._db() as db:
+            return db.execute('SELECT receipt_json FROM reference_source_object_receipts WHERE object_id=?', (self.raw,)).fetchone()[0]
+
+    def assert_closed(self, statement, *values):
+        self.execute(statement, *values)
+        state = self.state()
+        self.assertEqual((state['eligible'], state['sourceTransfer']), (False, None), statement)
+        before = self.rows()
+        with self.assertRaises(Conflict):
+            self.resume(self.held_body)
+        self.assertEqual(self.rows(), before)
+        self.assertEqual(self.status(), ('held', 'coordinator_restart'))
+
+    def receipt_column(self, assignment, *values):
+        self.assert_closed(f'UPDATE reference_source_object_receipts SET {assignment} WHERE object_id=?', *values, self.raw)
+
+    def test_control_the_raw_input_is_outside_the_grant_and_has_no_pin(self):
+        with self.queue._db() as db:
+            pins = {row[0] for row in db.execute('SELECT object_id FROM reference_source_object_pins WHERE job_id=?', (self.job_id,))}
+        self.assertEqual(pins, set(self.first_grant['objectIds']))
+        self.assertNotIn(self.raw, pins)
+        self.assertEqual(self.resume(self.held_body)['resumedStatus'], 'running')
+
+    def test_excluded_receipt_size(self):
+        self.receipt_column('byte_size=byte_size+1')
+
+    def test_excluded_receipt_hash(self):
+        self.receipt_column('sha256=?', 'f' * 64)
+
+    def test_excluded_receipt_storage_key(self):
+        self.receipt_column('storage_key=?', 'moved/elsewhere.blob')
+
+    def test_excluded_receipt_generation(self):
+        self.receipt_column('generation=generation+1')
+
+    def test_excluded_receipt_kind(self):
+        self.receipt_column("object_kind='derived'")
+
+    def test_excluded_receipt_mount(self):
+        self.receipt_column('mount_id=?', 'b' * 64)
+
+    def test_excluded_receipt_body_size(self):
+        self.receipt_column('receipt_json=?', json.dumps(dict(json.loads(self.receipt()), byteSize=1)))
+
+    def test_excluded_receipt_body_hash(self):
+        self.receipt_column('receipt_json=?', json.dumps(dict(json.loads(self.receipt()), sha256='f' * 64)))
+
+    def test_excluded_receipt_body_storage_key(self):
+        self.receipt_column('receipt_json=?', json.dumps(dict(json.loads(self.receipt()), storageKey='moved/elsewhere.blob')))
+
+    def test_excluded_receipt_body_extra_field(self):
+        self.receipt_column('receipt_json=?', json.dumps(dict(json.loads(self.receipt()), extra=True)))
+
+    def changed_manifest(self, column):
+        manifest = json.loads(self.intake(column))
+        manifest['objects'][0]['byteSize'] += 1
+        return json.dumps(manifest)
+
+    def test_source_manifest_content_with_the_accepted_sha_unchanged(self):
+        self.assert_closed('UPDATE reference_source_intakes SET source_manifest_json=? WHERE job_id=?',
+            self.changed_manifest('source_manifest_json'), self.job_id)
+
+    def test_derived_manifest_content_with_the_accepted_sha_unchanged(self):
+        self.assert_closed('UPDATE reference_source_intakes SET derived_manifest_json=? WHERE job_id=?',
+            self.changed_manifest('derived_manifest_json'), self.job_id)
+
+    def test_manifest_and_its_stored_sha_rewritten_together_still_fail_the_signed_proof(self):
+        manifest = json.loads(self.changed_manifest('source_manifest_json'))
+        manifest['sha256'] = protocol.manifest_sha256(manifest)
+        self.assert_closed('UPDATE reference_source_intakes SET source_manifest_json=?,source_manifest_sha=? WHERE job_id=?',
+            json.dumps(manifest), manifest['sha256'], self.job_id)
+
+
 class FetchRecoveryPathTests(RecoveryHarness):
     def test_resume_keeps_the_original_claim_and_starts_nothing_new(self):
         before = self.rows()
