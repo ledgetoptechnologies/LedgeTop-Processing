@@ -324,11 +324,6 @@ class NodeGate:
         state['lastAcknowledgment'] = tombstone
         self._save(state)
 
-    def resolved(self, receipt_id):
-        """Whether the latest operator abandonment was this receipt: nothing is left to complete on it."""
-        last = self.snapshot().get('lastResolution')
-        return type(last) is dict and type(last.get('reservation')) is dict and last['reservation'].get('receiptId') == receipt_id
-
     def resolutions(self):
         """Closed per-receipt evidence: {receiptId: {jobId, generation}}."""
         self._check_lock()
