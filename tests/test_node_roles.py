@@ -170,6 +170,15 @@ class NodeRoleConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'unique environment'):
                 from_environment()
 
+    def test_node_engine_origins_reject_normalized_aliases(self):
+        values = {
+            'PROCESSING_PROTOTYPE_NODE_IDS': 'cluster,main',
+            'PROCESSING_NODE_CLUSTER_URL': 'http://NodeODM.Example:80/',
+            'PROCESSING_NODE_MAIN_URL': 'http://nodeodm.example',
+        }
+        with self.environment(**values), self.assertRaisesRegex(ValueError, 'unique normalized engine origins'):
+            from_environment()
+
     def test_multiple_nodes_may_share_engine_token_but_not_application_token(self):
         shared = 'shared-engine-secret-000000000000000000'
         values = {
