@@ -18,7 +18,7 @@ not be added together or described as a complete suite.
 | Durable result return and selective cleanup | Signed ready proof, real Viewer process death/recovery, synthetic 24-hour timer and preserved raw GCP/originals | Installed credentials, NAS durability and actual return to Viewer |
 | Coordinator/worker maintenance | Independently generated startup policy, crash-safe cutover journal and 121-test combined qualification | Concrete cutover transport, real worker update/drain/resume |
 | Long transfer after coordinator outage | Reviewed `481058c` source-renewal changes integrated through `ece54b2`; 101/101 integrated Linux checks passed in 17.976 s as UID10001. Initial grant I/O registration from `578578f` integrated through `fde3d12` | Initial mint combined qualification; actual coordinator-restart fetching/processing recovery and per-receipt operator-resolution delivery remain open |
-| Viewer GCP workflow | Viewer `ae43303b`, successful Operations production build and 46 selected Viewer tests on the paired branch | Explicit source-vs-ellipsoidal height choice/provenance, target runtime/geoid qualification, unrelated workspace type diagnostics and rendered acceptance |
+| Viewer GCP workflow | Viewer `ddb2e8cb`, explicit height choice and v3 provenance; 27/27 independent focused tests; installed GCPFile UTM/OpenSfM in-memory conversion of candidate bytes passed | Updated combined transfer/cleanup qualification, NAVD88 geoid support, unrelated workspace type diagnostics and rendered acceptance |
 | TreeDar and Gaussian splats | Genuine-LiDAR validation/scaffolding | Typed usable TreeDar output registration and real processing; Gaussian remains disabled |
 | Customer/project/task workspace | Historical #406 behavior and hierarchy tests | Current owner/release reconciliation and rendered/deployed acceptance |
 
@@ -50,9 +50,12 @@ and the complete cutover driver are still required.
 
 The installed NodeODX accepts the corrected compound GCP CRS, but accepted
 syntax does not establish the desired geoid transformation. The offline
-synthetic NAVD88 conversion lacked a non-ballpark operation; explicit retained
-ellipsoidal heights and output-datum provenance are separate pending work.
-See `evidence/installed-gcp-crs-probes-20261105.md`. This issue does not apply
+synthetic NAVD88 conversion lacked a non-ballpark operation. Explicit retained
+ellipsoidal heights and output-datum provenance are now implemented in the paired
+Viewer candidate; actual installed GCPFile conversion passed for those generated
+bytes, without claiming survey accuracy or NAVD88 support. See
+`evidence/explicit-gcp-height-pair-20261105.md` and
+`evidence/installed-gcp-crs-probes-20261105.md`. This issue does not apply
 to the agreed no-GCP photo dataset.
 
 ## Latest combined and native-host preparation checkpoint
