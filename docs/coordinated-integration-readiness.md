@@ -32,6 +32,10 @@ are not operational.
   result and checks persistent nonce replay rejection.
 - These are synthetic process-crash tests. They do not prove power-loss
   durability, production TLS, TrueNAS custody or installed worker services.
+- Ops #430 at `50ddd6e88bd1e26b0cd7cfb2bfbebcec77de987a`, incorporating
+  broker #429 `d2cb01a`, paired with this integrated Processing code: 20/20
+  source-range tests passed without skips, including actual HTTPS Python
+  interruption/restart, bounded range reads and source corruption checks.
 - Temporary Node executables and export containers used for pairing were
   removed after the processes exited.
 
@@ -48,9 +52,10 @@ are not operational.
    issue #427 owns this missing path. Beau controls all TrueNAS changes. The
    selected spool subfolder under existing Model-Viewer Storage is not yet
    provisioned or ACL-qualified.
-3. **Source pairing:** reconcile Ops #430 with current #429 broker source before
-   qualifying the current source path. A 17-test pass on #430 `5f53a22` and
-   Processing #349 `e10326bf` used the older broker inherited by #430.
+3. **Source pairing:** the current #429/#430 broker and integrated Python client
+   are paired synthetically as recorded above. Qualify authenticated source
+   production, grant renewal and source custody as one installed path; the
+   passing range test does not establish those missing upstream components.
 4. **Result custody and cleanup:** qualify runtime credentials, persistent mounts,
    exact acknowledgement replay, disconnected delivery, disk-full/corruption
    handling and cleanup against the actual installed services. Source release
