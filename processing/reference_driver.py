@@ -1286,8 +1286,9 @@ class ReferenceDriver:
         """Ask the coordinator to lift a restart hold; the answer grants nothing.
 
         The intent is saved before its POST and retried exactly, so an outage or
-        lost reply spends no attempt. The caller still needs fresh running state,
-        and every range is checked again. A hold that stays keeps everything.
+        lost reply spends no attempt, and an exact receipt clears the count. The
+        caller still needs fresh running state, and every range is checked again.
+        A hold that stays keeps everything.
         """
         from .reference_recovery import ClaimRecoveryService
         from .source_range_transfer import validate_source_grant
@@ -1302,12 +1303,16 @@ class ReferenceDriver:
             status, receipt = self._request('POST', suffix, request, claim_token=token)
             if status == 200 and receipt != ClaimRecoveryService._make_receipt(request):
                 raise DriverHeld('source_recovery_receipt_changed')
-            if status == 200 or running:
-                journal['pending'] = None
-                data['sourceRecovery'] = journal
-                self._save(job_id, stage, data)
-                return True
-            return False
+            if status != 200 and not running:
+                return False
+            journal['pending'] = None
+            if status == 200:
+                # The cap counts unresolved attempts in a row, not restarts in a
+                # job's life. Only this counter: every source budget runs on.
+                journal['attempts'] = 0
+            data['sourceRecovery'] = journal
+            self._save(job_id, stage, data)
+            return True
 
         pending = journal['pending']
         if pending is not None:
