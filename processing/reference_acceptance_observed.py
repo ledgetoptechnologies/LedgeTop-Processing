@@ -188,7 +188,7 @@ def lookup(store, job_id):
     with store.queue._db() as db:
         row = store._row(db, job_id)
         submission = json.loads(row['input_json'])
-        if submission.get('sourceIntakeVersion') != 2:
+        if type(submission.get('sourceIntakeVersion')) is not int or submission['sourceIntakeVersion'] != 2:
             return None
         if not db.execute("SELECT 1 FROM sqlite_master WHERE name='reference_worker_acceptance_observations'").fetchone():
             return None
@@ -196,11 +196,32 @@ def lookup(store, job_id):
             (job_id, row['generation'])).fetchone()
         if saved is None:
             return None
-        request = validate_request(json.loads(saved['request_json']))
-        if (request['jobId'] != job_id or request['generation'] != row['generation']
-                or request['coordinatorAuthorityId'] != store.queue.authority_id
-                or saved['request_sha256'] != p.digest(request)
-                or saved['observation_id'] != request['observationId']):
-            raise Conflict('worker observation journal changed')
-        identity = dict(node_id=saved['node_id'], worker_id=saved['worker_id'], worker_instance_id=saved['instance_id'])
-        return validate_ack(json.loads(saved['ack_json']), request, identity)
+        try:
+            request = validate_request(json.loads(saved['request_json']))
+            result = p.validate_result_manifest(json.loads(row['result_json']), job_id=job_id,
+                generation=row['generation'], environment=row['environment'], pipeline_digest=row['pipeline_digest'])
+            expected = dict(jobId=job_id, generation=row['generation'], environment=row['environment'],
+                coordinatorAuthorityId=store.queue.authority_id, inputManifestSha256=row['manifest_sha'],
+                pipelineDigest=row['pipeline_digest'], resultManifestSha256=result['resultManifestSha256'])
+            if (any(request[key] != value for key, value in expected.items())
+                    or saved['request_json'] != p.canonical_json(request).decode('ascii')
+                    or saved['request_sha256'] != p.digest(request)
+                    or saved['observation_id'] != request['observationId']):
+                raise Conflict('worker observation journal changed')
+            identity = dict(node_id=saved['node_id'], worker_id=saved['worker_id'], worker_instance_id=saved['instance_id'])
+            for value in identity.values():
+                p._slug(value, 'observed worker identity')
+            claim = db.execute('SELECT * FROM reference_claims WHERE job_id=?', (job_id,)).fetchone()
+            p._hash(saved['claim_sha256'], 'observed claim digest')
+            if (not claim or type(claim['token']) is not str or not claim['token'].isascii()
+                    or not 1 <= len(claim['token']) <= 128
+                    or (claim['node_id'], claim['worker_id'], claim['instance_id']) !=
+                        (identity['node_id'], identity['worker_id'], identity['worker_instance_id'])
+                    or not hmac.compare_digest(saved['claim_sha256'], hashlib.sha256(claim['token'].encode('ascii')).hexdigest())):
+                raise Conflict('worker observation owner changed')
+            ack = validate_ack(json.loads(saved['ack_json']), request, identity)
+            if saved['ack_json'] != p.canonical_json(ack).decode('ascii'):
+                raise Conflict('worker observation acknowledgement changed')
+            return ack
+        except (ValueError, TypeError, KeyError, UnicodeError):
+            raise Conflict('worker observation journal invalid') from None

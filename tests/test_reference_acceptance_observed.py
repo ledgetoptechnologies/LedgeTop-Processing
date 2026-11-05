@@ -173,12 +173,18 @@ class AcceptanceObservationStoreTests(unittest.TestCase):
     def test_committed_observation_replays_after_custody_hold_without_new_authority(self):
         first = self.post()
         self.assertEqual(first.status, 200)
-        with self.queue._db() as db:
-            db.execute("UPDATE reference_source_intakes SET source_state='held',derived_state='held' WHERE job_id=?", (self.job['jobId'],))
+        self.store._hold_source_intake(self.job['jobId'])
+        self.assertEqual(self.queue.get(self.job['jobId'])['status'], 'held')
         with patch.object(self.queue, '_clock', side_effect=AssertionError('historical acknowledgement must remain stable')):
             replay = self.post()
         self.assertEqual(replay.status, 200, replay.body)
         self.assertEqual(replay.body, first.body)
+        self.assertEqual(self.store.worker_acceptance_observation(self.job['jobId']), first.body)
+        from tests.test_reference_v2_store_acceptance import VIEWER_BEARER
+        lookup = self.state['api'].handle('GET', '/ltds/v2/jobs/' + self.job['jobId'] + '/source/acceptance-observation',
+            {'Authorization': 'Bearer ' + VIEWER_BEARER}, protected_transport=True)
+        self.assertEqual(lookup.status, 200)
+        self.assertEqual(lookup.body, first.body)
         different = copy.deepcopy(self.intent); different['observationId'] = str(uuid.uuid4())
         self.assertEqual(self.post(different).status, 409)
 
@@ -217,6 +223,51 @@ class AcceptanceObservationStoreTests(unittest.TestCase):
             wrong = viewer.handle('GET', path, {'Authorization': 'Bearer synthetic-other-environment-token'}, protected_transport=True)
         self.assertEqual(wrong.status, 404)
         self.assertEqual(viewer.handle('GET', path, {}, protected_transport=True).status, 401)
+
+    def lookup_response(self):
+        from tests.test_reference_v2_store_acceptance import VIEWER_BEARER
+        return self.state['api'].handle('GET', '/ltds/v2/jobs/' + self.job['jobId'] + '/source/acceptance-observation',
+            {'Authorization': 'Bearer ' + VIEWER_BEARER}, protected_transport=True)
+
+    def test_lookup_rejects_self_consistent_ack_for_wrong_input_pipeline_result_or_environment(self):
+        first = self.post()
+        self.assertEqual(first.status, 200)
+        for field, value in (('inputManifestSha256', 'f' * 64), ('pipelineDigest', 'f' * 64),
+                ('resultManifestSha256', 'f' * 64), ('environment', 'production')):
+            with self.subTest(field=field):
+                request = {**self.intent, field: value}
+                ack = make_ack(request, IDENTITY, first.body['observedAt'])
+                with self.queue._db() as db:
+                    db.execute('UPDATE reference_worker_acceptance_observations SET request_sha256=?,request_json=?,ack_json=?',
+                        (p.digest(request), p.canonical_json(request).decode(), p.canonical_json(ack).decode()))
+                self.assertEqual(self.lookup_response().status, 409)
+
+    def test_lookup_requires_canonical_stored_bytes_and_original_owner_even_for_valid_ack_hash(self):
+        first = self.post()
+        self.assertEqual(first.status, 200)
+        with self.queue._db() as db:
+            original = dict(db.execute('SELECT * FROM reference_worker_acceptance_observations').fetchone())
+        forged_owner = {**IDENTITY, 'worker_id': 'other-worker'}
+        changes = [dict(request_json=json.dumps(self.intent, indent=2)),
+            dict(ack_json=json.dumps(first.body, indent=2)), dict(claim_sha256='f' * 64),
+            dict(worker_id='other-worker', ack_json=p.canonical_json(make_ack(self.intent, forged_owner, first.body['observedAt'])).decode())]
+        for changed in changes:
+            with self.subTest(fields=sorted(changed)):
+                saved = {**original, **changed}
+                with self.queue._db() as db:
+                    db.execute('''UPDATE reference_worker_acceptance_observations SET request_json=?,ack_json=?,
+                        node_id=?,worker_id=?,instance_id=?,claim_sha256=?''', tuple(saved[field] for field in
+                            ('request_json', 'ack_json', 'node_id', 'worker_id', 'instance_id', 'claim_sha256')))
+                self.assertEqual(self.lookup_response().status, 409)
+
+    def test_lookup_rejects_stale_ack_after_current_result_row_changes(self):
+        self.assertEqual(self.post().status, 200)
+        changed = copy.deepcopy(self.state['result'])
+        changed['objects'][0]['sha256'] = 'f' * 64
+        changed['resultManifestSha256'] = p.digest({key: value for key, value in changed.items() if key != 'resultManifestSha256'})
+        with self.queue._db() as db:
+            db.execute('UPDATE reference_jobs SET result_json=? WHERE job_id=?', (p.canonical_json(changed).decode(), self.job['jobId']))
+        self.assertEqual(self.lookup_response().status, 409)
 
     def test_reopen_preserves_ack_and_original_claim_ownership(self):
         ack = self.post().body

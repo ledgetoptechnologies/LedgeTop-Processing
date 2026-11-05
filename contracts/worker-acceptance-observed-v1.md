@@ -62,6 +62,12 @@ path or full acceptance/copy receipt. A future release operation must consult
 the authoritative journal and separately verify its authenticated release
 policy; a client-supplied acknowledgement is not deletion authority.
 
+Read-only lookup also validates the saved canonical request and acknowledgement,
+current immutable environment/input/pipeline/result binding, and retained
+original claim owner/token digest. A self-consistent stale journal hash is not
+sufficient. These checks do not require current source custody to be accepted:
+the original acknowledgement remains a historical fact after a real custody hold.
+
 This is an authenticated assertion from the assigned trusted worker, crosschecked
 against coordinator records. It is not hardware attestation of remote execution.
 

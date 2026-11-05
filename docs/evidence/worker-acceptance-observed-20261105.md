@@ -44,3 +44,13 @@ manifest, while retaining synthetic raw/derived GCP custody objects separately.
 The pre-existing ODM driver's refusal of auxiliary GCP engine inputs was reported
 for separate scoped work; these tests do not qualify GCP engine execution. No
 source deletion or Viewer snapshot-hold retirement was enabled.
+
+The read-only lookup follow-up passed **73/73 Linux tests, no skips**, in 4.339
+seconds with the same bounded setup. Three additional cases reject a
+self-consistent request/acknowledgement with the wrong immutable input,
+pipeline, result or environment; changed canonical storage or original claim
+owner/token digest; and a stale acknowledgement after the current result row
+changes. The positive historical replay/GET test now uses the actual
+`_hold_source_intake` path, which also places the canonical queue job in `held`,
+rather than modifying only the intake-state fields. Its stored acknowledgement
+remains unchanged; new/conflicting observations under held custody are refused.
