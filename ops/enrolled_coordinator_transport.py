@@ -585,13 +585,32 @@ def validate_recipe(recipe, *, bootstrap=False):
     return json.loads(canonical(recipe))
 
 
-def create_arguments(recipe, *, operation_id, role, intent_id):
-    recipe = validate_recipe(recipe, bootstrap=role == 'bootstrap')
-    require(role in ('bootstrap', 'final') and type(operation_id) is str and type(intent_id) is str
+def create_arguments(recipe, *, operation_id, role, intent_id, holder_settings=None):
+    recipe = validate_recipe(recipe, bootstrap=role in ('bootstrap', 'lease-holder'))
+    require(role in ('bootstrap', 'final', 'lease-holder') and type(operation_id) is str and type(intent_id) is str
             and re.fullmatch('[0-9a-f-]{36}', operation_id) and re.fullmatch('[0-9a-f-]{36}', intent_id),
             'exact_owned_recipe_binding_required')
+    holder_source = None
+    if role == 'lease-holder':
+        from ops.enrolled_coordinator_lease_helper import validate_settings, serializable_source
+        validate_settings(holder_settings)
+        require(holder_settings['operationId'] == operation_id and recipe['init'] is False
+                and recipe['network'] == 'none' and recipe['ports'] == []
+                and holder_settings['stateRoot'] == '/prototype-state', 'isolated_pid1_holder_required')
+        state = [m for m in recipe['mounts'] if m['target'] == holder_settings['stateRoot']]
+        external = [m for m in recipe['mounts'] if m['target'] == holder_settings['leaseDirectory']]
+        require(len(state) == len(external) == 1 and state[0]['type'] == 'volume'
+                and state[0]['readOnly'] is True and external[0]['type'] == 'bind'
+                and external[0]['readOnly'] is False, 'original_readonly_state_and_external_holder_mounts_required')
+        require(all(m['readOnly'] or m is external[0] for m in recipe['mounts']),
+                'holder_other_writable_mount_refused')
+        holder_source = serializable_source(holder_settings).decode('utf8')
+    else:
+        require(holder_settings is None, 'holder_settings_on_application_refused')
+    bound_recipe = recipe if holder_source is None else dict(recipe=recipe, holderSettings=holder_settings,
+                          holderSourceSha256=hashlib.sha256(holder_source.encode('utf8')).hexdigest())
     labels = dict(recipe['labels'], **{OWNER_LABEL: operation_id, ROLE_LABEL: role,
-        INTENT_LABEL: intent_id, RECIPE_LABEL: digest(recipe)})
+        INTENT_LABEL: intent_id, RECIPE_LABEL: digest(bound_recipe)})
     args = ['container', 'create', '--name', recipe['name'], '--pull', 'never', '--read-only',
             '--user', recipe['user'], '--workdir', recipe['workingDir'], '--network', recipe['network'],
             '--restart', 'no', '--stop-signal', 'SIGTERM', '--stop-timeout', '-1',
@@ -609,8 +628,13 @@ def create_arguments(recipe, *, operation_id, role, intent_id):
         address = '[' + port['hostIp'] + ']' if ':' in port['hostIp'] else port['hostIp']
         args.extend(('--publish', address + ':' + str(port['hostPort']) + ':' + port['containerPort']))
     args.extend(('--tmpfs', '/tmp:' + recipe['tmpfs']['/tmp']))
-    if recipe['entrypoint']: args.extend(('--entrypoint', recipe['entrypoint'][0]))
-    args.extend((recipe['imageId'], *recipe['command']))
+    if holder_source is not None:
+        # Source has public physical/operation bindings only; credentials and
+        # census keys are never serialized into argv or this holder command.
+        args.extend(('--no-healthcheck', '--entrypoint', 'python', recipe['imageId'], '-I', '-c', holder_source))
+    else:
+        if recipe['entrypoint']: args.extend(('--entrypoint', recipe['entrypoint'][0]))
+        args.extend((recipe['imageId'], *recipe['command']))
     return args
 
 

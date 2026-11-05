@@ -7,7 +7,7 @@ needs no data writes. Existing AuthorityLease owns the original external lease.
 import errno
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import signal
 import socket
@@ -41,7 +41,7 @@ def validate_settings(value):
         require(type(value[field]) is str and str(uuid.UUID(value[field])) == value[field])
     require(type(value['planSha256']) is str and re.fullmatch('[a-f0-9]{64}', value['planSha256']))
     for field in ('stateRoot', 'leaseDirectory'):
-        path = Path(value[field])
+        path = PurePosixPath(value[field])
         require(path.is_absolute() and str(path) == value[field] and '..' not in path.parts)
     return value
 

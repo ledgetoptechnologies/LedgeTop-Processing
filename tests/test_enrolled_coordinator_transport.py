@@ -50,6 +50,24 @@ class StructuredTransportTests(unittest.TestCase):
         self.assertNotIn('sh',args)
         self.assertEqual(args[args.index('--stop-timeout')+1],'-1')
 
+    def test_closed_holder_recipe_requires_pid1_original_readonly_state_and_exact_external_mount(self):
+        operation=str(uuid.uuid4());intent=str(uuid.uuid4())
+        settings=dict(schemaVersion=1,operationId=operation,planSha256='a'*64,authorityId=str(uuid.uuid4()),
+                      stateRoot='/prototype-state',leaseDirectory='/authority-leases')
+        value=recipe();value['init']=False;value['mounts'][0]['readOnly']=True
+        value['mounts'].append(dict(type='bind',source='/private/authority-leases',target='/authority-leases',readOnly=False))
+        args=t.create_arguments(value,operation_id=operation,role='lease-holder',intent_id=intent,holder_settings=settings)
+        self.assertNotIn('--init',args);self.assertIn('--no-healthcheck',args)
+        self.assertEqual(args[-3:-1],['-I','-c']);self.assertIn('require_pid1=True',args[-1])
+        self.assertIn('reviewed_readonly_package_required',args[-1])
+        for change in ('init','state','external'):
+            bad=copy.deepcopy(value)
+            if change=='init':bad['init']=True
+            elif change=='state':bad['mounts'][0]['readOnly']=False
+            else:bad['mounts'][-1]['readOnly']=True
+            with self.assertRaises(t.TransportHeld):
+                t.create_arguments(bad,operation_id=operation,role='lease-holder',intent_id=intent,holder_settings=settings)
+
     def test_unreviewed_recipe_fields_mounts_and_public_network_refused(self):
         for change in (dict(privileged=True),dict(network='host'),dict(readOnly=False),dict(stopTimeout=10),
                        dict(restartPolicy={'Name':'always','MaximumRetryCount':0})):
