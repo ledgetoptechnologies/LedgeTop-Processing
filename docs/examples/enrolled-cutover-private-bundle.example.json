@@ -198,9 +198,35 @@
     "leaseDirectory": "/authority-leases"
   },
   "artifacts": {
+    "policy": {
+      "path": "/private/policy",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "holderEnvironment": {
+      "path": "/private/holder.env",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
     "bootstrapEnvironment": {
       "path": "/private/bootstrap.env",
       "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "bootstrapConfig": {
+      "path": "/private/tls/bootstrap.json",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "containerPath": "/run/processing-reference/bootstrap.json"
+    },
+    "censusKey": {
+      "path": "/private/censusKey",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "finalConfig": {
+      "path": "/private/tls/final.json",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "containerPath": "/run/processing-reference/final.json"
+    },
+    "predecessorSchema": {
+      "path": "/private/predecessorSchema",
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
     },
     "reviewedCounts": {
       "path": "/private/reviewedCounts",
@@ -209,32 +235,6 @@
     "finalEnvironment": {
       "path": "/private/final.env",
       "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    },
-    "bootstrapConfig": {
-      "path": "/private/tls/bootstrap.json",
-      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "containerPath": "/run/processing-reference/bootstrap.json"
-    },
-    "holderEnvironment": {
-      "path": "/private/holder.env",
-      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    },
-    "censusKey": {
-      "path": "/private/censusKey",
-      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-    },
-    "policy": {
-      "path": "/private/policy",
-      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-    },
-    "predecessorSchema": {
-      "path": "/private/predecessorSchema",
-      "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
-    },
-    "finalConfig": {
-      "path": "/private/tls/final.json",
-      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "containerPath": "/run/processing-reference/final.json"
     }
   },
   "sourceHashes": {
@@ -253,6 +253,18 @@
     "processing/app.py": "6666666666666666666666666666666666666666666666666666666666666666",
     "processing/runtime_source_custody.py": "6666666666666666666666666666666666666666666666666666666666666666",
     "processing/maintenance.py": "6666666666666666666666666666666666666666666666666666666666666666"
+  },
+  "custodySources": {
+    "coordinator_predecessor_census": "7777777777777777777777777777777777777777777777777777777777777777",
+    "coordinator_candidate_projection": "7777777777777777777777777777777777777777777777777777777777777777",
+    "coordinator_startup_policy": "7777777777777777777777777777777777777777777777777777777777777777"
+  },
+  "budgets": {
+    "maxArtifactBytes": 2147483648,
+    "maxBackupBytes": 4294967296,
+    "maxMetadataBytes": 67108864,
+    "maxSeconds": 300,
+    "safetyFloorBytes": 67108864
   },
   "nodeEndpoints": [
     {

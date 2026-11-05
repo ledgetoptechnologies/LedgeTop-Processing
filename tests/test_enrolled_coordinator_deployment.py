@@ -47,6 +47,8 @@ def bundle():
         recipes=recipes,holderSettings=dict(schemaVersion=1,operationId=plan['operationId'],
             authorityId=plan['authorityId'],stateRoot='/prototype-state',leaseDirectory='/authority-leases'),
         artifacts=files,sourceHashes={name:'6'*64 for name in d.SOURCES},
+        custodySources={name:'7'*64 for name in ('coordinator_predecessor_census','coordinator_candidate_projection','coordinator_startup_policy')},
+        budgets=dict(maxArtifactBytes=2*1024**3,maxBackupBytes=4*1024**3,maxMetadataBytes=64*1024**2,maxSeconds=300,safetyFloorBytes=64*1024**2),
         nodeEndpoints=[dict(id=node,url='http://192.0.2.1:3000') for node in ('cluster','main')],workers=workers,
         qualifications={name:dict(path='/private/'+name+'.json',sha256=pin) for name,pin in plan['gates'].items()})
     plan['bindings']['deploymentSha256']=d.digest(value)

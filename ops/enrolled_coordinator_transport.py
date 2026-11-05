@@ -719,13 +719,15 @@ def container_environment(item):
     return result
 
 
-def operator_script(method, path, payload=None):
+def operator_script(method, path, payload=None, *, owner_digest=False):
     """Real normal operator HTTP; token is read inside the exact container."""
     require(method in ('GET', 'POST') and path in ('/healthz', '/v1/prototype/authority',
             '/v1/prototype/coordinator-freeze', '/v1/prototype/coordinator-custody')
             and (method == 'GET' or path == '/v1/prototype/coordinator-freeze'), 'fixed_operator_rpc_required')
-    packet = canonical(dict(method=method, path=path, payload=payload))
-    return ('''import http.client,json,os
+    require(type(owner_digest) is bool and (not owner_digest or method=='GET' and path=='/v1/prototype/coordinator-freeze'),
+            'readonly_gate_owner_digest_required')
+    packet = canonical(dict(method=method, path=path, payload=payload,ownerDigest=owner_digest))
+    return ('''import http.client,json,os,hashlib
 request=json.loads(''' + repr(packet) + ''')
 token=os.environ.get('PROCESSING_PROTOTYPE_OPERATOR_TOKEN','')
 if len(token)<32:raise RuntimeError('operator_credential_unavailable')
@@ -737,7 +739,9 @@ try:
  connection.request(request['method'],request['path'],body=body,headers={'Authorization':'Bearer '+token,'Content-Type':'application/json','Accept':'application/json','Connection':'close'})
  response=connection.getresponse();raw=response.read(65537)
  if len(raw)>65536 or response.getheader('Content-Encoding','identity')!='identity' or response.getheader('Content-Type','').split(';')[0]!='application/json':raise RuntimeError('operator_rpc_unavailable')
- print(json.dumps(dict(status=response.status,body=json.loads(raw)),sort_keys=True,separators=(',',':')))
+ result=dict(status=response.status,body=json.loads(raw))
+ if request['ownerDigest']:result['ownerSha256']=hashlib.sha256(token.encode()).hexdigest()
+ print(json.dumps(result,sort_keys=True,separators=(',',':')))
 finally:connection.close()
 ''').encode()
 

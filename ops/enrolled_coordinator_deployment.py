@@ -105,7 +105,8 @@ def validate_bundle(value, plan):
     """Pure validation; performs no Docker, SSH, file reads or side effects."""
     plan=validate_plan(plan)
     closed(value,('schemaVersion','profile','operationId','authorityId','host','predecessor','candidateSourceCommit','reviewedSourceRoot',
-                  'recipes','holderSettings','artifacts','sourceHashes','nodeEndpoints','workers','qualifications'),
+                  'recipes','holderSettings','artifacts','sourceHashes','nodeEndpoints','workers','qualifications',
+                  'custodySources','budgets'),
            'closed_private_deployment_required')
     require(type(value['schemaVersion']) is int and value['schemaVersion']==1 and value['profile']==PROFILE
             and value['operationId']==plan['operationId'] and value['authorityId']==plan['authorityId'],
@@ -161,6 +162,15 @@ def validate_bundle(value, plan):
             'existing_review_authority_changed')
     hashes=value['sourceHashes'];closed(hashes,SOURCES,'existing_policy_source_inventory_required')
     for item in hashes.values():hash_value(item)
+    closed(value['custodySources'],('coordinator_predecessor_census','coordinator_candidate_projection','coordinator_startup_policy'),
+           'existing_custody_helper_inventory_required')
+    for item in value['custodySources'].values():hash_value(item)
+    budgets=value['budgets'];closed(budgets,('maxArtifactBytes','maxBackupBytes','maxMetadataBytes','maxSeconds','safetyFloorBytes'),
+                                   'closed_custody_budgets_required')
+    require(all(type(item) is int and item>0 for item in budgets.values()) and
+            budgets['maxArtifactBytes']<=1024**4 and budgets['maxBackupBytes']<=1024**4 and
+            budgets['maxMetadataBytes']<=64*1024**2 and budgets['maxSeconds']<=600 and
+            64*1024**2<=budgets['safetyFloorBytes']<=64*1024**3,'bounded_reviewed_custody_required')
     endpoints=value['nodeEndpoints'];require(type(endpoints) is list and len(endpoints)==2,'exact_enrolled_node_inventory_required')
     nodes=set()
     for endpoint in endpoints:
