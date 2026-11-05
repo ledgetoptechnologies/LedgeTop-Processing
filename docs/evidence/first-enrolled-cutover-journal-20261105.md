@@ -122,3 +122,13 @@ the same logical request. The two real child-death cases remain green. Concrete
 transport proof production still needs independent review/qualification. The
 one-CPU/768MiB network-none runner exited0 and was auto-removed; exact task-label
 inventory was empty.
+
+
+A final pre-write guard requires a valid non-null dispatch marker before any
+mutating intent can be completed. Existing desired state does not prove that a
+pre-dispatch intent ran. The regression crashes before dispatch, supplies an
+already-matching after-state, and verifies inspection refuses without changing a
+single journal byte. Explicit complete no-effect evidence still supports normal
+rollback. Read-only observation phases remain completable without dispatch.
+32/32 Linux journal cases passed, no skips, in0.176 seconds; owned bounded
+network-none container exited0 and auto-removed, exact task-label inventory empty.

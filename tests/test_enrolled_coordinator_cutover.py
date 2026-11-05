@@ -134,6 +134,22 @@ class EnrolledCutoverJournalTests(unittest.TestCase):
         self.assertEqual(restarted.journal.read()['phase'],'rolled-back-rebaseline-required')
         self.assertNotIn('disable-predecessor-restart',[action for action,_ in self.driver.calls])
 
+    def test_existing_desired_afterstate_does_not_complete_predispatch_intent(self):
+        self.crash_before_dispatch()
+        action=self.actor.journal.read()['pending']['action']
+        self.driver.effects.add(action)  # The before-state can already match desired state.
+        before=self.actor.journal.path.read_bytes()
+        with self.assertRaisesRegex(c.CutoverHeld,'pre_dispatch_mutation'):
+            self.actor.inspect()
+        self.assertEqual(self.actor.journal.path.read_bytes(),before)
+        self.assertIsNone(self.actor._load()['dispatch'])
+        self.assertEqual(self.driver.calls,[])
+        with patch.object(self.driver,'verify_not_applied',return_value=True):
+            self.actor.reconcile_not_applied(disposition='rollback')
+        self.assertIsNone(self.actor._load()['pending'])
+        self.actor.begin_rollback()
+        self.assertEqual(self.actor._load()['rollbackScope'],'restart-only')
+
     def test_predispatch_rearm_is_explicit_and_survives_reopen(self):
         self.crash_before_dispatch();self.actor.reconcile_not_applied(disposition='rearm')
         restarted=c.FirstEnrolledCutover(self.root,self.plan,self.driver);self.driver.controller=restarted

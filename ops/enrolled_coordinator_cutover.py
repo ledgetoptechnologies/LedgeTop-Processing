@@ -313,6 +313,9 @@ class FirstEnrolledCutover:
         require(all(value is not None for value in self.plan['gates'].values()),'first_cutover_prerequisites_unqualified')
 
     def _finish(self,state,action,next_phase,intent,observation):
+        self._dispatch_shape(state['dispatch'],intent)
+        require(state['dispatch'] is not None or action in READ_ACTIONS or action in ROLLBACK_READS,
+                'pre_dispatch_mutation_requires_explicit_not_applied_recovery')
         require(self.driver.verify(action,observation,intent,state) is True,'cutover_effect_or_transform_not_verified')
         require(type(observation) is dict and set(observation)=={'intentId','bindingSha256','factsSha256'} and
                 observation['intentId']==intent['intentId'] and
