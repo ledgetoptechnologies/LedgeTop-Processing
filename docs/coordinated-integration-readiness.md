@@ -55,6 +55,21 @@ Claude's revised staging fence remain on separate work branches. They are not
 included in the 682-test checkpoint. Installed NAS custody, real-photo/real-LiDAR
 and multi-PC acceptance remain open.
 
+The enrolled external-authority lease restore is integrated as `d079d48`.
+Focused Linux authority/freeze/prototype/HTTP/node-role regression passed
+**54/54 tests, no skips**, in 11.302 seconds. The first harness invocation named
+two nonexistent test modules; it failed with two loader errors and is not counted
+as a passing suite. The corrected invocation used the actual prototype modules.
+Both owned runners and their disposable volumes exited and were removed.
+
+A subsequent read-only installed metadata check found runtime UID/GID 10001,
+an original authority-lease directory owned by 10001 with mode `0711`, and its
+single-link regular lease file owned by 10001 with mode `0600`. Neither is a
+symlink. The current candidate requires `0700` on the directory and therefore
+would refuse this installed predecessor. A narrowly reviewed compatibility fix
+and exact-mode regression remain required; no installed permission was changed.
+This is an enablement blocker in addition to the current-schema census gate.
+
 Processing `18e37ac` passed **126/126 focused Linux integration tests, no skips**,
 in 68.948 seconds across ten modules. This includes actual Viewer whole/range
 photo and GCP intake/result roundtrips and controlled conversion/publication,
