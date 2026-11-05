@@ -4,6 +4,7 @@ from contextlib import nullcontext
 import copy
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -85,6 +86,16 @@ class PreparationLifecycleTests(unittest.TestCase):
 
 
 class ExplicitEntrypointTests(unittest.TestCase):
+    def test_reviewed_writer_bytes_survive_canonical_receipt_roundtrip(self):
+        payloads={'final.json':b'final','bootstrap.json':b'bootstrap'}
+        settings=dict(schemaVersion=1,operationId=str(uuid.uuid4()),planSha256='a'*64,
+            imageId='sha256:'+'b'*64,rootIdentity=[1,2,0o40700,10001,10001],
+            hashes={name:hashlib.sha256(raw).hexdigest() for name,raw in payloads.items()},
+            sourceHashes={name:'c'*64 for name in reversed(s.SOURCES)})
+        replay=json.loads(s.canonical(settings))
+        self.assertEqual(s.serialized_writer(settings,payloads),
+                         s.serialized_writer(replay,dict(reversed(list(payloads.items())))))
+
     def test_staging_recipe_has_no_state_lease_network_or_private_payload_argv(self):
         stage=s.ConfigPreparation.__new__(s.ConfigPreparation)
         stage.plan=dict(operationId=str(uuid.uuid4()),candidate={'imageId':'sha256:'+'a'*64});stage.name='owned-stage'

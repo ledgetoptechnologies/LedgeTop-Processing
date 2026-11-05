@@ -92,6 +92,10 @@ def write_new(settings,payloads,*,root='/stage'):
 
 
 def serialized_writer(settings,payloads):
+    # The private receipt canonicalizes object keys. Reconstructing the exact
+    # reviewed stdin must not depend on the caller's original insertion order.
+    settings=json.loads(canonical(settings))
+    payloads={name:payloads[name] for name in sorted(payloads)}
     module=Path(__file__).read_text().split('\nclass ConfigPreparation:',1)[0].replace('from .coordinator_startup_policy import SOURCES','')
     tail='''\ntry:
  result=write_new('''+repr(settings)+','+repr(payloads)+''')
