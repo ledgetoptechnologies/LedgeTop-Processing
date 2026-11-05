@@ -86,3 +86,11 @@ The optional in-memory `reviewed_schema_bytes` is still pinned to the canonical
 through existing container stdin without installing ops/contracts files into
 that image or writing any tool into live state. Absence uses the reviewed
 repository artifact; supplying bytes does not relax schema validation.
+
+
+The independently generated startup-policy followup is now qualified for the
+closed first profile in `first-coordinator-startup-policy-20261105.md`. Earlier
+statements above describe the comparator-only checkpoint. The current generated
+path adds a closed startup specification and reconstructs its phase rows through
+that separately reviewed module, rather than relying on caller-created row
+expectations. Installed activation and concrete Docker/helper proof remain open.

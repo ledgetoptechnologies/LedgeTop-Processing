@@ -140,7 +140,7 @@ def verify_projection(root, *, baseline, policy_bytes, expected_policy_sha256, e
     policy=old._json(policy_bytes.decode('utf-8'))
     fields={'schemaVersion','profile','candidateImageId','candidateSourceCommit',
             'oldColumns','additionalColumns','bindingNames','phases'}
-    _require(type(policy) is dict and set(policy)==fields and type(policy['schemaVersion']) is int and policy['schemaVersion']==1 and
+    _require(type(policy) is dict and set(policy) in (fields,fields|{'startup'}) and type(policy['schemaVersion']) is int and policy['schemaVersion']==1 and
              policy['profile']==PROFILE and set(policy['phases'])==set(PHASES),
              'closed_declared_projection_policy_required')
     _require(type(policy['candidateImageId']) is str and policy['candidateImageId'].startswith('sha256:') and
@@ -170,7 +170,13 @@ def verify_projection(root, *, baseline, policy_bytes, expected_policy_sha256, e
                      for name in baseline['tables']}
     finally:memory.close()
     _require(policy['oldColumns']==old_columns,'legacy_projection_columns_changed')
-    declared=_instantiate(policy['phases'][phase],gate_binding)
+    if 'startup' in policy:
+        from .coordinator_startup_policy import materialize
+        _require(type(baseline.get('metadataBytes')) is int and
+                 baseline['metadataBytes']+len(policy_bytes)+4*len(old._canonical(gate_binding))+1048576<64*1048576,
+                 'first_cutover_startup_quota_margin_unproven')
+        declared=materialize(policy,gate_binding,phase,key)
+    else:declared=_instantiate(policy['phases'][phase],gate_binding)
     _require(type(declared) is dict and set(declared)=={'objects','rows','files','directories'},
              'closed_phase_declaration_required')
     for group in ('files','directories'):
@@ -233,8 +239,11 @@ def verify_projection(root, *, baseline, policy_bytes, expected_policy_sha256, e
                 _require(baseline['tables'][name]==dict(count=len(values),content=proof.hexdigest()),'legacy_rows_changed')
             else:
                 if name in EMPTY_PAYLOAD_TABLES:_require(values==[],'new_payload_before_cutover')
-                _require(sorted(map(old._canonical,values))==sorted(map(old._canonical,declared['rows'][name])),
-                         'undeclared_startup_rows')
+                if 'startup' in policy:
+                    from .coordinator_startup_policy import match_rows
+                    matched=match_rows(name,values,declared['rows'][name],gate_binding)
+                else:matched=sorted(map(old._canonical,values))==sorted(map(old._canonical,declared['rows'][name]))
+                _require(matched,'undeclared_startup_rows')
             table_proofs[name]=dict(count=len(values),content=proof.hexdigest())
         page=db.execute('PRAGMA page_size').fetchone()[0]
         _require(before.st_size<=4*max_metadata_bytes+(4*row_count+256)*page,'candidate_physical_budget_exceeded')

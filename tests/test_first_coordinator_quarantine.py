@@ -5,6 +5,7 @@ This tests process restart in one immutable source/image boundary, not a public
 Docker recreation, installed cutover, live NAS, or successful backend processing.
 """
 import copy
+from datetime import datetime,timezone
 import hashlib
 import http.client
 import json
@@ -27,7 +28,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from tests import test_coordinator_predecessor_census as old_fixture
 from tests import test_reference_dynamic_source_intake_scale as tls_fixture
 from tests.viewer_receipt_signer import SyntheticViewerSigner
-from ops.coordinator_candidate_projection import freeze_expectations
+from ops.coordinator_candidate_projection import freeze_expectations,verify_projection
+from ops import coordinator_startup_policy as startup_policy
 
 
 @unittest.skipUnless(os.name == 'posix', 'actual Linux lease and tmpfs qualification')
@@ -172,6 +174,16 @@ class FirstCoordinatorQuarantineTests(unittest.TestCase):
 
     def test_normal_quarantine_seal_and_frozen_restart_preserve_legacy_data(self):
         before_rows,before_files=self.legacy_rows(),self.artifact_bytes()
+        baseline=self.old.census();final_config=self.final_config()
+        source=Path(__file__).resolve().parents[1]
+        policy=startup_policy.build_startup_policy(source,
+            expected_source_hashes={name:hashlib.sha256((source/name).read_bytes()).hexdigest() for name in startup_policy.SOURCES},
+            candidate_image_id='sha256:'+'a'*64,candidate_source_commit='b'*40,
+            bootstrap_config_bytes=json.dumps(self.bootstrap).encode(),final_config_bytes=json.dumps(final_config).encode(),
+            node_endpoints=[dict(id='cluster',url='http://127.0.0.1:19001'),dict(id='main',url='http://127.0.0.1:19002')],
+            authority_id=self.old.authority)
+        now=lambda:datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        bootstrap_earliest=now()
         self.start_child()
         status,_,state=self.request('GET','/v1/prototype/coordinator-freeze',self.operator)
         self.assertEqual(status,200);self.assertEqual(state['phase'],'open')
@@ -217,11 +229,39 @@ class FirstCoordinatorQuarantineTests(unittest.TestCase):
             for table,values in expected.items():
                 actual=[dict(row) for row in db.execute('SELECT * FROM "'+table+'"')]
                 self.assertEqual(sorted(map(json.dumps,actual)),sorted(map(json.dumps,values)),table)
-        self.write_config(self.final_config())
+        context=dict(bootstrapStartupId=original_startup,currentStartupId=original_startup,planId=plan,
+            ownerSha256=hashlib.sha256(self.operator.encode('ascii')).hexdigest(),
+            requestIds={action:str(uuid.uuid5(uuid.UUID(plan),action)) for action in ('intent','drain','seal')},
+            operationBinding=binding,sourceReaderBinding=None,sourceCustody=None,
+            bootstrapWindow=dict(earliest=bootstrap_earliest,latest=now()),
+            finalWindow=dict(earliest=bootstrap_earliest,latest=now()))
+        def verify(phase):
+            from ops.coordinator_predecessor_census import _canonical
+            return verify_projection(self.old.root,baseline=baseline,policy_bytes=policy,
+                expected_policy_sha256=hashlib.sha256(policy).hexdigest(),
+                expected_baseline_sha256=hashlib.sha256(_canonical(baseline)).hexdigest(),key=self.old.key,
+                phase=phase,gate_binding=context,uid=os.geteuid(),max_artifact_bytes=16*1024*1024)
+        self.assertTrue(verify('bootstrap-frozen')['retainedFilesValidated'])
+        self.assertTrue(verify('rollback-bootstrap')['retainedFilesValidated'])
+        self.write_config(final_config)
+        final_earliest=now()
         self.start_child()
         status,_,state=self.request('GET','/v1/prototype/coordinator-freeze',self.operator)
         self.assertEqual(status,200);self.assertEqual(state['phase'],'frozen')
         self.assertEqual(state['planId'],plan);self.assertNotEqual(state['startupId'],original_startup)
+        status,_,custody=self.request('GET','/v1/prototype/coordinator-custody',self.operator)
+        self.assertEqual(status,200);self.assertEqual(custody['status'],'verified')
+        reader_root=self.old.root/'source-readers';reader_lease=reader_root/'lease'
+        physical=reader_lease.stat();physical_root=reader_root.stat();database=self.old.path.stat()
+        source_binding=dict(authorityId=self.old.authority,database=str(self.old.path),
+            databaseIdentity=[database.st_dev,database.st_ino],root=str(reader_root),
+            rootIdentity=[physical_root.st_dev,physical_root.st_ino],
+            leaseIdentity=[physical.st_dev,physical.st_ino,physical.st_size,physical.st_mode,physical.st_nlink,
+                           physical.st_uid,physical.st_mtime_ns,physical.st_ctime_ns],
+            marker=reader_lease.read_bytes().hex())
+        context.update(currentStartupId=state['startupId'],sourceReaderBinding=source_binding,sourceCustody=custody,
+                       finalWindow=dict(earliest=final_earliest,latest=now()))
+        self.assertTrue(verify('final-frozen')['retainedFilesValidated'])
         for tls,path,token in ((False,'/v1/prototype/jobs',self.api_token),(True,'/ltds/v2/jobs',self.viewer)):
             status,_,body=self.request('POST',path,token,tls=tls,headers_only=True)
             self.assertEqual((status,body),(503,dict(error='coordinator_maintenance')))
@@ -229,6 +269,7 @@ class FirstCoordinatorQuarantineTests(unittest.TestCase):
         self.assertEqual(self.legacy_rows(),before_rows)
         self.assertEqual(self.artifact_bytes(),before_files)
         self.assertEqual(list(self.spool.iterdir()),[])
+        self.assertTrue(verify('rollback-final')['retainedFilesValidated'])
         with closing(sqlite3.connect(self.old.path)) as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0],22)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_jobs').fetchone()[0],0)
