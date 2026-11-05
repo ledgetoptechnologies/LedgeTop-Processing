@@ -97,6 +97,13 @@ def _ensure_source_range_schema(queue):
 class ReferenceSourceIntakeMethods:
     @contextmanager
     def source_operation(self, job_id, *, generation, operation, receiving_only=False):
+        with self.queue.coordinator_operation('source-io'):
+            with self._source_operation(job_id,generation=generation,operation=operation,
+                    receiving_only=receiving_only):
+                yield
+
+    @contextmanager
+    def _source_operation(self, job_id, *, generation, operation, receiving_only=False):
         """Pin one synchronous source writer/auditor in the existing read lease.
 
         The owning call must close its internal descriptors before returning.
@@ -872,6 +879,18 @@ class ReferenceSourceIntakeMethods:
         adopted = held = 0
         for row in rows:
             job_id, generation = row['job_id'], row['generation']
+            from .source_release import reconcile_source_release_custody
+            try:
+                if reconcile_source_release_custody(self,source_spool,job_id,generation):
+                    held += int(row['source_state']=='held' or row['derived_state']=='held')
+                    continue
+            except Exception as error:
+                from .source_spool import SourceSpoolCloseUncertain
+                from .coordinator_freeze import CoordinatorFrozen
+                if isinstance(error,(SourceSpoolCloseUncertain,CoordinatorFrozen)):raise
+                self._hold_source_intake(job_id)
+                held += 1
+                continue
             if row['source_state'] == 'held' or row['derived_state'] == 'held':
                 held += 1
                 continue

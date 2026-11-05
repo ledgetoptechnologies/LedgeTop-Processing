@@ -211,6 +211,9 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                 body_limit = (V2_SOURCE_INTAKE_BYTES if
                               self.command == "POST" and self.path == "/ltds/v2/jobs"
                               else MAX_BODY_BYTES)
+                if self.command=='POST' and re.fullmatch(r'/ltds/v2/jobs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}/source/releases',self.path):
+                    from .source_release_contract import MAX_BYTES
+                    body_limit=MAX_BYTES
                 if len(text) > 20 or (self.command != "PUT" and int(text) > body_limit):
                     self._error(413, "metadata_too_large")
                     return

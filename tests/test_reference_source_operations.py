@@ -13,6 +13,7 @@ from unittest.mock import patch
 from processing.maintenance import Conflict
 from processing.reference_api import ReferenceAPI
 from processing.reference_source_readers import SourceReaderError
+from processing.coordinator_freeze import CoordinatorFrozen
 from tests.test_reference_source_readers import source_fixture
 
 
@@ -116,7 +117,7 @@ class SourceOperationTests(unittest.TestCase):
                 try:
                     self.assertTrue(entered.wait(5))
                     self.assertGreater(readers.active_count(job['jobId'], 1), 0)
-                    with self.assertRaises(SourceReaderError): queue.close()
+                    with self.assertRaises((SourceReaderError,CoordinatorFrozen)): queue.close()
                     readers.fence(job['jobId'], 1, 'synthetic-release')
                 finally:
                     resume.set(); thread.join(5)
@@ -150,7 +151,7 @@ class SourceOperationTests(unittest.TestCase):
             try:
                 self.assertTrue(entered.wait(5))
                 self.assertEqual(readers.active_count(job['jobId'],1),1)
-                with self.assertRaises(SourceReaderError): queue.close()
+                with self.assertRaises((SourceReaderError,CoordinatorFrozen)): queue.close()
                 readers.fence(job['jobId'],1,'synthetic-release')
             finally:
                 resume.set(); thread.join(5)

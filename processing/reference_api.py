@@ -13,6 +13,7 @@ from types import MappingProxyType
 from .maintenance import Conflict
 from . import reference_protocol as protocol
 from .source_spool import SourceSpoolCloseUncertain, SourceSpoolError
+from .coordinator_freeze import CoordinatorFrozen
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,7 @@ class ReferenceAPI:
     def __init__(self, store, *, bearer_tokens, capability_fingerprint,
                  options_fingerprint, allowed_odm_options=(), treedar_available=False,
                  result_proxy=None, viewer_receipt_keys=None, source_spool=None,
-                 source_attestation_keys=None, authority_id=None):
+                 source_attestation_keys=None, authority_id=None, source_release_service=None):
         protocol._hash(capability_fingerprint, "capability fingerprint")
         protocol._hash(options_fingerprint, "options fingerprint")
         if type(bearer_tokens) is not dict or not bearer_tokens:
@@ -53,6 +54,7 @@ class ReferenceAPI:
         self.source_spool = source_spool
         self.source_attestation_keys = source_attestation_keys
         self.authority_id = authority_id
+        self.source_release_service = source_release_service
         from .viewer_acceptance_receipt import validate_trusted_viewer_receipt_keys
         try:
             self.viewer_receipt_keys = validate_trusted_viewer_receipt_keys(
@@ -187,6 +189,24 @@ class ReferenceAPI:
                     trusted_source_keys=self.source_attestation_keys,authority_id=self.authority_id,
                     available_engines=("odm","treedar") if self.treedar_available else ("odm",))
                 return Response(201 if created else 200,job)
+            release = re.fullmatch(r'/ltds/v2/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/source/releases(?:/([0-9a-f-]{36}))?',path)
+            if release:
+                service=self.source_release_service
+                if service is None:return self._error(503,'source_release_unavailable')
+                token=self._header(headers,'Authorization')
+                principal=service.settings.principal(token[7:] if token.startswith('Bearer ') else '',environment)
+                if principal is None:return self._error(403,'source_release_role_required')
+                if self._job(release[1],environment) is None:return self._error(404,'not_found')
+                if method=='POST' and release[2] is None:
+                    if not service.settings.enabled:return self._error(503,'source_release_disabled')
+                    from .source_release_contract import MAX_BYTES
+                    result,created=service.submit(release[1],protocol.decode_submission(body,max_bytes=MAX_BYTES),principal=principal)
+                    return Response(201 if created else 200,result)
+                if method=='GET' and release[2] is not None:
+                    if body not in (b'',''):return self._error(400,'invalid_request')
+                    result=service.lookup(release[1],release[2],principal=principal)
+                    return Response(200,result) if result else self._error(404,'not_found')
+                return self._error(405,'method_not_allowed')
             observation = re.fullmatch(r'/ltds/v2/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/source/acceptance-observation', path)
             if observation:
                 if self._job(observation[1], environment) is None:
@@ -285,6 +305,8 @@ class ReferenceAPI:
             return self._error(405, "method_not_allowed")
         except SourceSpoolCloseUncertain:
             return self._error(503, 'source_descriptor_retirement_uncertain')
+        except CoordinatorFrozen:
+            return self._error(503,'coordinator_maintenance')
         except SourceSpoolError as error:
             return self._source_spool_error(error)
         except (protocol.ProtocolError, ValueError, TypeError):

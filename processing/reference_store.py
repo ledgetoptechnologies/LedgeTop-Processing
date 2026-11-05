@@ -327,6 +327,8 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         used += inventory_metadata_bytes(db)
         from .coordinator_freeze import metadata_bytes as freeze_metadata_bytes
         used += freeze_metadata_bytes(db)
+        from .source_release import metadata_bytes as source_release_metadata_bytes
+        used += source_release_metadata_bytes(db)
         return used
 
     def _quota(self, db, extra_bytes=0):

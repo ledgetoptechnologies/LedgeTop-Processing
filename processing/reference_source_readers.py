@@ -230,12 +230,17 @@ class SourceReaders:
         finally:
             self._operations.handles = previous
 
-    def reserve(self, job_id, generation, object_id, *, authorize, quota=None, operation='read'):
+    def reserve(self, job_id, generation, object_id, *, authorize, quota=None, operation='read', _release_id=None):
+        with self.queue.coordinator_operation('source-io-admission'):
+            return self._reserve(job_id,generation,object_id,authorize=authorize,quota=quota,
+                operation=operation,_release_id=_release_id)
+
+    def _reserve(self, job_id, generation, object_id, *, authorize, quota=None, operation='read', _release_id=None):
         self._process()
         for value in (job_id, object_id):
             protocol._slug(value, 'source reader identity')
         protocol._integer(generation, 'source reader generation')
-        if operation not in ('read', 'source-put', 'source-receipt', 'source-complete', 'source-audit'):
+        if operation not in ('read', 'source-put', 'source-receipt', 'source-complete', 'source-audit', 'source-release'):
             raise ValueError('invalid source operation')
         with self.queue._lifecycle_lock, self._mutex:
             self.check()
@@ -245,8 +250,17 @@ class SourceReaders:
             wrote = False
             try:
                 with self._db() as db:
-                    self._unfenced(db, job_id, generation)
-                    self._admit_operation(db, job_id, generation, operation)
+                    if operation == 'source-release':
+                        fence=db.execute('SELECT release_id FROM source_reader_fences WHERE job_id=? AND generation=?',(job_id,generation)).fetchone()
+                        if not fence or fence['release_id'] != _release_id:
+                            raise SourceReaderError('source_release_fence_required')
+                        if db.execute("SELECT 1 FROM source_reader_pins WHERE job_id=? AND generation=? AND state IN ('active','uncertain') LIMIT 1",(job_id,generation)).fetchone():
+                            raise SourceReaderError('source_operation_busy')
+                    else:
+                        if _release_id is not None:
+                            raise SourceReaderError('source_release_operation_required')
+                        self._unfenced(db, job_id, generation)
+                        self._admit_operation(db, job_id, generation, operation)
                     authorize(db)
                     (quota or self.store._quota)(db, sum(len(str(x)) for x in (reference, self.epoch, job_id, generation, object_id, 'superseded', operation)))
                     wrote = True
@@ -268,16 +282,26 @@ class SourceReaders:
         protocol._integer(generation, 'source reader generation')
         protocol._slug(release_id, 'source release identity')
         with self.queue._lifecycle_lock, self._mutex, self._db() as db:
-            job = db.execute('SELECT generation FROM reference_jobs WHERE job_id=?', (job_id,)).fetchone()
-            if not job or job['generation'] != generation:
-                raise SourceReaderError('source_reader_job_changed')
-            old = db.execute('SELECT release_id FROM source_reader_fences WHERE job_id=? AND generation=?', (job_id, generation)).fetchone()
-            if old:
-                if old['release_id'] != release_id:
-                    raise SourceReaderError('source_release_fence_conflict')
-                return
-            self.store._quota(db, len(job_id) + len(str(generation)) + len(release_id))
-            db.execute('INSERT INTO source_reader_fences VALUES(?,?,?)', (job_id, generation, release_id))
+            return self.fence_in_transaction(db, job_id, generation, release_id)
+
+    def fence_in_transaction(self, db, job_id, generation, release_id):
+        """Caller owns the queue transaction and verifies its release authority."""
+        self.check()
+        job = db.execute('SELECT generation FROM reference_jobs WHERE job_id=?', (job_id,)).fetchone()
+        if not job or job['generation'] != generation:
+            raise SourceReaderError('source_reader_job_changed')
+        old = db.execute('SELECT release_id FROM source_reader_fences WHERE job_id=? AND generation=?', (job_id, generation)).fetchone()
+        if old:
+            if old['release_id'] != release_id:
+                raise SourceReaderError('source_release_fence_conflict')
+            return
+        self.store._quota(db, len(job_id) + len(str(generation)) + len(release_id))
+        db.execute('INSERT INTO source_reader_fences VALUES(?,?,?)', (job_id, generation, release_id))
+
+    def reserve_release(self, job_id, generation, release_id, *, authorize):
+        """Internal only: exact journal/fence authorizer, after all I/O drains."""
+        return self.reserve(job_id,generation,'source-release',authorize=authorize,
+            operation='source-release',_release_id=release_id)
 
     def active_count(self, job_id, generation):
         self._process()
@@ -292,10 +316,11 @@ class SourceReaders:
             self.check()
             if self._handles:
                 raise SourceReaderError('source_readers_still_live_or_uncertain')
-            with self._db() as db:
-                if db.execute("SELECT 1 FROM source_reader_pins WHERE epoch=? AND state IN ('active','uncertain') LIMIT 1", (self.epoch,)).fetchone():
-                    raise SourceReaderError('source_readers_still_live_or_uncertain')
-                db.execute("UPDATE source_reader_epochs SET state='closed' WHERE epoch=?", (self.epoch,))
+            with self.queue._coordinator_freeze.source_readers_shutdown(self):
+                with self._db() as db:
+                    if db.execute("SELECT 1 FROM source_reader_pins WHERE epoch=? AND state IN ('active','uncertain') LIMIT 1", (self.epoch,)).fetchone():
+                        raise SourceReaderError('source_readers_still_live_or_uncertain')
+                    db.execute("UPDATE source_reader_epochs SET state='closed' WHERE epoch=?", (self.epoch,))
             os.close(self._fd)
             self._fd = None
             self._closed = True
@@ -374,11 +399,12 @@ class SourceReadHandle:
                         raise SourceReaderError('source_reader_descriptor_changed')
                     self._reader.close()
                     self._known_closed = True
-                with self.session._db() as db:
-                    row = db.execute('SELECT epoch,state FROM source_reader_pins WHERE reference=?', (self.reference,)).fetchone()
-                    if not row or row['epoch'] != self.session.epoch or row['state'] not in ('active', 'released'):
-                        raise SourceReaderError('source_reader_pin_changed')
-                    db.execute("UPDATE source_reader_pins SET state='released' WHERE reference=?", (self.reference,))
+                with self.session.queue._coordinator_freeze.source_pin_retire(self):
+                    with self.session._db() as db:
+                        row = db.execute('SELECT epoch,state FROM source_reader_pins WHERE reference=?', (self.reference,)).fetchone()
+                        if not row or row['epoch'] != self.session.epoch or row['state'] not in ('active', 'released'):
+                            raise SourceReaderError('source_reader_pin_changed')
+                        db.execute("UPDATE source_reader_pins SET state='released' WHERE reference=?", (self.reference,))
                 self.closed = True
                 self.session._handles.pop(self.reference, None)
             except Exception:

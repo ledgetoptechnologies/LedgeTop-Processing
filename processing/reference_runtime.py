@@ -72,6 +72,7 @@ class ReferenceSettings:
     viewer_acceptance_targets: dict | None = None
     source_spool: object | None = None
     source_attestation_keys: object | None = None
+    source_release: object | None = None
 
 
 def _file(path, *, private):
@@ -122,6 +123,7 @@ def load_reference_settings(path, config):
                 required.add("sourceSpool")
                 required.add("sourceAttestationKeys")
                 allowed.add("sourceAttestationKeys")
+                allowed.add("sourceRelease")
             if not required <= set(value) or set(value) - allowed:
                 raise RuntimeConfigurationError("runtime configuration fields differ")
         else:
@@ -249,9 +251,14 @@ def load_reference_settings(path, config):
         if value["schemaVersion"]==6:
             from .viewer_source_attestation import validate_trusted_keys
             source_attestation_keys=validate_trusted_keys(value["sourceAttestationKeys"])
+        release_settings=None
+        if 'sourceRelease' in value:
+            from .source_release import ReleaseSettings
+            release_settings=ReleaseSettings(value['sourceRelease'],
+                viewer_bearers={token:env for env,token in viewers.items()},spool=source_spool)
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
                                  {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery,
-                                 viewer_keys, viewer_targets or None, source_spool, source_attestation_keys)
+                                 viewer_keys, viewer_targets or None, source_spool, source_attestation_keys,release_settings)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -363,7 +370,8 @@ class _DynamicAPI:
                     viewer_receipt_keys=self.settings.viewer_receipt_keys,
                     source_spool=self.settings.source_spool,
                     source_attestation_keys=self.settings.source_attestation_keys,
-                    authority_id=self.control.viewer.store.queue.authority_id)
+                    authority_id=self.control.viewer.store.queue.authority_id,
+                    source_release_service=self.control.viewer.source_release_service)
             except Exception:
                 return Response(503, {"error": "engine_catalog_unavailable"})
             if path in (p.PREFIX + "/jobs",SOURCE_PREFIX + "/jobs") and method == "POST":
@@ -401,6 +409,9 @@ class ReferenceRuntime:
         self._server, self._thread = None, None
         self._source_readers = None
         self._viewer_transfer_worker, self._viewer_transfer_thread = None, None
+        self._source_release = None
+        self._source_release_thread = None
+        self._source_release_stop = threading.Event()
         self._viewer_transfer_stop = threading.Event()
         try:
             recovery=settings.recovery_bindings
@@ -446,6 +457,10 @@ class ReferenceRuntime:
                 if queue._coordinator_freeze.status()['phase'] == 'open' else {'state': 'maintenance_frozen'})
             if settings.source_spool is not None:
                 self._source_readers = self.store.source_readers()
+            if settings.source_release is not None:
+                from .source_release import SourceReleaseService
+                self._source_release=SourceReleaseService(self.store,settings.source_spool,settings.source_release,
+                    stop_requested=self._source_release_stop.is_set)
             self._streams = threading.BoundedSemaphore(settings.stream_budget["maxConcurrent"])
             proxy = ResultProxy({node: worker["resultOrigin"] for node, worker in settings.workers.items()},
                 worker_bearers={node: worker["resultBearer"] for node, worker in settings.workers.items()},
@@ -459,7 +474,7 @@ class ReferenceRuntime:
                 recovery_bindings=recovery, viewer_receipt_keys=settings.viewer_receipt_keys,
                 source_spool=settings.source_spool,
                 source_attestation_keys=settings.source_attestation_keys,
-                authority_id=queue.authority_id)
+                authority_id=queue.authority_id,source_release_service=self._source_release)
             if settings.viewer_acceptance_targets:
                 from .reference_viewer_transfer_worker import ReferenceViewerTransferWorker
                 from .viewer_acceptance_transfer import ViewerAcceptanceTransfer, ViewerTransferUnavailable
@@ -532,6 +547,8 @@ class ReferenceRuntime:
 
     def start(self):
         if self._server is not None:
+            if self.queue._coordinator_freeze.status()['phase']=='open':
+                self._start_source_release()
             return
         if self.settings.source_spool is not None:
             with self.queue._coordinator_freeze.runtime_startup(self):
@@ -550,7 +567,13 @@ class ReferenceRuntime:
                 self._viewer_transfer_thread = threading.Thread(target=self._viewer_transfer_loop,
                     name="processing-viewer-acceptance", daemon=True)
                 self._viewer_transfer_thread.start()
+            self._start_source_release()
         except Exception:
+            self._source_release_stop.set()
+            if self._source_release_thread is not None:
+                self._source_release_thread.join(timeout=1)
+                if self._source_release_thread.is_alive():
+                    raise RuntimeConfigurationError('source release I/O still draining; authority retained') from None
             self._viewer_transfer_stop.set()
             if self._viewer_transfer_thread is not None and self._viewer_transfer_thread.is_alive():
                 self._viewer_transfer_thread.join()
@@ -565,12 +588,43 @@ class ReferenceRuntime:
 
     def _viewer_transfer_loop(self):
         while not self._viewer_transfer_stop.is_set():
-            result = self._viewer_transfer_worker.run_once()
+            from .coordinator_freeze import CoordinatorFrozen
+            try:
+                with self.store.queue.coordinator_operation('viewer-transfer'):
+                    result = self._viewer_transfer_worker.run_once() if self._viewer_transfer_worker is not None else {'state':'idle'}
+            except CoordinatorFrozen:
+                result={'state':'idle'}
             wait = 0 if result.get("state") == "accepted" else (2 if result.get("state") == "idle" else 1)
             if self._viewer_transfer_stop.wait(wait):
                 return
 
+    def _start_source_release(self):
+        if self._source_release is None or not self.settings.source_release.enabled:
+            return
+        self._source_release_stop.clear()
+        if self._source_release_thread is not None and self._source_release_thread.is_alive():
+            return
+        self._source_release_thread=threading.Thread(target=self._source_release_loop,
+            name='processing-source-release',daemon=True)
+        self._source_release_thread.start()
+
+    def _source_release_loop(self):
+        while not self._source_release_stop.is_set():
+            progress=self._source_release.run_once()
+            if self._source_release_stop.wait(0.1 if progress else 2):
+                return
+
     def close(self):
+        # Do not stop HTTP/delivery first: an unresponsive NAS operation still
+        # owns its exact source pin and must remain attached to this runtime.
+        self._source_release_stop.set()
+        if self._source_release_thread is not None:
+            self._source_release_thread.join(timeout=1)
+            if self._source_release_thread.is_alive():
+                raise RuntimeConfigurationError('source release I/O still draining; authority retained')
+            self._source_release_thread=None
+        if self._source_readers is not None and self._source_readers._handles:
+            raise RuntimeConfigurationError('source I/O still draining; authority retained')
         self._viewer_transfer_stop.set()
         if self._viewer_transfer_thread is not None:
             self._viewer_transfer_thread.join()
