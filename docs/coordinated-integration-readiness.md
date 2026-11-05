@@ -88,10 +88,14 @@ are not operational.
    typed output closure still need real runtime qualification. TreeDar stays on
    main; Gaussian splats remain disabled. Jobs on one host must not overlap
    between engines.
-7. **Viewer experience:** review/deploy the current-main hierarchy/UI candidate
-   Ops #406 and verify customer/project/task navigation, queue reasons, selected
-   node and logs. Historical Claude co-authorship does not prove current review
-   ownership. UI completion does not qualify the processing pipeline.
+7. **Viewer experience:** Ops #406 at `bf5c1dbbb5fb49213e429f131c40ad7403628147`
+   independently passed 52 workspace behavior/brand/control tests plus 14
+   hierarchy migration/API/permission tests, no skips. These verify customer
+   project scoping and unchanged access grants plus DOM navigation/error states;
+   rendered browser acceptance, deployment, queue/node/log integration and
+   current Claude review ownership remain open. The branch has 15 historical
+   Claude co-author trailers; that is not evidence of current peer delivery.
+   UI completion does not qualify the processing pipeline.
 8. **Installed acceptance:** the last read-only checks found reference worker
    services inactive on both processing PCs. Verify credential rotation,
    immutable installed builds, storage and active workers; restore the staging
