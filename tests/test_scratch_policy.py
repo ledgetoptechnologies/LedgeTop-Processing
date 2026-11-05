@@ -11,7 +11,7 @@ import os
 import importlib.util
 from contextlib import closing
 
-from processing.scratch_policy import LeaseLapsed, ScratchLedger, PolicyConflict
+from processing.scratch_policy import FENCED_LEASE, LeaseLapsed, MAX_INTEGER, ScratchLedger, PolicyConflict
 
 
 class ScratchPolicyTests(unittest.TestCase):
@@ -290,6 +290,26 @@ class ScratchPolicyTests(unittest.TestCase):
         self.reserve(job_id='j2',reservation_id='r2',ttl_seconds=1);self.now=600
         with self.assertRaisesRegex(LeaseLapsed,'lease expired before engine mutation'):self.ledger.claim_engine_lease('r2')
         self.assertEqual(self.row('r2')[6:9],('expired',0,0));self.assertEqual(self.fences(),[('r1',100.0)])
+
+    def test_no_accepted_clock_can_end_a_fenced_zero_allocated_reservation(self):
+        self.reserve();self.ledger.begin_transfer('r1');kept=self.row();self.assertEqual(kept[5:9],(FENCED_LEASE,'reserved',400,0))
+        for clock in (float(MAX_INTEGER),2**53,1e300):
+            with self.subTest(clock=clock):
+                self.now=clock;self.ledger=self.open()
+                self.ledger.begin_transfer('r1');self.ledger.claim_engine_lease('r1');self.ledger.record_allocated('r1',0)
+                self.assertEqual(self.row(),kept)
+        self.ledger.set_engine_state('r1','engine_started');self.assertEqual(self.row()[6:9],('engine_started',400,0))
+
+    def test_no_accepted_clock_stops_a_fenced_lease_taking_its_control_charge(self):
+        self.reserve();self.ledger.record_allocated('r1',100);self.ledger.begin_transfer('r1');self.now=1e300
+        descriptor,scope=self.publishable();receipt=self.control(scope_sha256=scope)
+        self.assertEqual(self.ledger.publish_control_charge('r1',charge_id='control-one',scope_sha256=scope,parent_binding_sha256='c'*64,publication_descriptor=descriptor)['chargeId'],receipt['chargeId'])
+
+    def test_extreme_clock_still_expires_an_unfenced_lease_and_refuses_a_new_one(self):
+        self.reserve();self.reserve(job_id='j2',reservation_id='r2');self.ledger.record_allocated('r2',10);self.now=float(MAX_INTEGER)-5
+        with self.assertRaisesRegex(PolicyConflict,'lease deadline outside supported range'):self.reserve(job_id='j3',reservation_id='r3',ttl_seconds=5)
+        self.assertEqual(self.row()[6:9],('expired',0,0));self.assertIsNone(self.row('r3'))
+        with self.assertRaises(LeaseLapsed):self.ledger.claim_engine_lease('r2')
 
     def test_terminal_release_frees_a_fenced_reservation_past_its_lease(self):
         self.reserve();self.ledger.begin_transfer('r1');self.now=500

@@ -165,6 +165,11 @@ class ParentGuardTests(unittest.TestCase):
         real=self.host.ledger.clock;self.host.ledger.clock=past;self.held();self.host.ledger.clock=real
         self.host.ledger.begin_transfer('parent-reservation');self.host.ledger.clock=past;self.check();self.check(False)
 
+    def test_no_accepted_clock_makes_a_fenced_parent_expired(self):
+        self.host.ledger.begin_transfer('parent-reservation')
+        for clock in (float(2**53-1),1e300):
+            self.host.ledger.clock=lambda clock=clock:clock;self.check();self.check(False)
+
     def test_live_physical_binding_and_completion_are_not_configuration_authority(self):
         path=self.host.root/'gate'/'gate.json';original=path.read_text()
         for key,value in [('generation',2),('authorityId','00000000-0000-4000-8000-000000000000'),('nodeId','cluster')]:
