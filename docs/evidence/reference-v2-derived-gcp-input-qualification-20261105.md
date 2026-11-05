@@ -67,8 +67,13 @@ cache cleanup complete without a second engine initialization.
 The follow-up test-only assertions additionally check the captured exact CRS,
 synthetic geographic coordinates, ftUS-to-metre height and selected pixel
 `25 75 photo.jpg`, and verify unchanged raw CSV hashes in Viewer and the source
-spool after worker cleanup. Those explicit assertions await the root combined
-qualification; they were added after the clean 13-test run above.
+spool after worker cleanup. Those assertions passed in root's combined Processing
+`89c3dc4` qualification: **542/542 selected Linux tests, no skips**, 146.084 seconds
+across 35 modules, including actual controlled conversion/publication, durable
+worker acceptance-observation, maintenance and both GCP transfer modes. That run
+used frozen Viewer `2317d400` and the old synthetic-only converter, one CPU/2 GiB,
+read-only sources/dependencies and no external network. Its owned container and
+temporary volume were removed. Native photogrammetry execution remains synthetic.
 
 The case uses a synthetic Emlid CSV and synthetic photo bytes. Engine
 initialization, execution and output archive remain synthetic; only its upload

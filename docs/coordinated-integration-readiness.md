@@ -6,7 +6,22 @@ approval. Runtime acceptance remains incomplete.
 
 ## Latest combined and native-host preparation checkpoint
 
-Processing `54c28d8e646f95937e6950596f42fdf2cc0b1e82` subsequently passed
+Processing `89c3dc4` passed **542/542 selected Linux tests, no skips**, in
+146.084 seconds across 35 modules. This combines the observation/recovery path
+below with receipt-bound ordinary V2 GCP execution admission in Driver, Router
+and ODM worker. Actual Viewer Emlid parsing, correspondence/snapshot generation,
+signed intake, whole/range transfer and captured native multipart run together.
+Captured GCP bytes match the receipt, selected coordinates/height/CRS and pixel
+`25 75 photo.jpg`; raw CSV hashes remain unchanged in Viewer and the spool after
+worker cleanup. Combined/staged GCP remains explicitly rejected before stage
+creation. See `evidence/reference-v2-derived-gcp-input-qualification-20261105.md`.
+
+The bounded combined setup remains frozen Viewer `2317d400`, the old synthetic-only
+converter and simulated native engine processing. It proves neither real-photo
+GCP processing nor rendered GCP UI acceptance. The container and owned temporary
+volume were removed. No runtime, NAS, source-release or publishing gate changed.
+
+Processing `54c28d8e646f95937e6950596f42fdf2cc0b1e82` previously passed
 **505/505 selected Linux tests, no skips**, in 127.949 seconds across 33 modules.
 This adds durable worker acceptance-observation and immutable lookup binding to
 the combined scope below. The actual loopback HTTPS lost-reply, committed replay,
@@ -52,12 +67,10 @@ Source deletion remains disabled. Durable worker acceptance-observation is
 included in the newer source-only `54c28d8` checkpoint above, but is **not** in
 these `51cff44` image and native-PC preparations.
 
-GCP boundary: Viewer import/serialization tests pass, but a subsequent worker
-audit found all-image guards in Driver/Router/EngineWorker and staged execution
-that still reject a V2 attempt-derived `gcp_list.txt`. Safe receipt-bound GCP
-auxiliary support and captured multipart qualification remain unfinished; do not
-equate the Viewer tests with GCP-enabled native processing. The user's next
-10,000-photo test was specified without GCPs.
+GCP boundary: ordinary V2 receipt-bound auxiliary admission and captured multipart
+are now qualified synthetically in `89c3dc4` above. Staged/combined GCP support,
+real native GCP processing and rendered UI acceptance remain unqualified. The
+user's next 10,000-photo test was specified without GCPs.
 
 ## Live NodeODX option compatibility checkpoint
 
