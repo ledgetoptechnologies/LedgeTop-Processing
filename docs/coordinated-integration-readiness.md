@@ -6,6 +6,35 @@ approval. Runtime acceptance remains incomplete.
 
 ## November 4 worker integration checkpoint
 
+### Combined intake/worker checkpoint
+
+Code `e7d63c6` combines source intake `2ba927e`, pinned live-engine worker
+checks, explicit V2 digest markers through execution/recovery, and the
+parent-claim client shape update. The 260-test Ubuntu/pilot combined suite passed
+with no skips: intake, spool, API, runtime, HTTP, driver/routing, engine/cleanup,
+parent guard, recovery, store and protocol. An earlier run had one Linux-only
+symlink-test setup failure; its fixture created a non-private intermediate
+directory. The fixture was corrected, its 11-test module passed, and the full
+260-test combined suite then passed on this exact code revision.
+
+The Windows actual-Viewer canonical/proof/intake selection passed 23/23 with no
+skips on the joined candidate immediately before that fixture-only correction.
+Runtime configuration schema 6 explicitly requires the spool and pinned Viewer
+source-attestation keys; existing schemas 3/4 are preserved.
+
+The next missing production seam is source grant/download wiring: the imported
+Store mint/read methods initially had no production callsites. That follow-up
+must pass a reserved worker's actual HTTPS download before this is an executable
+end-to-end workflow. Actual Viewer client pairing is also pending. The 10,000
+photo synthetic metadata closure measured 4,920,057 bytes for ordinary filenames,
+exceeding the existing 4 MiB V2 intake limit; a bounded V2-only limit and matching
+Viewer outbox/node-budget migration are being prepared. Neither of these gaps
+is resolved by the passing tests above. No client datasets were processed.
+
+The current NAS preparation is described in
+[the source spool checklist](truenas-source-spool-preparation.md). Only the
+coordinator needs a NAS spool mount; workers use its authenticated source broker.
+
 Worker integration code `06560c6` (parent `5b2d0f8`) incorporates the pinned
 live-engine probe before mutations and cleanup, rejects the alternate legacy
 Viewer executor in multi-node reference configuration, and retains the current
