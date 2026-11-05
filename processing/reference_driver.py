@@ -1235,12 +1235,16 @@ class ReferenceDriver:
             raise DriverHeld('source_fetch_not_admitted')
         if state['status'] in ('failed', 'cancelled'):
             return self._unstarted(job_id, stage, data, 'source_fetch_ended')
+        recovered = False
         if source_range_v2 and self._restart_recoverable(state, data, stage):
             self._recover_source_fetch(job_id, stage, data)
             state = self._claim_state(job_id, data['claim'])
             if state is None:
                 raise DriverHeld('source_fetch_not_admitted')
+            recovered = True
         if state['status'] == 'running' and state['executionPhase'] == 'fetching':
+            if recovered:
+                self._clear_transfer_watch(job_id, stage, data)
             return None
         raise DriverHeld('source_fetch_held')
 
@@ -1250,6 +1254,16 @@ class ReferenceDriver:
         return state['executionPhase'] in SOURCE_RECOVERY_PHASES.get(stage, ()) and (
             (state['status'], state['heldReason']) == ('held', 'coordinator_restart')
             or (data.get('sourceRecovery') or {}).get('pending') is not None)
+
+    def _clear_transfer_watch(self, job_id, stage, data):
+        """Retire a shown transfer problem once it is proven over; nothing else.
+
+        Only a recovery that returned this claim to running, or an object that
+        really arrived, proves that. Running state alone does not, or a failing
+        source would flap. A journaled hold is never a watch, so it is untouched.
+        """
+        if (data.get('watch') or {}).get('reasonCode') == 'source_transfer_unavailable':
+            self._clear_watch(job_id, stage, data)
 
     def _source_refused(self, job_id, stage, data):
         """A control call got 409 with no GET to gate: resume it if a restart held it."""
@@ -1809,6 +1823,7 @@ class ReferenceDriver:
                 data['inputPaths'] = paths
                 self.ledger.record_allocated(reservation, sum(item['byteSize'] for item in claim['submission']['manifest']['objects'] if item['id'] in paths))
                 self._save(job_id, 'fetching', data)
+                self._clear_transfer_watch(job_id, 'fetching', data)
                 return {'state': 'fetching', 'jobId': job_id}
             self.ledger.record_allocated(reservation, claim['submission']['manifest']['totalBytes'])
             data['inputPaths'] = paths
