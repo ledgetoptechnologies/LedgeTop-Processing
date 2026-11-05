@@ -396,20 +396,15 @@ class EvidenceFailsClosed(FenceCase):
         self.assertEqual(cell.queue.get(production)['status'], 'queued')
         self.assertFalse(cell.queue.staging_open('main'))
 
-    def test_only_verified_bytes_over_current_scratch_are_proof(self):
-        cell = self.cell({'cluster': 10, 'main': None})
-        job_id = cell.reference_job(2, 'production')
-        total = cell.reference.get(job_id, private=True)['submission']['manifest']['totalBytes']
-        for evidence, proven in (((total, 1), True), ((total + 1, 0), False), (None, False), (('x', 1), False), ('bad', False)):
-            with self.subTest(evidence=evidence):
-                cell.reference.node_scratch_evidence = lambda node: evidence
-                self.assertEqual(cell.queue.staging_open('cluster'), proven)
-
-    def test_viewer_bytes_are_not_scratch_proof(self):
-        cell = self.cell({'cluster': 10, 'main': None})
-        cell.viewer_job(2, 'production')
-        cell.reference.node_scratch_evidence = lambda node: (0, 0)
-        self.assertFalse(cell.queue.staging_open('cluster'))
+    def test_byte_cap_and_scratch_are_not_staging_proof(self):
+        # Beau: "no just photo count". Bytes guard admission, never staging priority.
+        for kind in ('reference', 'viewer'):
+            with self.subTest(production=kind):
+                cell = self.cell({'cluster': 10, 'main': None})
+                getattr(cell, kind + '_job')(2, 'production')
+                cell.reference._configured_node_limits['cluster']['maxInputBytes'] = 1
+                self.assertFalse(cell.queue.staging_open('cluster'))
+        self.assertFalse(hasattr(ReferenceStore, 'node_scratch_evidence'))
 
     def test_queue_without_scheduler_proves_nothing(self):
         with tempfile.TemporaryDirectory() as directory:

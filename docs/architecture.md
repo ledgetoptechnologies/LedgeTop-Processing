@@ -84,9 +84,9 @@ coordinator now applies explicit small-node-first policy at its atomic claim.
 Each physical node runs one job. Production goes first on every node it can
 use. Running production keeps only its own node and held production stops all
 staging. Queued production keeps a node from staging unless it is proven unable
-to use it: a configured capability or photo cap, or hash-verified bytes above a
-current scratch observation. Missing or tampered metadata and live engine
-reports prove nothing. Every Reference and Viewer claim recomputes this fence
+to use it: a configured capability or photo cap. Byte caps and scratch stay
+admission guards and are never staging proof. Missing or tampered metadata and
+live engine reports prove nothing. Every Reference and Viewer claim recomputes this fence
 in its transaction.
 
 ## Security and API boundary

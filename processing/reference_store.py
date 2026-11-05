@@ -54,9 +54,6 @@ def _reason(value):
 
 
 class ReferenceStore(ReferenceSourceIntakeMethods):
-    # Readiness may supply current (availableBytes, reservedBytes) for a node.
-    node_scratch_evidence = None
-
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
                  main_node_id=None, node_limits=None, node_option_validator=None):
@@ -592,10 +589,10 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
     def _production_cannot_use(self, db, job, node_id):
         """Prove queued production cannot run on this node; doubt proves nothing.
 
-        Proof is a configured capability or photo cap, or verified bytes above
-        a current scratch observation. Live engine reports (readiness, queue
-        depth, reported maxImages) are not proof, so a node still being probed
-        stays unknown, never busy.
+        Proof is a configured capability or photo cap only. Byte caps and scratch
+        stay admission guards, not staging priority. Live engine reports (readiness,
+        queue depth, reported maxImages) are not proof, so a node still being
+        probed stays unknown, never busy.
         """
         if job["profile"] not in self.queue.node_profiles(node_id):
             return True
@@ -604,15 +601,9 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             evidence = readers[job["profile"]](db, job) if job["profile"] in readers else None
             if evidence is None:
                 return False
-            images, total, treedar = evidence
+            images, _total, treedar = evidence
             limit = self._configured_node_limits[node_id]["maxImages"]
-            if (limit is not None and images > limit) or (treedar and node_id not in self.queue.treedar_node_ids):
-                return True
-            scratch = self.node_scratch_evidence(node_id) if self.node_scratch_evidence is not None else None
-            if total is None or scratch is None:
-                return False
-            available, reserve = scratch
-            return type(available) is int and type(reserve) is int and total + reserve > available
+            return (limit is not None and images > limit) or (treedar and node_id not in self.queue.treedar_node_ids)
         except (sqlite3.Error, KeyError, TypeError, ValueError, AttributeError):
             return False
 
