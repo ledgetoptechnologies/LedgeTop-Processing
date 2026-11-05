@@ -365,7 +365,8 @@ class ReferenceSourceIntakeMethods:
             expected = dict(schemaVersion=1, jobId=job_id, generation=row['generation'], objectId=item['id'],
                 storageKey=SourceSpool.storage_key(job_id, row['generation'], item['id']), byteSize=item['byteSize'],
                 sha256=item['sha256'], mountId=receipt['mount_id'])
-            if receipt['storage_key'] != expected['storageKey'] or receipt['receipt_json'] != _json(expected):
+            if (receipt['generation'] != row['generation'] or receipt['storage_key'] != expected['storageKey']
+                    or receipt['receipt_json'] != _json(expected)):
                 raise Conflict('source custody receipt changed')
 
     def _source_fetch_closure(self, db, job_id):
