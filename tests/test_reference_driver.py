@@ -575,10 +575,11 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(len(list(self.scratch.glob('jobs/*/all.zip'))), 1)
 
     def test_dynamic_local_options_refresh_and_strict_scalar_types(self):
+        self.transport.options.append(dict(name='3d-tiles', type='bool', value='false'))
         self.assertTrue(self.driver._ready())
-        self.assertEqual(self.worker.allowed_options, frozenset(('numeric-limit','fast-mode')))
+        self.assertEqual(self.worker.allowed_options, frozenset(('numeric-limit','fast-mode','3d-tiles')))
         raw = copy.deepcopy(self.fixture['submission'])
-        raw['pipeline']['odm']['options'] = {'numeric-limit': 5, 'fast-mode': True}
+        raw['pipeline']['odm']['options'] = {'numeric-limit': 5, 'fast-mode': True, '3d-tiles': True}
         normalized = validate_submission(raw, environment='staging', capability_fingerprint=raw['capabilityFingerprint'],
                                          allowed_odm_options=self.worker.allowed_options)
         job = dict(submission=normalized, environment='staging', nodeId='cluster',

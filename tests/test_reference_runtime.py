@@ -690,6 +690,22 @@ class ReferenceRuntimeTests(unittest.TestCase):
         changed["nodes"][0]["engineVersion"] = "synthetic-2"
         self.assertNotEqual(first[0], discovered_policy(changed, self.config)[0])
 
+    def test_actual_digit_prefixed_output_option_survives_discovery_and_admission(self):
+        self.snapshot['commonOptions'].append(dict(name='3d-tiles', type='bool', value='false'))
+        queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'), reference_enabled=True)
+        self.addCleanup(queue.close)
+        runtime = self.runtime(queue)
+        headers = {'Authorization': 'Bearer ' + self.value['viewerBearers']['staging']}
+        listed = runtime.api.handle('GET', '/ltds/v1/options', headers, protected_transport=True)
+        self.assertEqual(listed.status, 200)
+        self.assertIn({'name': '3d-tiles', 'type': 'bool', 'value': 'false'}, listed.body['options'])
+        raw = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())['submission']
+        raw['capabilityFingerprint'] = listed.body['capabilityFingerprint']
+        raw['pipeline']['odm']['optionsFingerprint'] = listed.body['optionsFingerprint']
+        raw['pipeline']['odm']['options'] = {'3d-tiles': True}
+        admitted = runtime.api.handle('POST', '/ltds/v1/jobs', headers, json.dumps(raw).encode(), protected_transport=True)
+        self.assertEqual(admitted.status, 201, admitted.body)
+
     def test_enum_values_are_checked_against_fresh_engine_choices(self):
         _, _, allowed = discovered_policy(self.snapshot, self.config)
         payload = {"pipeline": {"odm": {"options": {"safe-enum": "high"}}}}

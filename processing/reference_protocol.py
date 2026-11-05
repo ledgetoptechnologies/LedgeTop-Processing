@@ -23,6 +23,11 @@ TREEDAR_ADMISSION_VERSION = "treedar-lidar-v1"
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 
 
+def valid_odm_option_name(value):
+    """Accept bounded engine option names, including NodeODM's ``3d-tiles``."""
+    return type(value) is str and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", value) is not None
+
+
 class ProtocolError(ValueError):
     """A request or receipt violates the reference protocol contract."""
 
@@ -195,7 +200,7 @@ def validate_submission(payload, *, environment, capability_fingerprint,
     if options_fingerprint is not None:
         _require(odm["optionsFingerprint"] == options_fingerprint, "stale options fingerprint")
     for key, value in odm["options"].items():
-        _require(type(key) is str and re.fullmatch(r"[a-z][a-z0-9-]{0,79}", key), "invalid ODM option name")
+        _require(valid_odm_option_name(key), "invalid ODM option name")
         _require(allowed_odm_options is not None and key in allowed_odm_options,
                  "unsupported ODM option")
         _require(value is None or type(value) in (str, bool, int, float), "ODM option must be a JSON scalar")

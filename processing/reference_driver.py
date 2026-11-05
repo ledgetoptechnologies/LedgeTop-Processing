@@ -616,7 +616,7 @@ class ReferenceDriver:
         selected = {}
         for option in definitions:
             name = option['name']
-            if (re.fullmatch(r'[a-z][a-z0-9-]{0,79}', name)
+            if (p.valid_odm_option_name(name)
                     and option.get('type') in ('bool','boolean','int','integer','float','double','number')
                     and not _UNSAFE.search(p.canonical_json(option).decode())):
                 selected[name] = option

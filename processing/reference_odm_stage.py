@@ -313,7 +313,7 @@ class NativeODMStage:
     def _options(self,intent):
         try:
             catalog=_validate_options(self.engine.read('/options',limit=262144))
-            definitions={o['name']:o for o in catalog if re.fullmatch(r'[a-z][a-z0-9-]{0,79}',o['name'])
+            definitions={o['name']:o for o in catalog if p.valid_odm_option_name(o['name'])
                 and o.get('type') in ('bool','boolean','int','integer','float','double','number')
                 and not _UNSAFE.search(p.canonical_json(o).decode())}
             for name,value in intent['stage']['options']['options'].items():

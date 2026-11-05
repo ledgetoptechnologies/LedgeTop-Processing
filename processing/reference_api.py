@@ -40,7 +40,7 @@ class ReferenceAPI:
         if type(treedar_available) is not bool:
             raise ValueError("explicit TreeDar availability boolean required")
         options = frozenset(allowed_odm_options)
-        if any(type(name) is not str or not re.fullmatch(r"[a-z][a-z0-9-]{0,79}", name) for name in options):
+        if any(not protocol.valid_odm_option_name(name) for name in options):
             raise ValueError("invalid ODM option allowlist")
         self.store = store
         self._bearers = MappingProxyType(dict(bearer_tokens))

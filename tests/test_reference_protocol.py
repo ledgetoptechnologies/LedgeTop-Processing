@@ -103,6 +103,16 @@ class ReferenceProtocolTests(unittest.TestCase):
             self.payload["pipeline"]["odm"]["options"] = {"projection": value}
             self.validate(allowed_odm_options={"projection"})
 
+    def test_digit_prefixed_engine_option_preserves_name_bounds(self):
+        self.payload["pipeline"]["odm"]["options"] = {"3d-tiles": True}
+        self.validate(allowed_odm_options={"3d-tiles"})
+        for name in ("", "-3d-tiles", "3D-tiles", "3d_tiles", "3d/tiles", "3d-tiles\n", "3" * 81):
+            with self.subTest(name=name):
+                self.assertFalse(p.valid_odm_option_name(name))
+                self.payload["pipeline"]["odm"]["options"] = {name: True}
+                with self.assertRaises(p.ProtocolError):
+                    self.validate(allowed_odm_options={name})
+
     def test_declared_counts_safe_ascii_ids_and_names(self):
         for change in ({"objectCount": True}, {"objectCount": 2},
                        {"inputCounts": {"images": 0, "lidarObjects": 0, "points": 0}},

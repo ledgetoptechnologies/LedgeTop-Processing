@@ -387,7 +387,7 @@ def discovered_policy(snapshot, config):
         if option_type in ("string", "enum"):
             description = json.dumps(option.get("domain", ""), ensure_ascii=False) + " " + str(option.get("help", ""))
             supported = supported and not (name in _FILE_OPTIONS or _UNSAFE.search(description))
-        if (type(name) is not str or not re.fullmatch(r"[a-z][a-z0-9-]{0,79}", name)
+        if (not p.valid_odm_option_name(name)
                 or not supported
                 or _UNSAFE.search(p.canonical_json(option).decode("utf-8"))):
             continue

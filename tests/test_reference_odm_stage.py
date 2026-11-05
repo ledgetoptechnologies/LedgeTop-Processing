@@ -259,6 +259,20 @@ class NativeODMStageTests(unittest.TestCase):
         self.assertEqual(self.counts()['initialize'],0)
         self.assertIsNone(self.stage.lookup(self.intent()))
 
+    def test_digit_prefixed_output_option_uses_current_native_boolean_definition(self):
+        dispatch = self.fixture._dispatch
+        def catalog(method, path, headers, body):
+            if method == 'GET' and path == '/options':
+                return 200, [dict(name='3d-tiles', type='bool', value='false')], False
+            return dispatch(method, path, headers, body)
+        self.fixture._dispatch = catalog
+        intent = {'stage': {'options': {'options': {'3d-tiles': True}}}}
+        self.stage._options(intent)
+        intent['stage']['options']['options']['3d-tiles'] = 'true'
+        with self.assertRaises(NativeStageHeld):
+            self.stage._options(intent)
+        self.assertEqual(self.counts()['initialize'], 0)
+
     def test_active_backend_queue_is_refused_before_initialization(self):
         dispatch=self.fixture._dispatch
         def active(method,path,headers,body):
