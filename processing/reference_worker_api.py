@@ -307,6 +307,10 @@ class ReferenceWorkerAPI:
                     if dropped is not None:
                         return Response(200, {"jobId": payload["jobId"], "status": dropped[0], "claimState": dropped[1]})
                     return self._error(409, "claim_unavailable")
+                if claim["status"] in ("succeeded", "failed", "cancelled"):
+                    # store.claim proved this is the same worker's own request. An
+                    # ended claim grants nothing, so its replay is the closed word.
+                    return Response(200, {"jobId": payload["jobId"], "status": claim["status"], "claimState": "ended"})
                 return Response(200, claim)
             if method == "POST" and path == PREFIX + "/claim-withdrawal":
                 payload = protocol.decode_submission(body)
