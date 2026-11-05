@@ -87,6 +87,61 @@ class FreezeTests(unittest.TestCase):
         with self.assertRaisesRegex(Conflict, 'maintenance'): self.change('intent')
         self.assertEqual(self.gate.status()['phase'], 'open')
 
+    def test_only_exact_owned_coordinator_node_drain_can_be_adopted(self):
+        with self.queue._db() as db:
+            db.execute("UPDATE nodes SET state='draining',plan_id=?", (str(uuid.uuid4()),))
+        with self.assertRaisesRegex(Conflict, 'foreign'): self.change('intent')
+        with self.queue._db() as db:
+            db.execute("UPDATE nodes SET state='active',plan_id=NULL")
+        now = self.queue._now().isoformat().replace('+00:00', 'Z')
+        self.queue.schedule_node_owned('cluster', dict(schemaVersion=1,
+            requestId=str(uuid.uuid5(uuid.UUID(self.plan), 'coordinator-freeze:cluster')),
+            authorityId=self.queue.authority_id, expectedRevision=0, drainAt=now,
+            notBefore=now, afterJobId=None, targetImage='sha256:' + 'a' * 64))
+        self.assertEqual(self.change('intent')['phase'], 'intent')
+
+    def test_same_startup_abort_does_not_retire_blocked_response_stream(self):
+        from processing.reference_http import create_reference_http_server
+        from processing.reference_binary import BinaryResponse
+        queue = self.queue
+        ready, release, closed = threading.Event(), threading.Event(), threading.Event()
+        class Stream:
+            def chunks(self):
+                ready.set()
+                if not release.wait(3): raise TimeoutError('synthetic stream deadline')
+                yield b'archive!'
+            def close(self): closed.set()
+        class API:
+            coordinator_queue = queue
+            def handle(self, *args, **kwargs):
+                return BinaryResponse(Stream(), headers={'Content-Length': '8', 'Content-Type': 'application/zip'})
+        server = create_reference_http_server(API())
+        thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .01})
+        thread.start()
+        connection = http.client.HTTPConnection(*server.server_address, timeout=3)
+        try:
+            connection.request('GET', '/synthetic-result/archive.zip')
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertTrue(ready.wait(2))
+            self.change('intent'); self.change('drain')
+            with self.assertRaisesRegex(Conflict, 'still draining'): self.change('seal')
+            self.assertEqual(self.change('abort', healthy=True)['phase'], 'open')
+            self.assertFalse(closed.is_set())
+            self.assertEqual(self.gate.status()['operations'], 1)
+            with self.queue.coordinator_operation('http'):
+                self.assertEqual(self.gate.status()['operations'], 2)
+            self.assertEqual(self.gate.status()['operations'], 1)
+            release.set()
+            self.assertEqual(response.read(), b'archive!')
+            until = time.monotonic() + 2
+            while self.gate.status()['operations'] and time.monotonic() < until: time.sleep(.01)
+            self.assertEqual(self.gate.status()['operations'], 0)
+            self.assertTrue(closed.is_set())
+        finally:
+            release.set(); connection.close()
+            server.shutdown(); server.server_close(); thread.join(2)
+
     def test_frozen_state_survives_queue_ownership_restart(self):
         for action in ('intent', 'drain', 'seal'): self.change(action)
         authority = self.queue.authority_id
@@ -114,6 +169,28 @@ class FreezeTests(unittest.TestCase):
         self.assertEqual(self.gate.transition(request, owner_secret=self.owner), receipt)
         self.change('drain'); self.change('seal')
         self.assertEqual(self.gate.status()['phase'], 'frozen')
+        self.change('resume', healthy=True)
+        with self.queue.coordinator_operation('http'):
+            self.assertEqual(self.queue.list(), [])
+        self.plan = str(uuid.uuid4())
+        with self.assertRaisesRegex(CoordinatorFrozen, 'historical_metadata_full'):
+            self.change('intent')
+
+    def test_retained_update_history_does_not_consume_active_emergency_capacity(self):
+        from processing.reference_store import ReferenceStore
+        from processing.coordinator_freeze import active_metadata_bytes, metadata_bytes
+        self.queue.allowed_profiles.add('reference-pipeline-v1')
+        store = ReferenceStore(self.queue)
+        for _ in range(120):
+            self.plan = str(uuid.uuid4())
+            for action in ('intent', 'drain', 'seal'): self.change(action)
+            self.change('resume', healthy=True)
+        with self.queue._db() as db:
+            self.assertGreater(metadata_bytes(db), 256 * 1024)
+            self.assertLess(active_metadata_bytes(db), 4096)
+            self.assertGreaterEqual(store._metadata_used_bytes(db), metadata_bytes(db))
+            self.assertEqual(db.execute('SELECT count(*) FROM coordinator_freeze_receipts').fetchone()[0], 480)
+        with self.queue.coordinator_operation('http'): pass
 
     def test_previous_disabled_barrier_marker_requires_reviewed_conversion(self):
         with self.queue._db() as db:

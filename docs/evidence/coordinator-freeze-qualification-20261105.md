@@ -15,6 +15,14 @@ transition request/receipt is retained, and a conflicting replay is rejected.
 
 Transitions are `open -> intent -> draining -> frozen -> open`, requested as
 `intent`, `drain`, `seal`, `resume`. A new plan cannot reuse a previous plan ID.
+The original healthy startup can explicitly `abort` its own intent/draining
+plan using the same owner/plan/revision. It reopens admission without retiring
+an active stream or source pin. It cannot abort across restart or unknown hold,
+and does not cancel any node plan; the updater must cancel only its exact owned
+node drains separately. Intent accepts an already-draining node only when its
+durable owned schedule request ID is UUIDv5(freezePlanId,
+`coordinator-freeze:` + nodeId), and its canonical request/receipt and current
+node plan/revision match exactly. Foreign drains and updates are refused.
 Intent and operation admission serialize through the existing Queue lifecycle
 mutex and SQLite transaction. A pre-intent operation owns an actual same-thread
 opaque token and durable pin; nested synchronous receipt closure inherits that
@@ -64,9 +72,15 @@ that reviewed startup table set until their separate review is integrated.
 
 ## Bounded control reserve
 
-Freeze state/receipts, epoch history and operation pins have an independent
-256 KiB control ceiling, with 512 bytes reserved for state closure/hold and at
-most 128 active pins. Operation kinds are a closed constant set; paths, raw
+Active freeze state/plan receipts, active epochs and operation pins have an
+independent 256 KiB control ceiling, with 512 bytes reserved for state closure/
+hold and at most 128 active pins. Completed plan receipts and closed/retired
+epochs/pins remain charged to the ordinary total metadata budget; retained
+history cannot consume active emergency capacity. Historical budget exhaustion
+holds new plans without discarding history or blocking existing ACK/status
+replay. A 120-cycle native regression retains 480 receipts and more than 256 KiB
+of history while active control uses less than 4 KiB and HTTP admission works.
+Operation kinds are a closed constant set; paths, raw
 query strings, headers and tokens are never persisted as operation metadata.
 All actual control bytes still appear in ReferenceStore's measured total.
 Payload allocation remains subject to the ordinary quota and cannot borrow

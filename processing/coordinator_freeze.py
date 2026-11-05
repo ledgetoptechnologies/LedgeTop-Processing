@@ -77,6 +77,25 @@ def metadata_bytes(db):
     return used
 
 
+def active_metadata_bytes(db):
+    """Emergency capacity is independent of retained, completed history."""
+    names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if 'coordinator_freeze_state' not in names:
+        return 0
+    state = db.execute('SELECT * FROM coordinator_freeze_state WHERE singleton=1').fetchone()
+    if state is None:
+        return 0
+    size = lambda row: sum(len(str(value).encode('utf-8')) for value in row if value is not None)
+    used = size(state)
+    if state['phase'] != 'open' and 'coordinator_freeze_receipts' in names:
+        used += sum(size(row) for row in db.execute('SELECT * FROM coordinator_freeze_receipts WHERE plan_id=?', (state['plan_id'],)))
+    if 'coordinator_operation_pins' in names:
+        used += sum(size(row) for row in db.execute("SELECT * FROM coordinator_operation_pins WHERE state IN ('active','uncertain')"))
+    if 'coordinator_operation_epochs' in names:
+        used += sum(size(row) for row in db.execute("SELECT * FROM coordinator_operation_epochs WHERE state='active'"))
+    return used
+
+
 class FreezeGate:
     def __init__(self, queue):
         self.queue = queue
@@ -157,7 +176,8 @@ class FreezeGate:
                     retire_pins.append(pin)
             charge = sum(len(value) for value in (queue.startup_id, wire, binding_sha, 'active'))
             charge += len(retire_pins) + 37 * sum(epochs[epoch]['state'] == 'active' for epoch in registered)
-            if metadata_bytes(db) + charge + 512 > 256 * 1024:
+            ordinary, ordinary_limit = self._ordinary_usage(db)
+            if active_metadata_bytes(db) + charge + 512 > 256 * 1024 or ordinary > ordinary_limit:
                 uncertain = True
             else:
                 db.execute('INSERT INTO coordinator_operation_epochs VALUES(?,?,?,?,NULL)',
@@ -206,8 +226,21 @@ class FreezeGate:
 
     def _row(self, db):
         row = db.execute('SELECT * FROM coordinator_freeze_state WHERE singleton=1').fetchone()
-        if row is None or row['phase'] not in ('open', 'intent', 'draining', 'frozen', 'held'):
+        if (row is None or row['phase'] not in ('open', 'intent', 'draining', 'frozen', 'held')
+                or type(row['revision']) is not int or not 0 <= row['revision'] <= 2**53 - 1):
             raise CoordinatorFrozen('coordinator_freeze_journal_unavailable')
+        if row['plan_id'] is None:
+            if row['phase'] not in ('open', 'held') or row['owner_sha256'] is not None or row['owner_epoch'] is not None:
+                raise CoordinatorFrozen('coordinator_freeze_owner_unavailable')
+        else:
+            try:
+                valid = (str(uuid.UUID(row['plan_id'])) == row['plan_id']
+                         and str(uuid.UUID(row['owner_epoch'])) == row['owner_epoch']
+                         and re.fullmatch('[a-f0-9]{64}', row['owner_sha256']) is not None)
+            except (ValueError, TypeError, AttributeError):
+                valid = False
+            if not valid:
+                raise CoordinatorFrozen('coordinator_freeze_owner_unavailable')
         return row
 
     def status(self):
@@ -362,8 +395,57 @@ class FreezeGate:
         # ReferenceStore still measures these bytes in its total, and cannot
         # allocate payload using this reserve. Census adds this 256KiB ceiling
         # explicitly when deriving the physical DB/headroom budget.
-        if metadata_bytes(db) + extra + 512 > 256 * 1024:
+        if active_metadata_bytes(db) + extra + 512 > 256 * 1024:
             raise CoordinatorFrozen('coordinator_freeze_metadata_full')
+
+    def _ordinary_usage(self, db):
+        store = getattr(self.queue, '_reference_scheduler', None)
+        limit = store.max_metadata_bytes if store is not None else 64 * 1024 * 1024
+        if store is not None:
+            total = store._metadata_used_bytes(db)
+        else:
+            # Query calculator only: no constructor, Queue, spool, network,
+            # reconciliation or lease acquisition. Legacy incomplete schemas
+            # use a conservative scalar-row byte census until reviewed upgrade.
+            try:
+                from .reference_store import ReferenceStore
+                total = ReferenceStore._metadata_used_bytes(object.__new__(ReferenceStore), db)
+            except sqlite3.OperationalError:
+                total = 0
+                for table, in db.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+                    if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', table):
+                        raise CoordinatorFrozen('unrecognized_metadata_table')
+                    for row in db.execute('SELECT * FROM "' + table + '"'):
+                        total += sum(len(value) if type(value) is bytes else len(str(value).encode('utf-8'))
+                                     for value in row if value is not None)
+        return max(0, total - active_metadata_bytes(db)), limit
+
+    def _owned_drains(self, db, plan_id):
+        """Only this freeze plan's exact durable node schedule may be adopted."""
+        from .maintenance import canonical
+        for node in db.execute("SELECT * FROM nodes WHERE state!='active'"):
+            if node['state'] != 'draining':
+                raise Conflict('node maintenance ownership must resolve first')
+            request_id = str(uuid.uuid5(uuid.UUID(plan_id), 'coordinator-freeze:' + node['id']))
+            saved = db.execute('SELECT * FROM owned_maintenance_schedules WHERE request_id=? AND node_id=?',
+                               (request_id, node['id'])).fetchone()
+            if saved is None or saved['authority_id'] != self.queue.authority_id:
+                raise Conflict('foreign node drain must resolve first')
+            request, receipt = json.loads(saved['request_json']), json.loads(saved['receipt_json'])
+            request_sha = hashlib.sha256(canonical(dict(nodeId=node['id'], request=request)).encode()).hexdigest()
+            receipt_body = {key: value for key, value in receipt.items() if key != 'receiptSha256'}
+            if (saved['request_json'] != canonical(request) or saved['receipt_json'] != canonical(receipt)
+                    or request_sha != saved['request_sha256'] or receipt.get('requestSha256') != request_sha
+                    or receipt.get('receiptSha256') != hashlib.sha256(canonical(receipt_body).encode()).hexdigest()
+                    or request.get('requestId') != request_id or request.get('authorityId') != self.queue.authority_id
+                    or receipt.get('requestId') != request_id or receipt.get('authorityId') != self.queue.authority_id
+                    or receipt.get('nodeId') != node['id'] or receipt.get('planId') != node['plan_id']
+                    or receipt.get('state') != 'draining' or receipt.get('revision') != node['revision']
+                    or request.get('expectedRevision', -2) + 1 != node['revision']
+                    or any(receipt.get(key) != node[column] for key, column in (
+                        ('drainAt', 'drain_at'), ('notBefore', 'not_before'), ('afterJobId', 'after_job_id'),
+                        ('targetImage', 'target_image')))):
+                raise Conflict('coordinator node drain receipt changed')
 
     @contextmanager
     def operation(self, kind):
@@ -411,9 +493,9 @@ class FreezeGate:
         for key in ('requestId', 'planId', 'startupId'):
             if type(request[key]) is not str or str(uuid.UUID(request[key])) != request[key]:
                 raise ValueError('canonical freeze identity required')
-        if type(request['expectedRevision']) is not int or request['expectedRevision'] < 0:
+        if type(request['expectedRevision']) is not int or not 0 <= request['expectedRevision'] < 2**53 - 1:
             raise ValueError('freeze revision required')
-        if request['action'] not in ('intent', 'drain', 'seal', 'resume') or not owner_secret:
+        if request['action'] not in ('intent', 'drain', 'seal', 'resume', 'abort') or not owner_secret:
             raise ValueError('freeze action and owner required')
         owner = hashlib.sha256(owner_secret.encode('ascii')).hexdigest()
         wire = _wire(request)
@@ -424,19 +506,29 @@ class FreezeGate:
             if prior:
                 if prior['owner_sha256'] != owner or prior['request_json'] != wire or prior['request_sha256'] != digest:
                     raise Conflict('freeze request identity changed')
-                return json.loads(prior['receipt_json'])
+                expected = dict(authorityId=self.queue.authority_id, startupId=request['startupId'],
+                    planId=request['planId'], revision=request['expectedRevision'] + 1,
+                    phase={'intent': 'intent', 'drain': 'draining', 'seal': 'frozen',
+                           'resume': 'open', 'abort': 'open'}[request['action']], requestId=request['requestId'])
+                if prior['plan_id'] != request['planId'] or prior['receipt_json'] != _wire(expected):
+                    raise Conflict('freeze stored receipt binding changed')
+                return expected
             row = self._row(db)
             if row['revision'] != request['expectedRevision'] or request['startupId'] != self.queue.startup_id:
                 raise Conflict('freeze revision or startup changed')
             target = {'intent': ('open', 'intent'), 'drain': ('intent', 'draining'),
-                      'seal': ('draining', 'frozen'), 'resume': ('frozen', 'open')}[request['action']]
-            if row['phase'] != target[0]:
+                      'seal': ('draining', 'frozen'), 'resume': ('frozen', 'open'),
+                      'abort': (('intent', 'draining'), 'open')}[request['action']]
+            expected_phases = target[0] if isinstance(target[0], tuple) else (target[0],)
+            if row['phase'] not in expected_phases:
                 raise Conflict('freeze phase changed')
             if request['action'] == 'intent':
+                used, limit = self._ordinary_usage(db)
+                if used > limit:
+                    raise CoordinatorFrozen('coordinator_historical_metadata_full')
                 if db.execute('SELECT 1 FROM coordinator_freeze_receipts WHERE plan_id=? LIMIT 1', (request['planId'],)).fetchone():
                     raise Conflict('freeze plan identity already used')
-                if db.execute("SELECT 1 FROM nodes WHERE state NOT IN ('active','draining') LIMIT 1").fetchone():
-                    raise Conflict('node maintenance ownership must resolve first')
+                self._owned_drains(db, request['planId'])
                 if db.execute("SELECT 1 FROM coordinator_operation_pins WHERE epoch!=? AND state IN ('active','uncertain') LIMIT 1", (self.queue.startup_id,)).fetchone():
                     raise Conflict('previous coordinator operations remain uncertain')
             elif row['plan_id'] != request['planId'] or row['owner_sha256'] != owner:
@@ -447,7 +539,9 @@ class FreezeGate:
                 names = {item[0] for item in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                 if 'source_reader_pins' in names and db.execute("SELECT 1 FROM source_reader_pins WHERE state IN ('active','uncertain') LIMIT 1").fetchone():
                     raise Conflict('source IO still draining')
-            if request['action'] == 'resume' and healthy is not True:
+            if request['action'] == 'abort' and row['owner_epoch'] != self.queue.startup_id:
+                raise Conflict('only original startup may abort its unfinished freeze')
+            if request['action'] in ('resume', 'abort') and healthy is not True:
                 raise Conflict('verified candidate health required')
             receipt = dict(authorityId=self.queue.authority_id, startupId=self.queue.startup_id,
                 planId=request['planId'], revision=row['revision'] + 1, phase=target[1], requestId=request['requestId'])
