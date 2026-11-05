@@ -60,3 +60,27 @@ current census must explicitly retain their closed, keyed byte inventory under
 strict path/owner/type/size bounds. Filenames alone cannot prove cancellation,
 child exit or supervisor absence. That custody work and stopped-writer proof
 remain open; no file was deleted or wildcard allowlist introduced.
+
+## Successful bounded metadata diagnostic
+
+After `42dec13`/`e0c17a2` added bounded opaque pilot retention and `cb0c979`
+recognized exact identity-bound historical `all.zip.intent` records, the same
+read-only diagnostic exited 0 on the installed coordinator. It reported:
+
+- 202 retained regular files, seven archive receipts and seven archive intents.
+- 90,778 logical metadata bytes; 278,528-byte SQLite database.
+- 1,860,664,916 aggregate retained artifact bytes, obtained from metadata/stat,
+  not by reading image or ZIP contents.
+- Two closed direct-maintenance residuals and 16 retained owned receipts.
+- 24 opaque pilot control files in four directories, 6,378 bytes in total.
+- Only 9,707 bytes read directly, consisting of bounded control metadata.
+
+There was no stderr; the exact task-owned process/start identity was verified
+absent afterward. The ephemeral keyed inventory was held only in memory and is
+not a persistent activation pin.
+
+The report explicitly retains `retainedFilesValidated=false`,
+`writerExclusionProven=false`, `signedViewerAcceptanceProven=false` and
+`pilotClosureProven=false`. A successful metadata diagnostic therefore clears
+the known layout-classification blockers, not full artifact integrity,
+stopped-writer custody, historical delivery acceptance or installed cutover.
