@@ -155,7 +155,8 @@ class ODMInputClosureTests(unittest.TestCase):
                 worker.start(self.job, reservation_id='gcp-reservation', input_paths=paths)
             self.assertEqual(engine.calls, [], 'all input hashes must verify before initialize/upload/commit')
 
-    def test_wrong_signed_intake_owner_is_rejected_before_queueing(self):
+    def test_changed_signed_owner_on_existing_submission_is_a_replay_conflict(self):
+        before = self.store.list(private=True)
         signed = self.helper.validate(allowed_odm_options={'numeric-probe'})
         payload = copy.deepcopy(self.helper.payload); payload['sourceAttestation'] = signed['sourceAttestation']
         proof = payload['sourceAttestation']['proof']
@@ -167,5 +168,45 @@ class ODMInputClosureTests(unittest.TestCase):
             attestationSha256=hashlib.sha256(message).hexdigest())
         response = self.control.handle('POST', '/ltds/v2/jobs', {'Authorization': 'Bearer synthetic-staging-token'},
             p.canonical_json(payload), protected_transport=True)
-        self.assertEqual(response.status, 400)
-        self.assertEqual(len(self.store.list(private=True)), 1)
+        self.assertEqual(response.status, 409)
+        self.assertEqual(response.body, {'error': 'reference_conflict'})
+        self.assertEqual(self.store.list(private=True), before)
+
+    def test_fresh_signed_wrong_owner_is_rejected_and_matched_owner_admits(self):
+        # Rebind the complete attempt closure, including derived object IDs and
+        # snapshot attempt identity. A fresh submission must reach signature /
+        # principal validation rather than duplicate-ID replay reconciliation.
+        import json, base64, hashlib
+        from processing import viewer_source_attestation as attestation
+        fresh = '00000000-0000-4000-8000-000000000099'
+        payload = json.loads(json.dumps(self.helper.payload).replace(intake_fixture.ATTEMPT, fresh))
+        payload['providerTaskId'] = '00000000-0000-4000-8000-000000000098'
+        for name in ('sourceManifest', 'derivedManifest'):
+            payload[name]['sha256'] = p.digest({k:v for k,v in payload[name].items() if k != 'sha256'})
+        payload['manifest']['sha256'] = p.manifest_sha256(payload['manifest'])
+        valid = self.helper.validate(payload=payload, allowed_odm_options={'numeric-probe'})
+        payload['sourceAttestation'] = valid['sourceAttestation']
+        wrong = copy.deepcopy(payload)
+        proof = wrong['sourceAttestation']['proof']
+        proof['principalId'] = 'different-owner'
+        message = attestation.DOMAIN + p.canonical_json(proof)
+        wrong['sourceAttestation'].update(
+            signature=base64.urlsafe_b64encode(self.helper.signing_key.sign(message)).decode().rstrip('='),
+            attestationSha256=hashlib.sha256(message).hexdigest())
+        before = self.store.list(private=True)
+        headers = {'Authorization': 'Bearer synthetic-staging-token'}
+        refused = self.control.handle('POST', '/ltds/v2/jobs', headers,
+            p.canonical_json(wrong), protected_transport=True)
+        self.assertEqual(refused.status, 400)
+        self.assertEqual(refused.body, {'error': 'invalid_request'})
+        self.assertEqual(self.store.list(private=True), before)
+        # Exactly the same newly rebound request with the original valid owner
+        # must admit, proving the negative was not another stale-binding error.
+        accepted = self.control.handle('POST', '/ltds/v2/jobs', headers,
+            p.canonical_json(payload), protected_transport=True)
+        self.assertEqual(accepted.status, 201, accepted.body)
+        self.assertEqual(accepted.body['attemptId'], fresh)
+        self.assertEqual(accepted.body['sourceState'], 'receiving')
+        after = self.store.list(private=True)
+        self.assertEqual(len(after), len(before) + 1)
+        self.assertTrue(all(job in after for job in before))
