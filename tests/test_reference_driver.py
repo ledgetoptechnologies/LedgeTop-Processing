@@ -1307,6 +1307,68 @@ class ReferenceDriverTests(unittest.TestCase):
             self.assertEqual(self.driver.step()['state'], 'fetching')
         download.assert_called_once()
 
+    def die_settled(self, job, state_path):
+        """A real exception after the ledger settled and before the row was saved."""
+        real = ReferenceDriver._save
+
+        def save(driver, job_id, stage, data):
+            if stage == 'completed':
+                raise OSError('synthetic worker death before the row checkpoint')
+            return real(driver, job_id, stage, data)
+
+        with patch.object(ReferenceDriver, '_save', save), \
+             patch.object(self.driver.source_range_client, 'download_object') as download:
+            self.assertEqual(self.driver.step(), {'state': 'retry_wait', 'reason': 'driver_step_unavailable'})
+        download.assert_not_called()
+        self.assertEqual(self.data(job)[0], 'fetching')
+        self.assertEqual(self.lease(job)['state'], 'terminal')
+        self.assertEqual(self.lease(job)['remaining'], 0)
+        self.driver = self.make_driver(source_range_v2_enabled=True, state_path=state_path)
+
+    def test_death_between_settlement_and_the_row_advances_on_the_next_step(self):
+        state_path = self.root / 'driver-source-range-settled.sqlite'
+        self.driver = self.make_driver(source_range_v2_enabled=True, state_path=state_path)
+        job = self.submit(contents=(b'settled-photo',))
+        self.advance(job, 'fetching')
+        self.end_job(job)
+        self.die_settled(job, state_path)
+        with patch.object(self.driver.source_range_client, 'download_object') as download:
+            self.assert_unstarted_terminal(job, 'source_fetch_ended', self.driver.step())
+        download.assert_not_called()
+        self.assertEqual(self.driver.step()['state'], 'idle')
+
+    def test_settled_row_outlasts_an_outage_then_advances_with_nobody_reconciling(self):
+        state_path = self.root / 'driver-source-range-settled-outage.sqlite'
+        self.driver = self.make_driver(source_range_v2_enabled=True, state_path=state_path)
+        job = self.submit(contents=(b'settled-outage-photo',))
+        self.advance(job, 'fetching')
+        self.end_job(job)
+        self.die_settled(job, state_path)
+        real = self.driver._request
+
+        def outage(method, suffix, *args, **kwargs):
+            if suffix.endswith('/claim-state'):
+                raise DriverWait('coordinator_unavailable')
+            return real(method, suffix, *args, **kwargs)
+
+        self.driver._request = outage
+        for _ in range(3):
+            self.assertEqual(self.driver.step()['state'], 'held')
+            self.assertEqual(self.data(job)[0], 'fetching')
+        self.driver._request = real
+        self.assert_unstarted_terminal(job, 'source_fetch_ended', self.driver.step())
+
+    def test_a_row_with_no_settlement_never_takes_the_settled_path(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-unsettled.sqlite')
+        job = self.submit(contents=(b'unsettled-photo',))
+        self.advance(job, 'fetching')
+        with patch.object(self.driver, '_unstarted') as unstarted, \
+             patch.object(self.driver.source_range_client, 'download_object', side_effect=lambda *, grant, object_id,
+                destination, grant_provider=None: Path(destination).write_bytes(self.contents[object_id])):
+            self.assertEqual(self.driver.step()['state'], 'fetching')
+        unstarted.assert_not_called()
+
     def test_failed_job_settles_its_unstarted_fetch_without_a_get(self):
         self.driver = self.make_driver(source_range_v2_enabled=True,
             state_path=self.root / 'driver-source-range-ended.sqlite')
