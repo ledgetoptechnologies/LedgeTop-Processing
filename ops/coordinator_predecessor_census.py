@@ -124,10 +124,11 @@ def _hash_file(path, uid, limit, key, budget):
         os.close(fd)
 
 
-def _read_small_json(path, uid, budget=None):
+def _read_small_json(path, uid, budget=None, *, private=False):
     budget = budget or _ReadBudget(None,None)
     before = _owned(path, uid)
     _require(before.st_size <= 65536, 'receipt_metadata_budget_exceeded')
+    _require(not private or stat.S_IMODE(before.st_mode) == 0o600, 'private_archive_metadata_required')
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         _require(_same(before) == _same(os.fstat(fd)), 'receipt_identity_changed')
@@ -411,7 +412,7 @@ def _census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
                      hashlib.sha256(item['definitions'].encode()).hexdigest() == item['sha256'],
                      'invalid_option_evidence')
             evidence[identity] = item
-        archive_checks = []
+        archive_checks, archive_intents = [], []
         for task, inputs in tasks:
             identifier = _uuid(task['uuid']); generation = task['generation']
             _require(type(generation) is int and generation > 0, 'invalid_viewer_generation')
@@ -449,14 +450,22 @@ def _census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
                 _require(relative not in expected_files, 'duplicate_viewer_input')
                 expected_files[relative] = (item['bytes'], item['sha256'])
             archive = directory + '/all.zip'
+            identity_fields = dict(version=1, task=identifier, generation=generation,
+                job=task['job_id'], node=task['node_id'], engine=task['engine_uuid'])
+            intent_path = archive + '.intent'
+            if (root / intent_path).exists() or (root / intent_path).is_symlink():
+                intent = _read_small_json(root / intent_path,uid,budget,private=True)
+                _require(type(intent) is dict and set(intent) == set(identity_fields) and
+                         all(type(intent[k]) is type(v) and intent[k] == v for k,v in identity_fields.items()),
+                         'archive_intent_binding_invalid')
+                expected_files[intent_path] = None
+                archive_intents.append(intent_path)
             if task['archive_path'] is not None:
                 _require(task['archive_path'] == logical_root.rstrip('/') + '/' + archive,
                          'viewer_archive_path_changed')
             if (root / archive).exists() or task['archive_path'] is not None:
                 receipt_path = archive + '.receipt'
-                receipt = _read_small_json(root / receipt_path, uid, budget)
-                identity_fields = dict(version=1, task=identifier, generation=generation,
-                    job=task['job_id'], node=task['node_id'], engine=task['engine_uuid'])
+                receipt = _read_small_json(root / receipt_path, uid, budget, private=True)
                 _require(type(receipt) is dict and set(receipt) == set(identity_fields) | {'bytes', 'sha256'}
                          and all(type(receipt[k]) is type(v) and receipt[k] == v for k, v in identity_fields.items())
                          and type(receipt['bytes']) is int and receipt['bytes'] >= 4 and
@@ -536,7 +545,7 @@ def _census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
                         manifestSha256=hashlib.sha256(_canonical(pilot_manifest)).hexdigest()),
                     metadataBytes=logical_bytes, artifactBytes=total_artifact, sqliteBytes=initial.st_size,
                     sqlitePhysicalBound=sqlite_bound, sqliteCoarsePhysicalBound=coarse_physical_bound,
-                    archiveReceipts=len(archive_checks),
+                    archiveReceipts=len(archive_checks), archiveIntents=len(archive_intents),
                     rootMode=stat.S_IMODE(root_info.st_mode), writerExclusionProven=False,
                     signedViewerAcceptanceProven=False)
     except sqlite3.DataError:

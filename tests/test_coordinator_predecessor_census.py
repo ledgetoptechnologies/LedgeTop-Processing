@@ -304,6 +304,42 @@ class ClosedPredecessorCensusTests(unittest.TestCase):
         other=self.root/'unknown-pilot-journals';other.mkdir(mode=0o700)
         with self.assertRaisesRegex(c.CensusRefused,'unknown_predecessor_path'):self.probe()
 
+    def add_archive_intents(self):
+        with self.db() as db:
+            for task in db.execute('SELECT * FROM viewer_tasks'):
+                value=dict(version=1,task=task['uuid'],generation=task['generation'],job=task['job_id'],
+                           node=task['node_id'],engine=task['engine_uuid'])
+                target=self.root/'viewer-tasks'/task['directory']/'all.zip.intent'
+                target.write_bytes(c._canonical(value));target.chmod(0o600)
+
+    def test_exact_archive_intents_are_retained_as_intent_not_acceptance(self):
+        self.add_archive_intents()
+        full,probe=self.census(),self.probe()
+        self.assertEqual(full['archiveIntents'],7)
+        self.assertEqual(probe['archiveIntents'],7)
+        self.assertFalse(probe['retainedFilesValidated'])
+        self.assertFalse(full['signedViewerAcceptanceProven'])
+        self.assertFalse(probe['signedViewerAcceptanceProven'])
+        self.assertEqual(full,self.census())
+
+    def test_archive_intent_identity_types_and_private_mode_are_closed(self):
+        self.add_archive_intents();target=self.tasks[0][2]/'all.zip.intent'
+        original=json.loads(target.read_text())
+        for changes in (dict(engine=str(uuid.uuid4())),dict(version=True),dict(extra='unreviewed')):
+            with self.subTest(changes=changes):
+                value=dict(original,**changes);target.write_text(json.dumps(value))
+                with self.assertRaisesRegex(c.CensusRefused,'archive_intent_binding_invalid'):self.probe()
+        target.write_bytes(c._canonical(original));target.chmod(0o644)
+        with self.assertRaisesRegex(c.CensusRefused,'private_archive_metadata_required'):self.probe()
+
+    def test_archive_intent_does_not_allow_partial_or_restore_temporary_paths(self):
+        self.add_archive_intents()
+        for name in ('all.zip.partial','.all.zip.restore-'+uuid.uuid4().hex,'.all.zip.intent.tmp-'+uuid.uuid4().hex):
+            target=self.tasks[0][2]/name;target.write_bytes(b'synthetic');target.chmod(0o600)
+            try:
+                with self.assertRaisesRegex(c.CensusRefused,'unknown_predecessor_path'):self.probe()
+            finally:target.unlink()
+
     def probe(self, **kwargs):
         args=dict(key=self.key,authority_id=self.authority,node_ids=('cluster','main'),uid=os.geteuid(),
                   max_artifact_bytes=16*1024*1024,reviewed_schema_bytes=c.SCHEMA_PATH.read_bytes())
