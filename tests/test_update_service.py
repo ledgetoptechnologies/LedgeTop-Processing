@@ -285,8 +285,16 @@ class HTTPPipelineServiceTests(unittest.TestCase):
         return self.fixture.host.api.json('GET','/v1/prototype/nodes/cluster')['node']['state']=='active'
 
     def test_actual_registry_qualifier_owned_schedule_http_and_managed_finalize_one_tick(self):
-        result=self.service.tick()
-        self.assertEqual(result['status'],'completed')
+        observed_versions=set()
+        adapter=self.fixture.host.host.adapter
+        observe=adapter.observed_engine_version
+        def version_probe():
+            value=observe();observed_versions.add(value);return value
+        with patch.object(adapter,'observed_engine_version',side_effect=version_probe):
+            result=self.service.tick()
+        self.assertEqual(result['status'],'completed',dict(service=result,
+            qualifiedEngineVersion=self.fixture.docker.info['engineVersion'],
+            observedEngineVersions=sorted(observed_versions)))
         self.assertEqual(len(self.release_calls),1)
         self.assertEqual(self.fixture.host.host.adapter.calls,[pipeline_fixture.engine_fixture.NEW])
         self.assertEqual(self.fixture.host.host.ingress.opens,1)
@@ -305,6 +313,20 @@ class HTTPPipelineServiceTests(unittest.TestCase):
         self.assertEqual(self.fixture.host.host.fixture.queue.get_node('cluster'),before)
         with self.fixture.host.adapter._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM schedule_intents').fetchone()[0],0)
         self.assertEqual(self.fixture.host.host.adapter.calls,[])
+
+    def test_qualified_version_disagreement_holds_and_rolls_back_without_reopen(self):
+        from processing.container_update import wait_healthy
+        self.fixture.docker.info['engineVersion']='different-qualified-version'
+        # A known mismatching synthetic response will not change with time.
+        # Keep the real health/version checks while bounding this negative run.
+        with patch('processing.container_update.wait_healthy',
+                   side_effect=lambda adapter,image,seconds:wait_healthy(adapter,image,0)):
+            result=self.service.tick()
+        self.assertEqual((result['status'],result['state']),('held','run_intent'),result)
+        self.assertEqual(self.fixture.host.host.adapter.calls,[pipeline_fixture.engine_fixture.NEW,pipeline_fixture.engine_fixture.OLD])
+        self.assertEqual(self.fixture.host.host.adapter.current,pipeline_fixture.engine_fixture.OLD)
+        self.assertEqual(self.fixture.host.host.ingress.opens,0)
+        self.assertEqual(self.fixture.host.host.fixture.queue.get_node('cluster')['state'],'failed')
 
 
 if __name__=='__main__':unittest.main()

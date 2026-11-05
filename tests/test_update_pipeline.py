@@ -26,6 +26,8 @@ class UpdatePipelineTests(unittest.TestCase):
         self.host.adapter=self.host.open()
         self.docker=qualifier_fixture.FakeDocker()
         self.docker.engine='synthetic-engine';self.docker.info['engine']='odm'
+        # Qualifier, replacement probe and ingress model the same exact image.
+        self.docker.info['engineVersion']=engine_fixture.NEW_ENGINE_VERSION
         self.docker.mismatch['image']=engine_fixture.NEW
         selected=registry_fixture.entry(config=engine_fixture.NEW)
         self.docker.registry.selected=selected;self.docker.registry.first=[selected]

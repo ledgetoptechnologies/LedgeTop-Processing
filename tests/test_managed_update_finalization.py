@@ -41,7 +41,7 @@ class ManagedFinalizationTests(unittest.TestCase):
             def workers(self,item):return {2}
             def backend(self,expected):
                 if not owner.adapter.serving(expected):raise GateError('synthetic unhealthy backend')
-                return dict(engine='odm',engineVersion='new-version',version='2.4.0')
+                return dict(engine='odm',engineVersion=update_fixture.NEW_ENGINE_VERSION,version='2.4.0')
             def http(self,port):
                 state=json.loads((self.root/'state.json').read_text())
                 return (200,self.backend(update_fixture.NEW)) if state['state']=='open' else (503,None)

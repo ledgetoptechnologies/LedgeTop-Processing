@@ -54,7 +54,7 @@ class UpdateMaintenanceAdapterTests(unittest.TestCase):
             manifestDigest='sha256:'+'d'*64,configDigest=update_fixture.NEW,localImageId=update_fixture.NEW,platform='linux/amd64',
             previousImageId=update_fixture.OLD,hostGeneration=0,supervisorPolicySha256='c'*64,
             qualifierId='separate-qualifier',qualificationPolicySha256='e'*64,qualificationSha256='f'*64,
-            targetEngineVersion='new-version',
+            targetEngineVersion=update_fixture.NEW_ENGINE_VERSION,
             receiptDirectory=str(self.receipts/self.operation/kind))
         if kind=='run':value['plan']=plan
         value['requestSha256']=module.digest(value)

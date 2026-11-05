@@ -67,6 +67,19 @@ The adapter refuses old unbound requests; it does not rewrite or delete its
 historical journal entries. Reference-worker mode still refuses updates until
 the separate config-pin and authenticated-readiness handover exists.
 
+The broader integration then exposed a shared-fixture discrepancy: the startup
+qualifier advertised `3.8.3`, while the replacement and ingress fixtures modeled
+`new-version`. The service correctly held at `run_intent` and rolled back. The
+composed fixture now uses one synthetic target-version constant across those
+transports. The service assertion reports only safe synthetic state/version
+diagnostics. An explicit disagreement test preserves the real health checks and
+verifies rollback, a blocked coordinator and zero ingress reopens.
+
+After that fixture correction, **33/33 Linux tests passed with no skips** across
+`test_update_service`, `test_update_service_units` and `test_update_pipeline` in
+5.818 seconds under the same bounded read-only container setup. This affected
+suite result does not replace the parent's complete combined-release rerun.
+
 The existing `StartupQualifier` already seals `engineVersion` with its exact
 staged/runtime-image and probe evidence in the persisted qualification receipt.
 `UpdateSupervisor` validates that receipt. Its validated version now flows

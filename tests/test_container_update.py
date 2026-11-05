@@ -18,6 +18,8 @@ from tests.test_service import TOKEN, start_server
 
 OLD = 'sha256:' + '1' * 64
 NEW = 'sha256:' + '2' * 64
+OLD_ENGINE_VERSION = 'old-version'
+NEW_ENGINE_VERSION = 'new-version'
 OPERATOR = 'maintenance-operator-private-test-credential'
 
 
@@ -25,14 +27,14 @@ class Adapter:
     def __init__(self):
         self.current, self.calls, self.busy = OLD, [], False
         self.worker_mode = 'legacy'
-        self.expected_version = 'old-version'
+        self.expected_version = OLD_ENGINE_VERSION
         self.bad_health, self.uncertain, self.missing = False, False, False
 
     def inspect(self):
         return {'Image': self.current}
 
     def observed_engine_version(self):
-        return 'old-version' if self.current == OLD else 'new-version'
+        return OLD_ENGINE_VERSION if self.current == OLD else NEW_ENGINE_VERSION
 
     def bind_engine_version(self, version):
         self.expected_version = version
@@ -83,7 +85,7 @@ class MaintenanceUpdateTests(unittest.TestCase):
         return self.operator.json('POST', '/v1/prototype/nodes/cluster/schedule', {
             'expectedRevision': self.queue.get_node('cluster')['revision'],
             'drainAt': stamp.isoformat(), 'notBefore': stamp.isoformat(),
-            'afterJobId': None, 'targetImage': NEW, 'targetEngineVersion': 'new-version'})['node']
+            'afterJobId': None, 'targetImage': NEW, 'targetEngineVersion': NEW_ENGINE_VERSION})['node']
 
     def run_update(self):
         return execute(self.api, self.operator, self.adapter, 'cluster', self.work,
@@ -239,7 +241,7 @@ class MaintenanceUpdateTests(unittest.TestCase):
         self.assertEqual(self.queue.get_node('cluster')['state'],'updating')
         self.assertNotIn('updateToken',result)
         return plan,dict(healthy=True,image=NEW,previousImage=OLD,composePinUpdateRequired=False,
-            persistentComposePin=NEW,ingress='open',engineVersion='new-version')
+            persistentComposePin=NEW,ingress='open',engineVersion=NEW_ENGINE_VERSION)
 
     def test_deferred_success_retains_capacity_until_exact_idempotent_finish(self):
         plan,proof=self.deferred()
