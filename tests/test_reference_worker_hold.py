@@ -5,6 +5,7 @@ import json
 import sqlite3
 import time
 import unittest
+from unittest.mock import patch
 import uuid
 
 from processing import reference_driver as driver_module
