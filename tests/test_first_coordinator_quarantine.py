@@ -27,6 +27,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from tests import test_coordinator_predecessor_census as old_fixture
 from tests import test_reference_dynamic_source_intake_scale as tls_fixture
 from tests.viewer_receipt_signer import SyntheticViewerSigner
+from ops.coordinator_candidate_projection import freeze_expectations
 
 
 @unittest.skipUnless(os.name == 'posix', 'actual Linux lease and tmpfs qualification')
@@ -193,6 +194,29 @@ class FirstCoordinatorQuarantineTests(unittest.TestCase):
         self.stop_child()
         self.assertEqual(self.legacy_rows(),before_rows)
         self.assertEqual(self.artifact_bytes(),before_files)
+        # Reconstruct expected control rows from authenticated RPC identities
+        # and independently statted ORIGINAL physical bindings, never DB values.
+        database=self.old.path.stat();root_info=self.old.root.stat()
+        main_lock=(self.old.root/'coordinator.lock').stat()
+        external=self.lease_file.stat();external_dir=self.leases.stat()
+        binding=dict(authorityId=self.old.authority,database=str(self.old.path),
+            databaseIdentity=[database.st_dev,database.st_ino],root=str(self.old.root),
+            rootIdentity=[root_info.st_dev,root_info.st_ino],lease=str(self.old.root/'coordinator.lock'),
+            leaseIdentity=[main_lock.st_dev,main_lock.st_ino,main_lock.st_mode,main_lock.st_nlink,main_lock.st_uid],
+            authorityLease=dict(authorityId=self.old.authority,directory=str(self.leases),
+                directoryIdentity=[external_dir.st_dev,external_dir.st_ino,external_dir.st_mode,external_dir.st_uid,external_dir.st_gid],
+                path=str(self.lease_file),
+                fileIdentity=[external.st_dev,external.st_ino,external.st_mode,external.st_nlink,external.st_uid,external.st_gid]))
+        expected=freeze_expectations(authority_id=self.old.authority,plan_id=plan,
+            owner_sha256=hashlib.sha256(self.operator.encode('ascii')).hexdigest(),
+            bootstrap_startup_id=original_startup,current_startup_id=original_startup,
+            request_ids={action:str(uuid.uuid5(uuid.UUID(plan),action)) for action in ('intent','drain','seal')},
+            operation_binding=binding,reserved_control_bytes=4096,current_closed=True)
+        with closing(sqlite3.connect(self.old.path)) as db:
+            db.row_factory=sqlite3.Row
+            for table,values in expected.items():
+                actual=[dict(row) for row in db.execute('SELECT * FROM "'+table+'"')]
+                self.assertEqual(sorted(map(json.dumps,actual)),sorted(map(json.dumps,values)),table)
         self.write_config(self.final_config())
         self.start_child()
         status,_,state=self.request('GET','/v1/prototype/coordinator-freeze',self.operator)

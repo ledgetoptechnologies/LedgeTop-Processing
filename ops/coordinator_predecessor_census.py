@@ -540,6 +540,8 @@ def _census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
                     retainedFilesValidated=not metadata_only, directFileBytesRead=budget.used,
                     sourceCommit=SOURCE, authorityId=authority_id,
                     schemaSha256=hashlib.sha256(_canonical(schema)).hexdigest(), tables=tables, files=files,
+                    directories={hmac.new(key,b'path\0'+name.encode(),hashlib.sha256).hexdigest():
+                                 dict(mode=stat.S_IMODE(identity[2])) for name,identity in directories.items()},
                     nodeMaintenanceHistory=maintenance_history,pilotClosureProven=False,
                     opaquePilotJournals=dict(files=pilot_files,directories=pilot_directories,bytes=pilot_bytes,
                         manifestSha256=hashlib.sha256(_canonical(pilot_manifest)).hexdigest()),
