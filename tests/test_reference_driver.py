@@ -482,9 +482,9 @@ class ReferenceDriverTests(unittest.TestCase):
              'reconciliation': 'physical_reservation_retained'})
         stage, data = self.data(job)
         self.assertNotEqual(stage, 'completed')
-        # A published worker hold reaches the same hold through its operator path.
-        if 'holdReport' not in result:
-            self.assertEqual((result['reason'], data['unstartedHold']), (reason, 'physical_reservation_retained'))
+        self.assertEqual(result['holdReport'], 'acknowledged')
+        self.assertEqual(data['fence']['reasonCode'], 'physical_reservation_retained')
+        self.assertEqual(self.store.get(job['jobId'])['queueReason'], 'physical_reservation_retained')
         self.assertNotIn('unstartedOutcome', data)
         self.assertEqual(self.lease(job), kept)
         self.assertGreater(kept['remaining'], 0)
@@ -823,6 +823,38 @@ class ReferenceDriverTests(unittest.TestCase):
         self.driver.step()
         self.assertEqual(self.data(job)[0], 'completed')
         self.assert_evidence_gone(job, receipt)
+
+    def observe_then_end(self, job):
+        stage, data = self.data(job)
+        self.driver._observe(job['jobId'], stage, data, 'node_lost')
+        self.end_job(job)
+        self.resolve_gate()
+        self.driver = self.make_driver()
+
+    def assert_operator_terminal_keeps_owed_result(self, die):
+        job = self.submit()
+        die(job)
+        self.assertNotIn('outboxId', self.data(job)[1])
+        self.observe_then_end(job)
+        self.driver.step()
+        self.assertNotIn('operatorTerminal', self.data(job)[1])
+        self.assert_result_owed(job)
+
+    def test_operator_terminal_keeps_a_result_committed_inside_poll(self):
+        self.assert_operator_terminal_keeps_owed_result(self.die_inside_poll)
+
+    def test_operator_terminal_keeps_a_result_committed_before_the_checkpoint(self):
+        self.assert_operator_terminal_keeps_owed_result(self.die_after_poll)
+
+    def test_operator_terminal_never_drops_a_failure_already_sealed(self):
+        job = self.submit()
+        self.die_sealing_failure(job)
+        self.assertNotIn('failureOutboxId', self.data(job)[1])
+        self.observe_then_end(job)
+        self.driver.step()
+        stage, data = self.data(job)
+        self.assertNotEqual(stage, 'completed')
+        self.assertNotIn('operatorTerminal', data)
 
     def test_a_never_resolved_receipt_stays_blocked_on_a_clear_gate(self):
         job = self.submit()

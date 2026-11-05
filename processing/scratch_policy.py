@@ -406,6 +406,10 @@ class ScratchLedger:
         return row["state"] == "terminal" and db.execute(
             "SELECT 1 FROM unstarted_settlements WHERE reservation=?", (row["id"],)).fetchone() is not None
 
+    def result_registered(self, reservation_id):
+        with self._transaction() as db:
+            return db.execute("SELECT 1 FROM results WHERE reservation=?", (reservation_id,)).fetchone() is not None
+
     def never_started(self, reservation_id):
         """Whether the ledger proves no engine outcome exists for this reservation."""
         with self._transaction() as db:

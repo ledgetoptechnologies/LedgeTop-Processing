@@ -173,6 +173,11 @@ class WorkerOutbox:
                        (outbox_id, job_id, generation, environment, payload, digest, self._now(db), local_metadata))
         return outbox_id
 
+    def holds(self, job_id):
+        """Whether any completion is recorded for this job, delivered or not."""
+        with self._transaction() as db:
+            return db.execute("SELECT 1 FROM completions WHERE job=? LIMIT 1", (job_id,)).fetchone() is not None
+
     def get(self, outbox_id):
         with self._transaction() as db:
             row = db.execute("SELECT * FROM completions WHERE id=?", (outbox_id,)).fetchone()
