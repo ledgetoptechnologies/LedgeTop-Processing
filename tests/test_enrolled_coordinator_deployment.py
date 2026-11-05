@@ -22,6 +22,7 @@ def bundle():
     files={name:dict(path='/private/'+name,sha256='5'*64) for name in d.FILES}
     for role in ('bootstrap','final'):
         files[role+'Config']['sha256']=plan['candidate'][role+'ConfigSha256']
+        files[role+'Config']['path']='/private/tls/'+role+'.json'
     for role in ('bootstrap','final','holder'):
         files[role+'Environment']=dict(path=recipes[role]['environmentFile'],sha256=recipes[role]['environmentSha256'])
     files['policy']['sha256']=plan['candidate']['declaredTransformSha256']
@@ -52,6 +53,16 @@ def bundle():
 
 
 class DeploymentBundleTests(unittest.TestCase):
+    def test_private_environment_keeps_one_scheduler_and_exact_mounted_config(self):
+        value,_=bundle()
+        for role in ('bootstrap','final'):
+            environment=mode_environment(value,role)
+            d.validate_environment(value,role,environment)
+            for changes in (dict(PROCESSING_VIEWER_ENABLED='1'),dict(PROCESSING_REFERENCE_CONFIG='/run/processing-reference/other.json'),
+                            dict(PROCESSING_AUTHORITY_LEASE_DIR='/other'),dict(PYTHONPATH='/private/shadow')):
+                bad=dict(environment,**changes)
+                with self.assertRaises(d.TransportHeld):d.validate_environment(value,role,bad)
+        with self.assertRaises(d.TransportHeld):d.validate_environment(value,'holder',{'LD_PRELOAD':'/private/shadow.so'})
     def test_worker_unit_normal_service_is_accepted_and_backslash_is_rejected_directly(self):
         value,plan=bundle();worker=copy.deepcopy(value['workers'][0])
         worker['settings']['unitName']='normal.service'
@@ -130,7 +141,8 @@ class DeploymentBundleTests(unittest.TestCase):
         for name in plan['gates']:plan['gates'][name]=None;value['qualifications'][name]=None
         plan['bindings']['deploymentSha256']=d.digest(value)
         by_path={entry['path']:raw[name] for name,entry in value['artifacts'].items()}
-        with patch.object(d,'private_bytes',side_effect=lambda path,**_:by_path[path]),patch.object(d,'environment_file',return_value={}):
+        by_environment={value['artifacts'][role+'Environment']['path']:mode_environment(value,role) for role in ('bootstrap','final','holder')}
+        with patch.object(d,'private_bytes',side_effect=lambda path,**_:by_path[path]),patch.object(d,'environment_file',side_effect=lambda path:by_environment[path]):
             with patch.object(d,'build_startup_policy',return_value=raw['policy']) as builder:
                 proof=d.verify_private_artifacts(value,plan)
                 self.assertEqual(proof['censusKey']['bytes'],32)
@@ -139,6 +151,13 @@ class DeploymentBundleTests(unittest.TestCase):
                 self.assertNotIn('root',builder.call_args.kwargs)
             with patch.object(d,'build_startup_policy',return_value=b'different derived policy'):
                 with self.assertRaises(d.TransportHeld):d.verify_private_artifacts(value,plan)
+
+
+def mode_environment(value,role):
+    if role=='holder':return {}
+    return dict(PROCESSING_VIEWER_ENABLED='0',PROCESSING_LEGACY_VIEWER_READ_ONLY='1' if role=='final' else '0',
+        PROCESSING_PROTOTYPE_STATE_DIR='/prototype-state',PROCESSING_AUTHORITY_LEASE_DIR='/authority-leases',
+        PROCESSING_PROTOTYPE_NODE_IDS='cluster,main',PROCESSING_REFERENCE_CONFIG='/run/processing-reference/'+role+'.json')
 
 
 if __name__=='__main__':unittest.main()

@@ -6,6 +6,7 @@ authority. Credentials remain in existing private files, never this bundle.
 """
 import hashlib
 import re
+from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 import uuid
 
@@ -184,6 +185,29 @@ def derived_holder_settings(bundle,plan):
     return dict(bundle['holderSettings'],planSha256=digest(validate_plan(plan)))
 
 
+def validate_environment(bundle,role,environment):
+    require(role in ('bootstrap','final','holder') and type(environment) is dict,'candidate_environment_required')
+    require(not set(environment).intersection(('PATH','LD_PRELOAD','LD_LIBRARY_PATH','PYTHONPATH',
+            'PYTHONHOME','PYTHONSTARTUP','PYTHONINSPECT')),'candidate_loader_override_refused')
+    if role=='holder':return
+    required=dict(PROCESSING_VIEWER_ENABLED='0',PROCESSING_LEGACY_VIEWER_READ_ONLY='1' if role=='final' else '0',
+                  PROCESSING_PROTOTYPE_STATE_DIR='/prototype-state',
+                  PROCESSING_AUTHORITY_LEASE_DIR=bundle['predecessor']['leaseDirectory'],
+                  PROCESSING_PROTOTYPE_NODE_IDS=','.join(e['id'] for e in bundle['nodeEndpoints']))
+    require(all(environment.get(name)==value for name,value in required.items()),'first_cutover_application_mode_changed')
+    target=environment.get('PROCESSING_REFERENCE_CONFIG');_absolute_path(target)
+    require(target.startswith('/run/processing-reference/'),'reviewed_reference_config_mount_required')
+    matches=[]
+    for mount in bundle['recipes'][role]['mounts']:
+        destination=mount['target']
+        if target!=destination and not target.startswith(destination+'/'):continue
+        require(mount['type']=='bind' and mount['readOnly'] is True,'readonly_reference_config_bind_required')
+        relative=PurePosixPath(target).relative_to(destination)
+        actual=str(PurePosixPath(mount['source'])/relative)
+        matches.append(actual)
+    require(matches==[bundle['artifacts'][role+'Config']['path']],'private_config_mount_binding_changed')
+
+
 def verify_private_artifacts(bundle, plan, *, require_all_qualifications=False):
     """Hash existing private files. This is not live health or qualification."""
     bundle=validate_bundle(bundle,plan)
@@ -195,7 +219,8 @@ def verify_private_artifacts(bundle, plan, *, require_all_qualifications=False):
         raw=private_bytes(entry['path'],maximum=maximum)
         require(hashlib.sha256(raw).hexdigest()==entry['sha256'],'private_reviewed_artifact_changed')
         require(name!='censusKey' or len(raw)==32,'existing_census_key_required')
-        if name.endswith('Environment'):environment_file(entry['path'])
+        if name.endswith('Environment'):
+            validate_environment(bundle,name[:-len('Environment')],environment_file(entry['path']))
         if name in ('bootstrapConfig','finalConfig','policy','predecessorSchema'):policy_inputs[name]=raw
         result[name]=dict(sha256=entry['sha256'],bytes=len(raw))
     generated=build_startup_policy(bundle['reviewedSourceRoot'],expected_source_hashes=bundle['sourceHashes'],

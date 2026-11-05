@@ -13,6 +13,13 @@ keys are forbidden bundle fields; only exact existing private paths and hashes
 are referenced. The file reader refuses duplicate keys, nonfinite JSON, unknown
 fields, symlinks, shared files, foreign owners and oversized input.
 
+Private environment validation explicitly disables the native dispatcher in
+both application recipes, enables the legacy read-only adapter only in final,
+preserves original state/authority-lease paths and node IDs, and resolves the
+reference-config path through its reviewed read-only bind to the pinned private
+host file. Loader/path overrides are refused. These checks prevent a correctly
+hashed environment from selecting a different execution mode or source path.
+
 | Field | Binding |
 | --- | --- |
 | `profile`, `operationId`, `authorityId` | Exact existing first-cutover mode and reviewed operation |
