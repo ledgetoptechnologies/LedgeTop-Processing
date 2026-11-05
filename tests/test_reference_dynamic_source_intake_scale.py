@@ -167,7 +167,7 @@ def _server_main(config_path: Path):
     tls.minimum_version = ssl.TLSVersion.TLSv1_2
     tls.load_cert_chain(config_data["certificate"], config_data["privateKey"])
     server = create_reference_http_server(api, host="127.0.0.1", port=0,
-        ssl_context=tls, request_timeout=10)
+        ssl_context=tls, request_timeout=2)
     thread = threading.Thread(target=server.serve_forever,
         kwargs={"poll_interval": 0.05}, daemon=True, name="metadata-scale-http")
     thread.start()
@@ -218,6 +218,9 @@ def _server_main(config_path: Path):
                     "spoolBytesIncludingMarker": spool_bytes,
                     "markerBytes": marker_size}
                 print(json.dumps({"metrics": result}), flush=True)
+            elif command == "SLOT":
+                print(json.dumps({"sourceSlotOccupied":
+                    server.source_submit_semaphore._value == 0}), flush=True)
             elif command == "STOP":
                 break
     finally:
@@ -293,6 +296,7 @@ class DynamicSourceIntakeScaleTests(unittest.TestCase):
                 "--server", str(config_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, bufsize=1, env=env)
             server_thread_stopped = False
+            slow_thread = None
             try:
                 ready_line = self._read_line(process, timeout=20)
                 ready = json.loads(ready_line)["ready"]
@@ -329,6 +333,71 @@ class DynamicSourceIntakeScaleTests(unittest.TestCase):
                     "legacy V1 HTTP metadata must keep its four MiB limit")
                 connection.close()
 
+                slow_outcome = []
+                def slow_incomplete_source_post():
+                    slow_connection = connect()
+                    try:
+                        slow_connection.putrequest("POST", "/ltds/v2/jobs")
+                        slow_connection.putheader("Content-Type", "application/json")
+                        slow_connection.putheader("Authorization", "Bearer " + VIEWER_BEARER)
+                        slow_connection.putheader("Content-Length", str(len(signed_body)))
+                        slow_connection.endheaders()
+                        slow_connection.send(b"{")
+                        result = slow_connection.getresponse()
+                        slow_outcome.append((result.status, result.read(1024)))
+                    except Exception as exc:
+                        slow_outcome.append(exc)
+                    finally:
+                        slow_connection.close()
+
+                slow_thread = threading.Thread(target=slow_incomplete_source_post,
+                    name="incomplete-source-post")
+                slow_thread.start()
+                deadline = time.monotonic() + 3
+                occupied = False
+                while time.monotonic() < deadline:
+                    process.stdin.write("SLOT\n")
+                    process.stdin.flush()
+                    occupied = json.loads(self._read_line(process, timeout=3))["sourceSlotOccupied"]
+                    if occupied:
+                        break
+                    time.sleep(0.02)
+                self.assertTrue(occupied, "first source POST did not acquire the intake slot")
+
+                connection = connect()
+                connection.putrequest("POST", "/ltds/v2/jobs")
+                connection.putheader("Content-Type", "application/json")
+                connection.putheader("Authorization", "Bearer " + VIEWER_BEARER)
+                connection.putheader("Content-Length", str(len(signed_body)))
+                connection.endheaders()
+                busy = connection.getresponse()
+                busy_status, retry_after, connection_close = (busy.status,
+                    busy.getheader("Retry-After"), busy.getheader("Connection"))
+                busy.read(1024)
+                connection.close()
+                self.assertEqual((busy_status, retry_after, connection_close), (429, "2", "close"))
+
+                connection = connect()
+                capability_status, _, _ = _json_response(connection, "GET", "/ltds/v2/capabilities",
+                    bearer=VIEWER_BEARER)
+                self.assertEqual(capability_status, 200,
+                    "source intake backpressure must not block ordinary GET requests")
+                connection.close()
+
+                slow_thread.join(timeout=5)
+                self.assertFalse(slow_thread.is_alive(), "incomplete-body request did not time out")
+                self.assertEqual(len(slow_outcome), 1)
+                self.assertIsInstance(slow_outcome[0], tuple, repr(slow_outcome[0]))
+                self.assertEqual(slow_outcome[0][0], 408,
+                    "incomplete source body must time out and release the intake slot")
+
+                connection = connect()
+                invalid_status, _, _ = _json_response(connection, "POST", "/ltds/v2/jobs",
+                    body=b"not-json", bearer=VIEWER_BEARER)
+                self.assertEqual(invalid_status, 400,
+                    "API validation errors must release the intake slot")
+                connection.close()
+
                 connection = connect()
                 status, response_body, client_ms = _json_response(connection, "POST", "/ltds/v2/jobs",
                     body=signed_body, bearer=VIEWER_BEARER)
@@ -344,6 +413,14 @@ class DynamicSourceIntakeScaleTests(unittest.TestCase):
                 connection.close()
 
                 connection = connect()
+                replay_status, replay_body, _ = _json_response(connection, "POST", "/ltds/v2/jobs",
+                    body=signed_body, bearer=VIEWER_BEARER)
+                replay = json.loads(replay_body)
+                self.assertEqual(replay_status, 200)
+                self.assertEqual(replay["jobId"], response["jobId"])
+                connection.close()
+
+                connection = connect()
                 too_large_status = self._content_length_only(connection, "/ltds/v2/jobs",
                     V2_SOURCE_INTAKE_BYTES + 1, bearer=VIEWER_BEARER)
                 self.assertEqual(too_large_status, 413,
@@ -354,8 +431,9 @@ class DynamicSourceIntakeScaleTests(unittest.TestCase):
                 process.stdin.flush()
                 metrics = json.loads(self._read_line(process, timeout=10))["metrics"]
                 self.assertEqual([(item["path"], item["status"]) for item in metrics["requestHandlers"]],
-                    [("/ltds/v2/jobs", 401), ("/ltds/v2/jobs", 201)])
-                admitted_request = metrics["requestHandlers"][1]
+                    [("/ltds/v2/jobs", 401), ("/ltds/v2/jobs", 400),
+                     ("/ltds/v2/jobs", 201), ("/ltds/v2/jobs", 200)])
+                admitted_request = metrics["requestHandlers"][2]
                 self.assertEqual((admitted_request["bodyBytes"], admitted_request["error"]),
                     (len(signed_body), None))
                 self.assertEqual(metrics["streamedPutCount"], 0)
@@ -374,7 +452,7 @@ class DynamicSourceIntakeScaleTests(unittest.TestCase):
                     "metadataOnly": True, "sourceBytesCreatedOrUploaded": 0,
                     "declaredPhotoCount": MAX_NAMES, "declaredPhotoBytes": DECLARED_PHOTO_BYTES,
                     "bodyBytes": len(signed_body), "clientRoundTripMilliseconds": round(client_ms, 3),
-                    "serverApiMilliseconds": metrics["requestHandlers"][1]["handlerMilliseconds"],
+                    "serverApiMilliseconds": metrics["requestHandlers"][2]["handlerMilliseconds"],
                     "serverPeakRssBytes": peak, "serverCurrentRssBytes": metrics["serverCurrentRssBytes"],
                     "activeNodeRamLimitBytes": ACTIVE_NODE_RAM_LIMIT_BYTES,
                     "estimatedMarginAgainstNodeLimitBytes": margin,
@@ -384,6 +462,10 @@ class DynamicSourceIntakeScaleTests(unittest.TestCase):
                     "queueState": "queued/source_receiving; not claimable or processing"}, sort_keys=True),
                     flush=True)
             finally:
+                if slow_thread is not None and slow_thread.is_alive():
+                    slow_thread.join(timeout=5)
+                if slow_thread is not None:
+                    self.assertFalse(slow_thread.is_alive(), "task-owned slow request thread did not exit")
                 try:
                     process.stdin.write("STOP\n")
                     process.stdin.flush()

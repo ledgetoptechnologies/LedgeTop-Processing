@@ -6,6 +6,7 @@ import math
 import re
 import socket
 import ssl
+import threading
 
 from .reference_api import Response
 from .reference_binary import BinaryResponse
@@ -62,7 +63,7 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
         def log_message(self, *_args):
             pass
 
-        def _reply(self, response):
+        def _reply(self, response, *, retry_after=None):
             self.close_connection = True
             if isinstance(response, BinaryResponse):
                 self._binary(response)
@@ -76,6 +77,8 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Content-Length", str(len(encoded)))
                 self.send_header("Connection", "close")
+                if retry_after is not None:
+                    self.send_header("Retry-After", retry_after)
                 self.end_headers()
                 if self.command != "HEAD":
                     self.wfile.write(encoded)
@@ -207,34 +210,48 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             if self.command not in ("POST", "PUT") and length:
                 self._error(400, "unexpected_request_body")
                 return
-            if self.command == "PUT":
-                if not source_put or not callable(getattr(api, "stream_source_object", None)):
-                    self._error(404, "not_found")
+            source_submit = self.command == "POST" and self.path == "/ltds/v2/jobs"
+            source_slot_acquired = False
+            if source_submit:
+                source_slot_acquired = self.server.source_submit_semaphore.acquire(blocking=False)
+                if not source_slot_acquired:
+                    # The request body remains unread. Closing the connection
+                    # avoids an attacker keeping a worker thread occupied while
+                    # retaining the full metadata-body memory budget.
+                    self._reply(Response(429, {"error": "source_intake_busy"}), retry_after="2")
+                    return
+            try:
+                if self.command == "PUT":
+                    if not source_put or not callable(getattr(api, "stream_source_object", None)):
+                        self._error(404, "not_found")
+                        return
+                    try:
+                        response = api.stream_source_object(self.path, dict(self.headers.items()), self.rfile, length,
+                            protected_transport=_protected(self.connection))
+                    except Exception:
+                        self._error(500, "internal_error")
+                        return
+                    self._reply(response)
                     return
                 try:
-                    response = api.stream_source_object(self.path, dict(self.headers.items()), self.rfile, length,
-                        protected_transport=_protected(self.connection))
+                    body = self.rfile.read(length) if length else b""
+                    if len(body) != length:
+                        self._error(400, "truncated_request_body")
+                        return
+                except (TimeoutError, OSError):
+                    self._error(408, "request_timeout")
+                    return
+                try:
+                    protected = _protected(self.connection)
+                    response = api.handle(self.command, self.path, dict(self.headers.items()), body,
+                                          protected_transport=protected)
                 except Exception:
                     self._error(500, "internal_error")
                     return
                 self._reply(response)
-                return
-            try:
-                body = self.rfile.read(length) if length else b""
-                if len(body) != length:
-                    self._error(400, "truncated_request_body")
-                    return
-            except (TimeoutError, OSError):
-                self._error(408, "request_timeout")
-                return
-            try:
-                protected = _protected(self.connection)
-                response = api.handle(self.command, self.path, dict(self.headers.items()), body,
-                                      protected_transport=protected)
-            except Exception:
-                self._error(500, "internal_error")
-                return
-            self._reply(response)
+            finally:
+                if source_slot_acquired:
+                    self.server.source_submit_semaphore.release()
 
         do_GET = _dispatch
         do_POST = _dispatch
@@ -248,6 +265,10 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
         address_family = family
         daemon_threads = True
         block_on_close = False
+
+        def __init__(self, *args, **kwargs):
+            self.source_submit_semaphore = threading.BoundedSemaphore(1)
+            super().__init__(*args, **kwargs)
 
         def get_request(self):
             connection, address = self.socket.accept()
