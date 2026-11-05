@@ -1,6 +1,10 @@
 # Reference source intake v1 (candidate)
 
-**Status: proposed cross-system wire contract; not implemented or enabled.** It
+**Status: implemented on the coordinated review candidate; installed NAS/runtime
+acceptance is not complete.** This is the V2 source-intake route's version-1
+wire contract. Its implementation and evidence are tracked in
+[`coordinated-integration-readiness.md`](../docs/coordinated-integration-readiness.md).
+It
 defines how Viewer can transfer a full retained dataset to a Processing NAS
 spool, while the engine input manifest remains a separately validated subset.
 It does not establish TrueNAS mount identity, protect against NAS administrators
@@ -321,13 +325,16 @@ environment, reservation, token, and object manifest binding match. It returns
 rejects redirects, compression, ranges, expired grants, IDs outside the
 pipeline closure, and inputs outside the accepted receipts. The worker verifies
 full size/hash in private scratch before engine upload. Only confirmed engine
-start changes Viewer state to `processing`. The scheduler first selects the
-earliest production job; staging is considered only when no production job is
-queued. For that queue head, it scans nodes in configured order and chooses the
-first currently available node whose discovered limits and engine capabilities
-admit the job. If none can admit it, it stays queued and later jobs do not
-overtake it. This sends small jobs to the cluster node first and keeps an
-oversized job waiting for a capable larger node.
+start changes Viewer state to `processing`. The scheduler considers production
+while any production job is queued, running or held; staging waits until that
+production work is cleared. Within that environment, it scans queued jobs in
+sequence and prefers the first configured available node whose size limits,
+profile and engine capabilities admit each job. A job blocked on a busy capable
+node stays queued; a later job may use a different idle node that cannot run the
+blocked job. This avoids leaving the small cluster idle behind an oversized job
+waiting for main. Each physical node has one execution slot; different nodes
+may execute concurrently. The claim transaction, rather than advisory discovery,
+establishes the reservation.
 
 ## Recovery, holds, and release
 
@@ -359,19 +366,25 @@ object even if the job succeeds, fails, is cancelled, or expires. Viewer
 permanent holds remain authoritative. No expiry, disconnect, restart,
 cancellation, or failed upload authorizes deletion.
 
-## Implementation gates
+## Implementation and remaining activation gates
 
-Current Processing v1 metadata validation does not accept `sourceManifest`, its
-HTTP server buffers request bodies under the metadata limit, and there is no
-streaming PUT, source-complete route, durable source spool, source receipt
-claim gate, or NAS-backed worker broker. The current Viewer has no immutable
-attempt crosswalk fields for Processing generation, environment, digests,
-source state, or accepted source receipt. Processing now has a pure
-`reference_source_intake` validator and shared canonical hash vectors, but they
-are not wired into its API or storage. Neither side is ready to execute the
-contract. Required synthetic
-coverage includes idempotent/lost-response replay, changed-body conflict,
-manifest/crosswalk closure, permanent GCP CSV exclusion, disk-full and
-mount-identity changes, crashes before/after file fsync/rename/DB commit,
-restart receipt reconciliation, and refusal to dispatch until exact receipt
-binding is durable.
+The review candidate wires `reference_source_intake` validation into the V2
+API, ReferenceStore, streaming object PUT, source-complete operation, durable
+SourceSpool and worker source broker. Viewer persists the immutable attempt
+crosswalk and uses its durable V2 client/outbox. V1 metadata remains a separate
+4 MiB route; exact V2 `POST /ltds/v2/jobs` has a 16 MiB envelope and one
+nonblocking large-admission slot. A competing admission receives retryable 429;
+that limit does not serialize node execution or source object transfers.
+
+Synthetic qualification includes actual Viewer HTTPS submissions, interrupted
+replay, immutable crosswalks, source closure and custody receipts, source ranges,
+node claims, restart recovery and result ingestion/publication. See the readiness
+record for exact tested revisions and limitations rather than treating this
+contract as deployment evidence. Large-scale tests currently declare 10,000
+photos / 50 GB in metadata; they do not upload that volume of source data.
+
+Before activation, qualify the actual NAS subfolder, server namespace durability,
+mount identity and app isolation, private runtime configuration, installed worker
+and node identities, and real two-node routing/recovery. Run small real photos
+before large client datasets. Source release is still unimplemented and deletion
+remains disabled; no result ACK alone grants permission to delete originals.
