@@ -1,0 +1,443 @@
+"""Scale-boundary qualification for real, metadata-only V2 coordinator admission.
+
+This launches the real HTTP handler and `_DynamicAPI` in a child process so its
+peak RSS excludes the synthetic Viewer-side producer/signing work. The only
+source payload is signed metadata declaring 10,000 photos / 50 GB; no photo
+bytes are created, uploaded, or processed. The temporary source spool disables
+the physical mount requirement and injects a 60 GiB capacity answer.
+"""
+from __future__ import annotations
+
+import copy
+import http.client
+import ipaddress
+import json
+import os
+from pathlib import Path
+try:
+    import resource
+except ImportError:  # pragma: no cover - benchmark runs in a Linux container
+    resource = None
+import select
+import socket
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import uuid
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric.rsa import generate_private_key
+from cryptography.x509.oid import NameOID
+
+from processing import reference_protocol as protocol
+from processing.reference_limits import V2_SOURCE_INTAKE_BYTES
+from tests.test_reference_source_intake import ReferenceSourceIntakeTests
+
+
+VIEWER_BEARER = "synthetic-metadata-scale-viewer-token-" + "v" * 32
+WORKER_BEARER = "synthetic-metadata-scale-worker-token-" + "w" * 32
+MAX_NAMES = 10_000
+PHOTO_BYTES = 5_000_000
+DECLARED_PHOTO_BYTES = MAX_NAMES * PHOTO_BYTES
+SYNTHETIC_AVAILABLE_BYTES = 60 * 1024**3
+ACTIVE_NODE_RAM_LIMIT_BYTES = 256 * 1024**2
+
+
+def _private_pem(key):
+    return key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()).decode("ascii")
+
+
+def _public_pem(key):
+    return key.public_key().public_bytes(serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo).decode("ascii")
+
+
+def _write_tls_material(directory: Path):
+    key = generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+        .serial_number(x509.random_serial_number()).not_valid_before(datetime.now(timezone.utc)
+            - timedelta(minutes=1)).not_valid_after(datetime.now(timezone.utc) + timedelta(days=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost"),
+            x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
+        .sign(key, hashes.SHA256()))
+    key_path, cert_path = directory / "scale-key.pem", directory / "scale-cert.pem"
+    key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    if os.name != "nt":
+        key_path.chmod(0o600)
+        cert_path.chmod(0o644)
+    return key_path, cert_path
+
+
+def _server_main(config_path: Path):
+    """Run the actual dynamic API in a dedicated child and report its RSS."""
+    from processing.config import ProcessingNode
+    from processing.prototype import Queue
+    from processing.reference_control import ReferenceControlAPI
+    from processing.reference_http import create_reference_http_server
+    from processing.reference_runtime import _DynamicAPI, discovered_policy
+    from processing.reference_source_intake import SOURCE_PREFIX
+    from processing.reference_store import PROFILE, ReferenceStore
+    from processing.source_spool import SourceSpool
+
+    config_data = json.loads(config_path.read_text(encoding="utf-8"))
+    state_root = Path(config_data["stateRoot"])
+    queue_root = state_root / "queue"
+    spool_root = state_root / "spool"
+    queue_root.mkdir(mode=0o700, parents=True)
+    spool_root.mkdir(mode=0o700, parents=True)
+    marker = spool_root / ".ltds-source-spool-id"
+    marker.write_text(config_data["mountId"], encoding="ascii")
+    if os.name != "nt":
+        marker.chmod(0o600)
+
+    queue = Queue(queue_root, node_ids=("cluster", "main"), reference_enabled=True)
+    queue.allowed_profiles.add(PROFILE)
+    spool = SourceSpool(spool_root, mount_id=config_data["mountId"], safety_floor_bytes=0,
+        max_object_bytes=20 * 1024**3, chunk_bytes=1024**2, require_mount=False)
+    capacity_checks = []
+
+    def synthetic_capacity_probe(required_bytes, *, reserved_bytes=0):
+        capacity_checks.append({"requiredBytes": required_bytes, "reservedBytes": reserved_bytes,
+            "syntheticAvailableBytes": SYNTHETIC_AVAILABLE_BYTES})
+        if required_bytes < 0 or reserved_bytes + required_bytes > SYNTHETIC_AVAILABLE_BYTES:
+            raise ValueError("synthetic source capacity exceeded")
+
+    spool.check_capacity = synthetic_capacity_probe
+    snapshot_options = []
+    snapshot = {"ready": True, "commonOptions": snapshot_options, "nodes": [
+        {"role": node, "available": True, "configured": True,
+         "capabilitiesSha256": ("a" if node == "cluster" else "b") * 64,
+         "engine": "odm", "engineVersion": "synthetic", "options": snapshot_options}
+        for node in ("cluster", "main")]}
+    config = SimpleNamespace(local_max_photos=MAX_NAMES,
+        local_max_input_bytes=SYNTHETIC_AVAILABLE_BYTES,
+        prototype_node_ids=("cluster", "main"),
+        node_endpoints=(ProcessingNode("cluster", "http://127.0.0.1:19001", "synthetic"),
+                        ProcessingNode("main", "http://127.0.0.1:19002", "synthetic")))
+    capability_fingerprint, options_fingerprint, allowed_options = discovered_policy(snapshot, config)
+    settings = SimpleNamespace(viewer_bearers={VIEWER_BEARER: "staging"},
+        viewer_receipt_keys={}, source_spool=spool,
+        source_attestation_keys=config_data["sourceKeys"])
+    control = ReferenceControlAPI(ReferenceStore(queue, local_max_photos=MAX_NAMES,
+        local_max_input_bytes=SYNTHETIC_AVAILABLE_BYTES),
+        viewer_bearers=settings.viewer_bearers,
+        worker_bearers={WORKER_BEARER: {"node_id": "cluster", "worker_id": "scale-worker",
+            "worker_instance_id": "scale-instance"}},
+        capability_fingerprint=capability_fingerprint, options_fingerprint=options_fingerprint,
+        allowed_odm_options=allowed_options, source_spool=spool,
+        source_attestation_keys=settings.source_attestation_keys, authority_id=queue.authority_id)
+    api = _DynamicAPI(control, config, settings, lambda: snapshot,
+        lambda: {node: {"ready": True, "maxImages": MAX_NAMES,
+            "maxInputBytes": SYNTHETIC_AVAILABLE_BYTES, "taskQueueCount": 0}
+            for node in ("cluster", "main")})
+    requests = []
+    original_handle = api.handle
+
+    def observed_handle(method, path, headers, body=b"", **kwargs):
+        started = time.perf_counter()
+        response = original_handle(method, path, headers, body, **kwargs)
+        if method == "POST" and path in (SOURCE_PREFIX + "/jobs", protocol.PREFIX + "/jobs"):
+            requests.append({"method": method, "path": path, "bodyBytes": len(body),
+                "status": response.status, "error": response.body.get("error")
+                    if type(response.body) is dict else None,
+                "handlerMilliseconds": round((time.perf_counter() - started) * 1000, 3)})
+        return response
+
+    api.handle = observed_handle
+    streamed_puts = []
+    original_stream = api.stream_source_object
+
+    def observed_stream(path, *args, **kwargs):
+        streamed_puts.append(path)
+        return original_stream(path, *args, **kwargs)
+
+    api.stream_source_object = observed_stream
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.minimum_version = ssl.TLSVersion.TLSv1_2
+    tls.load_cert_chain(config_data["certificate"], config_data["privateKey"])
+    server = create_reference_http_server(api, host="127.0.0.1", port=0,
+        ssl_context=tls, request_timeout=10)
+    thread = threading.Thread(target=server.serve_forever,
+        kwargs={"poll_interval": 0.05}, daemon=True, name="metadata-scale-http")
+    thread.start()
+    public_info = {"port": server.server_address[1], "authorityId": queue.authority_id,
+        "capabilityFingerprint": capability_fingerprint,
+        "optionsFingerprint": options_fingerprint}
+    print(json.dumps({"ready": public_info}), flush=True)
+    try:
+        for line in sys.stdin:
+            command = line.strip()
+            if command == "METRICS":
+                row = None
+                with queue._db() as db:
+                    row = db.execute("""SELECT j.status AS job_status,r.phase,s.source_state,s.derived_state,
+                        s.reserved_bytes,r.input_json,s.source_manifest_json
+                        FROM reference_jobs r JOIN jobs j ON j.id=r.job_id
+                        JOIN reference_source_intakes s ON s.job_id=r.job_id
+                        ORDER BY r.created_at DESC LIMIT 1""").fetchone()
+                    queued_jobs = db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued'").fetchone()[0]
+                    receipt_rows = db.execute("SELECT COUNT(*) FROM reference_source_object_receipts").fetchone()[0]
+                source_count = input_count = None
+                if row:
+                    source_count = len(json.loads(row["source_manifest_json"])["objects"])
+                    input_count = len(json.loads(row["input_json"])["manifest"]["objects"])
+                marker_size = marker.stat().st_size
+                spool_bytes = sum(path.stat().st_size for path in spool_root.rglob("*") if path.is_file())
+                rss_current = None
+                try:
+                    for status_line in Path("/proc/self/status").read_text().splitlines():
+                        if status_line.startswith("VmRSS:"):
+                            rss_current = int(status_line.split()[1]) * 1024
+                            break
+                except OSError:
+                    pass
+                result = {"serverPid": os.getpid(),
+                    "serverPeakRssBytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024,
+                    "serverCurrentRssBytes": rss_current,
+                    "requestHandlers": requests, "streamedPutCount": len(streamed_puts),
+                    "capacityChecks": capacity_checks, "queueRows": queued_jobs,
+                    "phase": row["phase"] if row else None,
+                    "queueStatus": row["job_status"] if row else None,
+                    "sourceState": row["source_state"] if row else None,
+                    "derivedState": row["derived_state"] if row else None,
+                    "reservedBytes": row["reserved_bytes"] if row else None,
+                    "sourceManifestObjectCount": source_count,
+                    "engineManifestObjectCount": input_count,
+                    "objectReceiptRows": receipt_rows,
+                    "spoolBytesIncludingMarker": spool_bytes,
+                    "markerBytes": marker_size}
+                print(json.dumps({"metrics": result}), flush=True)
+            elif command == "STOP":
+                break
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)
+        queue.close()
+    return 0
+
+
+def _json_response(connection, method, path, body=None, *, bearer=None):
+    headers = {"Content-Type": "application/json"}
+    if bearer:
+        headers["Authorization"] = "Bearer " + bearer
+    start = time.perf_counter()
+    connection.request(method, path, body=body, headers=headers)
+    response = connection.getresponse()
+    response_body = response.read(1024 * 1024 + 1)
+    if len(response_body) > 1024 * 1024:
+        raise AssertionError("bounded metadata response exceeded one MiB")
+    return response.status, response_body, (time.perf_counter() - start) * 1000
+
+
+@unittest.skipUnless(os.name == "posix", "server child RSS measurement uses Linux /proc and ru_maxrss")
+class DynamicSourceIntakeScaleTests(unittest.TestCase):
+    def _new_payload(self, helper, *, authority_id, capability_fingerprint,
+                     options_fingerprint, names):
+        payload = helper._large_dji_payload(MAX_NAMES)
+        helper.authority_id = authority_id
+        payload["submissionId"] = str(uuid.uuid4())
+        payload["providerTaskId"] = str(uuid.uuid4())
+        payload["viewerTaskId"] = str(uuid.uuid4())
+        payload["sourceManifest"]["id"] = str(uuid.uuid4())
+        payload["derivedManifest"]["attemptId"] = payload["submissionId"]
+        payload["sourceManifest"]["datasetManifestSha256"] = "d" * 64
+        payload["capabilityFingerprint"] = capability_fingerprint
+        payload["pipeline"]["odm"]["options"] = {}
+        payload["pipeline"]["odm"]["optionsFingerprint"] = options_fingerprint
+        by_id = {item["id"]: item for item in payload["manifest"]["objects"]}
+        for index, source_item in enumerate(payload["sourceManifest"]["objects"]):
+            name = names(index)
+            source_item.update(name=name, byteSize=PHOTO_BYTES)
+            pipeline_item = by_id[source_item["id"]]
+            pipeline_item.update(name=name, byteSize=PHOTO_BYTES)
+        payload["sourceManifest"]["totalBytes"] = DECLARED_PHOTO_BYTES
+        payload["manifest"]["totalBytes"] = DECLARED_PHOTO_BYTES
+        helper.payload = payload
+        helper.rehash()
+        signed = helper.validate(payload, capability_fingerprint=capability_fingerprint,
+            options_fingerprint=options_fingerprint, allowed_odm_options=set(),
+            authority_id=authority_id)
+        request = copy.deepcopy(payload)
+        request["sourceAttestation"] = signed["sourceAttestation"]
+        return request
+
+    def test_dynamic_http_v2_10k_metadata_limit_and_server_rss(self):
+        helper = ReferenceSourceIntakeTests()
+        helper.setUp()
+        with tempfile.TemporaryDirectory(prefix="reference-source-scale-") as directory:
+            root = Path(directory)
+            private_key_path, certificate_path = _write_tls_material(root)
+            config_path = root / "server.json"
+            server_config = {"stateRoot": str(root / "server-state"),
+                "certificate": str(certificate_path), "privateKey": str(private_key_path),
+                "mountId": "e" * 64, "sourceKeys": helper.trusted_keys}
+            config_path.write_text(json.dumps(server_config), encoding="utf-8")
+            if os.name != "nt":
+                config_path.chmod(0o600)
+            env = os.environ.copy()
+            source_root = str(Path(__file__).resolve().parents[1])
+            env["PYTHONPATH"] = source_root + os.pathsep + env.get("PYTHONPATH", "")
+            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()),
+                "--server", str(config_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, bufsize=1, env=env)
+            server_thread_stopped = False
+            try:
+                ready_line = self._read_line(process, timeout=20)
+                ready = json.loads(ready_line)["ready"]
+                context = ssl.create_default_context(cafile=str(certificate_path))
+                def connect():
+                    return http.client.HTTPSConnection("127.0.0.1", ready["port"],
+                        context=context, timeout=20)
+
+                connection = connect()
+                unauthorized_status, _, _ = _json_response(connection, "POST", "/ltds/v2/jobs",
+                    body=b"not-json")
+                self.assertEqual(unauthorized_status, 401,
+                    "viewer authentication must run before V2 body decoding")
+                connection.close()
+
+                payload = self._new_payload(helper, authority_id=ready["authorityId"],
+                    capability_fingerprint=ready["capabilityFingerprint"],
+                    options_fingerprint=ready["optionsFingerprint"],
+                    names=lambda i: f"DJI_{i:05d}_" + "X" * 230 + ".JPG")
+                signed_body = protocol.canonical_json(payload)
+                self.assertEqual(payload["sourceManifest"]["totalBytes"], DECLARED_PHOTO_BYTES)
+                self.assertEqual(payload["sourceManifest"]["objectCount"], MAX_NAMES)
+                self.assertGreater(len(signed_body), protocol.MAX_BODY_BYTES)
+                self.assertLessEqual(len(signed_body), V2_SOURCE_INTAKE_BYTES)
+
+                legacy = {key: payload[key] for key in (
+                    "schemaVersion", "submissionId", "manifest", "pipeline", "capabilityFingerprint")}
+                legacy_body = protocol.canonical_json(legacy)
+                self.assertGreater(len(legacy_body), protocol.MAX_BODY_BYTES)
+                self.assertLess(len(legacy_body), V2_SOURCE_INTAKE_BYTES)
+                connection = connect()
+                legacy_status = self._content_length_only(connection, "/ltds/v1/jobs", len(legacy_body))
+                self.assertEqual(legacy_status, 413,
+                    "legacy V1 HTTP metadata must keep its four MiB limit")
+                connection.close()
+
+                connection = connect()
+                status, response_body, client_ms = _json_response(connection, "POST", "/ltds/v2/jobs",
+                    body=signed_body, bearer=VIEWER_BEARER)
+                response = json.loads(response_body)
+                print("SOURCE_INTAKE_SCALE_PROBE " + json.dumps({
+                    "bodyBytes": len(signed_body), "clientRoundTripMilliseconds": round(client_ms, 3),
+                    "responseStatus": status,
+                    "responseError": response.get("error") if type(response) is dict else None},
+                    sort_keys=True), flush=True)
+                self.assertEqual(status, 201, response)
+                self.assertEqual(response["phase"], "source_receiving")
+                self.assertEqual(response["status"], "queued")
+                connection.close()
+
+                connection = connect()
+                too_large_status = self._content_length_only(connection, "/ltds/v2/jobs",
+                    V2_SOURCE_INTAKE_BYTES + 1, bearer=VIEWER_BEARER)
+                self.assertEqual(too_large_status, 413,
+                    "V2 request bodies over 16 MiB must be rejected by the HTTP limit")
+                connection.close()
+
+                process.stdin.write("METRICS\n")
+                process.stdin.flush()
+                metrics = json.loads(self._read_line(process, timeout=10))["metrics"]
+                self.assertEqual([(item["path"], item["status"]) for item in metrics["requestHandlers"]],
+                    [("/ltds/v2/jobs", 401), ("/ltds/v2/jobs", 201)])
+                admitted_request = metrics["requestHandlers"][1]
+                self.assertEqual((admitted_request["bodyBytes"], admitted_request["error"]),
+                    (len(signed_body), None))
+                self.assertEqual(metrics["streamedPutCount"], 0)
+                self.assertEqual(metrics["capacityChecks"], [{"requiredBytes": DECLARED_PHOTO_BYTES,
+                    "reservedBytes": 0, "syntheticAvailableBytes": SYNTHETIC_AVAILABLE_BYTES}])
+                self.assertEqual((metrics["queueRows"], metrics["queueStatus"], metrics["phase"],
+                    metrics["sourceState"], metrics["derivedState"]), (1, "queued", "queued", "receiving", "receiving"))
+                self.assertEqual((metrics["sourceManifestObjectCount"], metrics["engineManifestObjectCount"],
+                    metrics["reservedBytes"], metrics["objectReceiptRows"]),
+                    (MAX_NAMES, MAX_NAMES, DECLARED_PHOTO_BYTES, 0))
+                self.assertEqual(metrics["spoolBytesIncludingMarker"], metrics["markerBytes"],
+                    "metadata-only admission must not write any source objects")
+                peak = metrics["serverPeakRssBytes"]
+                margin = ACTIVE_NODE_RAM_LIMIT_BYTES - peak
+                print("SOURCE_INTAKE_SCALE " + json.dumps({
+                    "metadataOnly": True, "sourceBytesCreatedOrUploaded": 0,
+                    "declaredPhotoCount": MAX_NAMES, "declaredPhotoBytes": DECLARED_PHOTO_BYTES,
+                    "bodyBytes": len(signed_body), "clientRoundTripMilliseconds": round(client_ms, 3),
+                    "serverApiMilliseconds": metrics["requestHandlers"][1]["handlerMilliseconds"],
+                    "serverPeakRssBytes": peak, "serverCurrentRssBytes": metrics["serverCurrentRssBytes"],
+                    "activeNodeRamLimitBytes": ACTIVE_NODE_RAM_LIMIT_BYTES,
+                    "estimatedMarginAgainstNodeLimitBytes": margin,
+                    "qualificationCaveat": "server-only RSS in a 1 GiB test container; no 256 MiB cgroup OOM test",
+                    "syntheticCapacityBytes": SYNTHETIC_AVAILABLE_BYTES,
+                    "physicalMountProbe": "disabled for temporary test spool; no NAS access",
+                    "queueState": "queued/source_receiving; not claimable or processing"}, sort_keys=True),
+                    flush=True)
+            finally:
+                try:
+                    process.stdin.write("STOP\n")
+                    process.stdin.flush()
+                    process.wait(timeout=10)
+                except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+                    if process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=5)
+                if process.stdout:
+                    process.stdout.close()
+                if process.stdin:
+                    try:
+                        process.stdin.close()
+                    except BrokenPipeError:
+                        pass
+                if process.stderr:
+                    error_text = process.stderr.read()
+                    process.stderr.close()
+                    self.assertEqual(process.returncode, 0, error_text[-2000:])
+                server_thread_stopped = process.poll() is not None
+                self.assertTrue(server_thread_stopped, "benchmark server child process did not exit")
+
+    @staticmethod
+    def _read_line(process, *, timeout):
+        ready, _, _ = select.select([process.stdout], [], [], timeout)
+        if not ready:
+            if process.poll() is not None:
+                detail = process.stderr.read() if process.stderr else ""
+                raise RuntimeError("benchmark server exited before returning metrics: " + detail[-2000:])
+            raise TimeoutError("benchmark server child did not report before timeout")
+        line = process.stdout.readline()
+        if not line:
+            detail = process.stderr.read() if process.stderr else ""
+            raise RuntimeError("benchmark server exited before returning metrics: " + detail[-2000:])
+        return line
+
+    @staticmethod
+    def _content_length_only(connection, path, content_length, *, bearer=None):
+        connection.putrequest("POST", path)
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader("Content-Length", str(content_length))
+        if bearer:
+            connection.putheader("Authorization", "Bearer " + bearer)
+        connection.endheaders()
+        response = connection.getresponse()
+        response.read(1024)
+        return response.status
+
+
+if __name__ == "__main__" and len(sys.argv) == 3 and sys.argv[1] == "--server":
+    raise SystemExit(_server_main(Path(sys.argv[2])))
+elif __name__ == "__main__":
+    unittest.main()

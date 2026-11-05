@@ -27,6 +27,7 @@ from .reference_tls import verified_client_context
 from .reference_recovery import RecoveryNodeBinding
 from .config import normalized_node_origin
 from .reference_source_intake import SOURCE_PREFIX
+from .reference_limits import V2_SOURCE_INTAKE_BYTES
 
 MAX_CONFIG_BYTES = 64 * 1024
 from .reference_option_policy import (
@@ -362,7 +363,12 @@ class _DynamicAPI:
                 return Response(503, {"error": "engine_catalog_unavailable"})
             if path in (p.PREFIX + "/jobs",SOURCE_PREFIX + "/jobs") and method == "POST":
                 try:
-                    payload = p.decode_submission(body)
+                    # V2 source intake carries both source and engine manifests.
+                    # Keep the legacy V1 decoder budget unchanged and grant the
+                    # larger envelope only to this exact authenticated route.
+                    max_bytes = (V2_SOURCE_INTAKE_BYTES
+                        if path == SOURCE_PREFIX + "/jobs" else p.MAX_BODY_BYTES)
+                    payload = p.decode_submission(body, max_bytes=max_bytes)
                     validate_discovered_option_values(payload, snapshot, allowed)
                 except (p.ProtocolError, TypeError, ValueError):
                     return Response(400, {"error": "invalid_request"})
