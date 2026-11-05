@@ -118,7 +118,8 @@ class ReferenceDriverTests(unittest.TestCase):
             gate.provision('cluster', self.gate_origin, self.queue.authority_id)
         self.worker = ReferenceEngineWorker(self.root / 'worker.sqlite', ledger=self.ledger, outbox=self.outbox,
             engine=self.native, engine_id='engine', node_id='cluster', authority_id=self.queue.authority_id,
-            coordinator_origin=self.gate_origin, gate_generation=1, worker_id='worker', engine_version='pinned-engine-1')
+            coordinator_origin=self.gate_origin, gate_generation=1, worker_id='worker', engine_version='pinned-engine-1',
+            engine_probe=lambda deadline: 'engine')
         self.context = ssl.create_default_context()
         self.broker = BrokerClient('https://broker.invalid:9444', ssl_context=self.context)
         self.contents = {}
@@ -450,7 +451,8 @@ class ReferenceDriverTests(unittest.TestCase):
         self.worker = ReferenceEngineWorker(self.root / 'worker.sqlite', ledger=self.ledger,
             outbox=self.outbox, engine=self.native, engine_id='engine', node_id='cluster',
             authority_id=self.queue.authority_id, coordinator_origin=self.gate_origin,
-            gate_generation=1, worker_id='worker', engine_version='pinned-engine-1')
+            gate_generation=1, worker_id='worker', engine_version='pinned-engine-1',
+            engine_probe=lambda deadline: 'engine')
         self.driver = self.make_driver()
         replayed = []
 
@@ -690,7 +692,8 @@ class NativeHTTPCacheCleanupDriverTests(unittest.TestCase):
             outbox=self.outbox, engine=self.native, engine_id='engine', node_id='cluster',
             authority_id=self.queue.authority_id, coordinator_origin=self.gate_origin,
             gate_generation=1, worker_id='worker', engine_version='pinned-engine-1',
-            viewer_receipt_keys=self.viewer_signer.trusted_keys)
+            viewer_receipt_keys=self.viewer_signer.trusted_keys,
+            engine_probe=lambda deadline: 'engine')
         self.engine_cleanup = EngineCacheCleanup(self.worker, path=self.root / 'actual-engine-cleanup.sqlite',
             viewer_receipt_keys=self.viewer_signer.trusted_keys)
         self.driver = ReferenceDriver(self.worker, self.ledger, self.outbox, self.broker,

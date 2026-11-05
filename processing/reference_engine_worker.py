@@ -15,11 +15,13 @@ import secrets
 import re
 import sqlite3
 import stat
+import time
 import zipfile
 from urllib.parse import urlsplit
 
 from . import reference_protocol as p
 from .node_gate import NodeGate, GateError
+from .engine_ingress_guard import local_engine_identity
 from . import reference_native_archive as native_archive
 
 
@@ -30,7 +32,8 @@ class WorkerHeld(ValueError):
 class ReferenceEngineWorker:
     def __init__(self, path, *, ledger, outbox, engine, engine_id, node_id,
                  authority_id, coordinator_origin, gate_generation, worker_id,
-                 engine_version, allowed_odm_options=(), viewer_receipt_keys=None):
+                 engine_version, allowed_odm_options=(), viewer_receipt_keys=None,
+                 engine_probe=local_engine_identity):
         self.path = Path(path).absolute()
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if any(x.is_symlink() for x in (self.path, *self.path.parents)):
@@ -67,6 +70,9 @@ class ReferenceEngineWorker:
             raise ValueError('invalid engine version')
         self.ledger, self.outbox, self.engine = ledger, outbox, engine
         self.engine_id, self.node_id = engine_id, node_id
+        if not callable(engine_probe):
+            raise ValueError('local Docker Engine identity probe required')
+        self.engine_probe = engine_probe
         self.authority_id, self.origin = authority_id, coordinator_origin
         self.gate_generation, self.worker_id = gate_generation, worker_id
         from .viewer_acceptance_receipt import validate_trusted_viewer_receipt_keys
@@ -111,6 +117,14 @@ class ReferenceEngineWorker:
     def _phase(self, job_id, phase):
         with self._db() as db:
             db.execute('UPDATE executions SET phase=? WHERE job=?', (phase, job_id))
+
+    def _verify_local_engine(self):
+        try:
+            observed = self.engine_probe(time.monotonic() + 2)
+        except Exception:
+            raise WorkerHeld('physical_engine_identity_unavailable') from None
+        if observed != self.engine_id:
+            raise WorkerHeld('physical_engine_identity_changed')
 
     def _part_fd(self, row, part, *, create=False):
         try:return native_archive.part_fd(row,part,create=create)
@@ -180,12 +194,15 @@ class ReferenceEngineWorker:
                            (job['jobId'], encoded, receipt))
             self.ledger.set_engine_state(reservation_id, 'engine_started')
             self._phase(job['jobId'], 'initialize_pending')
+            self._verify_local_engine()
             self.engine.initialize(dict(name=job['jobId'], engine_uuid=job['jobId'], outputs=None,
                 options=[dict(name=k, value=v) for k, v in pipeline['odm']['options'].items()]))
             for item in inputs:
                 self._phase(job['jobId'], 'upload_pending')
+                self._verify_local_engine()
                 self.engine.upload(job['jobId'], item)
             self._phase(job['jobId'], 'commit_pending')
+            self._verify_local_engine()
             self.engine.action('commit', job['jobId'])
             self._phase(job['jobId'], 'processing')
             return 'processing'

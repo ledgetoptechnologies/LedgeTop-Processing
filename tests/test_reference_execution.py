@@ -44,7 +44,7 @@ class ExecutionRouterTests(unittest.TestCase):
         return ReferenceEngineWorker(self.root/'private'/'odm.sqlite',ledger=self.ledger,outbox=self.outbox,
             engine=self.native,engine_id=c.engine_id,node_id='main',authority_id=c.authority_id,
             coordinator_origin=c.coordinator_origin,gate_generation=c.gate_generation,
-            worker_id=c.worker_id,engine_version=observed)
+            worker_id=c.worker_id,engine_version=observed,engine_probe=lambda deadline:c.engine_id)
 
     def open(self):
         return ExecutionRouter(self.root/'private'/'routes.sqlite',self.odm,self.tree,failure_outbox=self.failures)

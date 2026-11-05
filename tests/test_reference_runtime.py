@@ -305,6 +305,15 @@ class ReferenceRuntimeTests(unittest.TestCase):
             with self.assertRaises(RuntimeConfigurationError):make_handler(config)
         self.assertFalse(Path(config.prototype_state_dir).exists())
 
+    def test_multinode_reference_runtime_cannot_expose_legacy_viewer_mutations(self):
+        self.value = self.recovery_config()
+        self.write_config()
+        config = replace(self.config, reference_config_path=str(self.path), viewer_enabled=True)
+        with patch('processing.app.Queue', side_effect=AssertionError('queue must not open')):
+            with self.assertRaisesRegex(RuntimeConfigurationError, 'legacy direct Viewer mutations'):
+                make_handler(config)
+        self.assertFalse(Path(config.prototype_state_dir).exists())
+
     def test_multi_node_runtime_refuses_legacy_unbound_settings(self):
         self.value=copy.deepcopy(self.value);self.value['schemaVersion']=1;self.value.pop('recoveryBindings');self.write_config()
         queue=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(queue.close)
@@ -565,17 +574,16 @@ class ReferenceRuntimeTests(unittest.TestCase):
         seed=Queue(self.config.prototype_state_dir,node_ids=('cluster','main'),reference_enabled=True)
         authority=seed.authority_id;seed.close()
         self.value=self.recovery_config(authority);self.write_config()
-        config = replace(self.config, reference_config_path=str(self.path))
+        config = replace(self.config, reference_config_path=str(self.path), viewer_enabled=False)
         first, second = self.tls_patches()
         with first, second:
             handler = self.make_configured_handler(config)
         self.addCleanup(handler.prototype_queue.close)
-        self.addCleanup(handler.viewer_service.close)
         runtime = handler.reference_listener
         runtime.api.discover = lambda: self.snapshot
         self.assertIs(runtime.queue, handler.prototype_queue)
-        self.assertIs(runtime.store.queue, handler.viewer_service.queue)
-        self.assertEqual(runtime.queue.authority_id, handler.viewer_service.queue.authority_id)
+        self.assertIsNone(handler.viewer_service)
+        self.assertEqual(runtime.queue.authority_id, handler.prototype_queue.authority_id)
         capabilities = runtime.api.handle("GET", "/ltds/v1/capabilities",
             {"Authorization": "Bearer " + self.value["viewerBearers"]["staging"]}, protected_transport=True)
         fixture = json.loads((Path(__file__).resolve().parents[1] /
@@ -588,7 +596,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertEqual(response.status, 201)
         runtime.store.claim(response.body["jobId"], node_id="cluster", worker_id="worker-cluster",
             worker_instance_id="instance-cluster", claim_request_id="reference-claim")
-        self.assertIsNone(handler.prototype_queue.claim({"workerId": "legacy", "profiles": [VIEWER_PROFILE]}))
+        self.assertIsNone(handler.prototype_queue.claim({"workerId": "legacy", "profiles": [REFERENCE_PROFILE]}))
         runtime.close()
 
     def test_actual_catalog_changes_fingerprints_and_stale_admission_is_rejected(self):

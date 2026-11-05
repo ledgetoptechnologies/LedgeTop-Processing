@@ -356,6 +356,7 @@ class EngineCacheCleanup:
                     return {'state':'uncertain', 'jobId':job_id, 'reason':'remove_outcome_requires_reconciliation'}
                 self._verify_inputs(identity)
                 self._policy(identity)
+                self.worker._verify_local_engine()
                 with self._db() as db:
                     db.execute("UPDATE removals SET phase='remove_pending',updated_at=CURRENT_TIMESTAMP WHERE job=?", (job_id,))
                 try:

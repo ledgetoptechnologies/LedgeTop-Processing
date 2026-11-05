@@ -105,6 +105,7 @@ class ReferenceEngineWorkerTests(unittest.TestCase):
         self.input_paths = {'image-1': 'jobs/reservation-1/image-1.jpg'}
 
     def make_worker(self, **kwargs):
+        kwargs.setdefault('engine_probe', lambda deadline: 'physical-engine')
         return ReferenceEngineWorker(self.root / 'journal' / 'worker.sqlite', ledger=self.ledger,
             outbox=self.outbox, engine=self.engine, engine_id='physical-engine', node_id='cluster',
             authority_id=self.authority, coordinator_origin='http://127.0.0.1:8000', gate_generation=1,
@@ -326,6 +327,23 @@ class ReferenceEngineWorkerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.make_worker()
         self.assertEqual(self.engine.calls, [])
+
+    def test_local_engine_identity_mismatch_fails_closed_before_mutation(self):
+        self.worker = self.make_worker(engine_probe=lambda deadline: 'different-engine')
+        with self.assertRaisesRegex(WorkerHeld, 'physical_engine_identity_changed'):
+            self.start()
+        self.assertEqual(self.engine.calls, [])
+        with NodeGate('physical-engine') as gate:
+            self.assertIsNotNone(gate.snapshot()['reservation'])
+
+    def test_local_engine_identity_is_rechecked_before_each_mutation(self):
+        observed = iter(('physical-engine', 'different-engine'))
+        self.worker = self.make_worker(engine_probe=lambda deadline: next(observed))
+        with self.assertRaisesRegex(WorkerHeld, 'physical_engine_identity_changed'):
+            self.start()
+        self.assertEqual(self.engine.calls, ['initialize'])
+        self.assertNotIn('upload', self.engine.calls)
+        self.assertNotIn('commit', self.engine.calls)
 
     def test_viewer_acceptance_is_validated_locally_and_never_deletes_or_bypasses_pins(self):
         self.start()

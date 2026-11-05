@@ -35,6 +35,14 @@ def make_handler(config: Config):
     if config.reference_config_path:
         from .reference_runtime import load_reference_settings
         reference_settings = load_reference_settings(config.reference_config_path, config)
+    if (reference_settings is not None and config.viewer_enabled
+            and len(config.prototype_node_ids) > 1):
+        # The native Viewer facade still owns a direct NodeODM mutation path.
+        # Exposing it beside the multi-node reference scheduler would bypass
+        # its durable claim, per-node reservation and result receipt pipeline.
+        from .reference_runtime import RuntimeConfigurationError
+        raise RuntimeConfigurationError(
+            "multi-node reference execution cannot expose legacy direct Viewer mutations")
     queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
                   node_ids=config.prototype_node_ids,
                   treedar_node_ids=config.treedar_node_ids,

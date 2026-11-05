@@ -63,7 +63,8 @@ class ResultsFixture:
     def make_worker(self):
         return ReferenceEngineWorker(self.root / 'journal/worker.sqlite', ledger=self.ledger, outbox=self.outbox,
             engine=self.engine, engine_id='physical-engine', node_id='cluster', authority_id=self.authority,
-            coordinator_origin='http://127.0.0.1:8000', gate_generation=1, worker_id='worker', engine_version='synthetic-v1')
+            coordinator_origin='http://127.0.0.1:8000', gate_generation=1, worker_id='worker', engine_version='synthetic-v1',
+            engine_probe=lambda deadline: 'physical-engine')
 
     def tearDown(self):
         self.gate_patch.stop()

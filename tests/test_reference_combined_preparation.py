@@ -70,7 +70,7 @@ class CombinedPreparationTests(unittest.TestCase):
         scratch=self.root/'scratch';scratch.mkdir(mode=0o700)
         self.ledger=ScratchLedger(self.root/'scratch.sqlite',scratch,capacity_probe=lambda _:1024**3,safety_floor_bytes=0)
         self.outbox=WorkerOutbox(self.root/'outbox.sqlite');self.failures=FailureOutbox(self.root/'failures.sqlite')
-        self.worker=ReferenceEngineWorker(self.root/'worker.sqlite',ledger=self.ledger,outbox=self.outbox,engine=self.native,engine_id='physical-main',node_id='main',authority_id=pipeline.authority_id,coordinator_origin=pipeline.coordinator_origin,gate_generation=1,worker_id='main-worker',engine_version='3.8.5')
+        self.worker=ReferenceEngineWorker(self.root/'worker.sqlite',ledger=self.ledger,outbox=self.outbox,engine=self.native,engine_id='physical-main',node_id='main',authority_id=pipeline.authority_id,coordinator_origin=pipeline.coordinator_origin,gate_generation=1,worker_id='main-worker',engine_version='3.8.5',engine_probe=lambda deadline:'physical-main')
         self.worker_api=self.api();self.calls=[];self.claim_requests=[];self.grant_ready=False
         test=self
         class Endpoint:

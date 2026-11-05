@@ -63,7 +63,8 @@ class ReferenceDriverRoutingTests(unittest.TestCase):
             mocked.start(); self.addCleanup(mocked.stop)
         self.odm = ReferenceEngineWorker(self.root/'private'/'odm.sqlite',ledger=self.ledger,outbox=self.outbox,
             engine=self.native,engine_id=self.config.engine_id,node_id='main',authority_id=self.queue.authority_id,
-            coordinator_origin=self.config.coordinator_origin,gate_generation=2,worker_id='worker-main',engine_version=self.transport.version)
+            coordinator_origin=self.config.coordinator_origin,gate_generation=2,worker_id='worker-main',engine_version=self.transport.version,
+            engine_probe=lambda deadline:self.config.engine_id)
         self.context = ssl.create_default_context()
         self.broker = BrokerClient('https://broker.invalid',ssl_context=self.context,clock=lambda:self.host.now,
             opener=self.broker_open)
