@@ -115,6 +115,13 @@ class FreezeTests(unittest.TestCase):
         self.change('drain'); self.change('seal')
         self.assertEqual(self.gate.status()['phase'], 'frozen')
 
+    def test_previous_disabled_barrier_marker_requires_reviewed_conversion(self):
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE coordinator_admission(marker TEXT)')
+        self.queue.close()
+        with self.assertRaisesRegex(CoordinatorFrozen, 'legacy_barrier'):
+            Queue(self.temp.name)
+
     def test_reference_freeze_rejects_before_large_body_read_with_retry_after(self):
         from processing.reference_http import create_reference_http_server
         from processing.reference_api import Response

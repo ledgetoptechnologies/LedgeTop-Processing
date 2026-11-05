@@ -84,6 +84,9 @@ class FreezeGate:
         self._active = {}
         self._pid = os.getpid()
         with queue._db() as db:
+            existing = {item[0] for item in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if existing.intersection(('coordinator_admission', 'coordinator_admission_operations', 'legacy_fence_requirement')):
+                raise CoordinatorFrozen('reviewed_legacy_barrier_conversion_required')
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS coordinator_freeze_state (
                   singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL,
@@ -455,4 +458,3 @@ class FreezeGate:
             db.execute('INSERT INTO coordinator_freeze_receipts VALUES(?,?,?,?,?,?)',
                        (request['requestId'], request['planId'], owner, digest, wire, encoded))
             return receipt
-

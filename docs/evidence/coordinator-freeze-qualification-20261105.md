@@ -100,3 +100,30 @@ branch, actual Viewer outbox 503 recovery, active response-stream drain tests,
 exact startup/close census transformations, reviewed installed 693cb7e profile,
 pure no-NAS preflight, and bounded copy/backup/rollback fault qualification.
 This checkpoint does not authorize a live coordinator replacement.
+
+## Prior candidate comparison
+
+Read-only review covered `f1acf77`/`4aff372` AdmissionDrain, `9c46659` HTTP drain,
+`98b41ea` joined actual-runtime evidence and `e5bb4f7` enrolled-updater hold.
+Their authority/generation/exact-replay, reserved reopen capacity and adversarial
+stream/shutdown test patterns are relevant here. Current CoordinatorService
+already contains the mature stop-both-listeners and actual dispatcher/runtime
+join behavior, so this patch does not add another shutdown controller.
+
+Direct merging is unsuitable: AdmissionDrain retains one in-memory RLock across
+admitted file/network work and has no current-V2 registered I/O/background DB
+fence; the HTTP-only gate is explicitly disabled and in-memory. Joined actual
+runtime evidence is real TLS/proxy/process restart coverage, but schema V1,
+direct fixture admission, acceptance-before-ingest and cleanup disabled.
+Guarded native dispatch checkpoints use a separate older NativeEngine transport
+and explicitly do not implement automatic resume/old-writer exclusion. The
+enrolled updater explicitly requires a new reviewed checkpoint ABI rather than
+mount/flag additions. These older guarantees must not be relabeled as current
+V2 qualification.
+
+The new gate refuses existing `coordinator_admission`,
+`coordinator_admission_operations` or `legacy_fence_requirement` table markers
+until an explicit reviewed conversion exists. It cannot silently run alongside
+or bypass those older barriers. A native test confirms that refusal and safe
+lease cleanup. The first installed profile under consideration, revision
+693cb7e, remains separately pinned and is not inferred from these old branches.
