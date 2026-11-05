@@ -61,6 +61,32 @@ dedicated, labeled disposable Docker volume for `/tmp`; do not weaken the
 production free-space guard or confuse temporary disk capacity with the
 container's memory limit.
 
+## Explicit controlled-conversion qualification
+
+After separately building and verifying the pinned converter, mount its complete
+artifact directory read-only at `/opt/obj2tiles`, including `build-info.json`.
+Set these additional variables:
+
+```text
+LTDS_RUN_CONTROLLED_CONVERSION_QUALIFICATION=1
+LTDS_OBJ2TILES_BIN=/opt/obj2tiles/Obj2Tiles
+HOME=/tmp
+DOTNET_BUNDLE_EXTRACT_BASE_DIR=/tmp/obj2tiles-bundle
+```
+
+The derivative guard requires more than 5 GiB free, so use an adequately sized
+owned disposable disk volume. Run `tests.test_viewer_result_v2_roundtrip`; all
+three cases must execute without skips. Explicitly requesting qualification
+with missing converter/Viewer/Node configuration must fail, not report a green
+skip. Normal staged-only tests do not require an installed converter.
+
+The opt-in case runs the real converter, auditor, verifier and publication API,
+then the genuine published-session and asset routes. It checks publication
+replay, binary child delivery, private OBJ exclusion and session revocation.
+It does not replace a rendered-browser check or installed photogrammetry test.
+Do not use an artifact with unresolved dependency/license release gates for
+client processing merely because this controlled synthetic case passed.
+
 ## Evidence boundaries and cleanup
 
 Require zero skipped paired tests. Provider health and a successful metadata POST

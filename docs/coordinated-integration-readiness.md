@@ -4,6 +4,72 @@ This record describes the review branch
 `codex/viewer-accepted-copy-integration-candidate-20261103`. It is not a deployment
 approval. Runtime acceptance remains incomplete.
 
+## Controlled conversion, publication and delivery checkpoint
+
+Processing `0327d45bdc83eea4b4a663806b555e2987a291e9` with frozen Viewer
+`2317d40029f5b0dbbb002cd319c8f25d321a1bfb` passed **272/272 selected Linux tests,
+no skips**, including explicitly enabled real conversion. The independent
+three-case roundtrip run also passed: whole-object transfer, range-V2 transfer,
+and controlled conversion/publication. Two negative preflight cases confirmed
+that explicitly requested conversion fails instead of silently skipping when
+the converter or Viewer configuration is absent.
+
+The new path executes actual `processOneDerivative`, Obj2Tiles, surface audit,
+verification, persisted derivative receipt, readiness and authenticated
+publication. It verifies exact publication replay with one publication audit,
+normal published-session issuance/redemption, HTTP tileset and referenced binary
+delivery, private OBJ exclusion and invalid/revoked-session rejection. Revocation
+uses the actual repository mutation; no generic published-session DELETE route
+was invented. This is server and asset-delivery qualification, **not rendered
+browser acceptance or real photogrammetry**. Native engine execution and physical
+mount/host probes remain synthetic.
+
+The exact converter was built from Viewer's pinned Obj2Tiles target:
+
+- Source v1.6.2 SHA-256:
+  `79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5`.
+- Patch SHA-256:
+  `6d5d99ea1d1e36208e44d0456d35cb0d8c68092dfd4a6ad01288bf85bb67322b`.
+- Binary SHA-256:
+  `3577688939806dabdf1f4620cc05debe6e178180a99bf0308f4b8483b8a36725`.
+- Local build image:
+  `sha256:15ac76c4d93548b50292795119e9afcc7c6e4c9d80b9c7eccde39a1d2da99ac9`.
+
+The file hash matches `build-info.json`; it starts as UID 10001 in the bookworm
+runtime with read-only files and networking disabled. The dedicated builder was
+verified at one CPU/2 GiB memory, then stopped after export. Its cache remains
+for the pending dependency rebuild. All qualification containers and labeled
+temporary disk volumes exited/were removed; the unrelated shared builder was
+preserved.
+
+**Converter release gate:** locked ImageSharp 3.1.12 produces four high and two
+moderate advisory warnings. TIFF decoding has an applicable converter entry
+path; not all other advisory preconditions were established, and no exploit is
+claimed. All six primary advisories identify 3.2.0 as patched; no patched 3.1.x
+covers the set. [Package/advisory inventory](https://www.nuget.org/packages/SixLabors.ImageSharp/3.1.12),
+[patched package](https://www.nuget.org/packages/SixLabors.ImageSharp/3.2.0).
+The vendor requires a valid build key for 3.2.0 direct references; eligibility
+has not been established. [Vendor announcement](https://sixlabors.com/posts/security-support-and-license-enforcement/).
+No license key was present in the checked shell/worktree/repository-secret-name
+contexts; organization secrets could not be listed without additional authority.
+That is not proof no usable key exists elsewhere. No permissions were broadened.
+This old converter artifact is for synthetic qualification only and is not a
+client-release candidate. The Viewer owner owns the separate dependency/lock,
+secure build-secret and provenance-compatibility patch. Old registered proofs
+must remain bound to exact durable receipts/bytes; new generation must require
+the patched binary. No licensing or security guard is bypassed.
+
+The current Processing source is now privately staged, **inactive**, on both
+PCs at `~/.local/share/ledgetop-processing-reference/dependency-candidates/504af0e/source`.
+Archive SHA-256:
+`3660f7d2b27b0d8717987bae0eb7a35ea9fca73ba3c9f6f33fdbbefb834cfc0f`.
+Each host parsed all **104** Processing/ops modules, imported the new policy and
+worker/runtime modules and passed **21/21** focused validators without skips,
+using the existing `39e0825` venv. Main uses Python 3.10.12; cluster 3.14.4.
+Preparation receipts record `workerStarted:false`. The source lives on verified
+local ext4, owned by UID 1000 in private candidate directories. No current-version
+link, active configuration, service, node container or TrueNAS path was changed.
+
 ## November 5 combined candidate checkpoint
 
 Processing `667ee7d9eda11fad1caa0569ba8b967dd84bdd67` paired with immutable Viewer
