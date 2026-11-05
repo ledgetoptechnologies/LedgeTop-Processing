@@ -409,6 +409,72 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(data['sourceRenewalSequence'], 1)
         self.assertNotIn('sourceRenewal', data)
 
+    def test_source_grant_past_its_reservation_renews_instead_of_holding(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-past-lease.sqlite')
+        job = self.submit(contents=(b'past-lease-photo',))
+        self.advance(job, 'fetching')
+        with self.driver._db() as db:
+            data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+        # Everything here has passed: the grant and the reservation it was
+        # capped by. The successor legitimately outlives that reservation.
+        data['claim']['transferRequest']['expiresAt'] = '2000-01-01T00:00:00.000Z'
+        data['grant']['expiresAt'] = '1999-01-01T00:00:00.000Z'
+        self.driver._save(job['jobId'], 'fetching', data)
+        future = datetime.fromtimestamp(time.time() + 3600, timezone.utc).isoformat(
+            timespec='milliseconds').replace('+00:00', 'Z')
+        successor = dict(data['grant'], expiresAt=future, token='past-lease-successor')
+
+        def renew(request):
+            return 200, {'protocol': 'source-range-v2-renewal', 'renewalId': request['renewalId'],
+                'sequence': request['sequence'], 'previousGrantSha256': request['previousGrantSha256'],
+                'grant': successor}
+
+        def acknowledge(request):
+            return 200, {'protocol': 'source-range-v2-renewal-ack', 'renewalId': request['renewalId'],
+                'sequence': request['sequence'], 'grantSha256': request['grantSha256']}
+
+        def download(*, grant, object_id, destination, grant_provider=None):
+            self.assertEqual(grant.token, 'past-lease-successor')
+            Path(destination).write_bytes(self.contents[object_id])
+            return Path(destination)
+
+        with patch.object(self.driver.source_range_client, 'renew_grant', side_effect=renew), \
+             patch.object(self.driver.source_range_client, 'acknowledge_grant_renewal', side_effect=acknowledge), \
+             patch.object(self.driver.source_range_client, 'download_object', side_effect=download):
+            self.assertEqual(self.driver.step()['state'], 'fetching')
+        with self.driver._db() as db:
+            data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+        self.assertEqual((data['grant'], data['sourceRenewalSequence']), (successor, 1))
+
+    def test_source_renewal_credentials_go_only_to_the_coordinator(self):
+        from processing.source_range_transfer import RENEWAL_ACK_PATH, RENEWAL_PATH
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-credentials.sqlite')
+        job = self.submit(contents=(b'credential-photo',))
+        self.advance(job, 'fetching')
+        with self.driver._db() as db:
+            data = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])
+        client = self.driver.source_range_client
+        self.assertEqual(client.renewal_origin, self.driver.origin)
+        self.assertEqual(client.renewal_headers(RENEWAL_PATH, {'previousGrant': data['grant']}),
+            {'Authorization': 'Bearer ' + TOKEN, 'X-Claim-Token': data['claim']['claimToken']})
+        self.assertEqual(client.renewal_headers(RENEWAL_ACK_PATH, {'token': 'successor'}),
+            {'Authorization': 'Bearer ' + TOKEN})
+        sent = []
+
+        class Reply:
+            status = 200
+            headers = {'Content-Type': 'application/json'}
+            def geturl(self): return sent[0].full_url
+            def read(self, _size): return b'{}'
+            def close(self): pass
+
+        client._open = lambda request, timeout: sent.append(request) or Reply()
+        client.renew_grant({'previousGrant': data['grant']})
+        self.assertEqual(sent[0].full_url.split('/api/')[0], self.driver.origin)
+        self.assertEqual(sent[0].get_header('X-claim-token'), data['claim']['claimToken'])
+
     def test_mid_transfer_renewal_wait_and_rejection_keep_driver_state(self):
         from processing.source_range_transfer import validate_source_grant
         self.driver = self.make_driver(source_range_v2_enabled=True,

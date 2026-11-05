@@ -236,7 +236,8 @@ class ReferenceDriver:
             from .source_range_transfer import SourceRangeClient
             self.source_range_client = SourceRangeClient(broker.origin,
                 self.path.parent / 'source-range-progress.sqlite',
-                ssl_context=ssl_context, clock=clock)
+                ssl_context=ssl_context, clock=clock, renewal_origin=self.origin,
+                renewal_headers=self._source_renewal_headers)
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if any(path.is_symlink() for path in (self.path, *self.path.parents)):
             raise ValueError('private worker journal required')
@@ -359,8 +360,25 @@ class ReferenceDriver:
             db.execute('UPDATE driver_jobs SET stage=?,data=? WHERE job=?',
                        (stage, p.canonical_json(data).decode(), job_id))
 
+    def _source_renewal_headers(self, _route, payload):
+        """Renewals prove this worker and, for a new grant, its exact claim."""
+        headers = {'Authorization': 'Bearer ' + self._bearer}
+        previous = payload.get('previousGrant')
+        if type(previous) is dict:
+            with self._db() as db:
+                row = db.execute('SELECT data FROM driver_jobs WHERE job=?', (previous.get('jobId'),)).fetchone()
+            if row is None:
+                raise DriverHeld('source_renewal_journal_invalid')
+            headers['X-Claim-Token'] = json.loads(row['data'])['claim']['claimToken']
+        return headers
+
     def _source_range_grant(self, job_id, claim, data):
-        """Renew an expired v2 grant through a durable request/reply/ack journal."""
+        """Renew an expired v2 grant through a durable request/reply/ack journal.
+
+        Time alone is never terminal here. The reservation deadline can pass,
+        and a replayed successor can have expired during an outage. The ACK then
+        still closes that journal step and the next renewal starts from it.
+        """
         from .source_range_transfer import (MAX_RENEWAL_SEQUENCE, SourceRenewalInvalid,
             SourceRenewalUnavailable, validate_source_grant)
 
@@ -370,8 +388,12 @@ class ReferenceDriver:
         raw_grant = data.get('grant')
         pending = data.get('sourceRenewal')
         expected_pending_fields = {'renewalId', 'sequence', 'previousGrantSha256', 'request', 'phase'}
+        def journaled(grant):
+            return validate_source_grant(grant, job=claim, clock=self.clock,
+                                         allow_expired=True, past_reservation=True)
+
         try:
-            previous = validate_source_grant(raw_grant, job=claim, clock=self.clock, allow_expired=True)
+            previous = journaled(raw_grant)
         except Exception:
             raise DriverHeld('source_transfer_grant_unavailable') from None
         if pending is not None:
@@ -395,7 +417,7 @@ class ReferenceDriver:
                 raise DriverHeld('source_renewal_journal_invalid')
         else:
             if previous.expires > _now(self.clock):
-                return validate_source_grant(raw_grant, job=claim, clock=self.clock)
+                return validate_source_grant(raw_grant, job=claim, clock=self.clock, past_reservation=sequence > 0)
             if sequence >= MAX_RENEWAL_SEQUENCE:
                 raise DriverHeld('source_renewal_sequence_exhausted')
             previous_digest = hashlib.sha256(p.canonical_json(raw_grant)).hexdigest()
@@ -430,12 +452,10 @@ class ReferenceDriver:
                     or response.get('previousGrantSha256') != pending['previousGrantSha256']):
                 raise DriverHeld('source_renewal_response_invalid')
             try:
-                validate_source_grant(response['grant'], job=claim, clock=self.clock)
+                renewed = journaled(response['grant'])
             except Exception:
                 raise DriverHeld('source_renewal_grant_invalid') from None
             successor = response['grant']
-            previous = validate_source_grant(raw_grant, job=claim, clock=self.clock, allow_expired=True)
-            renewed = validate_source_grant(successor, job=claim, clock=self.clock)
             if (renewed.expires <= previous.expires
                     or (renewed.identity, renewed.objects, renewed.chunk_bytes, renewed.request_budget,
                         renewed.byte_budget, renewed.attempt_budget) !=
@@ -460,8 +480,8 @@ class ReferenceDriver:
                     'grantSha256': pending['grantSha256'], 'token': successor.get('token')}):
             raise DriverHeld('source_renewal_journal_invalid')
         try:
-            old = validate_source_grant(raw_grant, job=claim, clock=self.clock, allow_expired=True)
-            new = validate_source_grant(successor, job=claim, clock=self.clock)
+            old = journaled(raw_grant)
+            new = journaled(successor)
         except Exception:
             raise DriverHeld('source_renewal_grant_invalid') from None
         if (new.expires <= old.expires
@@ -477,7 +497,8 @@ class ReferenceDriver:
         except SourceRenewalInvalid:
             raise DriverHeld('source_renewal_ack_response_invalid') from None
         if status != 200:
-            if status >= 500:
+            code = response.get('error') if type(response) is dict else None
+            if status >= 500 or code == 'renewal_authority_unavailable':
                 raise DriverWait('source_renewal_ack_unavailable')
             raise DriverHeld('source_renewal_ack_rejected')
         if (type(response) is not dict or set(response) != {'protocol', 'renewalId', 'sequence', 'grantSha256'}
@@ -489,8 +510,10 @@ class ReferenceDriver:
         data['sourceRenewalSequence'] = pending['sequence']
         data.pop('sourceRenewal', None)
         self._save(job_id, 'fetching', data)
+        if new.expires <= _now(self.clock):
+            return self._source_range_grant(job_id, claim, data)
         try:
-            return validate_source_grant(data['grant'], job=claim, clock=self.clock)
+            return validate_source_grant(data['grant'], job=claim, clock=self.clock, past_reservation=True)
         except Exception:
             raise DriverHeld('source_renewal_grant_invalid') from None
 
