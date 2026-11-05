@@ -20,6 +20,11 @@ timed out with 408; malformed authenticated JSON returned 400; later submission
 and replay succeeded. The server held one queued job with 10,000 objects in
 each manifest, 50,000,000,000 reserved bytes, and zero source PUTs or receipts.
 
+The source-intake body-limit and admission-slot code under qualification
+corresponds to root integration commits `f654a4878faa05b5148ec605aaa809a9e4b4b8b6`
+and `187f5420112287c7d3902e76a0ded60cdfd02e84`. The measured server image was
+`sha256:57f01267c88439d872f6782b54511e314614a76145e32cfe2fad003e5ca0fac8`.
+
 The ordinary Linux/1 GiB focused suite also passed: 20 tests covering the
 reference HTTP routes and the default dynamic TLS scale fixture.
 
