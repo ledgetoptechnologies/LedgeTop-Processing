@@ -31,6 +31,9 @@ def _node_configs(config):
 
 
 def make_handler(config: Config):
+    if getattr(config, 'legacy_viewer_read_only', False) and (config.viewer_enabled or not config.reference_config_path
+                                         or not config.prototype_state_dir):
+        raise ValueError('legacy read-only delivery requires reference mode without the native dispatcher')
     reference_settings = None
     if config.reference_config_path:
         from .reference_runtime import load_reference_settings
@@ -80,6 +83,16 @@ def make_handler(config: Config):
                 queue.close()
             raise
     reference_runtime = None
+    if getattr(config, 'legacy_viewer_read_only', False):
+        from .legacy_viewer_readonly import LegacyViewerReadonly, LegacyViewerReadonlyFacade
+        try:
+            facade = LegacyViewerReadonlyFacade(
+                LegacyViewerReadonly(queue, max_archive_bytes=config.viewer_max_archive_bytes),
+                config.viewer_token, config.viewer_staging_token)
+        except BaseException:
+            if queue is not None:
+                queue.close()
+            raise
     if reference_settings is not None:
         from .reference_runtime import ReferenceRuntime
         try:

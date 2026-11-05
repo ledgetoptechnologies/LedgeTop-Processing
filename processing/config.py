@@ -62,6 +62,7 @@ class Config:
     reference_config_path: str = field(default='', repr=False)
     processing_nodes: tuple[ProcessingNode, ...] = field(default=(), repr=False)
     authority_lease_dir: str = field(default='', repr=False)
+    legacy_viewer_read_only: bool = False
 
     @property
     def node_endpoints(self) -> tuple[ProcessingNode, ...]:
@@ -149,6 +150,11 @@ def from_environment() -> Config:
     if photo_smoke == "1" and not os.environ.get("PROCESSING_PROTOTYPE_STATE_DIR"):
         raise ValueError("photo smoke requires a dedicated prototype state directory")
     viewer = os.environ.get('PROCESSING_VIEWER_ENABLED', '0')
+    legacy_read_only = os.environ.get('PROCESSING_LEGACY_VIEWER_READ_ONLY', '0')
+    if legacy_read_only not in ('0', '1'):
+        raise ValueError('PROCESSING_LEGACY_VIEWER_READ_ONLY must be 0 or 1')
+    if legacy_read_only == '1' and (viewer != '0' or not os.environ.get('PROCESSING_REFERENCE_CONFIG')):
+        raise ValueError('legacy read-only delivery requires reference mode and disables the native dispatcher')
     authority_lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
     if authority_lease_dir and (not os.path.isabs(authority_lease_dir)
                               or not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR')):
@@ -187,7 +193,7 @@ def from_environment() -> Config:
     node_tokens = tuple(node.token for node in node_endpoints)
     if any(len(value) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in value) for value in node_tokens):
         raise ValueError('node tokens must contain at most 4096 non-space printable ASCII characters')
-    if viewer == '1':
+    if viewer == '1' or legacy_read_only == '1':
         if (not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR')
                 or any(not node.url for node in node_endpoints)):
             raise ValueError('Viewer requires persistent state and every configured processing node endpoint')
@@ -220,6 +226,7 @@ def from_environment() -> Config:
         prototype_node_ids=node_ids,
         treedar_node_ids=treedar_node_ids,
         viewer_enabled=viewer == '1', viewer_token=viewer_token,
+        legacy_viewer_read_only=legacy_read_only == '1',
         viewer_staging_token=viewer_staging,
         viewer_max_input_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_INPUT_BYTES', str(20 * 1024 ** 3)),
                                             'PROCESSING_VIEWER_MAX_INPUT_BYTES', 10 ** 15),
