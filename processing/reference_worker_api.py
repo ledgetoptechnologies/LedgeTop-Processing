@@ -220,15 +220,16 @@ class ReferenceWorkerAPI:
         except Exception:
             return self._error(503,'source_storage_unavailable')
 
-    def _source_renewal(self, path, body):
+    def _source_renewal(self, path, body, identity, claim_token):
         if self.source_spool is None:
             return self._error(503,'renewal_authority_unavailable')
         try:
             request=protocol.decode_submission(body)
             if path == RENEWAL_PATH:
-                response=self.store.renew_source_transfer_grant(request,source_spool=self.source_spool)
+                response=self.store.renew_source_transfer_grant(request,source_spool=self.source_spool,
+                    worker=dict(identity,claim_token=claim_token))
             else:
-                response=self.store.acknowledge_source_transfer_grant(request)
+                response=self.store.acknowledge_source_transfer_grant(request,worker=dict(identity))
             return Response(200,response)
         except Conflict as error:
             code=str(error)
@@ -276,7 +277,13 @@ class ReferenceWorkerAPI:
         if path in (RENEWAL_PATH,RENEWAL_ACK_PATH):
             if method != 'POST' or not body:
                 return self._error(405,'method_not_allowed')
-            return self._source_renewal(path,body)
+            # A grant is a capability, not an identity. Renewal happens after it
+            # expired, so only the worker's own credentials can ask for another.
+            identity=self._authenticate(headers)
+            claim_token=self._header(headers,'X-Claim-Token')
+            if identity is None or (path == RENEWAL_PATH and claim_token is None):
+                return self._error(401,'unauthorized')
+            return self._source_renewal(path,body,identity,claim_token)
         if isinstance(path, str) and path.startswith(OBJECT_PREFIX):
             if method != "GET" or body:
                 return self._error(405, "method_not_allowed")

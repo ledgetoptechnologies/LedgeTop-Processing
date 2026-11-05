@@ -74,8 +74,11 @@ class ReferenceSourceRangeBrokerTests(unittest.TestCase):
             spool=SourceSpool(spool_root,mount_id='a'*64,safety_floor_bytes=0,max_object_bytes=1024,chunk_bytes=3)
             source_case.payload['manifest']['id']='dataset-range-broker'
             source_case.rehash()
-            queue,store,control,job,_claim_token=source_case._make_reserved_source_job(
+            queue,store,control,job,claim_token=source_case._make_reserved_source_job(
                 directory.name,spool,'range-broker',source_range_v2=True)
+            worker=dict(node_id='cluster',worker_id='worker',worker_instance_id='instance',claim_token=claim_token)
+            renewal_headers={'Content-Type':'application/json','X-Claim-Token':claim_token,
+                'Authorization':'Bearer synthetic-worker-token-012345'}
             grant=store.mint_source_transfer_grant(job['jobId'],source_spool=spool)
             self.assertEqual(grant['protocol'],'source-range-v2')
             from tests.test_reference_source_intake import GCP_ID
@@ -207,7 +210,7 @@ class ReferenceSourceRangeBrokerTests(unittest.TestCase):
             try:
                 from processing.maintenance import Conflict
                 with self.assertRaisesRegex(Conflict,'metadata quota'):
-                    store.renew_source_transfer_grant(renewal,source_spool=spool,clock=lambda:now[0])
+                    store.renew_source_transfer_grant(renewal,source_spool=spool,worker=worker,clock=lambda:now[0])
                 with queue._db() as db:
                     self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_source_grant_renewals WHERE job_id=?',
                         (job['jobId'],)).fetchone()[0],renewal_count)
@@ -217,14 +220,14 @@ class ReferenceSourceRangeBrokerTests(unittest.TestCase):
             with patch('processing.reference_source_intake_store.time.time',side_effect=lambda:now[0]):
                 with self.assertRaises(Exception):
                     lost.open(__import__('urllib.request').request.Request('https://broker.invalid'+RENEWAL_PATH,
-                        data=renewal_body,method='POST',headers={'Content-Type':'application/json'}))
+                        data=renewal_body,method='POST',headers=renewal_headers))
                 replay=_ControlOpener(control).open(__import__('urllib.request').request.Request(
                     'https://broker.invalid'+RENEWAL_PATH,data=renewal_body,method='POST',
-                    headers={'Content-Type':'application/json'}))
+                    headers=renewal_headers))
             renewal_reply=json.loads(replay.read())
             if replay.status != 200:
                 try:
-                    store.renew_source_transfer_grant(renewal,source_spool=spool,clock=lambda:now[0])
+                    store.renew_source_transfer_grant(renewal,source_spool=spool,worker=worker,clock=lambda:now[0])
                 except Exception as error:
                     self.fail(f'renewal route failed: {renewal_reply}; store reason: {error}')
             self.assertEqual(replay.status,200,renewal_reply)
@@ -239,7 +242,7 @@ class ReferenceSourceRangeBrokerTests(unittest.TestCase):
             with patch('processing.reference_source_intake_store.time.time',side_effect=lambda:now[0]):
                 with self.assertRaises(Exception):
                     lost_ack.open(__import__('urllib.request').request.Request('https://broker.invalid'+RENEWAL_ACK_PATH,
-                        data=ack_body,method='POST',headers={'Content-Type':'application/json'}))
+                        data=ack_body,method='POST',headers=renewal_headers))
             client=SourceRangeClient('https://broker.invalid',Path(directory.name)/'worker-ledger.sqlite',
                 opener=_ControlOpener(control),clock=lambda:now[0])
             validated_new=validate_source_grant(successor,job=store.get(job['jobId'],private=True),clock=lambda:now[0])
@@ -270,7 +273,7 @@ class ReferenceSourceRangeBrokerTests(unittest.TestCase):
                     'https://broker.invalid'+RENEWAL_PATH,data=protocol.canonical_json(renewal_after_lease),
                     method='POST',headers={'Content-Type':'application/json'}))
             self.assertEqual((expired_reply.status,json.loads(expired_reply.read())),
-                (409,{'error':'renewal_authority_unavailable'}))
+                (401,{'error':'unauthorized'}))
             queue.close(); queue=Queue(directory.name); queue.allowed_profiles.add(PROFILE)
             store=ReferenceStore(queue)
             control=ReferenceControlAPI(store,viewer_bearers={'synthetic-staging-token':'staging'},
@@ -284,7 +287,7 @@ class ReferenceSourceRangeBrokerTests(unittest.TestCase):
             with patch('processing.reference_source_intake_store.time.time',side_effect=lambda:now[0]):
                 replay_ack=_ControlOpener(control).open(__import__('urllib.request').request.Request(
                     'https://broker.invalid'+RENEWAL_ACK_PATH,data=ack_body,method='POST',
-                    headers={'Content-Type':'application/json'}))
+                    headers=renewal_headers))
             self.assertEqual(json.loads(replay_ack.read()),{'protocol':'source-range-v2-renewal-ack',
                 'renewalId':'renewal-range-test','sequence':1,'grantSha256':ack['grantSha256']})
             with queue._db() as db:
