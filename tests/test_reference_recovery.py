@@ -76,6 +76,24 @@ class RecoveryTests(unittest.TestCase):
             for key in ('status','held_reason','updated_at'):job.pop(key)
         return ref,claim,grants,jobs
 
+    def test_v1_wire_is_unchanged_by_source_fetch_recovery(self):
+        # Pinned from the code before v2 fetch recovery existed.
+        identity = dict(jobId='00000000-0000-4000-8000-000000000001', authorityId='00000000-0000-4000-8000-000000000002',
+            generation=1, environment='staging', nodeId='cluster', workerId='worker', workerInstanceId='instance',
+            claimRequestId='claim-1', claimTokenSha256='a' * 64, manifestSha256='b' * 64, pipelineDigest='c' * 64,
+            engineId='physical-cluster', coordinatorOrigin='http://127.0.0.1:18080', gateGeneration=1,
+            gateReceiptId='d' * 32, outputBudget=1000, reservationId='reservation-1', inputBytes=3)
+        request = dict(schemaVersion=1, requestId='00000000-0000-4000-8000-000000000003',
+            coordinatorEpoch='00000000-0000-4000-8000-000000000004', expectedNodeRevision=0, parentBinding=identity,
+            transferRequestSha256='e' * 64, workerEvidenceSha256='f' * 64)
+        from processing.reference_recovery import ClaimRecoveryService
+        checked = ClaimRecoveryService._request(request)
+        self.assertEqual(p.digest(checked), '5b203542f66cecf095261879ce4941d0caca4ee2473c39cab3fa21f576ca7ac3')
+        self.assertEqual(p.digest(ClaimRecoveryService._make_receipt(checked)), '4c705f9f86468627ebeef206afd70ac00a899466753daa50e2839fcaf080a25d')
+        state = self.state()
+        self.assertEqual((state['schemaVersion'], set(state)), (1, {'schemaVersion', 'protocol', 'authorityId',
+            'coordinatorEpoch', 'claim', 'physicalBinding', 'reservation', 'node', 'eligible'}))
+
     def test_exact_original_claim_resumes_without_requeue_or_input_changes(self):
         before=self.facts();request=self.request();old_token=self.claim['claimToken']
         response=self.call('POST','recover',request);self.assertEqual(response.status,200,response.body)

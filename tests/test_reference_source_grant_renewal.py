@@ -27,6 +27,7 @@ from processing.maintenance import Conflict
 from processing.prototype import Queue
 from processing.reference_control import ReferenceControlAPI
 from processing.reference_driver import DriverHeld, DriverWait, ReferenceDriver
+from processing.reference_recovery import RecoveryNodeBinding
 from processing.reference_source_readers import SourceReaderError
 from processing.reference_source_intake_store import SOURCE_RANGE_GRANT_TTL_SECONDS
 from processing.reference_store import PROFILE, ReferenceStore
@@ -89,6 +90,7 @@ class _UnknownClose:
 
 class RenewalHarness(unittest.TestCase):
     chunk_bytes = None
+    extra_objects = 0
 
     def setUp(self):
         if self.chunk_bytes is not None:
@@ -102,6 +104,7 @@ class RenewalHarness(unittest.TestCase):
         case = ReferenceSourceIntakeTests('runTest')
         case.setUp()
         case.payload['manifest']['id'] = 'dataset-grant-renewal'
+        self.add_objects(case)
         case.rehash()
         self.case = case
         spool_root = self.root / 'spool'
@@ -131,11 +134,83 @@ class RenewalHarness(unittest.TestCase):
         self.client = SourceRangeClient('https://broker.invalid', self.root / 'worker-ledger.sqlite',
             opener=_ControlOpener(self.control), clock=lambda: self.now[0])
         self.client.renewal_headers = self.credentials
-        self.data = {'grant': copy.deepcopy(self.first_grant)}
-        self.saved = []
-        self.driver = SimpleNamespace(clock=lambda: self.now[0], source_range_client=self.client,
-            _save=lambda *_args: self.saved.append(copy.deepcopy(self.data)))
-        self.driver._source_range_grant = lambda *args: ReferenceDriver._source_range_grant(self.driver, *args)
+        self.data = {'grant': copy.deepcopy(self.first_grant), 'claim': self.claim,
+            'reservation': self.claim['transferRequest']}
+        self.saved, self.saved_stages = [], []
+        self.down, self.lose_reply, self.requests = set(), set(), []
+        self.driver = self.real_driver()
+
+    def add_objects(self, case):
+        """Synthetic extra photos, so the transfer wire scales with the manifest."""
+        case.extra_bodies = {}
+        for index in range(self.extra_objects):
+            object_id, body = str(uuid.uuid5(uuid.NAMESPACE_URL, f'extra-{index}')), b'photo-%d' % index
+            case.extra_bodies[object_id] = body
+            digest = hashlib.sha256(body).hexdigest()
+            name = f'Extra_{index:05d}.JPG'
+            source, manifest = case.payload['sourceManifest'], case.payload['manifest']
+            source['objects'].append({'id': object_id, 'name': name, 'byteSize': len(body), 'sha256': digest,
+                'sourceType': 'raw_input', 'retentionClass': 'release_after_acceptance', 'retentionHoldId': None})
+            manifest['objects'].append({'id': object_id, 'name': name, 'byteSize': len(body), 'sha256': digest,
+                'kind': 'image', 'mediaType': 'image/jpeg'})
+            for target in (source, manifest):
+                target['totalBytes'] += len(body)
+                target['objectCount'] += 1
+            manifest['inputCounts']['images'] += 1
+        for target in (case.payload['sourceManifest'], case.payload['manifest']):
+            target['objects'].sort(key=lambda item: item['id'])
+
+    def real_driver(self):
+        """Real journal, claim-state and recovery code over a real local journal.
+
+        Everything beyond those methods (engine, ledger, adapters) is absent, so
+        a call into any of it fails loudly rather than being faked.
+        """
+        driver = object.__new__(ReferenceDriver)
+        driver.path = self.root / 'driver-journal.sqlite'
+        driver._combined_policy = driver._combined_policy_initial = None
+        driver.clock, driver.source_range_client = (lambda: self.now[0]), self.client
+        driver.worker = SimpleNamespace(authority_id=self.queue.authority_id)
+        driver.node_id, driver.worker_id, driver.worker_instance_id = 'cluster', 'worker', 'instance'
+        driver._request = self.worker_request
+        driver._save = self.save
+        with driver._db() as db:
+            db.execute('CREATE TABLE driver_jobs(job TEXT PRIMARY KEY,claim_request TEXT NOT NULL)')
+            db.execute('INSERT INTO driver_jobs VALUES(?,?)', (self.job_id, 'source-claim-renewal'))
+        return driver
+
+    def save(self, _job_id, stage, data):
+        self.saved.append(copy.deepcopy(data))
+        self.saved_stages.append(stage)
+
+    def worker_request(self, method, suffix, payload=None, *, claim_token=None):
+        """The driver's real status mapping over the real coordinator API."""
+        operation = suffix.rsplit('/', 1)[-1]
+        self.requests.append((method, operation))
+        if operation in self.down:
+            raise DriverWait('coordinator_unavailable')
+        headers = {'Authorization': 'Bearer ' + WORKER_TOKEN}
+        if claim_token is not None:
+            headers['X-Claim-Token'] = claim_token
+        response = self.control.handle(method, '/ltds/worker/v1' + suffix, headers,
+            b'' if payload is None else protocol.canonical_json(payload), protected_transport=True)
+        if operation in self.lose_reply:
+            self.lose_reply.discard(operation)
+            raise DriverWait('coordinator_unavailable')
+        if response.status in (400, 401, 403, 404):
+            raise DriverHeld('control_request_rejected')
+        if response.status == 409:
+            return 409, None
+        if response.status != 200:
+            raise DriverWait('coordinator_unavailable')
+        return 200, response.body
+
+    def admit(self):
+        return self.driver._fetch_refusal(self.job_id, 'fetching', self.data, True)
+
+    def crash_worker(self):
+        """Only what reached the journal survives a worker death."""
+        self.data = copy.deepcopy(self.saved[-1])
 
     def bind_clock(self):
         for name in ('renew_source_transfer_grant', 'acknowledge_source_transfer_grant', 'source_range_for_grant'):
@@ -152,7 +227,9 @@ class RenewalHarness(unittest.TestCase):
             worker_bearers={WORKER_TOKEN: dict(node_id='cluster', worker_id='worker', worker_instance_id='instance')},
             capability_fingerprint='a' * 64, options_fingerprint=self.case.payload['pipeline']['odm']['optionsFingerprint'],
             allowed_odm_options={'numeric-probe'}, source_spool=self.spool,
-            source_attestation_keys=self.case.trusted_keys, authority_id=self.queue.authority_id)
+            source_attestation_keys=self.case.trusted_keys, authority_id=self.queue.authority_id,
+            recovery_bindings={'cluster': RecoveryNodeBinding('cluster', 'physical-cluster', self.queue.authority_id,
+                'http://127.0.0.1:18080', 1, 1000)})
         self.bind_clock()
         self.opener(_ControlOpener(self.control))
 
@@ -635,15 +712,7 @@ class ExhaustedBoundsTests(RenewalHarness):
 
 
 class RenewalRestartTests(RenewalHarness):
-    """A real restart holds every running job, so the journal must outlast the hold.
-
-    Nothing resumes a v2 job in fetching today: claim recovery accepts only
-    processing. ``lift_restart_hold`` stands in for that missing step.
-    """
-
-    def lift_restart_hold(self):
-        self.execute("UPDATE jobs SET status='running',held_reason=NULL WHERE id=? AND held_reason='coordinator_restart'",
-            self.job_id)
+    """A real restart holds every running job, so the journal must outlast the hold."""
 
     def held_reason(self):
         with self.queue._db() as db:
@@ -656,7 +725,8 @@ class RenewalRestartTests(RenewalHarness):
         with self.assertRaisesRegex(DriverHeld, 'source_renewal_rejected'):
             self.renew()
         self.assertEqual(self.journal(), [])
-        self.lift_restart_hold()
+        self.data.pop('sourceRenewal')
+        self.assertIsNone(self.admit())
         self.assertEqual(self.fetch(self.renew(), 0), b'abc')
 
     def test_lost_renewal_reply_replays_the_same_successor_after_a_restart(self):
@@ -670,7 +740,7 @@ class RenewalRestartTests(RenewalHarness):
         with self.assertRaisesRegex(DriverHeld, 'source_renewal_rejected'):
             self.renew()
         self.assertEqual(self.data['sourceRenewal'], intent)
-        self.lift_restart_hold()
+        self.assertIsNone(self.admit())
         renewed = self.renew()
         self.assertEqual(hashlib.sha256(protocol.canonical_json(self.data['grant'])).hexdigest(),
             minted[0]['successor_sha256'])
@@ -687,28 +757,31 @@ class RenewalRestartTests(RenewalHarness):
         self.assertEqual([(row['sequence'], row['acked']) for row in self.journal()], [(1, 1)])
         with self.assertRaises(Conflict):
             self.read_range(renewed.token, renewed)
-        self.lift_restart_hold()
+        self.assertIsNone(self.admit())
         self.assertEqual(self.fetch(renewed, 1), b'1,2,3\n')
 
     def test_replay_after_a_restart_still_needs_the_claim_owner(self):
         self.after_lease()
-        self.renew_directly()
+        self.opener(_ControlOpener(self.control, drop=RENEWAL_PATH))
+        with self.assertRaises(DriverWait):
+            self.renew()
+        self.opener(_ControlOpener(self.control))
+        request = self.data['sourceRenewal']['request']
         self.restart_coordinator()
-        self.lift_restart_hold()
-        self.assertEqual(self.post(RENEWAL_PATH, self.request(), {}).status, 401)
+        self.assertIsNone(self.admit())
+        self.assertEqual(self.post(RENEWAL_PATH, request, {}).status, 401)
         with self.assertRaises(Conflict):
-            self.renew_directly(worker_instance_id='replacement')
-        self.assertEqual(self.renew_directly()['sequence'], 1)
+            self.renew_directly(request, worker_instance_id='replacement')
+        self.assertEqual(self.renew_directly(request)['sequence'], 1)
 
-    def test_claim_recovery_cannot_resume_a_source_range_transfer_yet(self):
-        from processing.reference_recovery import ClaimRecoveryService, RecoveryNodeBinding
+    def test_claim_recovery_resumes_a_source_range_transfer(self):
         self.restart_coordinator()
-        binding = RecoveryNodeBinding('cluster', 'physical-cluster', self.queue.authority_id,
-            'http://127.0.0.1:18080', 1, 1000)
-        service = ClaimRecoveryService(self.store, {'cluster': binding})
         identity = {key: self.worker[key] for key in ('node_id', 'worker_id', 'worker_instance_id')}
-        with self.assertRaisesRegex((Conflict, ValueError), 'original transfer reservation'):
-            service.state(self.job_id, identity=identity, claim_token=self.claim_token)
+        state = self.control.worker.recovery.state(self.job_id, identity=identity, claim_token=self.claim_token)
+        self.assertTrue(state['eligible'])
+        self.assertEqual(state['claim']['executionPhase'], 'fetching')
+        self.assertIsNone(self.admit())
+        self.assertEqual(self.held_reason(), ('running', None))
 
 
 class RenewalAcrossRangesTests(RenewalHarness):

@@ -1154,6 +1154,100 @@ class ReferenceDriverTests(unittest.TestCase):
             self.assert_unstarted_terminal(job, 'source_fetch_ended', self.driver.step())
         download.assert_not_called()
 
+    def restart_hold(self, job):
+        with self.queue._db() as db:
+            db.execute("UPDATE jobs SET status='held',held_reason='coordinator_restart' WHERE id=?", (job['jobId'],))
+
+    def lift_hold(self, job, *_args):
+        with self.queue._db() as db:
+            db.execute("UPDATE jobs SET status='running',held_reason=NULL WHERE id=?", (job['jobId'],))
+
+    def test_step_recovers_a_restart_hold_before_any_source_attempt(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-restart.sqlite')
+        job = self.submit(contents=(b'restart-photo',))
+        self.advance(job, 'fetching')
+        self.restart_hold(job)
+        order = []
+        real_begin = self.ledger.begin_transfer
+
+        def begin(reservation):
+            order.append('begin_transfer')
+            return real_begin(reservation)
+
+        def recover(*args):
+            order.append('recover')
+            self.lift_hold(job)
+
+        def download(*, grant, object_id, destination, grant_provider=None):
+            order.append('download')
+            Path(destination).write_bytes(self.contents[object_id])
+            return Path(destination)
+
+        with patch.object(self.ledger, 'begin_transfer', side_effect=begin), \
+             patch.object(self.driver, '_recover_source_fetch', side_effect=recover), \
+             patch.object(self.driver.source_range_client, 'download_object', side_effect=download):
+            self.assertEqual(self.driver.step()['state'], 'fetching')
+        self.assertEqual(order, ['begin_transfer', 'recover', 'download'])
+
+    def test_restart_after_the_last_object_recovers_from_processing_pending(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-restart-last.sqlite')
+        job = self.submit(contents=(b'restart-last-photo',))
+        self.advance(job, 'fetching')
+
+        def download(*, grant, object_id, destination, grant_provider=None):
+            Path(destination).write_bytes(self.contents[object_id])
+            return Path(destination)
+
+        with patch.object(self.driver.source_range_client, 'download_object', side_effect=download):
+            self.advance(job, 'processing_pending')
+        self.restart_hold(job)
+        stages = []
+
+        def recover(_job_id, stage, _data):
+            stages.append(stage)
+            self.lift_hold(job)
+
+        with patch.object(self.driver, '_recover_source_fetch', side_effect=recover):
+            self.assertEqual(self.driver.step()['state'], 'processing_pending')
+        self.assertEqual(stages, ['processing_pending'])
+        self.assertEqual(self.driver.step()['state'], 'execution_pending')
+
+    def test_migration_census_treats_recovery_history_like_any_other_row(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-census.sqlite')
+        job = self.submit(contents=(b'census-photo',))
+        self.advance(job, 'fetching')
+        with self.driver._db() as db:
+            binding = json.loads(db.execute('SELECT binding FROM driver_binding').fetchone()[0])
+        physical = {key: binding[key] for key in ('nodeId', 'workerId', 'engineId', 'authorityId', 'gateGeneration')}
+        physical['origin'] = binding['gateOrigin']
+        history = {'attempts': 2, 'pending': None}
+        stage, data = self.data(job)
+        self.driver._save(job['jobId'], stage, dict(data, sourceRecovery=history))
+        with self.assertRaisesRegex(DriverHeld, 'migration_driver_not_terminal'):
+            ReferenceDriver.migration_census(self.driver.path, physical_binding=physical)
+        self.end_job(job)
+        self.driver.step()
+        self.assertEqual(self.data(job)[0], 'completed')
+        recorded = ReferenceDriver.migration_census(self.driver.path, physical_binding=physical)
+        _stage, data = self.data(job)
+        self.assertEqual(data['sourceRecovery'], history)
+        data.pop('sourceRecovery')
+        self.driver._save(job['jobId'], 'completed', data)
+        self.assertEqual(ReferenceDriver.migration_census(self.driver.path, physical_binding=physical), recorded)
+
+    def test_restart_held_v1_fetch_never_asks_for_source_recovery(self):
+        job = self.submit(contents=(b'restart-v1-photo',))
+        self.advance(job, 'fetching')
+        self.restart_hold(job)
+        with patch.object(self.driver, '_recover_source_fetch') as recover, \
+             patch.object(self.broker, 'download_object') as download:
+            self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'source_fetch_held'})
+        recover.assert_not_called()
+        download.assert_not_called()
+
     def test_mid_transfer_renewal_wait_and_rejection_keep_driver_state(self):
         from processing.source_range_transfer import validate_source_grant
         self.driver = self.make_driver(source_range_v2_enabled=True,
