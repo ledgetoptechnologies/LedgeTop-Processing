@@ -434,6 +434,7 @@ class RecoveryAttemptTests(RecoveryHarness):
         self.assertNotEqual(self.data['sourceRecovery']['pending']['request']['requestId'], old)
 
     def test_replaying_an_accepted_receipt_is_idempotent(self):
+        self.fetch(validate_source_grant(self.first_grant, job=self.claim, clock=lambda: self.now[0]), 0)
         self.restart_coordinator()
         self.lose_reply.add('recover')
         with self.assertRaises(DriverWait):
