@@ -1,9 +1,16 @@
-"""Worker-reported holds; a visibility overlay on jobs.status, never a release.
+"""Worker status reports; a visibility overlay on jobs.status, never a release.
+
+Only irreversible local evidence (HOLD_REASONS) sets jobs.status='held'; a job
+held that way leaves only by Queue.operator. Everything transient is OBSERVING:
+the job stays as it was, retries and result delivery are unchanged, and the
+report is shown beside it. A coordinator_restart or operator hold is another
+authority, so a report never replaces it: ClaimRecoveryService and the
+restart-tolerant result path stay exactly as eligible as they were.
 
 Uses existing columns only: jobs.status/held_reason, jobs.result for the bounded
-record and reference_jobs.error for the code. The execution phase is preserved.
-Reports carry allowlisted codes, never free text or paths. Only Queue.operator
-leaves a hold; nothing here requeues, moves, resumes or deletes anything.
+record and reference_jobs.error for an escalated code. Reports carry allowlisted
+codes, never free text or paths. Nothing here requeues, moves, resumes or
+deletes a job.
 """
 from datetime import datetime, timezone
 import hashlib
@@ -15,9 +22,12 @@ from .maintenance import Conflict
 
 PROTOCOL = 'ltds-worker-hold-v1'
 ACK_PROTOCOL = 'ltds-worker-hold-ack-v1'
-HOLD_REASONS = frozenset(('engine_init_uncertain', 'engine_start_refused', 'engine_reconciliation_required',
-    'engine_task_missing', 'node_lost', 'result_over_budget', 'scratch_capacity_unavailable',
-    'reservation_expired', 'source_transfer_unavailable', 'worker_reconciliation_required'))
+HOLD_REASONS = frozenset(('engine_init_uncertain', 'reservation_expired', 'result_over_budget'))
+OBSERVING_REASONS = frozenset(('engine_start_refused', 'engine_reconciliation_required', 'engine_task_missing',
+    'node_lost', 'scratch_capacity_unavailable', 'source_transfer_unavailable', 'worker_reconciliation_required'))
+# An operator ended the job while this node's physical fence is still live.
+TERMINAL_REASONS = frozenset(('physical_reservation_retained',))
+REASONS = HOLD_REASONS | OBSERVING_REASONS | TERMINAL_REASONS
 OBSERVATIONS = frozenset(('engine_task_present', 'engine_task_missing', 'engine_unreachable'))
 ENGINE_STATUS_CODES = frozenset((10, 20, 30, 40, 50))
 FIELDS = ('schemaVersion', 'protocol', 'holdId', 'sequence', 'coordinatorAuthorityId', 'jobId', 'generation',
@@ -40,8 +50,10 @@ def validate_request(value):
     p._environment(value['environment'])
     for name in ('inputManifestSha256', 'pipelineDigest'):
         p._hash(value[name], name)
-    p._require(type(value['reasonCode']) is str and value['reasonCode'] in HOLD_REASONS, 'unknown hold reason')
     observation, code = value['observation'], value['engineStatusCode']
+    # A null reason retires an observation; it can carry nothing else.
+    p._require(type(value['reasonCode']) is str and value['reasonCode'] in REASONS
+        or value['reasonCode'] is None and observation is None, 'unknown hold reason')
     p._require(observation is None or type(observation) is str and observation in OBSERVATIONS, 'unknown hold observation')
     p._require(code is None or type(code) is int and code in ENGINE_STATUS_CODES and observation == 'engine_task_present',
         'invalid engine status observation')
@@ -75,16 +87,45 @@ def validate_ack(value, request):
 
 
 def stored_record(row):
-    """The bounded record behind a reported hold; None for any other hold."""
-    if row['status'] != 'held' or row['held_reason'] not in HOLD_REASONS or not row['queue_result']:
+    """The bounded report behind a job's visible worker status, else None."""
+    if not row['queue_result'] or row['result_json'] or row['terminal_failure_json']:
         return None
-    record = json.loads(row['queue_result']).get('workerHold')
+    value = json.loads(row['queue_result'])
+    record = value.get('workerHold') if type(value) is dict else None
+    if record is None:
+        return None
     p._closed(record, RECORD_FIELDS, 'stored worker hold')
     return record
 
 
+def queue_status(record):
+    """Additive public fields for one report; None once it has been retired."""
+    reason = record['reasonCode'] if record is not None else None
+    if reason is None:
+        return None
+    message = ('Waiting for operator resolution of a worker hold.' if reason in HOLD_REASONS
+        else 'Node stays fenced until its physical reservation is reconciled.' if reason in TERMINAL_REASONS
+        else 'Worker is retrying; the job keeps its claim.')
+    return dict(queueReason=reason, queueMessage=message, holdObservation=record['observation'],
+        holdEngineStatusCode=record['engineStatusCode'])
+
+
+def _permitted(row, reason):
+    """Whether this report may be recorded against the job's current authority."""
+    if row['result_json'] or row['terminal_failure_json']:
+        return False
+    status, held = row['status'], row['held_reason']
+    if reason in TERMINAL_REASONS:
+        return status in ('failed', 'cancelled')
+    if status == 'running':
+        return True
+    # Same-reason updates only: an escalated hold keeps its code, and any other
+    # hold (restart, operator) is not this worker's to replace.
+    return status == 'held' and (held == 'coordinator_restart' or held in HOLD_REASONS and held == reason)
+
+
 def report(store, job_id, request, *, identity, claim_token):
-    """Record one hold transition; exact replay writes nothing and returns one ack."""
+    """Record one report; exact replay writes nothing and returns one ack."""
     request = validate_request(request)
     digest = p.digest(request)
     if type(claim_token) is not str or not claim_token.isascii() or not 1 <= len(claim_token) <= 128:
@@ -104,28 +145,32 @@ def report(store, job_id, request, *, identity, claim_token):
             environment=row['environment'], inputManifestSha256=row['manifest_sha'], pipelineDigest=row['pipeline_digest'])
         if any(request[key] != value for key, value in expected.items()):
             raise Conflict('worker hold binding mismatch')
+        reason = request['reasonCode']
         old = stored_record(row)
         if old is not None:
-            if old['holdId'] != request['holdId'] or old['reasonCode'] != request['reasonCode']:
+            if old['holdId'] != request['holdId']:
                 raise Conflict('job already holds a different worker report')
             if request['sequence'] < old['sequence'] or (request['sequence'] == old['sequence'] and digest != old['requestSha256']):
                 raise Conflict('stale worker hold report')
             if request['sequence'] == old['sequence']:
                 return make_ack(job_id, row['generation'], old)
-            held_at = old['heldAt']
-        elif (row['status'] != 'running' and not (row['status'] == 'held' and row['held_reason'] == 'coordinator_restart')
-                or row['result_json'] or row['terminal_failure_json']):
+        if not _permitted(row, reason):
             # Operator holds stay as they are and delivered work is not reopened.
             raise Conflict('job cannot take a worker hold')
-        else:
-            held_at = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+        held_at = (old['heldAt'] if old is not None and old['reasonCode'] == reason else
+            datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))
         record = dict(holdId=request['holdId'], sequence=request['sequence'], requestSha256=digest,
-            reasonCode=request['reasonCode'], observation=request['observation'],
+            reasonCode=reason, observation=request['observation'],
             engineStatusCode=request['engineStatusCode'], heldAt=held_at)
-        db.execute("UPDATE jobs SET status='held',held_reason=?,result=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-            (request['reasonCode'], p.canonical_json(dict(workerHold=record)).decode('ascii'), job_id))
-        db.execute('UPDATE reference_jobs SET error=?,updated_at=CURRENT_TIMESTAMP WHERE job_id=?',
-            (request['reasonCode'], job_id))
+        # The operator's own terminal note stays beside the report.
+        value = json.loads(row['queue_result']) if reason in TERMINAL_REASONS and row['queue_result'] else {}
+        result = p.canonical_json(dict(value, workerHold=record)).decode('ascii')
+        if reason in HOLD_REASONS and row['status'] == 'running':
+            db.execute("UPDATE jobs SET status='held',held_reason=?,result=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (reason, result, job_id))
+            db.execute('UPDATE reference_jobs SET error=?,updated_at=CURRENT_TIMESTAMP WHERE job_id=?', (reason, job_id))
+        else:
+            db.execute('UPDATE jobs SET result=?,updated_at=CURRENT_TIMESTAMP WHERE id=?', (result, job_id))
         return make_ack(job_id, row['generation'], record)
 
 

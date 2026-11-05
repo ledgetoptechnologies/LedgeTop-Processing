@@ -24,7 +24,7 @@ from .viewer_result_manifest import derive_viewer_result_manifest, validate_view
 from .prototype import PROFILE as TREEDAR_PROFILE, VIEWER_PROFILE
 from .reference_source_intake_canonical import pipeline_digest as v2_pipeline_digest
 from .reference_source_intake_store import ReferenceSourceIntakeMethods
-from .reference_worker_hold import HOLD_REASONS, stored_record
+from .reference_worker_hold import HOLD_REASONS, queue_status, stored_record
 
 PROFILE = "reference-pipeline-v1"
 PHASES = {
@@ -279,11 +279,7 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             elif not recovering and source_receiving:
                 result_record.update(queueReason='source_receiving',
                     queueMessage='Waiting for durable source and derived input receipts.')
-        record = stored_record(row)
-        if record is not None:
-            result_record.update(queueReason=record['reasonCode'],
-                queueMessage='Waiting for operator resolution of a worker hold.',
-                holdObservation=record['observation'], holdEngineStatusCode=record['engineStatusCode'])
+        result_record.update(queue_status(stored_record(row)) or {})
         return result_record
 
     def _record(self, row, private):

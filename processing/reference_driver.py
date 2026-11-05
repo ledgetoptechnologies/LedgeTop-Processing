@@ -34,16 +34,17 @@ from .reference_engine_cleanup import EngineCacheCleanup
 from .options import _validate_options
 from .reference_option_policy import safe_option_definitions, validate_option_values
 from .reference_execution import ExecutionRouter, RouteConflict
-from .reference_worker_hold import HOLD_REASONS, make_request as make_hold_request, validate_ack as validate_hold_ack
+from .reference_parent_guard import validate_claim_fields
+from .reference_worker_hold import HOLD_REASONS, OBSERVING_REASONS, make_request as make_hold_request, validate_ack as validate_hold_ack
 from .scratch_policy import PolicyConflict
 from .treedar_engine import TreeDarHeld
 
 
 PREFIX = '/ltds/worker/v1'
-# Consecutive bad engine reads before a hold; any good read resets both.
+# Consecutive bad engine reads before they are reported; a good read resets both.
 ENGINE_TASK_MISSING_READS = 10
 ENGINE_SUSPECT_SECONDS = 1800
-# Accepted-result cleanup can free scratch, so a shortage waits before holding.
+# Accepted-result cleanup can free scratch, so a shortage waits before reporting.
 SCRATCH_SHORTAGE_SECONDS = 900
 HOLDABLE_STAGES = frozenset(('claim_pending', 'claimed', 'reservation_pending', 'awaiting_grant', 'fetching_pending',
     'fetching', 'processing_pending', 'execution_pending', 'executing'))
@@ -59,12 +60,13 @@ SCRATCH_CONFLICTS = {'insufficient unreserved scratch': 'scratch_capacity_unavai
     'reservation settings changed or lease expired': 'reservation_expired',
     'lease expired before engine mutation': 'reservation_expired', 'invalid engine transition': 'reservation_expired',
     'allocation outside reservation': 'reservation_expired', 'result exceeds output budget': 'result_over_budget'}
+ENGINE_OBSERVATIONS = {'missing': 'engine_task_missing', 'unreachable': 'node_lost'}
 
 
 def _hold_code(reason):
     if reason in LOCAL_HOLDS:
         return None
-    if reason in HOLD_REASONS:
+    if reason in HOLD_REASONS or reason in OBSERVING_REASONS:
         return reason
     if reason.startswith('source_') or reason == 'worker_fetch_attempt_budget_exhausted':
         return 'source_transfer_unavailable'
@@ -826,10 +828,25 @@ class ReferenceDriver:
             row = db.execute('SELECT stage,data FROM driver_jobs WHERE job=?', (self._active_job,)).fetchone()
         return (row['stage'], json.loads(row['data'])) if row is not None and row['stage'] in HOLDABLE_STAGES else None
 
-    def _hold(self, reason):
-        """Journal before contacting the coordinator; the row then stops advancing.
+    def _lease_lapsed(self, data):
+        """The ledger's own durable word; a refusal message alone proves nothing."""
+        reservation = (data.get('reservation') or {}).get('reservationId')
+        if reservation is None:
+            return False
+        try:
+            with self.ledger._transaction() as db:
+                now = self.ledger._now(db)
+                self.ledger._expire(db, now)
+                current = self.ledger._reservation(db, reservation)
+        except PolicyConflict:
+            return False
+        return current['state'] == 'expired' or (current['state'] == 'reserved' and current['expires'] <= now)
 
-        Only Queue.operator leaves a hold, so progress past it would only be refused.
+    def _hold(self, reason):
+        """Journal irreversible evidence before contact; the row then stops advancing.
+
+        Anything else is observed and the row keeps its original retry, so a job
+        that recovers delivers as if nothing had happened.
         """
         held = {'state': 'held', 'reason': reason}
         code = _hold_code(reason)
@@ -838,8 +855,14 @@ class ReferenceDriver:
             if active is None:
                 return held
             stage, data = active
-            data.setdefault('hold', dict(holdId=str(uuid4()), reasonCode=code, reason=reason, sequence=0,
-                observation=None, engineStatusCode=None, ack=None))
+            if code == 'reservation_expired' and not self._lease_lapsed(data):
+                code = 'worker_reconciliation_required'
+            if code not in HOLD_REASONS:
+                self._observe(self._active_job, stage, data, code)
+                return dict(held, observing=code)
+            watch = data.pop('watch', None) or {}
+            data.setdefault('hold', dict(holdId=watch.get('holdId') or str(uuid4()), reasonCode=code, reason=reason,
+                sequence=watch.get('sequence', -1) + 1, observation=None, engineStatusCode=None, ack=None))
             data.pop('suspect', None)
             self._save(self._active_job, stage, data)
             self._report_hold(self._active_job, stage, data)
@@ -847,42 +870,139 @@ class ReferenceDriver:
             pass
         return held
 
-    def _report_hold(self, job_id, stage, data):
-        hold, claim = data['hold'], data['claim']
-        result = {'state': 'held', 'jobId': job_id, 'reason': hold['reason'], 'holdReason': hold['reasonCode'],
-            'observation': hold['observation'], 'engineStatusCode': hold['engineStatusCode']}
-        if hold['ack'] is not None and hold['ack']['sequence'] == hold['sequence']:
-            return dict(result, holdReport='acknowledged')
+    def _post_report(self, job_id, stage, data, key):
+        """One bounded report of data[key]: acknowledged, refused or pending."""
+        record, claim = data[key], data['claim']
+        if record['ack'] is not None and record['ack']['sequence'] == record['sequence']:
+            return 'acknowledged'
         with self._db() as db:
             request_id = db.execute('SELECT claim_request FROM driver_jobs WHERE job=?', (job_id,)).fetchone()[0]
-        request = make_hold_request(claim, authority_id=self.worker.authority_id, claim_request_id=request_id, hold=hold)
+        request = make_hold_request(claim, authority_id=self.worker.authority_id, claim_request_id=request_id, hold=record)
         try:
             status, ack = self._request('POST', '/jobs/' + job_id + '/hold', request, claim_token=claim['claimToken'])
             if status != 200:
-                return dict(result, holdReport='refused')
-            hold['ack'] = validate_hold_ack(ack, request)
+                return 'refused'
+            record['ack'] = validate_hold_ack(ack, request)
         except (DriverHeld, DriverWait, ValueError):
-            return dict(result, holdReport='pending')
+            return 'pending'
         self._save(job_id, stage, data)
-        return dict(result, holdReport='acknowledged')
+        return 'acknowledged'
+
+    def _report_hold(self, job_id, stage, data):
+        hold = data['hold']
+        return {'state': 'held', 'jobId': job_id, 'reason': hold['reason'], 'holdReason': hold['reasonCode'],
+            'observation': hold['observation'], 'engineStatusCode': hold['engineStatusCode'],
+            'holdReport': self._post_report(job_id, stage, data, 'hold')}
 
     def _held_step(self, job_id, stage, data):
-        """Read-only while held; a reappearing task is reported, never resumed."""
+        """Read-only while held: an operator's decision is honoured, a task only reported."""
         hold = data['hold']
+        closed = self._operator_terminal(job_id, stage, data, hold)
+        if closed is not None:
+            return closed
         observed = (hold['observation'], hold['engineStatusCode'])
         try:
             if self._kind(job_id) == 'odm':
                 self.worker._row(job_id)
                 state, info = self.worker.task_observation(job_id)
-                code = info['status'].get('code') if info else None
+                code = info['status']['code'] if info else None
                 observed = ({'present': 'engine_task_present', 'missing': 'engine_task_missing',
-                    'unreachable': 'engine_unreachable'}[state], code if type(code) is int and code in (10, 20, 30, 40, 50) else None)
+                    'unreachable': 'engine_unreachable'}[state], code)
         except WorkerHeld:
             pass
         if observed != (hold['observation'], hold['engineStatusCode']):
             hold.update(observation=observed[0], engineStatusCode=observed[1], sequence=hold['sequence'] + 1)
             self._save(job_id, stage, data)
         return self._report_hold(job_id, stage, data)
+
+    def _physically_live(self, job_id):
+        """Whether this job may still own the node; only the gate can say it does not."""
+        tree = getattr(self.execution_router, 'treedar_worker', None)
+        if tree is not None:
+            try:
+                tree.controller._row(job_id)
+                return True
+            except (WorkerHeld, TreeDarHeld):
+                pass
+        with NodeGate(self.worker.engine_id) as gate:
+            reservation = gate.snapshot()['reservation']
+        # An unbound reservation may be this job's crash between reserve and bind.
+        return reservation is not None and (reservation['job'] is None or reservation['job']['id'] == job_id)
+
+    def _terminal_status(self, job_id, data):
+        """Exact authenticated terminal word for this claim, else None (keep trying)."""
+        claim = data['claim']
+        try:
+            status, state = self._request('GET', '/jobs/' + job_id + '/claim-state', claim_token=claim['claimToken'])
+            if status != 200:
+                return None
+            validate_claim_fields(state)
+        except (DriverHeld, DriverWait, ValueError):
+            return None
+        with self._db() as db:
+            request_id = db.execute('SELECT claim_request FROM driver_jobs WHERE job=?', (job_id,)).fetchone()[0]
+        expected = dict(authorityId=self.worker.authority_id, jobId=job_id, generation=claim['generation'],
+            environment=claim['environment'], nodeId=self.node_id, workerId=self.worker_id,
+            workerInstanceId=self.worker_instance_id, claimRequestId=request_id,
+            claimTokenSha256=hashlib.sha256(claim['claimToken'].encode()).hexdigest(),
+            manifestSha256=claim['manifestSha256'], pipelineDigest=claim['pipelineDigest'])
+        if any(state[key] != value for key, value in expected.items()):
+            return None
+        return state['status'] if state['status'] in ('failed', 'cancelled') else None
+
+    def _operator_terminal(self, job_id, stage, data, record):
+        """An operator ended this job: end its row, but never a live physical fence.
+
+        While the gate still names the job the row stays and says so, publicly,
+        so the node is fenced visibly. gate.resolve is the operator's physical
+        step; scratch, engine files and any task are left exactly as they are.
+        """
+        if 'outboxId' in data or 'failureOutboxId' in data:
+            return None
+        status = self._terminal_status(job_id, data)
+        if status is None:
+            return None
+        result = {'jobId': job_id, 'reason': record['reasonCode'], 'terminalStatus': status}
+        if self._physically_live(job_id):
+            data.setdefault('fence', dict(holdId=record['holdId'], sequence=record['sequence'] + 1,
+                reasonCode='physical_reservation_retained', observation=None, engineStatusCode=None, ack=None))
+            self._save(job_id, stage, data)
+            return dict(result, state='held', reconciliation='physical_reservation_retained',
+                holdReport=self._post_report(job_id, stage, data, 'fence'))
+        data['operatorTerminal'] = dict(status=status, reasonCode=record['reasonCode'], stage=stage)
+        self._save(job_id, 'completed', data)
+        return dict(result, state='operator_terminal')
+
+    def _observe(self, job_id, stage, data, code, observation=None):
+        """Show a transient condition; never changes the job or the row's retry."""
+        watch = data.get('watch') or dict(holdId=str(uuid4()), sequence=-1, reasonCode=None, observation=None,
+            engineStatusCode=None, ack=None, stage=stage)
+        if (watch['reasonCode'], watch['observation'], watch['stage']) != (code, observation, stage):
+            watch.update(reasonCode=code, observation=observation, stage=stage, sequence=watch['sequence'] + 1, ack=None)
+        data['watch'] = watch
+        self._save(job_id, stage, data)
+        return self._post_report(job_id, stage, data, 'watch')
+
+    def _clear_watch(self, job_id, stage, data):
+        """Retire a shown condition; a refusal means there is nothing left to retire."""
+        watch = data.get('watch')
+        if watch is None:
+            return
+        if watch['reasonCode'] is not None:
+            watch.update(reasonCode=None, observation=None, engineStatusCode=None, sequence=watch['sequence'] + 1, ack=None)
+            self._save(job_id, stage, data)
+        if self._post_report(job_id, stage, data, 'watch') != 'pending':
+            del data['watch']
+            self._save(job_id, stage, data)
+
+    def _watch_step(self, job_id, stage, data):
+        watch = data['watch']
+        if watch['reasonCode'] is None or watch['stage'] != stage:
+            return self._clear_watch(job_id, stage, data)
+        closed = self._operator_terminal(job_id, stage, data, watch)
+        if closed is None:
+            self._post_report(job_id, stage, data, 'watch')
+        return closed
 
     def _suspect(self, job_id, stage, data, kind):
         """Persist one consecutive bad observation; returns (count, elapsed)."""
@@ -900,28 +1020,33 @@ class ReferenceDriver:
             self._save(job_id, stage, data)
 
     def _engine_task(self, job_id, data):
+        """The exact task, or a retry. An outage is only ever observed: a task that
+        reappears carries on through the ordinary poll and outbox."""
         state, info = self.worker.task_observation(job_id)
         if state == 'present':
             self._clear_suspect(job_id, 'executing', data)
+            if (data.get('watch') or {}).get('reasonCode') in ENGINE_OBSERVATIONS.values():
+                self._clear_watch(job_id, 'executing', data)
             return info
         count, elapsed = self._suspect(job_id, 'executing', data, state)
-        if state == 'missing':
-            if count >= ENGINE_TASK_MISSING_READS or elapsed >= ENGINE_SUSPECT_SECONDS:
-                raise DriverHeld('engine_task_missing')
-            raise DriverWait('engine_task_not_found')
-        if elapsed >= ENGINE_SUSPECT_SECONDS:
-            raise DriverHeld('node_lost')
-        raise DriverWait('engine_terminal_identity_unavailable')
+        if elapsed >= ENGINE_SUSPECT_SECONDS or (state == 'missing' and count >= ENGINE_TASK_MISSING_READS):
+            self._observe(job_id, 'executing', data, ENGINE_OBSERVATIONS[state],
+                'engine_task_missing' if state == 'missing' else 'engine_unreachable')
+        raise DriverWait('engine_task_not_found' if state == 'missing' else 'engine_terminal_identity_unavailable')
 
     def _scratch_conflict(self, message):
         reason = SCRATCH_CONFLICTS.get(message)
         active = self._active_row() if reason is not None and self.combined_preparation is None else None
         if active is None:
             return {'state': 'retry_wait', 'reason': 'driver_step_unavailable'}
+        stage, data = active
         if reason == 'scratch_capacity_unavailable':
-            stage, data = active
-            if self._suspect(self._active_job, stage, data, reason)[1] < SCRATCH_SHORTAGE_SECONDS:
-                return {'state': 'retry_wait', 'jobId': self._active_job, 'reason': reason}
+            if self._suspect(self._active_job, stage, data, reason)[1] >= SCRATCH_SHORTAGE_SECONDS:
+                self._observe(self._active_job, stage, data, reason)
+            return {'state': 'retry_wait', 'jobId': self._active_job, 'reason': reason}
+        if reason == 'reservation_expired' and not self._lease_lapsed(data):
+            self._observe(self._active_job, stage, data, 'worker_reconciliation_required')
+            return {'state': 'retry_wait', 'jobId': self._active_job, 'reason': 'worker_reconciliation_required'}
         return self._hold(reason)
 
     def _background(self):
@@ -1083,6 +1208,10 @@ class ReferenceDriver:
             self._active_job = job_id
         if 'hold' in data:
             return self._held_step(job_id, stage, data)
+        if 'watch' in data:
+            closed = self._watch_step(job_id, stage, data)
+            if closed is not None:
+                return closed
         if stage == 'claim_pending':
             if self.execution_router is not None or self.combined_preparation is not None:
                 self._advice(data.get('execution', {}), data.get('execution'))
@@ -1133,6 +1262,7 @@ class ReferenceDriver:
                 manifest_sha256=claim['manifestSha256'], input_bytes=claim['submission']['manifest']['totalBytes'], output_budget=self.output_budget,
                 environment=claim['environment'], ttl_seconds=self.transfer_ttl, worker_ready=True)
             self._clear_suspect(job_id, 'reservation_pending', data)
+            self._clear_watch(job_id, 'reservation_pending', data)
             status, public = self._request('POST', suffix + '/reservation', {'claimToken': token, 'transferRequest': request})
             if status == 409:
                 return {'state': 'reservation_pending', 'jobId': job_id}
@@ -1252,7 +1382,12 @@ class ReferenceDriver:
                 try:
                     adapter.start(fresh, **arguments)
                 except WorkerHeld as error:
-                    raise DriverHeld('reservation_expired' if str(error) == 'reservation_expired' else 'engine_start_refused') from None
+                    if str(error) == 'reservation_expired':
+                        raise DriverHeld('reservation_expired') from None
+                    # Refused before any engine mutation is retried as before; an
+                    # execution row left behind is what becomes init-uncertain.
+                    self._observe(job_id, 'execution_pending', data, 'engine_start_refused')
+                    raise
             self._save(job_id, 'executing', data)
             return {'state': 'executing', 'jobId': job_id}
         if stage == 'executing':
@@ -1275,6 +1410,7 @@ class ReferenceDriver:
                 if not tree and adapter._row(job_id)['phase'] in ('prepared', 'initialize_pending', 'upload_pending'):
                     raise DriverHeld('engine_init_uncertain') from None
                 raise DriverHeld('engine_reconciliation_required') from None
+            self._clear_watch(job_id, 'executing', data)
             if outbox_id is None:
                 return {'state': 'executing', 'jobId': job_id}
             if tree and adapter.completion(job_id)['kind'] == 'failure':
