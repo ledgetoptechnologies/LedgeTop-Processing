@@ -13,7 +13,8 @@ import uuid
 from .coordinator_startup_policy import SOURCES, _origin as engine_origin, build_startup_policy
 from .enrolled_coordinator_cutover import validate_plan, PREDECESSOR_ID, PREDECESSOR_IMAGE, PREDECESSOR_SOURCE, NAME
 from .enrolled_coordinator_transport import (TransportHeld, require, canonical, digest, decode,
-    private_bytes, environment_file, _absolute_path, validate_recipe, create_arguments)
+    private_bytes, environment_file, _absolute_path, validate_recipe, create_arguments,
+    immutable_container_recipe, container_environment)
 
 
 PROFILE = 'ltds-enrolled-cutover-private-deployment-v1'
@@ -58,18 +59,23 @@ def origin(value):
     return value
 
 
-def artifact(value):
-    closed(value,('path','sha256'),'closed_private_artifact_required')
+def artifact(value,*,config=False):
+    closed(value,('path','sha256','containerPath') if config else ('path','sha256'),'closed_private_artifact_required')
     _absolute_path(value['path']);hash_value(value['sha256'])
+    if config:
+        _absolute_path(value['containerPath'])
+        require(PurePosixPath(value['containerPath']).parent==PurePosixPath('/run/processing-reference'),
+                'direct_private_config_mount_child_required')
 
 
 def worker(value, authority):
-    closed(value,('nodeId','sshHost','settings','expected'),'closed_worker_readiness_reference_required')
+    closed(value,('nodeId','sshHost','sshUid','settings','expected'),'closed_worker_readiness_reference_required')
     slug(value['nodeId'])
     # The existing SSH identity is selected by the operator; no password, key or
     # arbitrary SSH options may be smuggled into a host argument.
     require(type(value['sshHost']) is str and re.fullmatch('[a-zA-Z0-9][a-zA-Z0-9.-]{0,252}',value['sshHost']),
             'fixed_existing_worker_host_required')
+    require(type(value['sshUid']) is int and 0<value['sshUid']<2**31,'reviewed_existing_worker_uid_required')
     settings=value['settings'];closed(settings,WORKER_SETTINGS,'existing_worker_handover_settings_required')
     require(type(settings['schemaVersion']) is int and settings['schemaVersion']==1,'worker_settings_version_required')
     require(type(settings['unitName']) is str and re.fullmatch(r'[A-Za-z0-9_.-]{1,128}\.service',settings['unitName']),
@@ -141,7 +147,7 @@ def validate_bundle(value, plan):
         require(len(state)==len(lease)==1 and state[0]['type']=='volume' and state[0]['source']==old['stateVolume']
                 and lease[0]['type']=='bind' and lease[0]['readOnly'] is False,'original_physical_mount_binding_changed')
     files=value['artifacts'];closed(files,FILES,'closed_private_artifact_map_required')
-    for entry in files.values():artifact(entry)
+    for name,entry in files.items():artifact(entry,config=name in ('bootstrapConfig','finalConfig'))
     for role in ('bootstrap','final'):
         require(files[role+'Config']['sha256']==plan['candidate'][role+'ConfigSha256']
                 and files[role+'Environment']['path']==recipes[role]['environmentFile']
@@ -196,6 +202,7 @@ def validate_environment(bundle,role,environment):
                   PROCESSING_PROTOTYPE_NODE_IDS=','.join(e['id'] for e in bundle['nodeEndpoints']))
     require(all(environment.get(name)==value for name,value in required.items()),'first_cutover_application_mode_changed')
     target=environment.get('PROCESSING_REFERENCE_CONFIG');_absolute_path(target)
+    require(target==bundle['artifacts'][role+'Config']['containerPath'],'configured_reference_file_changed')
     require(target.startswith('/run/processing-reference/'),'reviewed_reference_config_mount_required')
     matches=[]
     for mount in bundle['recipes'][role]['mounts']:
@@ -208,15 +215,53 @@ def validate_environment(bundle,role,environment):
     require(matches==[bundle['artifacts'][role+'Config']['path']],'private_config_mount_binding_changed')
 
 
-def verify_private_artifacts(bundle, plan, *, require_all_qualifications=False):
+def read_config_from_predecessor(docker,bundle,plan,role):
+    """Read service-owned600 config through the existing exact RO mount only."""
+    bundle=validate_bundle(bundle,plan)
+    require(role in ('bootstrap','final'),'candidate_config_role_required')
+    original=docker.inspect(plan['predecessor']['containerId'])
+    require(original.get('Id')==plan['predecessor']['containerId'] and original.get('Image')==plan['predecessor']['imageId']
+            and digest(immutable_container_recipe(original))==plan['bindings']['predecessorRecipeSha256']
+            and digest(container_environment(original))==plan['bindings']['predecessorEnvironmentSha256'],
+            'original_readback_deployment_changed')
+    entry=bundle['artifacts'][role+'Config']
+    mounts=[m for m in original['Mounts'] if m.get('Destination')=='/run/processing-reference']
+    require(len(mounts)==1 and mounts[0].get('Type')=='bind' and mounts[0].get('RW') is False,
+            'existing_original_readonly_config_mount_required')
+    try:relative=PurePosixPath(entry['path']).relative_to(mounts[0]['Source'])
+    except ValueError:raise TransportHeld('original_config_host_binding_changed') from None
+    if len(relative.parts)==1:
+        original_path='/run/processing-reference/'+relative.as_posix()
+        raw=docker.read_private_file(plan['predecessor']['containerId'],original_path)
+    else:
+        directory='first-cutover-'+plan['operationId']
+        require(relative.parts==(directory,role+'.json'),'exact_owned_config_subdirectory_required')
+        expected={}
+        for phase in ('bootstrap','final'):
+            item=bundle['artifacts'][phase+'Config']
+            require(item['path']==str(PurePosixPath(mounts[0]['Source'])/directory/(phase+'.json')),
+                    'complete_owned_config_stage_required')
+            expected[phase+'.json']=item['sha256']
+        contents=docker.read_private_config_set(plan['predecessor']['containerId'],
+            '/run/processing-reference/'+directory,expected)
+        raw=contents[role+'.json']
+    require(hashlib.sha256(raw).hexdigest()==entry['sha256'],'service_owned_config_changed')
+    return raw
+
+
+def verify_private_artifacts(bundle, plan, *, config_reader, require_all_qualifications=False):
     """Hash existing private files. This is not live health or qualification."""
     bundle=validate_bundle(bundle,plan)
     require(not require_all_qualifications or all(bundle['qualifications'].values()),
             'reviewed_activation_qualification_missing')
+    require(callable(config_reader),'concrete_service_owned_config_readback_required')
     result={};policy_inputs={}
     for name,entry in bundle['artifacts'].items():
         maximum=32 if name=='censusKey' else 65536 if name.endswith('Environment') or name=='predecessorSchema' else 1024*1024
-        raw=private_bytes(entry['path'],maximum=maximum)
+        if name in ('bootstrapConfig','finalConfig'):
+            raw=config_reader(name[:-len('Config')],entry)
+            require(type(raw) is bytes and len(raw)<=maximum,'bounded_service_owned_config_required')
+        else:raw=private_bytes(entry['path'],maximum=maximum)
         require(hashlib.sha256(raw).hexdigest()==entry['sha256'],'private_reviewed_artifact_changed')
         require(name!='censusKey' or len(raw)==32,'existing_census_key_required')
         if name.endswith('Environment'):

@@ -198,41 +198,43 @@
     "leaseDirectory": "/authority-leases"
   },
   "artifacts": {
+    "bootstrapEnvironment": {
+      "path": "/private/bootstrap.env",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "reviewedCounts": {
+      "path": "/private/reviewedCounts",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
     "finalEnvironment": {
       "path": "/private/final.env",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "bootstrapConfig": {
+      "path": "/private/tls/bootstrap.json",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "containerPath": "/run/processing-reference/bootstrap.json"
+    },
+    "holderEnvironment": {
+      "path": "/private/holder.env",
       "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     },
     "censusKey": {
       "path": "/private/censusKey",
       "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
     },
-    "predecessorSchema": {
-      "path": "/private/predecessorSchema",
-      "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
-    },
-    "bootstrapEnvironment": {
-      "path": "/private/bootstrap.env",
-      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    },
-    "finalConfig": {
-      "path": "/private/tls/final.json",
-      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-    },
-    "bootstrapConfig": {
-      "path": "/private/tls/bootstrap.json",
-      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-    },
-    "reviewedCounts": {
-      "path": "/private/reviewedCounts",
-      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-    },
     "policy": {
       "path": "/private/policy",
       "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     },
-    "holderEnvironment": {
-      "path": "/private/holder.env",
-      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    "predecessorSchema": {
+      "path": "/private/predecessorSchema",
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+    },
+    "finalConfig": {
+      "path": "/private/tls/final.json",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "containerPath": "/run/processing-reference/final.json"
     }
   },
   "sourceHashes": {
@@ -266,6 +268,7 @@
     {
       "nodeId": "cluster",
       "sshHost": "192.0.2.1",
+      "sshUid": 1000,
       "settings": {
         "schemaVersion": 1,
         "unitName": "synthetic-cluster.service",
@@ -294,6 +297,7 @@
     {
       "nodeId": "main",
       "sshHost": "192.0.2.1",
+      "sshUid": 1000,
       "settings": {
         "schemaVersion": 1,
         "unitName": "synthetic-main.service",

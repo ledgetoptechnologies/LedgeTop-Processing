@@ -23,6 +23,7 @@ def bundle():
     for role in ('bootstrap','final'):
         files[role+'Config']['sha256']=plan['candidate'][role+'ConfigSha256']
         files[role+'Config']['path']='/private/tls/'+role+'.json'
+        files[role+'Config']['containerPath']='/run/processing-reference/'+role+'.json'
     for role in ('bootstrap','final','holder'):
         files[role+'Environment']=dict(path=recipes[role]['environmentFile'],sha256=recipes[role]['environmentSha256'])
     files['policy']['sha256']=plan['candidate']['declaredTransformSha256']
@@ -30,7 +31,7 @@ def bundle():
     files['reviewedCounts']['sha256']=plan['bindings']['reviewedCountsSha256']
     workers=[]
     for node in ('cluster','main'):
-        workers.append(dict(nodeId=node,sshHost='192.0.2.1',settings=dict(schemaVersion=1,
+        workers.append(dict(nodeId=node,sshHost='192.0.2.1',sshUid=1000,settings=dict(schemaVersion=1,
             unitName='synthetic-'+node+'.service',unitFile='/private/worker.service',unitSha256='1'*64,
             pythonExecutable='/usr/bin/python3',configPath='/private/worker.json',sourceRoot='/private/source',
             sourceSha256='2'*64,readinessOrigin='https://127.0.0.1:1234',readinessCAFile='/private/ca.pem'),
@@ -53,6 +54,50 @@ def bundle():
 
 
 class DeploymentBundleTests(unittest.TestCase):
+    def test_service_owned_config_readback_uses_exact_original_ro_mount_not_operator_file_access(self):
+        import hashlib
+        value,plan=bundle();raw=b'{}'
+        value['artifacts']['bootstrapConfig']['sha256']=hashlib.sha256(raw).hexdigest()
+        plan['candidate']['bootstrapConfigSha256']=value['artifacts']['bootstrapConfig']['sha256']
+        original=dict(Id=d.PREDECESSOR_ID,Image=d.PREDECESSOR_IMAGE,Config={'Env':['SAFE=synthetic']},HostConfig={},
+            Mounts=[dict(Type='bind',Source='/private/tls',Destination='/run/processing-reference',RW=False)])
+        plan['bindings']['predecessorRecipeSha256']=d.digest(d.immutable_container_recipe(original))
+        plan['bindings']['predecessorEnvironmentSha256']=d.digest(d.container_environment(original))
+        plan['bindings']['deploymentSha256']=d.digest(value)
+        class Docker:
+            reads=[]
+            def inspect(self,identity):return original
+            def read_private_file(self,identity,path):self.reads.append((identity,path));return raw
+        docker=Docker()
+        with patch.object(d,'private_bytes',side_effect=AssertionError('service UID10001 file is not operator-readable')):
+            self.assertEqual(d.read_config_from_predecessor(docker,value,plan,'bootstrap'),raw)
+        self.assertEqual(docker.reads,[(d.PREDECESSOR_ID,'/run/processing-reference/bootstrap.json')])
+        original['Mounts'][0]['RW']=True
+        with self.assertRaises(d.TransportHeld):d.read_config_from_predecessor(docker,value,plan,'bootstrap')
+        self.assertEqual(len(docker.reads),1)
+
+    def test_operation_staged_configs_are_read_as_one_exact_private_directory(self):
+        import hashlib
+        value,plan=bundle();directory='first-cutover-'+plan['operationId'];raw=b'{}'
+        for role in ('bootstrap','final'):
+            value['artifacts'][role+'Config']['path']='/private/tls/'+directory+'/'+role+'.json'
+            value['artifacts'][role+'Config']['sha256']=hashlib.sha256(raw).hexdigest()
+            plan['candidate'][role+'ConfigSha256']=hashlib.sha256(raw).hexdigest()
+            value['recipes'][role]['mounts'][1]['source']='/private/tls/'+directory
+            plan['candidate'][role+'RecipeSha256']=d.digest(value['recipes'][role])
+        original=dict(Id=d.PREDECESSOR_ID,Image=d.PREDECESSOR_IMAGE,Config={'Env':['SAFE=synthetic']},HostConfig={},
+            Mounts=[dict(Type='bind',Source='/private/tls',Destination='/run/processing-reference',RW=False)])
+        plan['bindings']['predecessorRecipeSha256']=d.digest(d.immutable_container_recipe(original))
+        plan['bindings']['predecessorEnvironmentSha256']=d.digest(d.container_environment(original))
+        plan['bindings']['deploymentSha256']=d.digest(value)
+        class Docker:
+            def inspect(self,identity):return original
+            def read_private_config_set(self,identity,path,pins):
+                self.called=(identity,path,pins);return {'bootstrap.json':raw,'final.json':raw}
+        docker=Docker()
+        self.assertEqual(d.read_config_from_predecessor(docker,value,plan,'final'),raw)
+        self.assertEqual(docker.called[1],'/run/processing-reference/'+directory)
+        self.assertEqual(set(docker.called[2]),{'bootstrap.json','final.json'})
     def test_private_environment_keeps_one_scheduler_and_exact_mounted_config(self):
         value,_=bundle()
         for role in ('bootstrap','final'):
@@ -122,9 +167,9 @@ class DeploymentBundleTests(unittest.TestCase):
         value,plan=bundle();plan['gates']['pilotClosureSha256']=None;value['qualifications']['pilotClosureSha256']=None
         plan['bindings']['deploymentSha256']=d.digest(value)
         with patch.object(d,'private_bytes',side_effect=AssertionError('must refuse before private read')):
-            with self.assertRaises(d.TransportHeld):d.verify_private_artifacts(value,plan,require_all_qualifications=True)
+            with self.assertRaises(d.TransportHeld):d.verify_private_artifacts(value,plan,config_reader=None,require_all_qualifications=True)
             value['host']['bootId']=str(uuid.uuid4())
-            with self.assertRaises(d.TransportHeld):d.verify_private_artifacts(value,plan)
+            with self.assertRaises(d.TransportHeld):d.verify_private_artifacts(value,plan,config_reader=None)
 
     def test_private_artifact_verification_reuses_independent_policy_builder_not_candidate_state(self):
         import hashlib
@@ -144,13 +189,13 @@ class DeploymentBundleTests(unittest.TestCase):
         by_environment={value['artifacts'][role+'Environment']['path']:mode_environment(value,role) for role in ('bootstrap','final','holder')}
         with patch.object(d,'private_bytes',side_effect=lambda path,**_:by_path[path]),patch.object(d,'environment_file',side_effect=lambda path:by_environment[path]):
             with patch.object(d,'build_startup_policy',return_value=raw['policy']) as builder:
-                proof=d.verify_private_artifacts(value,plan)
+                proof=d.verify_private_artifacts(value,plan,config_reader=lambda role,entry:raw[role+'Config'])
                 self.assertEqual(proof['censusKey']['bytes'],32)
                 self.assertEqual(builder.call_args.kwargs['reviewed_schema_bytes'],raw['predecessorSchema'])
                 self.assertEqual(builder.call_args.kwargs['expected_source_hashes'],value['sourceHashes'])
                 self.assertNotIn('root',builder.call_args.kwargs)
             with patch.object(d,'build_startup_policy',return_value=b'different derived policy'):
-                with self.assertRaises(d.TransportHeld):d.verify_private_artifacts(value,plan)
+                with self.assertRaises(d.TransportHeld):d.verify_private_artifacts(value,plan,config_reader=lambda role,entry:raw[role+'Config'])
 
 
 def mode_environment(value,role):

@@ -273,6 +273,46 @@ class DockerCLI:
         return self.command('container', 'cp', identifier + ':' + state_root + '/.', '-',
                             sink=sink_callable, output_limit=max_bytes, timeout=timeout)
 
+    def read_private_config_set(self, identifier, path, expected):
+        """Read one exact small operation directory, refusing parent symlinks.
+
+        Docker's non-following directory TAR must include the private directory
+        itself and precisely the two reviewed regular configuration files.
+        """
+        require(type(identifier) is str and ID.fullmatch(identifier),'exact_container_identity_required')
+        _absolute_path(path)
+        root=PurePosixPath(path).name
+        require(PurePosixPath(path).parent==PurePosixPath('/run/processing-reference')
+                and re.fullmatch(r'first-cutover-[a-f0-9-]{36}',root)
+                and type(expected) is dict and set(expected)=={'bootstrap.json','final.json'}
+                and all(type(pin) is str and HASH.fullmatch(pin) for pin in expected.values()),
+                'exact_owned_config_directory_required')
+        raw=self.command('container','cp',identifier+':'+path,'-',output_limit=2*1024*1024+131072)
+        found={};directory=False;count=0
+        try:
+            with tarfile.open(fileobj=io.BytesIO(raw),mode='r|') as archive:
+                for member in archive:
+                    count+=1;require(count<=3 and member.uid==member.gid==10001,
+                                     'closed_private_config_archive_required')
+                    if member.name.rstrip('/')==root:
+                        require(not directory and member.isdir() and member.mode==0o700,
+                                'private_config_directory_required')
+                        directory=True;continue
+                    relative=member.name.removeprefix(root+'/')
+                    require(member.name==root+'/'+relative and relative in expected and relative not in found
+                            and member.isfile() and not member.issym() and not member.islnk()
+                            and member.mode==0o600 and 0<=member.size<=1024*1024,
+                            'private_config_member_required')
+                    stream=archive.extractfile(member);require(stream is not None,'private_config_member_required')
+                    with stream:value=stream.read(1024*1024+1)
+                    require(len(value)==member.size and hashlib.sha256(value).hexdigest()==expected[relative],
+                            'private_config_content_changed')
+                    found[relative]=value
+            require(directory and set(found)==set(expected),'complete_private_config_set_required')
+            return found
+        except (OSError,tarfile.TarError,ValueError):
+            raise TransportHeld('private_config_set_unavailable') from None
+
 
 def _absolute_path(value):
     require(type(value) is str and value.startswith('/') and len(value) <= 4096
@@ -450,9 +490,14 @@ class TrackedExec:
     current dispatch nonce. This registry proves observer lifecycle only; it
     does not establish whether an operator POST's deployment effect occurred.
     """
-    def __init__(self, docker, operation_id, operation_directory):
+    TARGET_FIELD = 'containerId'
+    PROTOCOL = 'ltds-cutover-exec-v1'
+
+    def __init__(self, docker, operation_id, operation_directory, *, owner_uid=10001):
+        require(type(owner_uid) is int and 0<owner_uid<2**31,'reviewed_remote_owner_required')
         self.docker = docker
         self.operation_id = operation_id
+        self.owner_uid = owner_uid
         self.proofs = PrivateProofs(operation_directory)
 
     def _binding(self, identifier, request_id, source, maximum):
@@ -461,8 +506,9 @@ class TrackedExec:
                 'exact_remote_request_required')
         settings = dict(operationId=self.operation_id, requestId=request_id,
                         sourceSha256=hashlib.sha256(source).hexdigest(), maximum=maximum)
+        if self.owner_uid != 10001: settings['ownerUid']=self.owner_uid
         helper.validate(settings)
-        intent = dict(intentId=request_id, containerId=identifier, settings=settings)
+        intent = dict(intentId=request_id, settings=settings, **{self.TARGET_FIELD:identifier})
         return helper, settings, intent
 
     def dispatch(self, identifier, request_id, source, *, timeout=30, maximum=1024 * 1024):
@@ -500,8 +546,8 @@ class TrackedExec:
                 and type(value['pid']) is int and value['pid'] > 0 and type(value['start']) is str
                 and value['start'].isdigit() and type(value['success']) is bool,
                 'actual_remote_retirement_required')
-        envelope = dict(schemaVersion=1, protocol='ltds-cutover-exec-v1', operationId=self.operation_id,
-                        requestId=request_id, containerId=identifier, sourceSha256=settings['sourceSha256'],
+        envelope = dict(schemaVersion=1, protocol=self.PROTOCOL, operationId=self.operation_id,
+                        requestId=request_id, sourceSha256=settings['sourceSha256'], **{self.TARGET_FIELD:identifier},
                         process=dict(pid=value['pid'], startTicks=value['start'], retired=True),
                         bodySucceeded=value['success'], result=value['result'])
         retired = dict(intentId=str(uuid.uuid5(uuid.UUID(request_id), 'remote-retired')), request=intent)

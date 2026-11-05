@@ -22,12 +22,15 @@ def canonical(value):
 
 
 def validate(settings):
-    require(type(settings) is dict and set(settings)=={'operationId','requestId','sourceSha256','maximum'})
+    require(type(settings) is dict and set(settings) in (
+        {'operationId','requestId','sourceSha256','maximum'},
+        {'operationId','requestId','sourceSha256','maximum','ownerUid'}))
     for name in ('operationId','requestId'):
         require(type(settings[name]) is str and str(uuid.UUID(settings[name]))==settings[name])
     require(type(settings['sourceSha256']) is str and len(settings['sourceSha256'])==64
             and all(c in '0123456789abcdef' for c in settings['sourceSha256']))
     require(type(settings['maximum']) is int and 1<=settings['maximum']<=16*1024*1024)
+    require(type(settings.get('ownerUid',10001)) is int and 0<settings.get('ownerUid',10001)<2**31)
     return Path('/tmp/ltds-exec-'+settings['operationId']+'-'+settings['requestId'])
 
 
@@ -49,10 +52,10 @@ def write(path,value):
     finally:os.close(fd)
 
 
-def read(path,maximum):
+def read(path,maximum,uid=10001):
     before=path.lstat()
     require(stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode)==0o600
-            and before.st_uid==10001 and before.st_nlink==1 and before.st_size<=maximum)
+            and before.st_uid==uid and before.st_nlink==1 and before.st_size<=maximum)
     fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
     identity=lambda s:(s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_nlink,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
     try:
@@ -75,7 +78,7 @@ class BoundedOutput(io.TextIOBase):
 
 def execute(settings,source):
     root=validate(settings)
-    require(os.geteuid()==10001 and type(source) is bytes
+    require(os.geteuid()==settings.get('ownerUid',10001) and type(source) is bytes
             and hashlib.sha256(source).hexdigest()==settings['sourceSha256'])
     # No exist_ok: even an earlier request that never wrote its start marker
     # stays ambiguous. Its absence is not permission to dispatch the body again.
@@ -110,20 +113,21 @@ def execute(settings,source):
 
 def inspect(settings):
     root=validate(settings);info=root.lstat()
+    uid=settings.get('ownerUid',10001)
     require(root.resolve()==root and stat.S_ISDIR(info.st_mode)
-            and info.st_uid==10001 and stat.S_IMODE(info.st_mode)==0o700)
-    start=read(root/'start.json',4096)
+            and info.st_uid==uid and stat.S_IMODE(info.st_mode)==0o700)
+    start=read(root/'start.json',4096,uid)
     require(type(start) is dict and set(start)=={'settings','pid','start'} and start['settings']==settings
             and type(start['pid']) is int and start['pid']>0 and type(start['start']) is str and start['start'].isdigit())
     try:live=start_time(start['pid'])==start['start']
     except FileNotFoundError:live=False
     require(not live)
-    end=read(root/'exit.json',8192)
+    end=read(root/'exit.json',8192,uid)
     require(type(end) is dict and set(end)=={'identity','success','resultSha256'}
             and end['identity']==start and type(end['success']) is bool)
     result=None
     if end['success']:
-        result=read(root/'result.json',settings['maximum'])
+        result=read(root/'result.json',settings['maximum'],uid)
         require(hashlib.sha256(canonical(result)).hexdigest()==end['resultSha256'])
     else:require(end['resultSha256'] is None)
     return dict(settings=settings,processRetired=True,pid=start['pid'],start=start['start'],

@@ -114,6 +114,26 @@ class StructuredTransportTests(unittest.TestCase):
         with self.assertRaises(t.TransportHeld):
             t.DockerCLI(runner=runner).read_private_file('a'*64,'/prototype-state/jobs.sqlite3')
 
+    def test_owned_config_directory_readback_requires_private_directory_and_exact_files(self):
+        import hashlib
+        root='first-cutover-'+str(uuid.uuid4());contents={'bootstrap.json':b'bootstrap','final.json':b'final'}
+        pins={name:hashlib.sha256(raw).hexdigest() for name,raw in contents.items()}
+        def archive(*,link=False,extra=False):
+            data=io.BytesIO()
+            with tarfile.open(fileobj=data,mode='w') as out:
+                member=tarfile.TarInfo(root);member.uid=member.gid=10001;member.mode=0o700
+                member.type=tarfile.SYMTYPE if link else tarfile.DIRTYPE;member.linkname='outside' if link else ''
+                out.addfile(member)
+                for name,raw in dict(contents,**({'unknown':b'x'} if extra else {})).items():
+                    member=tarfile.TarInfo(root+'/'+name);member.uid=member.gid=10001;member.mode=0o600;member.size=len(raw)
+                    out.addfile(member,io.BytesIO(raw))
+            return data.getvalue()
+        path='/run/processing-reference/'+root
+        self.assertEqual(t.DockerCLI(runner=FakeRunner(archive())).read_private_config_set('a'*64,path,pins),contents)
+        for answer in (archive(link=True),archive(extra=True)):
+            with self.assertRaises(t.TransportHeld):
+                t.DockerCLI(runner=FakeRunner(answer)).read_private_config_set('a'*64,path,pins)
+
     def test_archive_stream_seam_forwards_sink_bounds_and_exact_original_path(self):
         receipt=dict(clientExitCode=0,streamClosed=True,bytes=10240,sha256='b'*64)
         runner=FakeRunner(receipt);sink=lambda chunk:None
