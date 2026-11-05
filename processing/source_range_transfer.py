@@ -413,6 +413,13 @@ class SourceRangeClient:
     def acknowledge_grant_renewal(self, request):
         return self._post_renewal_json(RENEWAL_ACK_PATH, request)
 
+    def committed_progress(self, identity):
+        """Ranges and bytes durably committed; each one was served by the broker."""
+        key, _identity = self._identity_key(identity)
+        with closing(self._connect()) as db:
+            return tuple(db.execute("""SELECT COUNT(*),COALESCE(SUM(length),0) FROM source_ranges
+                WHERE identity_key=? AND state='committed'""", (key,)).fetchone())
+
     def _init_ledger(self):
         with closing(self._connect()) as db:
             db.executescript("""

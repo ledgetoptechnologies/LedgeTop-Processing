@@ -300,8 +300,12 @@ class ReferenceSourceIntakeMethods:
                 'objects': [item[0] for item in objects]}
 
     @staticmethod
-    def _reconcile_source_range_ledger(ledger, grant):
-        """Refuse a successor unless served ranges still fit the original budget."""
+    def _reconcile_source_range_ledger(ledger, grant, *, next_attempt=True):
+        """Refuse unless served ranges fit the original budget, with room for one more.
+
+        ``next_attempt=False`` asks only that the ledger is sound: a finished
+        transfer may have spent every attempt and still needs nothing further.
+        """
         usage = ledger['usage']
         if usage is None:
             if ledger['totals'] != [0, 0, 0] or ledger['objects']:
@@ -312,8 +316,113 @@ class ReferenceSourceIntakeMethods:
                 or not set(ledger['objects']).issubset(item.id for item in grant.objects)):
             raise Conflict('source renewal range ledger changed')
         if (usage['requests_used'] > grant.request_budget or usage['bytes_used'] > grant.byte_budget
-                or usage['attempts_used'] >= grant.attempt_budget):
+                or usage['attempts_used'] > grant.attempt_budget - (1 if next_attempt else 0)):
             raise Conflict('source renewal budget exhausted')
+
+    @staticmethod
+    def _source_retention_bound(row, job_id):
+        """Both retention receipts, digest-exact and bound to this job and attempt."""
+        source_receipt=json.loads(row['source_receipt_json'])
+        derived_receipt=json.loads(row['derived_receipt_json'])
+        if (type(source_receipt) is not dict or type(derived_receipt) is not dict
+                or protocol.digest(source_receipt)!=row['source_receipt_sha']
+                or protocol.digest(derived_receipt)!=row['derived_receipt_sha']
+                or source_receipt.get('receiptType')!='source_retention'
+                or derived_receipt.get('receiptType')!='attempt_derived_input'
+                or (source_receipt.get('jobId'),source_receipt.get('attemptId'),source_receipt.get('generation'),
+                    source_receipt.get('environment'),source_receipt.get('pipelineManifestSha256'),
+                    source_receipt.get('sourceManifestSha256')) !=
+                   (job_id,row['submission_id'],row['generation'],row['environment'],
+                    row['pipeline_manifest_sha'],row['source_manifest_sha'])
+                or (derived_receipt.get('jobId'),derived_receipt.get('attemptId'),derived_receipt.get('generation'),
+                    derived_receipt.get('environment'),derived_receipt.get('derivedManifestSha256')) !=
+                   (job_id,row['submission_id'],row['generation'],row['environment'],row['derived_manifest_sha'])):
+            raise Conflict('source renewal retention receipts changed')
+
+    def _source_fetch_closure(self, db, job_id):
+        """The exact persisted transfer a restarted coordinator may resume, or Conflict.
+
+        Metadata only, inside the caller's transaction: no NAS I/O, because every
+        range read rechecks its object anyway. Old renewals are checked through
+        their hash links; only the newest row's bodies are re-read, since each
+        body repeats the whole object list and there can be 1000 of them.
+        """
+        from .source_range_transfer import MAX_RENEWAL_SEQUENCE, validate_source_grant
+        row = self._row(db, job_id)
+        generation = row['generation']
+        self._source_reader_unfenced(db, job_id, generation)
+        if (db.execute("SELECT 1 FROM sqlite_master WHERE name='source_releases'").fetchone()
+                and db.execute('SELECT 1 FROM source_releases WHERE job_id=? LIMIT 1', (job_id,)).fetchone()):
+            raise Conflict('source release recorded')
+        if (row['source_state'], row['derived_state']) != ('accepted', 'accepted'):
+            raise Conflict('source custody not accepted')
+        self._source_retention_bound(row, job_id)
+        stored = db.execute('SELECT grant_json,digest FROM reference_transfer_grants WHERE job_id=?', (job_id,)).fetchone()
+        if stored is None:
+            raise Conflict('source grant unavailable')
+        grant = json.loads(stored['grant_json'])
+        if stored['digest'] != protocol.digest(grant):
+            raise Conflict('source grant changed')
+        checked = validate_source_grant(grant, job=self._record(row, True), allow_expired=True, past_reservation=True)
+        if not db.execute('SELECT 1 FROM reference_source_grant_tokens WHERE token_sha256=? AND job_id=? AND generation=?',
+                (hashlib.sha256(grant['token'].encode('ascii')).hexdigest(), job_id, generation)).fetchone():
+            raise Conflict('source grant token unavailable')
+
+        chain = db.execute('''SELECT sequence,previous_grant_sha256,successor_sha256,acked
+            FROM reference_source_grant_renewals WHERE job_id=? ORDER BY sequence LIMIT ?''',
+            (job_id, MAX_RENEWAL_SEQUENCE + 1)).fetchall()
+        if len(chain) > MAX_RENEWAL_SEQUENCE:
+            raise Conflict('source renewal chain exceeds its bound')
+        for index, link in enumerate(chain):
+            if (link['sequence'] != index + 1
+                    or index and link['previous_grant_sha256'] != chain[index - 1]['successor_sha256']
+                    or index + 1 < len(chain) and not link['acked']):
+                raise Conflict('source renewal chain broken')
+        pending = bool(chain) and not chain[-1]['acked']
+        if chain:
+            newest = db.execute('''SELECT request_json,request_sha256,successor_grant_json,successor_sha256
+                FROM reference_source_grant_renewals WHERE job_id=? AND sequence=?''',
+                (job_id, chain[-1]['sequence'])).fetchone()
+            if (protocol.digest(json.loads(newest['request_json'])) != newest['request_sha256']
+                    or protocol.digest(json.loads(newest['successor_grant_json'])) != newest['successor_sha256']
+                    or stored['digest'] != chain[-1]['previous_grant_sha256' if pending else 'successor_sha256']):
+                raise Conflict('source renewal chain broken')
+
+        ranges = self._source_range_ledger(db, job_id, generation)
+        self._reconcile_source_range_ledger(ranges, checked, next_attempt=False)
+        expected = {item['id'] for name in ('source_manifest_json', 'derived_manifest_json')
+                    for item in json.loads(row[name])['objects']}
+        receipts = [dict(item) for item in db.execute('''SELECT generation,object_id,byte_size,sha256,mount_id,
+            storage_key,receipt_json FROM reference_source_object_receipts WHERE job_id=? ORDER BY object_id''', (job_id,))]
+        pins = [dict(item) for item in db.execute('''SELECT generation,object_id,byte_size,sha256,mount_id,device,inode,
+            mode,link_count,owner_uid,mtime_ns,ctime_ns FROM reference_source_object_pins
+            WHERE job_id=? ORDER BY object_id''', (job_id,))]
+        by_id = {item['object_id']: item for item in receipts}
+        pinned = {item['object_id']: item for item in pins}
+        if (len(by_id) != len(receipts) or set(by_id) != expected or len(pinned) != len(pins)
+                or set(pinned) != {item.id for item in checked.objects}):
+            raise Conflict('source custody closure changed')
+        for item in checked.objects:
+            receipt, pin = by_id[item.id], pinned[item.id]
+            stored_receipt = json.loads(receipt['receipt_json'])
+            if ((receipt['generation'], receipt['byte_size'], receipt['sha256']) != (generation, item.byte_size, item.sha256)
+                    or (pin['generation'], pin['byte_size'], pin['sha256'], pin['mount_id']) !=
+                       (generation, item.byte_size, item.sha256, receipt['mount_id'])
+                    or (stored_receipt.get('jobId'), stored_receipt.get('generation'), stored_receipt.get('objectId'),
+                        stored_receipt.get('byteSize'), stored_receipt.get('sha256'), stored_receipt.get('mountId'),
+                        stored_receipt.get('storageKey')) !=
+                       (job_id, generation, item.id, item.byte_size, item.sha256, receipt['mount_id'], receipt['storage_key'])):
+                raise Conflict('source custody binding changed')
+        usage = ranges['usage'] or dict(requests_used=0, bytes_used=0, attempts_used=0)
+        return {'closureSha256': protocol.digest(dict(transfer=row['transfer_json'], grant=stored['digest'],
+                    source=row['source_manifest_sha'], derived=row['derived_manifest_sha'],
+                    retention=[row['source_receipt_sha'], row['derived_receipt_sha']],
+                    chain=[list(item) for item in chain], ranges=ranges, receipts=receipts, pins=pins)),
+                'grantSha256': stored['digest'],
+                'predecessorGrantSha256': chain[-1]['previous_grant_sha256'] if chain else None,
+                'renewalSequence': len(chain), 'renewalPending': pending,
+                'requestsAdmitted': usage['requests_used'], 'bytesAdmitted': usage['bytes_used'],
+                'attemptsAdmitted': usage['attempts_used'], 'objectCount': len(checked.objects)}
 
     def renew_source_transfer_grant(self, request, *, source_spool, worker=None, clock=None):
         """Create or replay one durable, claim-bound V2 grant successor.
@@ -443,22 +552,7 @@ class ReferenceSourceIntakeMethods:
             raise Conflict('source renewal previous grant changed')
         private = self._record(row, True)
         try:
-            source_receipt=json.loads(row['source_receipt_json'])
-            derived_receipt=json.loads(row['derived_receipt_json'])
-            if (type(source_receipt) is not dict or type(derived_receipt) is not dict
-                    or protocol.digest(source_receipt)!=row['source_receipt_sha']
-                    or protocol.digest(derived_receipt)!=row['derived_receipt_sha']
-                    or source_receipt.get('receiptType')!='source_retention'
-                    or derived_receipt.get('receiptType')!='attempt_derived_input'
-                    or (source_receipt.get('jobId'),source_receipt.get('attemptId'),source_receipt.get('generation'),
-                        source_receipt.get('environment'),source_receipt.get('pipelineManifestSha256'),
-                        source_receipt.get('sourceManifestSha256')) !=
-                       (job_id,row['submission_id'],row['generation'],row['environment'],
-                        row['pipeline_manifest_sha'],row['source_manifest_sha'])
-                    or (derived_receipt.get('jobId'),derived_receipt.get('attemptId'),derived_receipt.get('generation'),
-                        derived_receipt.get('environment'),derived_receipt.get('derivedManifestSha256')) !=
-                       (job_id,row['submission_id'],row['generation'],row['environment'],row['derived_manifest_sha'])):
-                raise Conflict('source renewal retention receipts changed')
+            self._source_retention_bound(row, job_id)
             reservation_expiry = datetime.fromisoformat(
                 private['transferRequest']['expiresAt'].replace('Z','+00:00')).timestamp()
             if not math.isfinite(reservation_expiry):
