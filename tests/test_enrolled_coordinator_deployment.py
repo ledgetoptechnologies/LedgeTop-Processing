@@ -108,6 +108,9 @@ class DeploymentBundleTests(unittest.TestCase):
                 bad=dict(environment,**changes)
                 with self.assertRaises(d.TransportHeld):d.validate_environment(value,role,bad)
         with self.assertRaises(d.TransportHeld):d.validate_environment(value,'holder',{'LD_PRELOAD':'/private/shadow.so'})
+        for change in (dict(LD_AUDIT='/private/shadow.so'),dict(PYTHONUSERBASE='/private'),dict(HOME='/private'),
+                       dict(PATH='/private'),dict(PYTHONNOUSERSITE='0')):
+            with self.assertRaises(d.TransportHeld):d.validate_environment(value,'final',dict(mode_environment(value,'final'),**change))
     def test_worker_unit_normal_service_is_accepted_and_backslash_is_rejected_directly(self):
         value,plan=bundle();worker=copy.deepcopy(value['workers'][0])
         worker['settings']['unitName']='normal.service'
@@ -201,6 +204,7 @@ class DeploymentBundleTests(unittest.TestCase):
 def mode_environment(value,role):
     if role=='holder':return {}
     return dict(PROCESSING_VIEWER_ENABLED='0',PROCESSING_LEGACY_VIEWER_READ_ONLY='1' if role=='final' else '0',
+        PYTHONNOUSERSITE='1',
         PROCESSING_PROTOTYPE_STATE_DIR='/prototype-state',PROCESSING_AUTHORITY_LEASE_DIR='/authority-leases',
         PROCESSING_PROTOTYPE_NODE_IDS='cluster,main',PROCESSING_REFERENCE_CONFIG='/run/processing-reference/'+role+'.json')
 

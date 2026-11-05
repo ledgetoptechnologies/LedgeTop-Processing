@@ -193,10 +193,14 @@ def derived_holder_settings(bundle,plan):
 
 def validate_environment(bundle,role,environment):
     require(role in ('bootstrap','final','holder') and type(environment) is dict,'candidate_environment_required')
-    require(not set(environment).intersection(('PATH','LD_PRELOAD','LD_LIBRARY_PATH','PYTHONPATH',
-            'PYTHONHOME','PYTHONSTARTUP','PYTHONINSPECT')),'candidate_loader_override_refused')
+    safe_python={'PYTHONUNBUFFERED','PYTHONDONTWRITEBYTECODE','PYTHONNOUSERSITE'}
+    require(not set(environment).intersection(('PATH','HOME')) and
+            all(not name.startswith('LD_') and (not name.startswith('PYTHON') or
+                name in safe_python and value=='1') for name,value in environment.items()),
+            'candidate_loader_override_refused')
     if role=='holder':return
     required=dict(PROCESSING_VIEWER_ENABLED='0',PROCESSING_LEGACY_VIEWER_READ_ONLY='1' if role=='final' else '0',
+                  PYTHONNOUSERSITE='1',
                   PROCESSING_PROTOTYPE_STATE_DIR='/prototype-state',
                   PROCESSING_AUTHORITY_LEASE_DIR=bundle['predecessor']['leaseDirectory'],
                   PROCESSING_PROTOTYPE_NODE_IDS=','.join(e['id'] for e in bundle['nodeEndpoints']))
