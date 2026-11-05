@@ -6,12 +6,14 @@ snapshot. Control holds remain conservative after metadata materializes; no TTL
 or ordinary terminal settlement releases them. Call record_allocated only
 after writes consume disk; it moves bytes from remaining to allocated. Call
 begin_transfer before the first input byte: a fence replaces the lease deadline in
-the row itself, so the reservation keeps its whole remaining budget, can no longer
-lapse, and every reader of expires lets that same reservation continue. A fenced
-claim that never reaches an engine ends through settle_unstarted, never by time.
-The first fence latches the config in its own transaction: older allocators refuse
-this ledger, and one with no fence stays old-compatible. Production and staging
-are immutable reservation settings, not interchangeable namespaces.
+the row itself with a marker, so the reservation keeps its whole remaining budget
+and can no longer lapse at any clock. Every reader asks lease_lapsed, never the
+timestamp, so that same reservation continues. A fenced claim that never reaches
+an engine ends through settle_unstarted, never by time. The first fence latches
+the config in its own transaction: older allocators refuse this ledger, and one
+with no fence stays old-compatible. The latch is one-way: it outlives every fence,
+so older images stay refused after fences end and rollback is not automatic.
+Production and staging are immutable reservation settings, not interchangeable namespaces.
 Confirmed terminal attestation releases only unused reservation budget; allocated
 files still occupy the probe's free-space snapshot until an executor removes them.
 """
@@ -50,6 +52,14 @@ class PolicyConflict(ValueError):
 
 class LeaseLapsed(PolicyConflict):
     """The lease ended with no fence: nothing may start, and no bytes were written for it."""
+
+
+def lease_lapsed(row, now):
+    """Whether a reserved row's deadline has passed; a fence's marker is no deadline.
+
+    The marker is compared for identity, never order, so no clock can reach it.
+    """
+    return row["state"] == "reserved" and row["expires"] != FENCED_LEASE and row["expires"] <= now
 
 
 def _integer(value, name, minimum=0):
@@ -266,24 +276,27 @@ class ScratchLedger:
 
     def _expire(self, db, now):
         # Neither engine-started, uncertain nor fenced reservations may expire
-        # automatically; a fence's FENCED_LEASE is never reached by a clock.
+        # automatically, whatever the clock says.
         db.execute("UPDATE reservations SET state='expired', remaining=0 "
-                   "WHERE state='reserved' AND expires<=? AND allocated=0", (now,))
+                   "WHERE state='reserved' AND expires<=? AND allocated=0 "
+                   "AND id NOT IN (SELECT reservation FROM transfer_fences)", (now,))
 
     @staticmethod
     def _lapsed(row, now):
-        return row["state"] == "expired" or (row["state"] == "reserved" and row["expires"] <= now)
+        return row["state"] == "expired" or lease_lapsed(row, now)
 
     def _latch(self, db, **marker):
+        # One-way on purpose: no path clears a marker, even once its records end.
         value = json.loads(db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()[0])
         db.execute("UPDATE metadata SET value=? WHERE key='config'", (_json(dict(value, **marker)),))
 
     def _fence(self, db, reservation_id, now):
         """Fence, deadline and latch commit together, or none of them do.
 
-        The deadline goes rather than a special case at each reader: control
-        charges, parent guards and engine start all ask expires, and even an
-        older allocator's live process cannot release what it sees as unexpired.
+        The deadline goes, so an older allocator's live process cannot release
+        what it sees as unexpired. The latch stays after this fence ends: older
+        images then keep refusing this ledger, which is what prevents rollback to
+        them. Removing it would need a separately proven quiescent migration.
         """
         if db.execute("INSERT OR IGNORE INTO transfer_fences VALUES(?,?)", (reservation_id, now)).rowcount:
             db.execute("UPDATE reservations SET expires=? WHERE id=?", (FENCED_LEASE, reservation_id))
@@ -306,6 +319,8 @@ class ScratchLedger:
         with self._transaction() as db:
             now = self._now(db)
             self._expire(db, now)
+            if now + ttl_seconds >= FENCED_LEASE:
+                raise PolicyConflict("lease deadline outside supported range")
             binding = db.execute("SELECT environment FROM job_environments WHERE job=?", (job_id,)).fetchone()
             if binding and binding[0] != environment:
                 raise PolicyConflict("job environment is immutable")
@@ -465,7 +480,7 @@ class ScratchLedger:
                 if old['identity']!=_json(identity):raise PolicyConflict('control charge replay differs')
                 return self._control(old,reservation)
             settings=json.loads(reservation['settings'])
-            if (reservation['state']!='reserved' or reservation['expires']<=self._now(db) or reservation['terminal_at'] is not None
+            if (reservation['state']!='reserved' or lease_lapsed(reservation,self._now(db)) or reservation['terminal_at'] is not None
                     or reservation['allocated']!=expected_allocated or expected_allocated!=settings['input_bytes'] or allowance_bytes>reservation['remaining']):raise PolicyConflict('fresh input-only control baseline required')
             if db.execute('SELECT COUNT(*) FROM control_charges WHERE scope=?',(scope_sha256,)).fetchone()[0]>=maximum_scope_charges:raise PolicyConflict('control scope cap reached')
             receipt=dict(schemaVersion=1,protocol='ltds-scratch-control-charge-v1',**identity,jobId=reservation['job'],generation=reservation['generation'],environment=reservation['environment'],
@@ -489,7 +504,7 @@ class ScratchLedger:
             if receipt['publicationSha256'] is not None:
                 if receipt['publicationSha256']!=publication_sha256 or row['publication']!=serialized:raise PolicyConflict('control publication differs')
                 return receipt
-            if reservation['state']!='reserved' or reservation['expires']<=self._now(db):raise PolicyConflict('pre-execution control publication required')
+            if reservation['state']!='reserved' or lease_lapsed(reservation,self._now(db)):raise PolicyConflict('pre-execution control publication required')
             db.execute('UPDATE control_charges SET publication=? WHERE reservation=? AND publication IS NULL',(serialized,reservation_id))
             return dict(receipt,publicationSha256=publication_sha256,publicationDescriptor=json.loads(serialized))
 
@@ -503,7 +518,7 @@ class ScratchLedger:
             now = self._now(db)
             self._expire(db, now)
             row = self._reservation(db, reservation_id)
-            if row["state"] == "reserved" and row["expires"] <= now:
+            if lease_lapsed(row, now):
                 raise PolicyConflict("lease expired before engine mutation")
             if row["state"] == "expired" or (row["state"] == "terminal" and state != "terminal"):
                 raise PolicyConflict("invalid engine transition")
