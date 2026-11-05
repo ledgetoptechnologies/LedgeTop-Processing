@@ -35,7 +35,10 @@ const config = JSON.parse(fs.readFileSync(process.env.LTDS_PAIRING_CONFIG, 'utf8
     const run = () => processSourceReleaseAttempt({ attemptId, processing, storage, sourceIntake, sourceRelease });
     if (config.sourceReleasePhase === 'lost-post') {
       assert.equal(before, null);
-      await assert.rejects(run(), { code: 'source_release_transport_uncertain' });
+      await assert.rejects(run(), error => {
+        if (error?.code !== 'source_release_transport_uncertain') console.error(error?.stack);
+        return error?.code === 'source_release_transport_uncertain';
+      });
       const intent = outbox.getIntent(attemptId);
       assert.equal(intent.state, 'prepared');
       assert.ok(intent.request && intent.requestSha256);
