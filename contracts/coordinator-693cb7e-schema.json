@@ -1,0 +1,268 @@
+{
+  "objects": [
+    [
+      "index",
+      "sqlite_autoindex_jobs_1",
+      "jobs",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_jobs_2",
+      "jobs",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_nodes_1",
+      "nodes",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_owned_maintenance_schedules_1",
+      "owned_maintenance_schedules",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_reference_acceptances_1",
+      "reference_acceptances",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_reference_claims_1",
+      "reference_claims",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_reference_claims_2",
+      "reference_claims",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_reference_jobs_1",
+      "reference_jobs",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_reference_jobs_2",
+      "reference_jobs",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_reference_outbox_1",
+      "reference_outbox",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_reference_terminal_acceptances_1",
+      "reference_terminal_acceptances",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_reference_terminal_acceptances_2",
+      "reference_terminal_acceptances",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_reference_terminal_acceptances_3",
+      "reference_terminal_acceptances",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_reference_transfer_grants_1",
+      "reference_transfer_grants",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_reference_worker_failures_1",
+      "reference_worker_failures",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_reference_worker_failures_2",
+      "reference_worker_failures",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_reference_worker_receipts_1",
+      "reference_worker_receipts",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_viewer_files_1",
+      "viewer_files",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_viewer_incarnations_1",
+      "viewer_incarnations",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_viewer_option_evidence_1",
+      "viewer_option_evidence",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_viewer_reservations_1",
+      "viewer_reservations",
+      null
+    ],
+    [
+      "index",
+      "sqlite_autoindex_viewer_tasks_1",
+      "viewer_tasks",
+      null
+    ],
+    [
+      "index",
+      "viewer_engine_uuid",
+      "viewer_tasks",
+      "CREATE UNIQUE INDEX viewer_engine_uuid\n                ON viewer_tasks(engine_uuid) WHERE engine_uuid IS NOT NULL"
+    ],
+    [
+      "table",
+      "coordinator_authority_lease",
+      "coordinator_authority_lease",
+      "CREATE TABLE coordinator_authority_lease (singleton INTEGER PRIMARY KEY CHECK(singleton=1), required INTEGER NOT NULL CHECK(required=1))"
+    ],
+    [
+      "table",
+      "coordinator_identity",
+      "coordinator_identity",
+      "CREATE TABLE coordinator_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)"
+    ],
+    [
+      "table",
+      "jobs",
+      "jobs",
+      "CREATE TABLE jobs (\n                seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,\n                request_id TEXT UNIQUE NOT NULL, environment TEXT NOT NULL,\n                profile TEXT NOT NULL, status TEXT NOT NULL, worker_id TEXT,\n                claim_hash TEXT, result TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,\n                updated_at TEXT DEFAULT CURRENT_TIMESTAMP, node_id TEXT, held_reason TEXT)"
+    ],
+    [
+      "table",
+      "nodes",
+      "nodes",
+      "CREATE TABLE nodes (\n            id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT 'active',\n            revision INTEGER NOT NULL DEFAULT 0, plan_id TEXT, drain_at TEXT,\n            not_before TEXT, after_job_id TEXT, target_image TEXT, result TEXT,\n            update_hash TEXT, finish_status TEXT)"
+    ],
+    [
+      "table",
+      "owned_maintenance_schedules",
+      "owned_maintenance_schedules",
+      "CREATE TABLE owned_maintenance_schedules (\n            request_id TEXT PRIMARY KEY,node_id TEXT NOT NULL,authority_id TEXT NOT NULL,\n            request_sha256 TEXT NOT NULL,request_json TEXT NOT NULL,receipt_json TEXT NOT NULL)"
+    ],
+    [
+      "table",
+      "reference_acceptances",
+      "reference_acceptances",
+      "CREATE TABLE reference_acceptances (\n                  receipt_id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES reference_jobs(job_id),\n                  digest TEXT NOT NULL, receipt_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    ],
+    [
+      "table",
+      "reference_claims",
+      "reference_claims",
+      "CREATE TABLE reference_claims (\n                  request_id TEXT PRIMARY KEY, job_id TEXT UNIQUE NOT NULL REFERENCES reference_jobs(job_id),\n                  node_id TEXT NOT NULL, worker_id TEXT NOT NULL, instance_id TEXT NOT NULL,\n                  token TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    ],
+    [
+      "table",
+      "reference_jobs",
+      "reference_jobs",
+      "CREATE TABLE reference_jobs (\n                  job_id TEXT PRIMARY KEY REFERENCES jobs(id), submission_id TEXT UNIQUE NOT NULL,\n                  request_digest TEXT NOT NULL, environment TEXT NOT NULL, input_json TEXT NOT NULL,\n                  manifest_sha TEXT NOT NULL, pipeline_digest TEXT NOT NULL, generation INTEGER NOT NULL DEFAULT 1,\n                  phase TEXT NOT NULL, node_id TEXT, transfer_json TEXT, result_json TEXT, error TEXT,\n                  created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    ],
+    [
+      "table",
+      "reference_outbox",
+      "reference_outbox",
+      "CREATE TABLE reference_outbox (\n                  identity TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL,\n                  digest TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,\n                  acknowledged INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+    ],
+    [
+      "table",
+      "reference_terminal_acceptances",
+      "reference_terminal_acceptances",
+      "CREATE TABLE reference_terminal_acceptances (\n                receipt_id TEXT PRIMARY KEY, storage_receipt_id TEXT NOT NULL UNIQUE,\n                job_id TEXT NOT NULL, generation INTEGER NOT NULL, digest TEXT NOT NULL,\n                receipt_json TEXT NOT NULL, UNIQUE(job_id,generation))"
+    ],
+    [
+      "table",
+      "reference_transfer_grants",
+      "reference_transfer_grants",
+      "CREATE TABLE reference_transfer_grants (\n                  job_id TEXT PRIMARY KEY, grant_json TEXT NOT NULL, digest TEXT NOT NULL)"
+    ],
+    [
+      "table",
+      "reference_worker_failures",
+      "reference_worker_failures",
+      "CREATE TABLE reference_worker_failures (\n                job_id TEXT NOT NULL, generation INTEGER NOT NULL,\n                failure_sha TEXT NOT NULL UNIQUE, payload_sha TEXT NOT NULL,\n                failure_json TEXT NOT NULL, receipt_json TEXT NOT NULL,\n                delivery_state TEXT NOT NULL, PRIMARY KEY(job_id,generation))"
+    ],
+    [
+      "table",
+      "reference_worker_receipts",
+      "reference_worker_receipts",
+      "CREATE TABLE reference_worker_receipts (\n                  outbox_id TEXT PRIMARY KEY, payload_sha TEXT NOT NULL,\n                  job_id TEXT NOT NULL, receipt_json TEXT NOT NULL)"
+    ],
+    [
+      "table",
+      "sqlite_sequence",
+      "sqlite_sequence",
+      "CREATE TABLE sqlite_sequence(name,seq)"
+    ],
+    [
+      "table",
+      "viewer_files",
+      "viewer_files",
+      "CREATE TABLE viewer_files (\n                uuid TEXT NOT NULL, name_key TEXT NOT NULL, name TEXT NOT NULL,\n                path TEXT NOT NULL, bytes INTEGER NOT NULL, sha256 TEXT NOT NULL,\n                is_photo INTEGER NOT NULL, PRIMARY KEY(uuid,name_key))"
+    ],
+    [
+      "table",
+      "viewer_incarnations",
+      "viewer_incarnations",
+      "CREATE TABLE viewer_incarnations (\n                uuid TEXT NOT NULL, generation INTEGER NOT NULL,\n                job_id TEXT, metadata TEXT NOT NULL, files TEXT NOT NULL,\n                PRIMARY KEY(uuid,generation))"
+    ],
+    [
+      "table",
+      "viewer_option_evidence",
+      "viewer_option_evidence",
+      "CREATE TABLE viewer_option_evidence (\n                uuid TEXT NOT NULL, generation INTEGER NOT NULL,\n                definitions TEXT NOT NULL, sha256 TEXT NOT NULL,\n                PRIMARY KEY(uuid,generation))"
+    ],
+    [
+      "table",
+      "viewer_reservations",
+      "viewer_reservations",
+      "CREATE TABLE viewer_reservations (\n                uuid TEXT PRIMARY KEY, environment TEXT NOT NULL, capability_hash TEXT NOT NULL,\n                state TEXT NOT NULL CHECK(state IN ('reserved','cancelled')))"
+    ],
+    [
+      "table",
+      "viewer_tasks",
+      "viewer_tasks",
+      "CREATE TABLE viewer_tasks (\n                uuid TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 1,\n                directory TEXT NOT NULL, name TEXT NOT NULL, options TEXT NOT NULL,\n                outputs TEXT NOT NULL, environment TEXT NOT NULL,\n                stage TEXT NOT NULL DEFAULT 'uploading', phase TEXT NOT NULL DEFAULT 'uploading',\n                job_id TEXT, node_id TEXT, engine_uuid TEXT, claim_token TEXT,\n                error TEXT, progress REAL NOT NULL DEFAULT 0,\n                output_lines TEXT NOT NULL DEFAULT '[]', archive_path TEXT,\n                removed INTEGER NOT NULL DEFAULT 0,\n                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,\n                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, option_evidence_required INTEGER NOT NULL DEFAULT 0 CHECK(option_evidence_required IN (0,1)))"
+    ]
+  ],
+  "profile": "installed-693cb7e-closed-v1",
+  "schemaVersion": 1,
+  "sourceCommit": "693cb7eca32295da959a4f42399f317577ef8a8a",
+  "sources": {
+    "processing/authority_lease.py": "952c711a8a0f56a0b8811efe649478ad1b1fd3e8a80c9d21afac396505005b55",
+    "processing/maintenance.py": "3db441879818e08a0009b052cee678d0bfad5e418be57682dc559a0c57e0e85c",
+    "processing/prototype.py": "40a228bd1ccac515b9b3cdaf4cf4074304a36a1b4dc41d8058258ea26b28b58f",
+    "processing/reference_failure.py": "33a107e5557de33413743d22f01f53fb9522a7b62fa9368cdf9e3d5651b7c511",
+    "processing/reference_store.py": "97d753aa6ce2c703dd1b6d0dd0e5cc53f56357c6f93868745f35390bed7e2321",
+    "processing/reference_terminal.py": "72b61696ab76053dce1f847f0a21e9b04f5e3e3954bcd48305b3d2f4e0f08319",
+    "processing/viewer_tasks.py": "9387f517993abc5337dd2c94b84e721639529ca83fbfe98c1ec239776b41ebcc"
+  }
+}
