@@ -81,6 +81,14 @@ routing alone does not prove the desired local-first rule; do not assume that
 a photo ceiling alone makes all smaller jobs land on `local`. The native
 coordinator now applies explicit small-node-first policy at its atomic claim.
 
+Each physical node runs one job. Production goes first on every node it can
+use. Running production keeps only its own node and held production stops all
+staging. Queued production keeps a node from staging unless it is proven unable
+to use it: a configured capability or photo cap, or hash-verified bytes above a
+current scratch observation. Missing or tampered metadata and live engine
+reports prove nothing. Every Reference and Viewer claim recomputes this fence
+in its transaction.
+
 ## Security and API boundary
 
 The first endpoint is private to the LAN or an authenticated tunnel. It uses

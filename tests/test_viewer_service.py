@@ -279,12 +279,11 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.task(production_second)['node_id'], 'cluster')
         self.assertIsNone(self.task(staging)['node_id'])
         self.assertEqual(self.fleet.max_active, 2)
+        # Running production keeps only its own node; staging takes the free one.
         self.finish(production_first)
         self.service.tick()
-        self.assertIsNone(self.task(staging)['node_id'])
+        self.assertEqual(self.task(staging)['node_id'], 'main')
         self.finish(production_second)
-        self.service.tick()
-        self.assertEqual(self.task(staging)['node_id'], 'cluster')
         self.finish(staging)
         self.service.tick()
         self.assertTrue(all(self.service.info(i)['status']['code'] == 40

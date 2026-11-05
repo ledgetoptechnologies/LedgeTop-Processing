@@ -346,14 +346,14 @@ class ViewerService:
             # Queue.list is already FIFO by sequence; a stable partition keeps
             # priority order without quadratic list.index work on large queues.
             queued = [j for j in jobs if j['status'] == 'queued']
-            production_pending = any(j['environment'] == 'production'
-                                     and j['status'] in ('queued', 'running', 'held') for j in jobs)
-            # Production globally fences staging. Within the active priority
-            # tier, each free node may take the first queued job it can run;
-            # a large job waiting for main does not leave cluster idle.
-            priority_jobs = [j for j in queued if j['environment'] ==
-                             ('production' if production_pending else 'staging')]
-            candidates = [j for j in priority_jobs if j['profile'] == VIEWER_PROFILE]
+            # Production goes first on the nodes it can use. Staging is offered
+            # only the nodes the queue's fence leaves open; claim recomputes it.
+            viewer_jobs = [j for j in queued if j['profile'] == VIEWER_PROFILE]
+            candidates = [j for j in viewer_jobs if j['environment'] == 'production']
+            staging_jobs = [j for j in viewer_jobs if j['environment'] == 'staging']
+            fenced = {node.id for node in self.node_configs if staging_jobs and not self.queue.staging_open(node.id)}
+            if len(fenced) < len(self.node_configs):
+                candidates += staging_jobs
             if not candidates:
                 return
             nodes = {}
@@ -390,12 +390,16 @@ class ViewerService:
                     # Shared cross-profile ordering cannot safely proceed with
                     # stale, incomplete or mismatched live engine metadata.
                     return
+            # An engine can look idle while a claimed job still holds its slot.
+            occupied = {j['nodeId'] for j in jobs if j['status'] in ('running', 'held')}
             for queued_job in candidates:
                 task = next((t for t in tasks if t['job_id'] == queued_job['id']), None)
                 if task is None:
                     raise Conflict('execution metadata unavailable')
-                decision = plan_ordered_nodes(task['images_count'], task['input_bytes'], ordered_nodes,
-                                              required_profile=VIEWER_PROFILE)
+                closed = occupied | (fenced if queued_job['environment'] == 'staging' else set())
+                decision = plan_ordered_nodes(task['images_count'], task['input_bytes'],
+                                              [{**n, 'taskQueueCount': 1} if n['id'] in closed else n
+                                               for n in ordered_nodes], required_profile=VIEWER_PROFILE)
                 if decision['decision'] == 'wait':
                     self.store.update(task['uuid'], phase='waiting_node', error=decision['reason'])
                     continue
@@ -413,8 +417,8 @@ class ViewerService:
                                        'profiles': [VIEWER_PROFILE], 'expectedJobId': task['job_id']})
                 if not job:
                     # Another scheduler turn or maintenance transition changed
-                    # queue admission; rediscover from fresh state next tick.
-                    return
+                    # admission for this job; others may still fit other nodes.
+                    continue
                 try:
                     self.store.update(task['uuid'], stage='running', phase='claimed', node_id=node_id,
                                       claim_token=job['claimToken'], engine_uuid=str(uuid.uuid4()), error=None)
