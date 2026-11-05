@@ -223,8 +223,53 @@ class ReferenceSourceIntakeMethods:
         }
         return sum(db.execute(query).fetchone()[0] for table, query in queries.items() if table in tables)
 
-    def renew_source_transfer_grant(self, request, *, source_spool, clock=None):
-        """Create or replay one durable, claim-bound V2 grant successor."""
+    @staticmethod
+    def _source_renewal_node_ready(db, node_id):
+        """A drain lets running work finish; an update or hold issues nothing."""
+        node = db.execute('SELECT state FROM nodes WHERE id=?', (node_id,)).fetchone()
+        if node is None or node['state'] not in ('active', 'scheduled', 'draining'):
+            raise Conflict('renewal_authority_unavailable')
+        return node['state']
+
+    @staticmethod
+    def _source_range_ledger(db, job_id, generation):
+        """Aggregate the durable range journal; one row per range would be unbounded."""
+        usage = db.execute('''SELECT reservation_id,requests_used,bytes_used,attempts_used
+            FROM reference_source_range_usage WHERE job_id=? AND generation=?''',
+            (job_id, generation)).fetchone()
+        totals = db.execute('''SELECT COUNT(*),COALESCE(SUM(range_length),0),COALESCE(SUM(attempts_used),0)
+            FROM reference_source_range_requests WHERE job_id=? AND generation=?''',
+            (job_id, generation)).fetchone()
+        objects = db.execute('''SELECT DISTINCT object_id FROM reference_source_range_requests
+            WHERE job_id=? AND generation=? ORDER BY object_id''', (job_id, generation)).fetchall()
+        return {'usage': dict(usage) if usage else None, 'totals': list(totals),
+                'objects': [item[0] for item in objects]}
+
+    @staticmethod
+    def _reconcile_source_range_ledger(ledger, grant):
+        """Refuse a successor unless served ranges still fit the original budget."""
+        usage = ledger['usage']
+        if usage is None:
+            if ledger['totals'] != [0, 0, 0] or ledger['objects']:
+                raise Conflict('source renewal range ledger changed')
+            return
+        if (usage['reservation_id'] != grant.identity.reservation_id
+                or ledger['totals'] != [usage['requests_used'], usage['bytes_used'], usage['attempts_used']]
+                or not set(ledger['objects']).issubset(item.id for item in grant.objects)):
+            raise Conflict('source renewal range ledger changed')
+        if (usage['requests_used'] > grant.request_budget or usage['bytes_used'] > grant.byte_budget
+                or usage['attempts_used'] >= grant.attempt_budget):
+            raise Conflict('source renewal budget exhausted')
+
+    def renew_source_transfer_grant(self, request, *, source_spool, worker=None, clock=None):
+        """Create or replay one durable, claim-bound V2 grant successor.
+
+        ``worker`` is the authenticated identity plus its claim token. The
+        expired grant only names the journal step; every issue or replay needs
+        the exact owner of the current claim. The reservation deadline caps a
+        successor while it is open. Afterwards the claim still owns the
+        transfer, so a successor gets one grant lifetime and no more.
+        """
         _ensure_source_range_schema(self.queue)
         import hashlib
         import hmac
@@ -234,6 +279,8 @@ class ReferenceSourceIntakeMethods:
 
         if source_spool is None or type(request) is not dict:
             raise Conflict('renewal_authority_unavailable')
+        if type(worker) is not dict or set(worker) != {'node_id', 'worker_id', 'worker_instance_id', 'claim_token'}:
+            raise Conflict('source renewal worker required')
         protocol._closed(request, ('protocol','renewalId','sequence','previousGrantSha256','previousGrant'),
                          'source range renewal')
         if request.get('protocol') != 'source-range-v2-renewal':
@@ -280,34 +327,53 @@ class ReferenceSourceIntakeMethods:
             return (row, dict(claim) if claim else None, [dict(x) for x in receipts],
                     dict(grant) if grant else None, [dict(x) for x in pins])
 
-        job_id = previous.get('jobId')
-        protocol._slug(job_id, 'job ID')
-        with self.queue._db() as db:
-            db.execute('BEGIN IMMEDIATE')
-            current_job = self._row(db, job_id)
-            self._source_reader_unfenced(db, job_id, current_job['generation'])
+        def authorize(db, job_id):
+            """The exact claim owner, for the exact job and generation it holds."""
+            binding = self._claim_snapshot(db, job_id, **worker)
+            if ((previous.get('generation'), previous.get('environment'), previous.get('manifestSha256'))
+                    != (binding['generation'], binding['environment'], binding['manifestSha256'])):
+                raise Conflict('source renewal authority unavailable')
+            return {'binding': binding,
+                    'nodeState': self._source_renewal_node_ready(db, worker['node_id']),
+                    'ranges': self._source_range_ledger(db, job_id, binding['generation'])}
+
+        def replay(db, job_id, job):
             # Exact retries, including retries after a lost response, get the
             # same already-minted successor. Never mint on a changed request.
             prior = db.execute('''SELECT request_json,request_sha256,previous_grant_sha256,
                 successor_grant_json,successor_sha256 FROM reference_source_grant_renewals
                 WHERE job_id=? AND (sequence=? OR renewal_id=?)''',
                                (job_id, sequence, request['renewalId'])).fetchall()
-            if prior:
-                if (len(prior) != 1 or prior[0]['request_json'] != request_encoded
-                        or prior[0]['request_sha256'] != request_sha
-                        or prior[0]['previous_grant_sha256'] != previous_sha
-                        or prior[0]['successor_sha256'] != protocol.digest(json.loads(prior[0]['successor_grant_json']))):
-                    raise Conflict('source renewal replay conflict')
-                successor = json.loads(prior[0]['successor_grant_json'])
-                return {'protocol':'source-range-v2-renewal','renewalId':request['renewalId'],
-                    'sequence':sequence,'previousGrantSha256':previous_sha,'grant':successor}
+            if not prior:
+                return None
+            if (len(prior) != 1 or prior[0]['request_json'] != request_encoded
+                    or prior[0]['request_sha256'] != request_sha
+                    or prior[0]['previous_grant_sha256'] != previous_sha
+                    or prior[0]['successor_sha256'] != protocol.digest(json.loads(prior[0]['successor_grant_json']))):
+                raise Conflict('source renewal replay conflict')
+            if job['status'] != 'running' or job['phase'] != 'fetching':
+                raise Conflict('source renewal authority unavailable')
+            successor = json.loads(prior[0]['successor_grant_json'])
+            return {'protocol':'source-range-v2-renewal','renewalId':request['renewalId'],
+                'sequence':sequence,'previousGrantSha256':previous_sha,'grant':successor}
+
+        job_id = previous.get('jobId')
+        protocol._slug(job_id, 'job ID')
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current_job = self._row(db, job_id)
+            self._source_reader_unfenced(db, job_id, current_job['generation'])
+            authority = authorize(db, job_id)
+            replayed = replay(db, job_id, current_job)
+            if replayed is not None:
+                return replayed
             row, claim, receipt_rows, grant_row, pin_rows = capture(db, job_id)
             latest = db.execute('SELECT COALESCE(MAX(sequence),0) FROM reference_source_grant_renewals WHERE job_id=?',
                                 (job_id,)).fetchone()[0]
             if latest + 1 != sequence:
                 raise Conflict('source renewal sequence conflict')
             snapshot = {'row': dict(row), 'claim': claim, 'receipts': receipt_rows,
-                        'grant': grant_row, 'pins': pin_rows, 'latest': latest}
+                        'grant': grant_row, 'pins': pin_rows, 'latest': latest, 'authority': authority}
             db.commit()
 
         request_now = now()
@@ -339,11 +405,13 @@ class ReferenceSourceIntakeMethods:
                 raise Conflict('source renewal retention receipts changed')
             reservation_expiry = datetime.fromisoformat(
                 private['transferRequest']['expiresAt'].replace('Z','+00:00')).timestamp()
-            if not math.isfinite(reservation_expiry) or reservation_expiry <= request_now:
+            if not math.isfinite(reservation_expiry):
                 raise Conflict('renewal_authority_unavailable')
-            old = validate_source_grant(previous, job=private, clock=lambda: request_now, allow_expired=True)
+            old = validate_source_grant(previous, job=private, clock=lambda: request_now,
+                                        allow_expired=True, past_reservation=True)
             if old.expires > request_now:
                 raise Conflict('grant_not_expired')
+            self._reconcile_source_range_ledger(authority['ranges'], old)
             source = json.loads(row['source_manifest_json'])
             derived = json.loads(row['derived_manifest_json'])
             expected = {item['id']: item for item in source['objects']}
@@ -372,13 +440,15 @@ class ReferenceSourceIntakeMethods:
                 reader,_identity = _open_pinned_source(source_spool,job_id,row['generation'],item.id,pins_by_id[item.id])
                 reader.close()
             verified_at = now()
-            expiry = min(verified_at + SOURCE_RANGE_GRANT_TTL_SECONDS, reservation_expiry)
+            expiry = verified_at + SOURCE_RANGE_GRANT_TTL_SECONDS
+            if reservation_expiry > verified_at:
+                expiry = min(expiry, reservation_expiry)
             if expiry <= max(verified_at, old.expires):
                 raise Conflict('renewal_authority_unavailable')
             grant_expiry = datetime.fromtimestamp(expiry, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z')
             successor = dict(previous)
             successor.update(expiresAt=grant_expiry, token=secrets.token_urlsafe(32))
-            validate_source_grant(successor, job=private, clock=lambda: verified_at)
+            validate_source_grant(successor, job=private, clock=lambda: verified_at, past_reservation=True)
         except Conflict:
             raise
         except Exception:
@@ -389,16 +459,23 @@ class ReferenceSourceIntakeMethods:
         successor_encoded = _json(successor)
         successor_sha = protocol.digest(successor)
         commit_now = now()
-        if reservation_expiry <= commit_now or expiry <= commit_now or expiry <= old.expires:
+        if expiry <= commit_now or expiry <= old.expires:
             raise Conflict('renewal_authority_unavailable')
-        validate_source_grant(successor,job=private,clock=lambda:commit_now)
+        validate_source_grant(successor,job=private,clock=lambda:commit_now,past_reservation=True)
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             current, current_claim, current_receipts, current_grant, current_pins = capture(db, job_id)
+            current_authority = authorize(db, job_id)
+            # A retry can overtake the slow original; the one that lost the
+            # race answers with the winner's successor instead of refusing.
+            replayed = replay(db, job_id, current)
+            if replayed is not None:
+                return replayed
             current_latest = db.execute('SELECT COALESCE(MAX(sequence),0) FROM reference_source_grant_renewals WHERE job_id=?',
                                         (job_id,)).fetchone()[0]
             if (_json({'row':dict(current),'claim':current_claim,'receipts':current_receipts,
-                       'grant':current_grant,'pins':current_pins,'latest':current_latest})
+                       'grant':current_grant,'pins':current_pins,'latest':current_latest,
+                       'authority':current_authority})
                     != _json(snapshot)):
                 raise Conflict('source renewal authority changed during verification')
             latest = db.execute('SELECT COALESCE(MAX(sequence),0) FROM reference_source_grant_renewals WHERE job_id=?',
@@ -415,12 +492,19 @@ class ReferenceSourceIntakeMethods:
                  successor_encoded,successor_sha))
         return response
 
-    def acknowledge_source_transfer_grant(self, request, *, clock=None):
-        """Install a previously returned successor only after its exact ACK."""
+    def acknowledge_source_transfer_grant(self, request, *, worker=None, clock=None):
+        """Install a previously returned successor only after its exact ACK.
+
+        A successor can expire while its ACK is outstanding, for instance across
+        a coordinator outage. Installing it keeps the journal chain intact and
+        gives no access; the worker then renews from it as usual.
+        """
         _ensure_source_range_schema(self.queue)
         import hashlib
         import hmac
         from .source_range_transfer import validate_source_grant
+        if type(worker) is not dict or set(worker) != {'node_id', 'worker_id', 'worker_instance_id'}:
+            raise Conflict('source renewal worker required')
         protocol._closed(request, ('protocol','renewalId','sequence','grantSha256','token'), 'source renewal ACK')
         if request.get('protocol') != 'source-range-v2-renewal-ack':
             raise Conflict('source renewal ACK invalid')
@@ -448,16 +532,22 @@ class ReferenceSourceIntakeMethods:
                 'sequence':request['sequence'],'grantSha256':request['grantSha256']}
             current = self._row(db, job_id)
             self._source_reader_unfenced(db, job_id, current['generation'])
+            claim = db.execute('SELECT node_id,worker_id,instance_id,token FROM reference_claims WHERE job_id=?',
+                               (job_id,)).fetchone()
+            if (claim is None or (claim['node_id'],claim['worker_id'],claim['instance_id']) !=
+                    (worker['node_id'],worker['worker_id'],worker['worker_instance_id'])):
+                raise Conflict('source renewal authority unavailable')
             if row['acked']:
                 return response
-            claim = db.execute('SELECT token FROM reference_claims WHERE job_id=?',(job_id,)).fetchone()
+            self._source_renewal_node_ready(db, worker['node_id'])
             if (current['status'] != 'running' or current['phase'] != 'fetching'
                     or claim is None or claim['token'] != current['private_claim_token']
                     or not current['claim_hash']
                     or not hmac.compare_digest(hashlib.sha256(claim['token'].encode()).hexdigest(),current['claim_hash'])):
                 raise Conflict('source renewal authority unavailable')
             private = self._record(current, True)
-            validate_source_grant(successor, job=private, clock=clock or time.time)
+            validate_source_grant(successor, job=private, clock=clock or time.time,
+                                  allow_expired=True, past_reservation=True)
             current_grant = db.execute('SELECT grant_json FROM reference_transfer_grants WHERE job_id=?',(job_id,)).fetchone()
             renew = db.execute('SELECT previous_grant_sha256 FROM reference_source_grant_renewals WHERE job_id=? AND sequence=?',
                                (job_id,request['sequence'])).fetchone()
@@ -504,7 +594,11 @@ class ReferenceSourceIntakeMethods:
             if grant_row['digest'] != protocol.digest(grant) or grant.get('token') != token:
                 raise Conflict('source grant unavailable')
             private = self._record(job,True)
-            checked = validate_source_grant(grant,job=private,clock=clock or time.time)
+            renewed = db.execute('''SELECT 1 FROM reference_source_grant_renewals
+                WHERE job_id=? AND successor_sha256=? AND acked=1''',
+                (token_row['job_id'],grant_row['digest'])).fetchone()
+            checked = validate_source_grant(grant,job=private,clock=clock or time.time,
+                                            past_reservation=renewed is not None)
             item = next((entry for entry in checked.objects if entry.id == object_id),None)
             if item is None or type(range_start) is not int or type(range_length) is not int:
                 raise Conflict('source range unavailable')

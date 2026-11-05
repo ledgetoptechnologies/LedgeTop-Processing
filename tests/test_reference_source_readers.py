@@ -182,8 +182,10 @@ class SourceReaderTests(unittest.TestCase):
             from processing import reference_protocol as protocol
             renewal = dict(protocol='source-range-v2-renewal', renewalId='fenced-renewal', sequence=1,
                 previousGrantSha256=protocol.digest(grant), previousGrant=grant)
-            with self.assertRaises(Conflict):
-                store.renew_source_transfer_grant(renewal, source_spool=spool)
+            worker = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
+                claim_token=store.get(job['jobId'], private=True)['claimToken'])
+            with self.assertRaisesRegex(Conflict, 'source_release_fenced'):
+                store.renew_source_transfer_grant(renewal, source_spool=spool, worker=worker)
 
     def test_queue_close_racing_reader_close_never_deadlocks_or_unlocks_live_reader(self):
         with tempfile.TemporaryDirectory() as directory, source_fixture(directory) as (queue, store, spool, job, grant, image):
