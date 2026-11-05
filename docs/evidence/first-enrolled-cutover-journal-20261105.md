@@ -68,3 +68,37 @@ creation ordering are now included. The first refined run found one stale test
 index after the new rollback-holder phase; the test now advances by exact action.
 No production behavior was weakened. The task container was removed and its exact
 label inventory was empty.
+
+
+## Supported not-applied recovery
+
+The journal writes a durable dispatch marker after the pending intent and before
+any possible external dispatch. A crash before that marker is now recoverable
+through explicit `reconcile_not_applied(disposition="rollback"|"rearm")`, requiring
+a fresh complete before-state proof bound to the exact pending intent. A durable
+no-effect history entry is recorded before clearing pending. Rollback disposition
+blocks further forward advance; rearm is an explicit operator/controller action
+and keeps the same intent/request identity. Inspection alone never replays.
+
+After dispatch is marked, absent Docker objects or unchanged state cannot prove
+that no daemon RPC remains in flight. Those outcomes stay held. Only a concrete
+transport's exact authenticated, code-bound nonmutating rejection can support the
+other accepted proof kind. Generic digests/absence do not constitute this proof.
+The driver must implement `observe_not_applied` and `verify_not_applied`; unknown
+or unsupported evidence keeps pending. Fresh guard checks run before and after
+the complete read-only proof. Retained proof history includes the original
+marker, intent and closed proof kind and is validated on reopen.
+
+Rollback separately journals retaining the exact final candidate's name before
+restoring the original predecessor name. No second Docker rename is hidden in
+one mutation and no candidate is deleted.
+
+Validation:30/30 Linux journal tests passed, no skips, in0.131 seconds. Two real
+forked children call `os._exit(71)` immediately after the fsynced pending write
+versus fsynced dispatch marker. Parent waitpid proves their death; fresh journal
+owners recover only the pre-dispatch case, while the dispatched case stays held
+even though the synthetic effect is absent. Authenticated-rejection rearm uses
+same intent, forged/wrong-intent proofs refuse, and guard/complete-proof failures
+retain pending. These tests use a synthetic transport boundary; concrete daemon
+and authenticated-rejection qualification remains transport-owned. The bounded
+one-CPU/512MiB network-none container auto-removed; exact label inventory empty.

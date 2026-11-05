@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 from ops import enrolled_coordinator_cutover as c
 
@@ -27,7 +28,7 @@ class Boundary:
     """Models effects independently; verify refuses missing/foreign effects."""
     def __init__(self):
         self.controller=None;self.calls=[];self.effects=set();self.loss=None;self.after=False
-        self.wrong=set();self.before_effect_journals=[];self.observed=[];self.guard_ready=True;self.locked=False
+        self.wrong=set();self.before_effect_journals=[];self.observed=[];self.guard_ready=True;self.locked=False;self.rejectionVerified=False
 
     @contextmanager
     def global_lock(self,value):
@@ -59,6 +60,13 @@ class Boundary:
 
     def verify(self,action,observation,intent,state):
         return action not in self.wrong and (action in c.READ_ACTIONS or action in c.ROLLBACK_READS or action in self.effects)
+
+    def observe_not_applied(self,action,intent,state):
+        return dict(intentId=intent['intentId'],bindingSha256=c.digest(intent),
+            factsSha256=c.digest({'syntheticBeforeState':action}),outcome='not-applied',proofKind='authenticated-rejection' if self.rejectionVerified else 'pre-dispatch')
+
+    def verify_not_applied(self,action,observation,intent,state):
+        return action not in self.effects and self.guard_ready and (observation['proofKind']=='pre-dispatch' or self.rejectionVerified)
 
 
 @unittest.skipUnless(os.name=='posix','private fsynced flock journal')
@@ -104,6 +112,110 @@ class EnrolledCutoverJournalTests(unittest.TestCase):
         self.assertEqual(len(self.driver.calls),1)
         self.assertEqual(self.actor.journal.read()['phase'],'prepared')
         with self.assertRaisesRegex(c.CutoverHeld,'closed_known'):self.actor.begin_rollback()
+
+    def crash_before_dispatch(self):
+        original=self.actor.journal.write
+        def interrupted(state):
+            original(state)
+            if state['pending'] is not None and state['dispatch'] is None:raise KeyboardInterrupt('synthetic process death')
+        with patch.object(self.actor.journal,'write',side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):self.actor.advance()
+
+    def test_predispatch_crash_reconciles_durably_then_rolls_back_without_replay(self):
+        self.crash_before_dispatch();self.assertEqual(self.driver.calls,[])
+        restarted=c.FirstEnrolledCutover(self.root,self.plan,self.driver);self.driver.controller=restarted
+        state=restarted.reconcile_not_applied(disposition='rollback')
+        self.assertEqual(len(state['noEffect']),1);self.assertIsNone(state['pending'])
+        self.assertEqual(state['noEffect'][0]['observation']['proofKind'],'pre-dispatch')
+        with self.assertRaisesRegex(c.CutoverHeld,'requires_rollback'):restarted.advance()
+        restarted.begin_rollback()
+        for _ in c.ROLLBACK_RESTART_ONLY:restarted.advance()
+        self.assertEqual(restarted.journal.read()['phase'],'rolled-back-rebaseline-required')
+        self.assertNotIn('disable-predecessor-restart',[action for action,_ in self.driver.calls])
+
+    def test_predispatch_rearm_is_explicit_and_survives_reopen(self):
+        self.crash_before_dispatch();self.actor.reconcile_not_applied(disposition='rearm')
+        restarted=c.FirstEnrolledCutover(self.root,self.plan,self.driver);self.driver.controller=restarted
+        self.assertEqual(restarted.advance()['phase'],'restart-disabled')
+        self.assertEqual(len(self.driver.calls),1)
+        self.assertEqual(len(restarted._load()['noEffect']),1)
+
+    def test_daemon_dispatch_marker_keeps_absent_effect_ambiguous(self):
+        self.driver.loss='disable-predecessor-restart'
+        with self.assertRaises(c.CutoverHeld):self.actor.advance()
+        self.assertEqual(self.driver.effects,set())
+        with self.assertRaisesRegex(c.CutoverHeld,'cannot_be_inferred_absent'):
+            self.actor.reconcile_not_applied(disposition='rearm')
+        self.assertIsNotNone(self.actor.journal.read()['pending'])
+
+    def test_not_applied_evidence_requires_fresh_guard_and_complete_verification(self):
+        self.crash_before_dispatch();self.driver.guard_ready=False
+        with self.assertRaises(c.CutoverHeld):self.actor.reconcile_not_applied(disposition='rollback')
+        self.assertIsNotNone(self.actor.journal.read()['pending'])
+        self.driver.guard_ready=True
+        with patch.object(self.driver,'verify_not_applied',return_value=False):
+            with self.assertRaises(c.CutoverHeld):self.actor.reconcile_not_applied(disposition='rollback')
+        self.assertEqual(self.actor.journal.read()['noEffect'],[])
+
+    def test_rollback_preserves_final_name_before_restoring_predecessor(self):
+        actions=[action for action,_ in c.ROLLBACK_STEPS]
+        self.assertLess(actions.index('retain-final-name'),actions.index('restore-predecessor-name'))
+
+    def test_verified_authenticated_rejection_explicitly_rearms_same_intent(self):
+        self.driver.loss='disable-predecessor-restart'
+        with self.assertRaises(c.CutoverHeld):self.actor.advance()
+        intent=copy.deepcopy(self.actor.journal.read()['pending'])
+        self.driver.rejectionVerified=True
+        state=self.actor.reconcile_not_applied(disposition='rearm')
+        self.assertEqual(state['noEffect'][0]['intent'],intent)
+        self.driver.loss=None;self.actor.advance()
+        self.assertEqual(self.driver.calls[-1][1],intent['intentId'])
+        self.assertEqual(len(self.driver.calls),2)
+
+    def test_forged_or_wrong_intent_authenticated_rejection_is_held(self):
+        self.driver.loss='disable-predecessor-restart'
+        with self.assertRaises(c.CutoverHeld):self.actor.advance()
+        intent=self.actor.journal.read()['pending']
+        fake=self.driver.observe_not_applied(intent['action'],intent,self.actor.journal.read())
+        fake['proofKind']='authenticated-rejection'
+        with patch.object(self.driver,'observe_not_applied',return_value=fake):
+            with self.assertRaisesRegex(c.CutoverHeld,'not_verified'):
+                self.actor.reconcile_not_applied(disposition='rearm')
+        self.driver.rejectionVerified=True;fake['intentId']=str(uuid.uuid4())
+        with patch.object(self.driver,'observe_not_applied',return_value=fake):
+            with self.assertRaisesRegex(c.CutoverHeld,'bounded_not_applied'):
+                self.actor.reconcile_not_applied(disposition='rearm')
+        self.assertEqual(self.actor.journal.read()['noEffect'],[])
+
+    def child_exit_at_durable_boundary(self, dispatched):
+        child=os.fork()
+        if child==0:
+            try:
+                original=self.actor.journal.write
+                def write(state):
+                    original(state)
+                    if state['pending'] is not None and (state['dispatch'] is not None)==dispatched:os._exit(71)
+                self.actor.journal.write=write;self.actor.advance()
+            except BaseException:os._exit(72)
+            os._exit(73)
+        pid,status=os.waitpid(child,0)
+        self.assertEqual(pid,child);self.assertTrue(os.WIFEXITED(status));self.assertEqual(os.WEXITSTATUS(status),71)
+        return c.FirstEnrolledCutover(self.root,self.plan,self.driver)
+
+    def test_actual_child_death_before_dispatch_can_recover_without_duplicate_effect(self):
+        restarted=self.child_exit_at_durable_boundary(False);self.driver.controller=restarted
+        intent=copy.deepcopy(restarted.journal.read()['pending'])
+        restarted.reconcile_not_applied(disposition='rearm');restarted.advance()
+        self.assertEqual(self.driver.calls,[(intent['action'],intent['intentId'])])
+        self.assertEqual(restarted._load()['noEffect'][0]['intent'],intent)
+
+    def test_actual_child_death_after_dispatch_marker_stays_held_despite_absence(self):
+        restarted=self.child_exit_at_durable_boundary(True);self.driver.controller=restarted
+        self.assertEqual(self.driver.effects,set())
+        with self.assertRaisesRegex(c.CutoverHeld,'cannot_be_inferred_absent'):
+            restarted.reconcile_not_applied(disposition='rearm')
+        with self.assertRaises(c.CutoverHeld):restarted.begin_rollback()
+        self.assertIsNotNone(restarted.journal.read()['pending'])
 
     def test_new_process_reopens_exact_pending_intent_without_reissue(self):
         self.until('start-final');self.driver.loss='start-final';self.driver.after=True

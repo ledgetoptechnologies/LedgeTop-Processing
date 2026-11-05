@@ -55,6 +55,7 @@ ROLLBACK_STEPS = (
     ('acquire-rollback-original-leases','rollback-original-leases-held'),
     ('verify-rollback-projection','rollback-projection-verified'),
     ('release-rollback-original-leases','rollback-original-leases-released'),
+    ('retain-final-name','rollback-final-name-retained'),
     ('restore-predecessor-name','rollback-name-restored'),
     ('start-exact-predecessor','rollback-predecessor-running'),
     ('verify-predecessor-readiness','rollback-predecessor-ready'),
@@ -217,20 +218,21 @@ class FirstEnrolledCutover:
                     evidence['predecessorVerified'] is True and evidence['readOnly'] is True,
                     'exact_readonly_preflight_required')
             state=dict(schemaVersion=1,mode=MODE,operationId=self.plan['operationId'],planSha256=self.plan_sha,
-                       phase='prepared',direction='forward',rollbackScope='none',index=0,pending=None,events=[],proofs={},admissionOpened=False)
+                       phase='prepared',direction='forward',rollbackScope='none',index=0,pending=None,events=[],proofs={},admissionOpened=False,noEffect=[],dispatch=None)
             self.journal.write(state)
             return state
 
     def _load(self):
         state=self.journal.read()
         fields={'schemaVersion','mode','operationId','planSha256','phase','direction','index','pending',
-                'events','proofs','admissionOpened','rollbackScope'}
+                'events','proofs','admissionOpened','rollbackScope','noEffect','dispatch'}
         require(type(state) is dict and set(state)==fields and type(state['schemaVersion']) is int and state['schemaVersion']==1 and state['mode']==MODE and
                 state['operationId']==self.plan['operationId'] and state['planSha256']==self.plan_sha and
                 state['direction'] in ('forward','rollback') and state['rollbackScope'] in ('none','restart-only','original-only','declared-v2')
                 and type(state['index']) is int and
                 type(state['admissionOpened']) is bool and type(state['events']) is list and len(state['events'])<=64 and
-                type(state['proofs']) is dict,'first_cutover_journal_binding_changed')
+                type(state['proofs']) is dict and type(state['noEffect']) is list and len(state['noEffect'])<=64,
+                'first_cutover_journal_binding_changed')
         steps=self._steps(state)
         require(0<=state['index']<=len(steps),'first_cutover_phase_invalid')
         expected='prepared' if state['index']==0 and state['direction']=='forward' else \
@@ -265,9 +267,26 @@ class FirstEnrolledCutover:
         require(state['rollbackScope']==expected_scope and state['proofs']==proofs and state['admissionOpened']==admission and
                 (state['index']==forward_count and not seen_rollback if state['direction']=='forward' else
                  state['index']==rollback_count and not admission),'cutover_history_projection_changed')
+        for record in state['noEffect']:
+            require(type(record) is dict and set(record)=={'intent','observation','disposition','afterEvents','dispatch'} and
+                    record['disposition'] in ('rollback','rearm') and type(record['afterEvents']) is int and
+                    0<=record['afterEvents']<=len(state['events']),'not_applied_history_changed')
+            intent=record['intent'];direction=intent.get('direction') if type(intent) is dict else None
+            require(direction in ('forward','rollback'),'not_applied_direction_changed')
+            prior=[event for event in state['events'][:record['afterEvents']] if event['direction']==direction]
+            sequence=STEPS if direction=='forward' else self._steps(dict(state,direction='rollback'))
+            number=len(prior)
+            require(number<len(sequence) and intent==self._intent(dict(direction=direction,index=number),sequence[number][0]) and
+                    (record['disposition']!='rollback' or direction=='forward'),'not_applied_intent_changed')
+            self._no_effect_shape(record['observation'],intent)
+            require(record['dispatch'] in (None,digest(intent)) and
+                    (record['observation']['proofKind']!='pre-dispatch' or record['dispatch'] is None),
+                    'not_applied_dispatch_evidence_changed')
         if state['pending'] is not None:
             require(state['index']<len(steps) and state['pending']==self._intent(state,steps[state['index']][0]),
                     'first_cutover_pending_intent_changed')
+        require(state['dispatch'] is None or state['pending'] is not None and state['dispatch']==digest(state['pending']),
+                'dispatch_marker_changed')
         return state
 
     @staticmethod
@@ -294,7 +313,7 @@ class FirstEnrolledCutover:
         event=dict(intentSha256=digest(intent),action=action,observation=observation,phase=next_phase,
                    direction=state['direction'],step=state['index'])
         state['events'].append(event);state['proofs'][action]=observation
-        state.update(index=state['index']+1,phase=next_phase,pending=None)
+        state.update(index=state['index']+1,phase=next_phase,pending=None,dispatch=None)
         if action=='resume-final-gate':state['admissionOpened']=True
         self.journal.write(state)
         return state
@@ -308,12 +327,15 @@ class FirstEnrolledCutover:
             if state['index']==len(steps):return state
             require(state['pending'] is None,'ambiguous_outcome_inspection_only')
             action,next_phase=steps[state['index']];intent=self._intent(state,action)
+            require(not any(record['intent']==intent and record['disposition']=='rollback' for record in state['noEffect']),
+                    'proven_not_applied_requires_rollback')
             require(self.driver.guard(action,intent,state,inspection=False) is True,
                     'current_cutover_boundary_not_qualified')
             state['pending']=intent;self.journal.write(state)  # Before any effect.
             if action in READ_ACTIONS or action in ROLLBACK_READS:
                 observation=self.driver.observe(action,intent,state)
             else:
+                state['dispatch']=digest(intent);self.journal.write(state)  # Before any possible external dispatch.
                 try:self.driver.execute(action,intent,state)
                 except Exception:raise CutoverHeld('mutation_outcome_uncertain_inspection_only') from None
                 observation=self.driver.observe(action,intent,state)
@@ -331,6 +353,40 @@ class FirstEnrolledCutover:
                     'current_inspection_boundary_not_qualified')
             observation=self.driver.observe(action,intent,state)
             return self._finish(state,action,next_phase,intent,observation)
+
+    @staticmethod
+    def _no_effect_shape(observation,intent):
+        require(type(observation) is dict and set(observation)=={'intentId','bindingSha256','factsSha256','outcome','proofKind'} and
+                observation['outcome']=='not-applied' and observation['proofKind'] in ('pre-dispatch','authenticated-rejection') and observation['intentId']==intent['intentId'] and
+                observation['bindingSha256']==digest(intent) and
+                all(type(observation[key]) is str and HASH.fullmatch(observation[key])
+                    for key in ('bindingSha256','factsSha256')),'bounded_not_applied_evidence_required')
+
+    def reconcile_not_applied(self, *, disposition):
+        """Explicitly abort/rearm only an independently proven absent effect.
+
+        The driver must prove the complete closed before-state, not merely the
+        absence of an expected after-state. No mutation is executed here.
+        """
+        require(disposition in ('rollback','rearm'),'explicit_not_applied_disposition_required')
+        with self._locked():
+            state=self._load();intent=state['pending']
+            require(intent is not None and not state['admissionOpened'] and
+                    (disposition!='rollback' or state['direction']=='forward'),'pending_closed_intent_required')
+            action=intent['action']
+            observe=getattr(self.driver,'observe_not_applied',None)
+            verify=getattr(self.driver,'verify_not_applied',None)
+            require(callable(observe) and callable(verify),'not_applied_boundary_unsupported')
+            require(self.driver.guard(action,intent,state,inspection=True) is True,'current_inspection_boundary_not_qualified')
+            observation=observe(action,intent,state);self._no_effect_shape(observation,intent)
+            require(observation['proofKind']!='pre-dispatch' or state['dispatch'] is None,
+                    'dispatched_outcome_cannot_be_inferred_absent')
+            require(verify(action,observation,intent,state) is True and
+                    self.driver.guard(action,intent,state,inspection=True) is True,'complete_not_applied_boundary_not_verified')
+            state['noEffect'].append(dict(intent=intent,observation=observation,disposition=disposition,
+                                          afterEvents=len(state['events']),dispatch=state['dispatch']))
+            state['pending']=None;state['dispatch']=None;self.journal.write(state)
+            return state
 
     def begin_rollback(self):
         """No database restoration, no rollback after admission or unknown effect."""
