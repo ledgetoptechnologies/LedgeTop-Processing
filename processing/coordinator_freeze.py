@@ -57,7 +57,7 @@ def request_scope(queue, method, path):
     """Hold admission through handler body/stream lifetime, before body reads."""
     pure = method in ('GET', 'HEAD') and (path in (
         '/healthz', '/v1/prototype/authority', '/v1/prototype/jobs', '/v1/prototype/nodes',
-        '/v1/prototype/coordinator-freeze') or re.fullmatch(
+        '/v1/prototype/coordinator-freeze', '/v1/prototype/coordinator-custody') or re.fullmatch(
             r'/ltds/v[12]/jobs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}', path)
         or re.fullmatch(r'/v1/prototype/(?:nodes|jobs)/[A-Za-z0-9][A-Za-z0-9._-]{0,63}', path)
         or re.fullmatch(r'/v1/prototype/nodes/[A-Za-z0-9][A-Za-z0-9._-]{0,63}/schedule-owned/[a-f0-9-]{36}', path))

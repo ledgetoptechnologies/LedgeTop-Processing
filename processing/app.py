@@ -175,6 +175,11 @@ def make_handler(config: Config):
                 self._reply(503, {'error': 'coordinator_maintenance'}, retry_after='2')
 
         def _do_GET_open(self):
+            if self.path == '/v1/prototype/coordinator-custody':
+                if self._authorized(operator=True):
+                    from .runtime_source_custody import observe_runtime_source_custody
+                    self._reply(200, observe_runtime_source_custody(self.prototype_queue, self.reference_listener))
+                return
             if self.path == '/v1/prototype/coordinator-freeze':
                 if self._authorized(operator=True):
                     self._reply(200, queue._coordinator_freeze.status()) if queue else self._reply(404, {'error': 'prototype_disabled'})
