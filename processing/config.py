@@ -61,6 +61,7 @@ class Config:
     viewer_max_archive_bytes: int = 100 * 1024 ** 3
     reference_config_path: str = field(default='', repr=False)
     processing_nodes: tuple[ProcessingNode, ...] = field(default=(), repr=False)
+    authority_lease_dir: str = field(default='', repr=False)
 
     @property
     def node_endpoints(self) -> tuple[ProcessingNode, ...]:
@@ -148,6 +149,10 @@ def from_environment() -> Config:
     if photo_smoke == "1" and not os.environ.get("PROCESSING_PROTOTYPE_STATE_DIR"):
         raise ValueError("photo smoke requires a dedicated prototype state directory")
     viewer = os.environ.get('PROCESSING_VIEWER_ENABLED', '0')
+    authority_lease_dir = os.environ.get('PROCESSING_AUTHORITY_LEASE_DIR', '')
+    if authority_lease_dir and (not os.path.isabs(authority_lease_dir)
+                              or not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR')):
+        raise ValueError('authority lease requires an absolute directory and persistent state')
     if viewer not in ('0', '1'):
         raise ValueError('PROCESSING_VIEWER_ENABLED must be 0 or 1')
     viewer_token = os.environ.get('PROCESSING_VIEWER_TOKEN', '')
@@ -225,4 +230,5 @@ def from_environment() -> Config:
         main_node_token=next((node.token for node in node_endpoints if node.id == "main"), ""),
         reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
         processing_nodes=tuple(node_endpoints),
+        authority_lease_dir=authority_lease_dir,
     )

@@ -34,7 +34,8 @@ STARTUP_TABLES = frozenset(('coordinator_identity', 'jobs', 'nodes', 'owned_main
     'reference_worker_failures', 'reference_worker_receipts', 'source_reader_binding',
     'source_reader_epochs', 'source_reader_fences', 'source_reader_pins', 'sqlite_sequence',
     'viewer_files', 'viewer_incarnations', 'viewer_tasks', 'coordinator_freeze_state',
-    'coordinator_freeze_receipts', 'coordinator_operation_pins', 'coordinator_operation_epochs'))
+    'coordinator_freeze_receipts', 'coordinator_operation_pins', 'coordinator_operation_epochs',
+    'coordinator_authority_lease'))
 
 
 class CoordinatorFrozen(RuntimeError):
@@ -234,10 +235,14 @@ class FreezeGate:
         if os.name == 'posix' and (root_info.st_uid != os.geteuid() or db_info.st_uid != os.geteuid()
                 or lock_info.st_uid != os.geteuid() or root_info.st_mode & 0o077 or lock_info.st_mode & 0o022):
             raise CoordinatorFrozen('private_original_coordinator_lease_required')
-        return dict(authorityId=queue.authority_id, database=str(database),
+        result = dict(authorityId=queue.authority_id, database=str(database),
             databaseIdentity=[db_info.st_dev, db_info.st_ino], root=str(root),
             rootIdentity=[root_info.st_dev, root_info.st_ino], lease=str(lease),
             leaseIdentity=[lock_info.st_dev, lock_info.st_ino, lock_info.st_mode, lock_info.st_nlink, lock_info.st_uid])
+        enrolled = getattr(queue, 'authority_lease', None)
+        if enrolled is not None:
+            result['authorityLease'] = enrolled.snapshot()
+        return result
 
     def _check(self):
         if os.getpid() != self._pid or self.queue._lock.closed:

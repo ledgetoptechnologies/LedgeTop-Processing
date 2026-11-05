@@ -43,19 +43,42 @@ def make_handler(config: Config):
         from .reference_runtime import RuntimeConfigurationError
         raise RuntimeConfigurationError(
             "multi-node reference execution cannot expose legacy direct Viewer mutations")
-    queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
-                  node_ids=config.prototype_node_ids,
-                  treedar_node_ids=config.treedar_node_ids,
-                  viewer_enabled=config.viewer_enabled,
-                  reference_enabled=reference_settings is not None) if config.prototype_state_dir else None
+    queue = lease = None
+    try:
+        if config.prototype_state_dir:
+            from . import authority_lease
+            lease_dir = getattr(config, 'authority_lease_dir', '')
+            if lease_dir:
+                # Keep the installed enrolled fence, before Queue opens state
+                # for writes. A copied state volume must share this host lease.
+                lease = authority_lease.acquire(lease_dir, config.prototype_state_dir)
+            queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
+                node_ids=config.prototype_node_ids, treedar_node_ids=config.treedar_node_ids,
+                viewer_enabled=config.viewer_enabled, reference_enabled=reference_settings is not None,
+                authority_lease=lease)
+            if lease is not None:
+                authority_lease.record_required(queue, lease)
+    except BaseException:
+        if queue is not None:
+            queue.close()
+        elif lease is not None:
+            lease.close()
+        raise
     service = facade = None
     if config.viewer_enabled:
         from .viewer_service import ViewerService
         from .viewer_http import ViewerFacade
-        service = ViewerService(queue, config)
-        spool = Path(config.prototype_state_dir) / 'viewer-spool'
-        spool.mkdir(mode=0o700, exist_ok=True)
-        facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool)
+        try:
+            service = ViewerService(queue, config)
+            spool = Path(config.prototype_state_dir) / 'viewer-spool'
+            spool.mkdir(mode=0o700, exist_ok=True)
+            facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool)
+        except BaseException:
+            if service is not None:
+                service.close()
+            if queue is not None:
+                queue.close()
+            raise
     reference_runtime = None
     if reference_settings is not None:
         from .reference_runtime import ReferenceRuntime

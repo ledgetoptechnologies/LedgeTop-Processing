@@ -29,7 +29,8 @@ REFERENCE_PROFILE = "reference-pipeline-v1"
 
 class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
-                 treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None):
+                 treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None,
+                 authority_lease=None):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids)):
@@ -54,6 +55,17 @@ class Queue(Maintenance):
         if reference_enabled:
             self.allowed_profiles.add(REFERENCE_PROFILE)
         root = Path(directory)
+        from . import authority_lease as authority_leases
+        lease_required = authority_leases.required(root)
+        if lease_required and authority_lease is None:
+            raise authority_leases.LeaseUnavailable('authority_lease_configuration_required')
+        if authority_lease is not None:
+            if not lease_required:
+                raise authority_leases.LeaseUnavailable('authority_lease_marker_missing')
+            if type(authority_lease) is not authority_leases.AuthorityLease:
+                raise authority_leases.LeaseUnavailable('actual_authority_lease_required')
+            authority_lease.check(root)
+        self.authority_lease = authority_lease
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._lock = (root / "coordinator.lock").open("a+b")
         self._lock.seek(0)
@@ -94,6 +106,8 @@ class Queue(Maintenance):
                 db.execute('CREATE TABLE IF NOT EXISTS coordinator_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)')
                 db.execute('INSERT OR IGNORE INTO coordinator_identity VALUES(1, ?)', (str(uuid.uuid4()),))
                 self.authority_id = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
+                if authority_lease is not None and authority_lease.authority != self.authority_id:
+                    raise authority_leases.LeaseUnavailable('authority_lease_authority_changed')
                 from .node_inventory import validate_removed_nodes
                 validate_removed_nodes(db, self.node_ids)
                 unassigned = db.execute("SELECT 1 FROM jobs WHERE node_id IS NULL AND status IN ('running','held') LIMIT 1").fetchone()
@@ -113,6 +127,8 @@ class Queue(Maintenance):
             raise RuntimeError('coordinator process changed')
         with self._lifecycle_lock:
             if self._lock.closed:
+                if self.authority_lease is not None:
+                    self.authority_lease.close()
                 return
             if self._database_users:
                 raise RuntimeError('coordinator transaction still active')
@@ -127,6 +143,8 @@ class Queue(Maintenance):
             if gate is not None:
                 gate.seal_epoch()
             self._lock.close()
+            if self.authority_lease is not None:
+                self.authority_lease.close()
 
     def coordinator_operation(self, kind):
         return self._coordinator_freeze.operation(kind)
@@ -147,6 +165,8 @@ class Queue(Maintenance):
         with self._lifecycle_lock:
             if self._lock.closed:
                 raise RuntimeError('coordinator ownership closed')
+            if self.authority_lease is not None:
+                self.authority_lease.check(Path(self.path).parent)
             db = sqlite3.connect(self.path, timeout=10)
             db.row_factory = sqlite3.Row
             self._database_users += 1
