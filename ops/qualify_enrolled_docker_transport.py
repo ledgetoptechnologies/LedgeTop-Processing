@@ -35,6 +35,42 @@ class QualificationDocker(transport.DockerCLI):
             raise
 
 
+def cleanup_owned(docker, operation, volumes):
+    cleanup_errors = []
+    # An empty scan does not exclude an unresolved daemon RPC applying later.
+    # Do not remove backing volumes until every dispatched mutation is known.
+    if docker.mutation_unknown:
+        print(json.dumps({'retainedUnknownOperation': operation, 'taskVolumes': volumes}), flush=True)
+        raise transport.TransportHeld('task_mutation_unknown_resources_retained')
+    for identifier in docker.matching(['label=' + TASK_LABEL + '=' + operation]):
+        if docker.mutation_unknown:
+            break
+        try:
+            item = docker.inspect(identifier)
+            transport.require(item['Config']['Labels'].get(TASK_LABEL) == operation, 'cleanup_owner_changed')
+            if item['State']['Running']:
+                docker.stop(identifier)
+            transport.require(not docker.inspect(identifier)['State']['Running'], 'cleanup_stopped_required')
+            docker.command('container', 'rm', identifier, mutation=True, timeout=10, output_limit=4096)
+        except Exception:
+            cleanup_errors.append('owned_container_cleanup_unverified')
+    for name in volumes:
+        if docker.mutation_unknown:
+            break
+        try:
+            item = transport.decode(docker.command('volume', 'inspect', name, output_limit=65536))[0]
+            transport.require(item.get('Labels', {}).get(TASK_LABEL) == operation, 'cleanup_volume_owner_changed')
+            transport.require(not docker.matching(['volume=' + name]), 'cleanup_volume_still_mounted')
+            docker.command('volume', 'rm', name, mutation=True, timeout=10, output_limit=4096)
+        except Exception:
+            cleanup_errors.append('owned_volume_cleanup_unverified')
+    if docker.mutation_unknown or cleanup_errors:
+        print(json.dumps({'retainedUnknownOperation': operation, 'taskVolumes': volumes}), flush=True)
+        raise transport.TransportHeld('task_resource_cleanup_unverified')
+    transport.require(not docker.matching(['label=' + TASK_LABEL + '=' + operation]), 'task_container_still_present')
+
+
+
 def initialize_fixture(docker, image_id, operation, name, volume, source):
     value = transport.decode(docker.command('run', '--rm', '--name', name,
         '--label', TASK_LABEL + '=' + operation, '--network', 'none', '--read-only',
@@ -59,7 +95,6 @@ def qualify(image_id, source_commit, daemon_id):
     container_name = 'ltds-qualify-candidate-' + suffix
     completed = []
     volumes = []
-    cleanup_errors = []
     result = None
     try:
         for name in names.values():
@@ -224,37 +259,7 @@ print(json.dumps({'uid':os.getuid(),'gid':os.getgid(),'health':health.get('statu
         print(json.dumps({'completedBeforeFailure': completed}), flush=True)
         raise
     finally:
-        # An empty scan does not exclude an unresolved daemon RPC applying later.
-        # Do not remove backing volumes until every dispatched mutation is known.
-        if docker.mutation_unknown:
-            print(json.dumps({'retainedUnknownOperation': operation, 'taskVolumes': volumes}), flush=True)
-            raise transport.TransportHeld('task_mutation_unknown_resources_retained')
-        for identifier in docker.matching(['label=' + TASK_LABEL + '=' + operation]):
-            if docker.mutation_unknown:
-                break
-            try:
-                item = docker.inspect(identifier)
-                transport.require(item['Config']['Labels'].get(TASK_LABEL) == operation, 'cleanup_owner_changed')
-                if item['State']['Running']:
-                    docker.stop(identifier)
-                transport.require(not docker.inspect(identifier)['State']['Running'], 'cleanup_stopped_required')
-                docker.command('container', 'rm', identifier, mutation=True, timeout=10, output_limit=4096)
-            except Exception:
-                cleanup_errors.append('owned_container_cleanup_unverified')
-        for name in volumes:
-            if docker.mutation_unknown:
-                break
-            try:
-                item = transport.decode(docker.command('volume', 'inspect', name, output_limit=65536))[0]
-                transport.require(item.get('Labels', {}).get(TASK_LABEL) == operation, 'cleanup_volume_owner_changed')
-                transport.require(not docker.matching(['volume=' + name]), 'cleanup_volume_still_mounted')
-                docker.command('volume', 'rm', name, mutation=True, timeout=10, output_limit=4096)
-            except Exception:
-                cleanup_errors.append('owned_volume_cleanup_unverified')
-        if docker.mutation_unknown or cleanup_errors:
-            print(json.dumps({'retainedUnknownOperation': operation, 'taskVolumes': volumes}), flush=True)
-            raise transport.TransportHeld('task_resource_cleanup_unverified')
-        transport.require(not docker.matching(['label=' + TASK_LABEL + '=' + operation]), 'task_container_still_present')
+        cleanup_owned(docker, operation, volumes)
     return result
 
 
