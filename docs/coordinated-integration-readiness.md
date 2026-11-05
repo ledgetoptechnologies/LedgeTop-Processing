@@ -4,6 +4,75 @@ This record describes the review branch
 `codex/viewer-accepted-copy-integration-candidate-20261103`. It is not a deployment
 approval. Runtime acceptance remains incomplete.
 
+## November 4 combined qualification and inactive host preparation
+
+Runtime code `8ff9a7276493c383f9ef250aeead4fca42117fba` paired with an immutable
+Viewer `66031588eb465c8e197acc9db9da3569933a33a3` archive passed **205/205 Linux
+tests, no skips**, using Python 3.13.17, Node 24.22.2 and pinned Python runtime
+dependencies. The Viewer archive SHA-256 is
+`7d0d74625d6041c934b06a005e3160f714771188064000d1c34fdf57ae1f53f5`;
+its package/lock bytes matched the isolated `npm ci --ignore-scripts` dependencies.
+
+- Both whole-object and opt-in range-V2 Driver paths pass the actual Viewer
+  source-client/outbox, HTTPS spool broker, ReferenceDriver/EngineWorker,
+  durable result outbox, worker result API/HTTPS proxy, Viewer result-copy signer,
+  Store acknowledgement replay and worker engine-cache cleanup roundtrip.
+  Viewer `processSubmit` resumes the accepted source intent and automatically
+  queues reconciliation; the fixture uses its normal delay and claim. Lost
+  POST/PUT/completion and copy-ACK replies recover without a duplicate engine
+  initialization, changed receipt IDs or deletion of the Viewer copy.
+- Real transport qualification exposed and fixed dropped ETag/request-ID
+  headers, rejection of Viewer's bare canonical dataset UUID, and missing
+  configured private-CA trust in the Driver's range client. Signed manifests
+  are not rewritten, legacy prefixed identities remain stable, and TLS
+  verification stays enabled.
+- Range grants/renewal/ACKs use the existing protocol, persist cumulative budgets
+  and exact replay, and remain bounded by the fixed reservation deadline. Short
+  grants last at most six hours; the existing worker reservation cap is 24 hours.
+  Unfinished work holds at that deadline. New range journals, pins and token
+  records are included in the metadata quota; quota failure rolls back growth,
+  while exact ACK replay does not add metadata.
+- Signed V2 intake/receipt tests exercise small-first cluster/main claims and
+  leave oversized work queued while an idle cluster takes a later eligible job.
+  Counts are scaled to a one-image cluster ceiling in those fixtures; the
+  configured installed ceiling remains 1,000. Logs now cross the existing
+  public API, fixed-worker proxy, authenticated result reader and execution
+  router. A bounded native JSON-prefix reader pages through large synthetic
+  tails without downloading the full remainder; TreeDar logs stay unavailable.
+
+These are synthetic execution/transport checks. The native engine, physical
+engine probe and mount qualification are injected; Viewer storage resolution
+and capacity use a scoped test adapter. The test preserves actual filesystem
+copy/fsync and database/outbox/signature code, but does not prove TrueNAS
+durability, real photogrammetry, model ingestion/publication, live logs or an
+openable result in the installed Viewer. The large-dataset transfer/capacity
+boundary and the P1-P13 installed acceptance matrix remain to be qualified.
+
+The exact source is privately staged, inactive, on **both PCs** at
+`~/.local/share/ledgetop-processing-reference/dependency-candidates/8ff9a72/source`.
+Archive SHA-256:
+`cd808291d97314d33f57d70b1dfe5b8a290b6a821cc51b3a0f620905952717ee`.
+Using each host's previously prepared `39e0825` dependency venv, all **103**
+Processing/ops Python modules parsed and worker/runtime imports passed; **24/24
+focused validators per host** passed without skips. Main uses Python 3.10.12
+and pycparser 2.23; cluster uses Python 3.14.4 and pycparser 3.12. Both retain
+cryptography 50.0.2, cffi 2.1.1 and rfc8785 0.1.4. Each private preparation receipt
+records `workerStarted: false`; no current-version link, service, live config,
+system package, engine container or TrueNAS setting was changed.
+
+The local coordinator image built from this runtime revision is
+`sha256:ed1800bcf8e0eda89ff4f1eb16d98faf7896c8111240fc917801f53432fba73c`.
+It passed a network-isolated, read-only UID-10001 import/health-200 smoke check;
+the task-owned container and listener were removed/joined. It has not been
+published or installed. Reference workers remain an installation gate.
+
+Viewer owner reports 46 focused status/UI/outbox checks at `66031588`, including
+persisted node/phase metadata, queued pre-engine phases and progress retention.
+Rendered installed acceptance and real ingest/publication remain separate gates.
+An exact-lock production dependency audit also reported body-parser
+`GHSA-27r3-jxmh-p828` (high, `<1.20.9`); the Viewer owner has been asked to review
+the targeted fix before release. No broad dependency update was performed here.
+
 ## November 4 worker integration checkpoint
 
 ### Actual client and host preparation checkpoint
