@@ -4,7 +4,9 @@ Capacity probes return *current free bytes*, already excluding allocated bytes.
 Remaining bytes plus retained precharged control holds are subtracted from that
 snapshot. Control holds remain conservative after metadata materializes; no TTL
 or ordinary terminal settlement releases them. Call record_allocated only
-after writes consume disk; it moves bytes from remaining to allocated. Production
+after writes consume disk; it moves bytes from remaining to allocated. Call
+begin_transfer before the first input byte: a fenced reservation keeps its whole
+remaining budget and never expires, even while allocated is still zero. Production
 and staging are immutable reservation settings, not interchangeable namespaces.
 Confirmed terminal attestation releases only unused reservation budget; allocated
 files still occupy the probe's free-space snapshot until an executor removes them.
@@ -107,6 +109,7 @@ class ScratchLedger:
             schema = """
                 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS job_environments (job TEXT PRIMARY KEY, environment TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS transfer_fences (reservation TEXT PRIMARY KEY, started_at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS reservations (
                   id TEXT PRIMARY KEY, settings TEXT NOT NULL, job TEXT NOT NULL,
                   generation INTEGER NOT NULL, environment TEXT NOT NULL,
@@ -247,9 +250,10 @@ class ScratchLedger:
         return float(db.execute("SELECT value FROM metadata WHERE key='clock'").fetchone()[0])
 
     def _expire(self, db, now):
-        # Neither engine-started nor uncertain reservations may expire automatically.
+        # Neither engine-started, uncertain nor fenced reservations may expire automatically.
         db.execute("UPDATE reservations SET state='expired', remaining=0 "
-                   "WHERE state='reserved' AND expires<=? AND allocated=0", (now,))
+                   "WHERE state='reserved' AND expires<=? AND allocated=0 "
+                   "AND id NOT IN (SELECT reservation FROM transfer_fences)", (now,))
 
     def reserve(self, *, job_id, generation, reservation_id, manifest_sha256,
                 input_bytes, output_budget, environment, ttl_seconds, worker_ready):
@@ -292,6 +296,23 @@ class ScratchLedger:
             except sqlite3.IntegrityError as exc:
                 raise PolicyConflict("job generation already reserved") from exc
             return dict(self._reservation(db, reservation_id))
+
+    def begin_transfer(self, reservation_id):
+        """Durably fence input writes before the first byte; idempotent.
+
+        Bytes in flight are not yet allocated, so the fence is what keeps them
+        budgeted. It lives in its own table because a pinned older allocator's
+        positional reservations INSERT must still open this database.
+        """
+        with self._transaction() as db:
+            now = self._now(db)
+            self._expire(db, now)
+            row = self._reservation(db, reservation_id)
+            # _expire has already retired an unfenced lease past its deadline with
+            # nothing allocated. This is record_allocated's refusal, before the bytes.
+            if row["state"] not in ("reserved", "engine_started", "uncertain"):
+                raise PolicyConflict("allocation outside reservation")
+            db.execute("INSERT OR IGNORE INTO transfer_fences VALUES(?,?)", (reservation_id, now))
 
     def record_allocated(self, reservation_id, allocated_bytes):
         """Set monotonic total allocation after disk writes; never a delta."""
@@ -414,7 +435,9 @@ class ScratchLedger:
             now = self._now(db)
             self._expire(db, now)
             row = self._reservation(db, reservation_id)
-            if row["state"] == "reserved" and row["expires"] <= now:
+            # A fence outlives its lease, so terminal must still be able to release it.
+            fenced = db.execute("SELECT 1 FROM transfer_fences WHERE reservation=?", (reservation_id,)).fetchone()
+            if row["state"] == "reserved" and row["expires"] <= now and not (state == "terminal" and fenced):
                 raise PolicyConflict("lease expired before engine mutation")
             if row["state"] == "expired" or (row["state"] == "terminal" and state != "terminal"):
                 raise PolicyConflict("invalid engine transition")

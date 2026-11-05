@@ -1402,6 +1402,7 @@ class ReferenceDriver:
                                 raise SourceRenewalUnavailable('source renewal deferred') from None
                             except DriverHeld:
                                 raise SourceRenewalInvalid('source renewal rejected') from None
+                        self.ledger.begin_transfer(reservation)
                         try:
                             self.source_range_client.download_object(grant=grant, object_id=obj['id'],
                                 destination=target, grant_provider=renew_during_transfer)
@@ -1413,6 +1414,7 @@ class ReferenceDriver:
                         attempts = data.setdefault('fetchAttempts', {}).get(obj['id'], 0)
                         if attempts >= 3:
                             raise DriverHeld('worker_fetch_attempt_budget_exhausted')
+                        self.ledger.begin_transfer(reservation)
                         data['fetchAttempts'][obj['id']] = attempts + 1
                         self._save(job_id, stage, data)
                         self.broker.download_object(grant, obj['id'], target)

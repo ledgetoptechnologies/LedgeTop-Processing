@@ -218,6 +218,72 @@ class ScratchPolicyTests(unittest.TestCase):
     def dump(self):
         with closing(sqlite3.connect(self.ledger.path)) as db,db:return '\n'.join(db.iterdump())
 
+    def row(self,reservation='r1'):
+        with closing(sqlite3.connect(self.ledger.path)) as db,db:
+            return db.execute('SELECT * FROM reservations WHERE id=?',(reservation,)).fetchone()
+
+    def fences(self):
+        with closing(sqlite3.connect(self.ledger.path)) as db,db:
+            return db.execute('SELECT * FROM transfer_fences ORDER BY reservation').fetchall()
+
+    def test_fenced_partial_transfer_keeps_budget_past_lease_and_restart(self):
+        self.reserve();self.ledger.begin_transfer('r1')
+        part=self.ledger.prepare_job_directory('r1')/'.reference-synthetic.part';part.write_bytes(b'x'*50)
+        self.free=950;before=self.row();self.now=500;self.ledger=self.open()
+        # 950-400-100 leaves 450, so 500 fits only if the fenced 400 had been released.
+        with self.assertRaisesRegex(PolicyConflict,'insufficient unreserved scratch'):
+            self.reserve(job_id='j2',reservation_id='r2',input_bytes=200)
+        self.assertEqual(self.row(),before);self.assertEqual(self.row()[6:9],('reserved',400,0))
+        self.assertIsNone(self.row('r2'));self.assertEqual(part.read_bytes(),b'x'*50)
+        self.ledger.record_allocated('r1',100);self.assertEqual(self.row()[6:9],('reserved',300,100))
+
+    def test_begin_transfer_is_idempotent_and_keeps_first_fence(self):
+        self.reserve();self.ledger.begin_transfer('r1');first=self.fences();self.now=110
+        self.ledger.begin_transfer('r1');self.assertEqual(self.fences(),first);self.assertEqual(first,[('r1',100.0)])
+        self.now=500;self.ledger=self.open();self.ledger.begin_transfer('r1')
+        self.assertEqual(self.fences(),first);self.assertEqual(self.row()[6:9],('reserved',400,0))
+
+    def test_lease_past_deadline_before_first_write_is_refused_without_a_fence(self):
+        self.reserve();self.now=120
+        with self.assertRaisesRegex(PolicyConflict,'allocation outside reservation'):self.ledger.begin_transfer('r1')
+        self.assertEqual(self.fences(),[]);self.assertEqual(self.row()[6:9],('expired',0,0))
+        with self.assertRaises(PolicyConflict):self.ledger.begin_transfer('unknown')
+
+    def test_later_object_past_lease_fences_an_already_allocated_reservation(self):
+        self.reserve();self.ledger.record_allocated('r1',10);self.now=500
+        self.ledger.begin_transfer('r1');self.assertEqual(self.row()[6:9],('reserved',390,10))
+
+    def test_terminal_release_frees_a_fenced_reservation_past_its_lease(self):
+        self.reserve();self.ledger.begin_transfer('r1');self.now=500
+        with self.assertRaisesRegex(PolicyConflict,'lease expired before engine mutation'):self.ledger.set_engine_state('r1','engine_started')
+        self.ledger.set_engine_state('r1','terminal',terminal_attested=True);self.assertEqual(self.row()[6:9],('terminal',0,0))
+        with self.assertRaises(PolicyConflict):self.ledger.begin_transfer('r1')
+        self.ledger=self.open();self.reserve(job_id='j2',reservation_id='r2',input_bytes=500)
+
+    def test_unfenced_allocated_lease_still_refuses_terminal_past_deadline(self):
+        self.reserve();self.ledger.record_allocated('r1',10);self.now=500
+        with self.assertRaisesRegex(PolicyConflict,'lease expired before engine mutation'):
+            self.ledger.set_engine_state('r1','terminal',terminal_attested=True)
+
+    def test_fenced_result_reaches_ordinary_cleanup(self):
+        self.reserve();self.ledger.begin_transfer('r1');self.ledger.record_allocated('r1',100);self.ledger.set_engine_state('r1','engine_started')
+        identity=dict(job_id='j1',generation=1,manifest_sha256='a'*64,pipeline_sha256='b'*64,result_manifest_sha256='c'*64)
+        self.ledger.register_result('r1',**identity,objects=[dict(object_id='o1',bytes=1,sha256='d'*64,relative_path='jobs/r1/o1.bin')])
+        self.ledger.accept_receipt('r1',receipt_id='receipt',storage_receipt_id='storage',**identity,accepted_object_ids=['o1'],viewer_receipt=dict(id='v'),verified_copy=True)
+        self.ledger.set_engine_state('r1','terminal',terminal_attested=True);self.now=500
+        self.assertEqual([row['id'] for row in self.ledger.cleanup_candidates()],['o1'])
+
+    def test_actual_pinned_old_allocator_opens_and_admits_beside_a_fence(self):
+        module=self.legacy_module();self.reserve();self.ledger.begin_transfer('r1');old=self.old_open(module)
+        old.reserve(job_id='old-job',generation=1,reservation_id='old-res',manifest_sha256='d'*64,input_bytes=1,output_budget=0,environment='staging',ttl_seconds=20,worker_ready=True)
+        self.assertEqual(self.fences(),[('r1',100.0)]);self.assertEqual(self.row('old-res')[6:9],('reserved',1,0))
+
+    def test_old_allocator_database_gains_the_fence_table_on_new_open(self):
+        module=self.legacy_module();path=self.root/'private'/'old.sqlite'
+        old=module.ScratchLedger(path,self.root,capacity_probe=lambda _:self.free,clock=lambda:self.now,safety_floor_bytes=100,cleanup_grace_seconds=10)
+        old.reserve(job_id='j1',generation=1,reservation_id='r1',manifest_sha256='a'*64,input_bytes=100,output_budget=300,environment='staging',ttl_seconds=20,worker_ready=True)
+        ScratchLedger(path,self.root,capacity_probe=lambda _:self.free,clock=lambda:self.now,safety_floor_bytes=100,cleanup_grace_seconds=10).begin_transfer('r1')
+
     def test_actual_pinned_old_allocator_still_opens_nocharge_legacy_config(self):
         module=self.legacy_module();self.reserve();self.ledger.record_allocated('r1',100)
         self.assertNotIn('accountingVersion',self.config());old=self.old_open(module)
