@@ -29,7 +29,7 @@ Operation: `532cc128-3d24-4e96-ba0b-33e4cbbf37b1`.
 Stopped outer controller: `ltds-phase-forward-532cc1283d244e96`, exact ID
 `660183ec23c3f266da74caafb273133f827084b56ea2db3dbebe3c4d3df9fb08`.
 Observed PID0, exit1, no OOM. Its private artifact volume
-`ltds-phase-forward-artifacts-532cc1283d244e96` remains for evidence.
+`ltds-phase-forward-artifacts-532cc1283d244e96` was initially retained.
 
 No uncertain mutation was recorded; known-safe inner cleanup completed. Exact
 inner task-label container and volume inventories were independently empty.
@@ -44,6 +44,13 @@ original baseline and synthetic census key:
 - SHA256 `7b9f1866f661236d1ba48e40ee0b5146e146aaad3b8bf784743c5a262bc9d6a9`.
 - Exact receipt match, clean stream closure and client exit0.
 - `restoreAuthorized=false`; a copy is never original lock authority.
+
+After that diagnostic completed, the root agent's conditional cleanup
+authorization was fulfilled: exact owner label/PID0/exit1 and absence of other
+volume mounts were checked, then only this stopped controller and its volume
+were removed. Exact operation-label inventory was empty afterward. Private
+diagnostic copies of the journal, receipt, baseline and TAR remain available;
+the operation was never replayed.
 
 ## Measured cost and next qualification
 
