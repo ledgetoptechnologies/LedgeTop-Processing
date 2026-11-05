@@ -104,6 +104,21 @@ class ParentGuardTests(unittest.TestCase):
             response=original(*args,**kwargs);body=dict(response.body);del body['heldReason'];return Response(200,body)
         with patch.object(self.api,'handle',side_effect=missing):self.held()
 
+    def test_actual_tls_claim_read_accepts_only_explicit_integer_v2_marker(self):
+        original=self.api.handle
+        def altered(version):
+            def reply(*args,**kwargs):
+                response=original(*args,**kwargs)
+                return Response(response.status,{**response.body,'sourceIntakeVersion':version})
+            return reply
+        with patch.object(self.api,'handle',side_effect=altered(2)):
+            snapshot=self.client.snapshot(self.host.claim['jobId'],self.host.claim['claimToken'])
+            self.assertEqual(snapshot['sourceIntakeVersion'],2)
+        for version in (True,2.0,1,3,None,'2'):
+            with self.subTest(version=version),patch.object(self.api,'handle',side_effect=altered(version)):
+                with self.assertRaises(m.ParentGuardHeld):
+                    self.client.snapshot(self.host.claim['jobId'],self.host.claim['claimToken'])
+
     def test_real_private_api_refuses_wrong_worker_instance_and_claim_token(self):
         for column,value,table,key in [('instance_id','other','reference_claims','job_id'),('claim_hash','0'*64,'jobs','id')]:
             with self.host.queue._db() as db:

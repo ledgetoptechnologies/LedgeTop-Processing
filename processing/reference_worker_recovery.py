@@ -320,8 +320,8 @@ class OriginalClaimRecovery:
         if type(value['schemaVersion']) is not int or value['schemaVersion']!=1 or value['protocol']!=STATE_PROTOCOL or value['authorityId']!=parent['authorityId'] or type(value['eligible']) is not bool:raise WorkerRecoveryHeld('recovery_state_binding_changed')
         p._uuid(value['coordinatorEpoch'],'recovery epoch')
         claim=value['claim']
-        from .reference_parent_guard import CLAIM_FIELDS
-        p._closed(claim,CLAIM_FIELDS,'recovery claim')
+        from .reference_parent_guard import validate_claim_fields
+        validate_claim_fields(claim)
         expected=dict(schemaVersion=1,protocol='ltds-parent-claim-v1',**{key:parent[key] for key in ('authorityId','jobId','generation','environment','nodeId','workerId','workerInstanceId','claimRequestId','claimTokenSha256','manifestSha256','pipelineDigest')})
         if any(not exact(claim[k],v) for k,v in expected.items()) or claim['executionPhase']!='processing':raise WorkerRecoveryHeld('recovery_claim_changed')
         physical=dict(node_id=parent['nodeId'],engine_id=parent['engineId'],authority_id=parent['authorityId'],coordinator_origin=parent['coordinatorOrigin'],gate_generation=parent['gateGeneration'],output_budget=parent['outputBudget'])

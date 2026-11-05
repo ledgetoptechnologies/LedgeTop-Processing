@@ -43,6 +43,16 @@ PARENT_FIELDS=('jobId','generation','environment','nodeId','workerId','workerIns
 def exact(left,right):return p.canonical_json(left)==p.canonical_json(right)
 
 
+def validate_claim_fields(value):
+    """Closed claim shape with the explicit V2 source digest marker, if present."""
+    fields=CLAIM_FIELDS
+    if type(value) is dict and 'sourceIntakeVersion' in value:
+        p._require(type(value['sourceIntakeVersion']) is int and value['sourceIntakeVersion']==2,
+                   'invalid claim source intake version')
+        fields+=('sourceIntakeVersion',)
+    p._closed(value,fields,'claim observation')
+
+
 def _credential(value):
     if type(value) is not str or not 16<=len(value)<=4096 or not all(0x21<=ord(c)<=0x7e for c in value):raise ParentGuardHeld('fixed_worker_credential_required')
     return value
@@ -147,7 +157,7 @@ class ClaimStateClient:
                 if total>self.policy.max_response_bytes:raise ParentGuardHeld('bounded_claim_observation_required')
                 if length is not None and total==int(length):break
             if time.monotonic()>=deadline or length is not None and total!=int(length):raise ParentGuardHeld('claim_observation_response_unavailable')
-            value=decode_receipt(b''.join(chunks));p._closed(value,CLAIM_FIELDS,'claim observation')
+            value=decode_receipt(b''.join(chunks));validate_claim_fields(value)
             if type(value['schemaVersion']) is not int or value['schemaVersion']!=1 or value['protocol']!='ltds-parent-claim-v1':raise ParentGuardHeld('claim_observation_version_unavailable')
             p._uuid(value['authorityId'],'observed authority');p._uuid(value['jobId'],'observed job');p._integer(value['generation'],'observed generation');p._environment(value['environment'])
             for key in ('nodeId','workerId','workerInstanceId','claimRequestId','executionPhase'):p._slug(value[key],'observed identity')
