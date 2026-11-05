@@ -101,6 +101,8 @@ class Queue(Maintenance):
                 db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held')")
                 db.execute("UPDATE jobs SET status='held', held_reason='coordinator_restart', updated_at=CURRENT_TIMESTAMP WHERE status='running'")
                 self._init_maintenance(db)
+            from .coordinator_freeze import FreezeGate
+            self._coordinator_freeze = FreezeGate(self)
         except BaseException:
             self._lock.close()
             raise
@@ -111,12 +113,18 @@ class Queue(Maintenance):
         with self._lifecycle_lock:
             if self._database_users:
                 raise RuntimeError('coordinator transaction still active')
+            gate = getattr(self, '_coordinator_freeze', None)
+            if gate is not None:
+                gate.require_quiescent_close()
             readers = getattr(self, '_source_reader_registry', None)
             if readers is not None:
                 # Refused shutdown retains both leases; live/uncertain source
                 # descriptors must never outlive coordinator authority.
                 readers.close()
             self._lock.close()
+
+    def coordinator_operation(self, kind):
+        return self._coordinator_freeze.operation(kind)
 
     def node_profiles(self, node_id):
         return sorted(profile for profile in self.allowed_profiles
@@ -139,10 +147,18 @@ class Queue(Maintenance):
             self._database_users += 1
             try:
                 db.execute("PRAGMA synchronous=FULL")
+                gate = getattr(self, '_coordinator_freeze', None)
+                if gate is not None:
+                    gate.authorize_connection(db)
                 with db:
                     yield db
                     if os.getpid() != self._creator_pid or self._lock.closed:
                         raise RuntimeError('coordinator ownership changed before commit')
+            except sqlite3.DatabaseError as error:
+                if getattr(error, 'sqlite_errorcode', None) == sqlite3.SQLITE_AUTH:
+                    from .coordinator_freeze import CoordinatorFrozen
+                    raise CoordinatorFrozen('coordinator_maintenance') from None
+                raise
             finally:
                 try:
                     db.close()
