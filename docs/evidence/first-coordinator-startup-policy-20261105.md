@@ -78,3 +78,15 @@ UID/GID10001, --init and128MiB tmpfs. It exited0, auto-removed, and exact task-l
 inventory was empty. Two real journal child-death cases and dispatch-rejection
 replay checks are included in that run; concrete daemon transport proof remains
 owned by the separate driver qualification.
+
+
+## Remaining full-goal enablement
+
+SourceRelease-disabled first cutover is a staging boundary, not a permanently
+narrower release. After original custody/quarantine/final activation is qualified,
+the full goal still requires a separately controlled configuration/schema
+transition enabling SourceRelease, its actual installed runtime acceptance,
+signed Viewer-to-backend delivery/retention tests and cleanup observation against
+the operator-qualified NAS boundary. That later transition must declare the three
+reviewed release tables and prove its timers/IO honor the same central freeze;
+this first-profile builder deliberately cannot silently authorize it.
