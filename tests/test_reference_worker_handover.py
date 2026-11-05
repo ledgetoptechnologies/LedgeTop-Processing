@@ -103,7 +103,9 @@ class ReferenceWorkerHandoverTests(unittest.TestCase):
         patcher.start();self.addCleanup(patcher.stop)
 
     def run_update(self):
-        return maintenance.run(self.root,self.api,self.host.operator,self.host.receipt,5,drain_seconds=2)
+        # The readonly source census crosses a Windows Docker bind in CI; allow
+        # bounded startup retries independently of the queue wait budget.
+        return maintenance.run(self.root,self.api,self.host.operator,self.host.receipt,5,drain_seconds=10)
 
     def test_real_factory_pin_migration_tls_readiness_and_gate_yield_complete_before_reopen(self):
         old=self.worker_path.read_bytes()
@@ -161,6 +163,21 @@ class ReferenceWorkerHandoverTests(unittest.TestCase):
                 with patch.object(bridge.managed,'run',side_effect=AssertionError('completion lookup cannot mutate')):
                     self.assertEqual(supervisor.advance(identifier),result)
                 self.assertEqual(self.control.calls,['stop','start'])
+
+    def test_factory_refuses_identical_shadow_source_before_engine_or_config_changes(self):
+        import shutil
+        self.control.close()
+        shadow=self.root/'shadow'
+        for package in ('ops','processing'):
+            shutil.copytree(Path(self.config['maintenanceReadiness']['sourceRoot'])/package,shadow/package,
+                ignore=shutil.ignore_patterns('__pycache__'))
+        copied=json.loads(self.worker_path.read_bytes());copied['maintenanceReadiness']['sourceRoot']=str(shadow)
+        self.assertEqual(source_digest(shadow),copied['maintenanceReadiness']['sourceSha256'])
+        save(self.worker_path,copied);before=self.worker_path.read_bytes()
+        with self.assertRaisesRegex(ValueError,'installed worker source pin differs'):
+            daemon.build_worker(daemon.load_config(str(self.worker_path)))
+        self.assertEqual(self.worker_path.read_bytes(),before)
+        self.assertEqual(self.host.adapter.calls,[]);self.assertEqual(self.control.calls,[])
 
     def test_transient_old_driver_busy_readiness_retries_before_any_stop(self):
         from urllib.error import HTTPError
@@ -256,6 +273,22 @@ class ReferenceWorkerHandoverTests(unittest.TestCase):
         self.assertEqual(self.queue.get_node('cluster')['state'],'active')
         self.assertEqual(self.run_update()['status'],'succeeded')
         self.assertEqual(self.control.calls,['stop','start']);self.assertEqual(self.host.adapter.calls,[NEW])
+        self.assertEqual(self.host.ingress.opens,1)
+
+    def test_health_failure_after_durable_compose_pin_holds_aligned_new_worker_and_engine(self):
+        healthy=self.host.adapter.healthy
+        def unhealthy_after_pin(image):
+            if json.loads((self.root/'compose.json').read_text())['services']['node']['image']==NEW:return False
+            return healthy(image)
+        with patch.object(self.host.adapter,'healthy',side_effect=unhealthy_after_pin):
+            with self.assertRaises(maintenance.GateError):self.run_update()
+        self.assertEqual(self.queue.get_node('cluster')['state'],'updating')
+        self.assertEqual(json.loads((self.root/'compose.json').read_text())['services']['node']['image'],NEW)
+        self.assertEqual(json.loads(self.worker_path.read_text())['engineVersion'],NEW_ENGINE_VERSION)
+        self.assertEqual(self.host.adapter.calls,[NEW]);self.assertEqual(self.control.calls,['stop','start'])
+        self.assertEqual(self.host.ingress.opens,0)
+        self.assertEqual(self.run_update()['status'],'succeeded')
+        self.assertEqual(self.host.adapter.calls,[NEW]);self.assertEqual(self.control.calls,['stop','start'])
         self.assertEqual(self.host.ingress.opens,1)
 
     def test_foreign_config_change_is_not_overwritten_or_rolled_back(self):

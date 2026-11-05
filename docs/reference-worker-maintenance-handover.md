@@ -18,7 +18,18 @@ credential separate from worker, result and engine credentials. The installed
 source root must match the actual daemon source. SourceSha256 is computed by
 `processing.reference_worker_readiness.source_digest`; it binds bounded Python
 source files under ops/processing and rejects symlinks. This detects accidental
-source drift; it is not hardware attestation against a privileged administrator.
+source drift. With maintenance-readiness explicitly enabled, the actual loaded
+ops/processing module file and spec origins must resolve to that exact source root.
+The service identity must currently lack write access to source directories and
+files, with no symlinks or group/other writers. Construction captures module
+file identity/hash and directory identity; readiness revalidates them alongside
+the whole footprint captured when the readiness module was imported. An identical
+shadow tree, mixed PYTHONPATH import, writable source checkout, or later changed
+origin/footprint cannot claim readiness. This feature requires a separately
+reviewed readonly deployment; ordinary worker configs retain existing behavior.
+This is not hardware attestation against a trusted host administrator, same-user
+chmod, parent rename or arbitrary in-process code tampering. Current readonly
+access, actual origins and repeated identity/fingerprint checks are the boundary.
 
 The reviewed unit uses the exact Python `-B -m ops.reference_worker_daemon --config`
 command, Type=simple, UMask=0077, NoNewPrivileges=yes, KillMode=mixed and
@@ -58,9 +69,14 @@ never publish it. Keep receipt and config directories private to their service u
 
 ## Failure and recovery boundaries
 
-Known pre-open startup/readiness failures stop the new worker, CAS-restore the exact
+Known startup/readiness failures before authoritative Compose pinning stop the new
+worker, CAS-restore the exact
 old config, replace the prior image, and start/authenticate the old factory. The
-node remains failed with ingress closed. Unknown start/stop acknowledgements,
+node remains failed with ingress closed. After authoritative Compose pinning
+begins, a failed health/finalization check holds the new worker, engine and
+persistent pin aligned behind the closed queue gate; it cannot report an old-image
+rollback while the target Compose pin is durable. Verified finalization can
+resume without repeating stop/start/replacement. Unknown start/stop acknowledgements,
 foreign config/lease changes, authority changes and uncertain ingress reloads hold
 closed rather than repeating side effects. Lost config acknowledgement is recovered
 only by exact-byte readback and fsync. Finished replay authenticates the current

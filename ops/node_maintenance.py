@@ -293,7 +293,10 @@ def run_reference(root,api,operator,receipt,wait_seconds,drain_seconds,*,expecte
                 return finalize_success(root,api,operator,receipt,settings,ingress,adapter,state,drain_seconds,worker_handover=handover)
             except WorkerHandoverUncertain:raise
             except (WorkerHandoverHeld,GateError,UpdateError):
-                if state.get('stage') in ('ingress_open_pending','finish_pending','completed'):raise
+                # Once authoritative Compose pinning starts, keep the new pin,
+                # worker and engine aligned. Reconcile finalization; never claim
+                # an old-image rollback while a target Compose pin may be durable.
+                if state.get('stage') in ('compose_pin_pending','compose_pinned','ingress_open_pending','finish_pending','completed'):raise
                 handover.stop_new(worker_deadline());handover.restore_old_config(gate)
                 adapter.bind_engine_version(private['oldEngineVersion']);adapter.replace(private['oldImage'])
                 if not wait_healthy(adapter,private['oldImage'],30):raise GateError('worker handover rollback engine unavailable')

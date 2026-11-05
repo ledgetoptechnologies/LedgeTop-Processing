@@ -11,13 +11,13 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock,patch
 import uuid
 
 from processing import reference_protocol as p
 from processing.reference_api import Response
 from processing.reference_http import create_reference_http_server
-from processing.reference_worker_readiness import WorkerReadinessAPI,PATH,source_digest
+from processing.reference_worker_readiness import WorkerReadinessAPI,PATH,source_digest,loaded_source_snapshot
 from tests.test_reference_dynamic_source_intake_scale import _write_tls_material
 
 
@@ -25,9 +25,10 @@ class ReadinessTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name);self.root.chmod(0o700)
-        self.source=self.root/'source'
-        for relative in ('processing/reference_driver.py','ops/reference_worker_daemon.py'):
-            path=self.source/relative;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('# synthetic footprint\n')
+        self.source=Path(__file__).resolve().parents[1]
+        if os.name=='nt':
+            guard=patch('processing.reference_worker_readiness.immutable_source_paths',return_value={})
+            guard.start();self.addCleanup(guard.stop)
         self.path=self.root/'driver.sqlite'
         db=sqlite3.connect(self.path)
         db.executescript("CREATE TABLE driver_engine_pin(singleton INTEGER PRIMARY KEY,pin TEXT); CREATE TABLE driver_binding(singleton INTEGER PRIMARY KEY,binding TEXT);")
@@ -79,10 +80,12 @@ class ReadinessTests(unittest.TestCase):
 
     def test_busy_driver_changed_source_and_dead_thread_all_hold(self):
         with self.driver._lock:self.assertEqual(self.request()[1].status,503)
-        file=self.source/'processing/reference_driver.py';file.write_text('changed')
+        with patch.object(p,'__file__',str(self.root/'foreign-protocol.py')):
+            self.assertEqual(self.request()[1].status,503)
+        original=self.api.loaded_source['modules']['processing.reference_protocol']['sha256']
+        self.api.loaded_source['modules']['processing.reference_protocol']['sha256']='b'*64
         self.assertEqual(self.request()[1].status,503)
-        self.settings['sourceSha256']=source_digest(self.source)
-        self.api.settings=dict(self.settings)
+        self.api.loaded_source['modules']['processing.reference_protocol']['sha256']=original
         self.api.service.health=lambda:dict(state='ready',driverAlive=False,listenerAlive=True)
         self.assertEqual(self.request()[1].status,503)
 
@@ -97,6 +100,30 @@ class ReadinessTests(unittest.TestCase):
     def test_invalid_actual_option_catalog_prevents_ready_without_mutating_driver(self):
         self.options[:]=[dict(name='broken',type='unknown-new-type',value='unsupported')]
         self.assertEqual(self.request()[1].status,503)
+
+    def test_identical_shadow_tree_cannot_claim_actual_loaded_source(self):
+        import shutil
+        shadow=self.root/'shadow'
+        for package in ('ops','processing'):
+            shutil.copytree(self.source/package,shadow/package,ignore=shutil.ignore_patterns('__pycache__'))
+        self.assertEqual(source_digest(shadow),source_digest(self.source))
+        with self.assertRaisesRegex(ValueError,'reviewed installation'):loaded_source_snapshot(shadow)
+
+    @unittest.skipUnless(os.name!='nt','Linux readonly source contract')
+    def test_service_writable_source_is_not_automatically_maintenance_ready(self):
+        from processing.reference_worker_readiness import immutable_source_paths
+        writable=self.root/'writable';(writable/'ops').mkdir(parents=True);(writable/'processing').mkdir()
+        (writable/'ops'/'source.py').write_text('# owned writable source')
+        with self.assertRaisesRegex(ValueError,'readonly worker source'):immutable_source_paths(writable)
+
+    def test_foreign_package_search_path_refuses_readiness_before_later_import(self):
+        import processing
+        with patch.object(processing,'__path__',[str(self.source/'processing'),str(self.root/'foreign')]):
+            self.assertEqual(self.request()[1].status,503)
+
+    def test_forged_module_spec_origin_refuses_readiness(self):
+        with patch.object(p.__spec__,'origin',str(self.root/'foreign.py')):
+            self.assertEqual(self.request()[1].status,503)
 
     def test_actual_tls_listener_enforces_separate_readiness_credential(self):
         key,cert=_write_tls_material(self.root)

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 import time
 import uuid
 
@@ -48,6 +49,67 @@ def source_digest(root):
     return p.digest(files)
 
 
+_ACTUAL_SOURCE_ROOT=Path(__file__).resolve().parents[1]
+_IMPORTED_SOURCE_SHA256=source_digest(_ACTUAL_SOURCE_ROOT)
+
+
+def immutable_source_paths(root):
+    """Current service identity must not be able to write runtime source paths."""
+    if not sys.platform.startswith('linux'):raise ValueError('Linux readonly installed source required')
+    root=Path(root);pending=[root/'ops',root/'processing'];result={};count=0
+    paths=[root]
+    while pending:
+        directory=pending.pop();paths.append(directory)
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                count+=1
+                if count>4096 or entry.is_symlink():raise ValueError('immutable worker source required')
+                if entry.is_dir(follow_symlinks=False):pending.append(Path(entry.path))
+                else:paths.append(Path(entry.path))
+    for path in paths:
+        info=path.lstat();readonly_mount=bool(os.statvfs(path).f_flag & os.ST_RDONLY)
+        if (path.resolve()!=path or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode))
+                or (info.st_mode & 0o022 and not readonly_mount) or os.access(path,os.W_OK)):
+            raise ValueError('readonly worker source required')
+        result[path.relative_to(root).as_posix()]=dict(device=info.st_dev,inode=info.st_ino,
+            mode=stat.S_IMODE(info.st_mode),owner=info.st_uid,group=info.st_gid,readonlyMount=readonly_mount)
+    return result
+
+
+def loaded_source_snapshot(root):
+    """Bind actual imported package origins to the reviewed installed footprint."""
+    root=Path(root).absolute()
+    if root!=_ACTUAL_SOURCE_ROOT or source_digest(root)!=_IMPORTED_SOURCE_SHA256:
+        raise ValueError('loaded worker source differs from reviewed installation')
+    paths=immutable_source_paths(root)
+    result={}
+    for key,module in tuple(sys.modules.items()):
+        spec=getattr(module,'__spec__',None)
+        name=getattr(spec,'name',None) if key=='__main__' else key
+        if type(name) is not str or name.split('.')[0] not in ('ops','processing'):continue
+        if module is None or spec is None or spec.name!=name:raise ValueError('loaded worker module origin unavailable')
+        relative=Path(*name.split('.'))
+        expected=root/(relative/'__init__.py' if spec.submodule_search_locations is not None else relative.with_suffix('.py'))
+        actual=getattr(module,'__file__',None);origin=getattr(spec,'origin',None)
+        namespace=spec.submodule_search_locations is not None and actual is None and origin is None and not expected.exists()
+        if not namespace and (type(actual) is not str or type(origin) is not str or Path(actual)!=expected or Path(origin)!=expected
+                or expected.resolve()!=expected):raise ValueError('loaded worker module origin changed')
+        if spec.submodule_search_locations is not None and (list(dict.fromkeys(spec.submodule_search_locations))!=[str(expected.parent)]
+                or list(dict.fromkeys(getattr(module,'__path__',())))!=[str(expected.parent)]):
+            raise ValueError('loaded worker package search path changed')
+        if namespace:
+            directory=expected.parent;info=directory.stat()
+            result[name]=dict(relativePath=directory.relative_to(root).as_posix(),device=info.st_dev,inode=info.st_ino,namespace=True)
+            continue
+        info=expected.stat()
+        result[name]=dict(relativePath=expected.relative_to(root).as_posix(),device=info.st_dev,inode=info.st_ino,
+            byteSize=info.st_size,modifiedNs=info.st_mtime_ns,changedNs=info.st_ctime_ns,
+            sha256=hashlib.sha256(expected.read_bytes()).hexdigest())
+    if 'processing.reference_worker_readiness' not in result or 'processing.reference_protocol' not in result:
+        raise ValueError('loaded worker source footprint incomplete')
+    return dict(modules=result,paths=paths)
+
+
 def validate_activation(value):
     if value is None:return None
     p._closed(value,ACTIVATION_FIELDS,'worker maintenance activation')
@@ -76,6 +138,8 @@ class WorkerReadinessAPI:
         self.inner=inner;self.settings=validate_settings(settings)
         self.config_sha256=config_sha256;self.driver=driver;self.owner=owner;self.session=reader_session
         p._hash(config_sha256,'loaded worker config')
+        self.loaded_source=loaded_source_snapshot(self.settings['sourceRoot'])
+        if self.settings['sourceSha256']!=_IMPORTED_SOURCE_SHA256:raise ValueError('worker loaded source pin differs')
         self.boot_id=str(uuid.uuid4());self.service=None
 
     def _snapshot(self,require_idle):
@@ -88,8 +152,11 @@ class WorkerReadinessAPI:
         try:
             deadline=time.monotonic()+6
             self.owner.check(driver.path.parent);self.session.check()
-            if source_digest(self.settings['sourceRoot'])!=self.settings['sourceSha256']:
-                raise ValueError('worker source changed')
+            current_source=loaded_source_snapshot(self.settings['sourceRoot'])
+            if (self.settings['sourceSha256']!=_IMPORTED_SOURCE_SHA256
+                    or current_source['paths']!=self.loaded_source['paths']
+                    or any(current_source['modules'].get(key)!=value for key,value in self.loaded_source['modules'].items())):
+                raise ValueError('worker loaded source changed')
             from .reference_execution import _migration_rows
             pins=_migration_rows(driver.path,'SELECT pin FROM driver_engine_pin WHERE singleton=1')
             bindings=_migration_rows(driver.path,'SELECT binding FROM driver_binding WHERE singleton=1')
@@ -132,7 +199,7 @@ class WorkerReadinessAPI:
                 nodeId=worker.node_id,workerId=worker.worker_id,workerInstanceId=driver.worker_instance_id,
                 authorityId=worker.authority_id,engineId=worker.engine_id,gateGeneration=worker.gate_generation,
                 engineVersion=worker.version,configSha256=self.config_sha256,
-                sourceSha256=self.settings['sourceSha256'],driverBindingSha256=p.digest(json.loads(binding['binding'])),
+                sourceSha256=self.settings['sourceSha256'],loadedSourceSha256=p.digest(self.loaded_source),driverBindingSha256=p.digest(json.loads(binding['binding'])),
                 optionsSha256=p.digest(definitions),safeOptionsSha256=p.digest(selected),
                 readerEpoch=self.session.epoch,activation=activation,ready=True,idle=idle)
         finally:driver._lock.release()

@@ -257,7 +257,7 @@ class ReferenceWorkerHandover:
         process=self.control.probe()
         p._closed(value,('schemaVersion','protocol','nonce','bootId','pid','nodeId','workerId','workerInstanceId','authorityId',
             'engineId','gateGeneration','engineVersion','configSha256','sourceSha256','driverBindingSha256','readerEpoch',
-            'activation','ready','idle','optionsSha256','safeOptionsSha256'),'worker readiness proof')
+            'activation','ready','idle','optionsSha256','safeOptionsSha256','loadedSourceSha256'),'worker readiness proof')
         expected=dict(schemaVersion=1,protocol=PROTOCOL,nonce=nonce,nodeId=config['nodeId'],workerId=config['workerId'],
             workerInstanceId=config['workerInstanceId'],authorityId=config['authorityId'],engineId=config['engineId'],
             gateGeneration=config['gateGeneration'],engineVersion=config['engineVersion'],configSha256=digest(raw),
@@ -271,7 +271,7 @@ class ReferenceWorkerHandover:
         for name in ('bootId','readerEpoch'):p._slug(value.get(name),name)
         p._uuid(value['bootId'],'worker boot')
         p._hash(value.get('driverBindingSha256'),'worker driver pin')
-        for key in ('optionsSha256','safeOptionsSha256'):p._hash(value[key],key)
+        for key in ('optionsSha256','safeOptionsSha256','loadedSourceSha256'):p._hash(value[key],key)
         return value,process
 
     def authorize_plan(self,node_id,node,adapter):

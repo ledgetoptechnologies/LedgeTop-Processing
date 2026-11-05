@@ -410,11 +410,12 @@ def _build_worker(config,owner,resources):
     root, scratch = _directory(config['stateRoot']), _directory(config['scratchRoot'])
     owner.check(root)
     if 'maintenanceReadiness' in config:
-        from processing.reference_worker_readiness import validate_settings,source_digest
+        from processing.reference_worker_readiness import validate_settings,source_digest,loaded_source_snapshot
         readiness=validate_settings(config['maintenanceReadiness'])
         if (Path(readiness['sourceRoot'])!=Path(__file__).resolve().parents[1]
                 or source_digest(readiness['sourceRoot'])!=readiness['sourceSha256']):
             raise ValueError('installed worker source pin differs')
+        loaded_source_snapshot(readiness['sourceRoot'])
     with NodeGate(config['engineId']) as gate:
         state = gate.snapshot()
         if (state['nodeId'], state['authorityId'], state['coordinatorOrigin'], state['generation']) != (
