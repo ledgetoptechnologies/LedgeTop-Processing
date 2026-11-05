@@ -451,7 +451,9 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                     self.assertIn(b'photo.jpg', captured_uploads[1]['body'])
                     self.assertNotIn(b'control.csv', captured_uploads[1]['body'])
                     gcp_lines = captured_uploads[1]['body'].decode('utf-8').strip().splitlines()
-                    self.assertEqual(gcp_lines[0], 'EPSG:6318+5703(GEOID18)')
+                    # Compound CRS accepted by the installed NodeODX parser.
+                    # Actual geoid transformation is a separate runtime gate.
+                    self.assertEqual(gcp_lines[0], 'EPSG:6349')
                     self.assertEqual(len(gcp_lines), 2)
                     correspondence = gcp_lines[1].split()
                     self.assertEqual(correspondence[:2], ['-88.1', '44.5'])
