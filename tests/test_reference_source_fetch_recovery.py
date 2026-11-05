@@ -422,6 +422,17 @@ class RecoveryRefusalTests(RecoveryHarness):
         self.assert_ineligible('DELETE FROM reference_source_object_pins WHERE job_id=? AND object_id=?',
             self.job_id, self.first_grant['objectIds'][0])
 
+    def test_custody_row_for_an_object_outside_the_closure(self):
+        for table in ('reference_source_object_receipts', 'reference_source_object_pins'):
+            with self.queue._db() as db:
+                row = dict(db.execute(f'SELECT * FROM {table} WHERE job_id=? LIMIT 1', (self.job_id,)).fetchone())
+                row['object_id'] = 'foreign-object'
+                db.execute(f"INSERT INTO {table} VALUES({','.join('?' * len(row))})", tuple(row.values()))
+            self.assertFalse(self.state()['eligible'], table)
+            self.assert_refused()
+            self.execute(f"DELETE FROM {table} WHERE job_id=? AND object_id='foreign-object'", self.job_id)
+        self.assertTrue(self.state()['eligible'])
+
     def test_changed_pin_identity_binding(self):
         self.assert_ineligible('UPDATE reference_source_object_pins SET sha256=? WHERE job_id=? AND object_id=?',
             'f' * 64, self.job_id, self.first_grant['objectIds'][0])
