@@ -1372,11 +1372,12 @@ class ReferenceDriver:
         not this path's to judge and keeps its own reconciliation.
         """
         reservation = data['reservation']['reservationId']
+        # Saved first so a death after settling replays under this same reason.
+        if data.get('unstartedHold') != reason:
+            data['unstartedHold'] = reason
+            self._save(job_id, stage, data)
         status = self._terminal_status(job_id, data)
         if status is None:
-            if data.get('unstartedHold') != reason:
-                data['unstartedHold'] = reason
-                self._save(job_id, stage, data)
             raise DriverHeld(reason)
         if self.ledger.never_started(reservation):
             record = data.get('hold') or data.get('watch') or dict(holdId=str(uuid4()), sequence=-1)
@@ -1566,6 +1567,11 @@ class ReferenceDriver:
         claim = data['claim']
         token = claim['claimToken']
         suffix = '/jobs/' + job_id
+        if 'reservation' in data and self.ledger.unstarted_settled(data['reservation']['reservationId']):
+            # The ledger settled and the row never heard: nothing else can move
+            # this row, and only the terminal word that settled it ends it here.
+            return self._unstarted(job_id, stage, data,
+                data.get('unstartedHold', 'unstarted_claim_requires_reconciliation'))
         if stage in ('claimed', 'reservation_pending'):
             if stage == 'claimed':
                 data['reservation'] = self._new_transfer_request(claim)

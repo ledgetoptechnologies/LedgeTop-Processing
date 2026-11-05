@@ -406,6 +406,12 @@ class ScratchLedger:
         return row["state"] == "terminal" and db.execute(
             "SELECT 1 FROM unstarted_settlements WHERE reservation=?", (row["id"],)).fetchone() is not None
 
+    def unstarted_settled(self, reservation_id):
+        """Whether settle_unstarted ended this reservation, now or on an earlier call."""
+        with self._transaction() as db:
+            row = db.execute("SELECT * FROM reservations WHERE id=?", (reservation_id,)).fetchone()
+            return row is not None and self._settled(db, row)
+
     def result_registered(self, reservation_id):
         with self._transaction() as db:
             return db.execute("SELECT 1 FROM results WHERE reservation=?", (reservation_id,)).fetchone() is not None
