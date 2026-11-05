@@ -330,6 +330,9 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
     def _quota(self, db, extra_bytes=0):
         used = self._metadata_used_bytes(db)
         if used + extra_bytes > self.max_metadata_bytes:
+            gate = getattr(self.queue, '_coordinator_freeze', None)
+            if gate is not None and gate.reserve_startup_metadata(db, extra_bytes):
+                return
             raise Conflict("reference metadata quota reached")
 
     def submit(self, validated):

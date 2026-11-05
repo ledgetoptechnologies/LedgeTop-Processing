@@ -503,6 +503,30 @@ class ReferenceRuntimeTests(unittest.TestCase):
         with self.assertRaises(CoordinatorFrozen), restarted.coordinator_operation('http'):
             pass
 
+    def test_only_verified_frozen_startup_can_spend_reserved_metadata_without_payload_mutation(self):
+        from processing.maintenance import Conflict
+        queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'), reference_enabled=True)
+        self.addCleanup(queue.close)
+        runtime = self.runtime(queue)
+        self.addCleanup(runtime.close)
+        runtime.store.max_metadata_bytes = 1
+        gate = queue._coordinator_freeze
+        plan = str(uuid.uuid4())
+        for action in ('intent', 'drain', 'seal'):
+            gate.transition(dict(requestId=str(uuid.uuid4()), planId=plan, action=action,
+                expectedRevision=gate.status()['revision'], startupId=queue.startup_id), owner_secret='synthetic-owner')
+        before = gate.status()['reservedControlBytes']
+        with queue._db() as db:
+            with self.assertRaisesRegex(Conflict, 'metadata quota'):
+                runtime.store._quota(db, 64)
+        from processing.coordinator_freeze import CoordinatorFrozen
+        with self.assertRaises(CoordinatorFrozen), gate.runtime_startup(runtime), queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            runtime.store._quota(db, 64)
+            self.assertEqual(gate._row(db)['reserved_control_bytes'], before - 64)
+            db.execute("UPDATE reference_jobs SET input_json='{}'")
+        self.assertEqual(gate.status()['reservedControlBytes'], before, 'refused payload mutation rolls back reservation')
+
     def test_partial_engine_outage_still_admits_and_queues_work_for_healthy_node(self):
         queue = Queue(self.config.prototype_state_dir, node_ids=('cluster', 'main'),
                       treedar_node_ids=('main',), reference_enabled=True)

@@ -13,6 +13,8 @@ import select
 import shutil
 import json
 import hashlib
+import sqlite3
+from unittest.mock import patch
 
 from processing.coordinator_freeze import CoordinatorFrozen
 from processing.maintenance import Conflict
@@ -68,6 +70,23 @@ class FreezeTests(unittest.TestCase):
         with self.assertRaises(CoordinatorFrozen), self.queue._db() as db:
             db.execute("UPDATE nodes SET revision=revision+1")
         self.assertEqual(self.queue.get_node('cluster')['revision'], 0)
+
+    def test_sqlite_denial_remains_typed_without_python311_error_attributes(self):
+        for action in ('intent', 'drain', 'seal'): self.change(action)
+        connect = sqlite3.connect
+        class LegacyErrorConnection(sqlite3.Connection):
+            def execute(self, sql, parameters=()):
+                try:
+                    return super().execute(sql, parameters)
+                except sqlite3.DatabaseError:
+                    error = sqlite3.DatabaseError('synthetic unstructured database refusal')
+                    assert not hasattr(error, 'sqlite_errorcode')
+                    raise error from None
+        with patch('processing.prototype.sqlite3.connect', side_effect=lambda *args, **kwargs:
+                   connect(*args, factory=LegacyErrorConnection, **kwargs)):
+            with self.assertRaises(CoordinatorFrozen):
+                self.queue.submit(dict(requestId='blocked', profile='treedar-synthetic-v1', environment='staging'))
+        self.assertEqual(self.queue.list(), [])
 
     def test_exact_transition_replay_stale_cas_owner_and_health(self):
         request = self.request('intent')
@@ -172,9 +191,23 @@ class FreezeTests(unittest.TestCase):
         self.change('resume', healthy=True)
         with self.queue.coordinator_operation('http'):
             self.assertEqual(self.queue.list(), [])
-        self.plan = str(uuid.uuid4())
-        with self.assertRaisesRegex(CoordinatorFrozen, 'historical_metadata_full'):
-            self.change('intent')
+        completed = 1
+        for _ in range(200):
+            self.plan = str(uuid.uuid4())
+            try:
+                self.change('intent')
+            except CoordinatorFrozen:
+                break
+            self.change('drain'); self.change('seal'); self.change('resume', healthy=True)
+            completed += 1
+        self.assertGreater(completed, 1, 'new emergency plan must work at full ordinary metadata quota')
+        self.assertLess(completed, 200, 'total measured metadata remains bounded')
+        self.assertEqual(self.gate.status()['phase'], 'open')
+        with self.queue.coordinator_operation('http'):
+            self.assertEqual(self.queue.list(), [])
+        with self.queue._db() as db:
+            self.assertLessEqual(store._metadata_used_bytes(db), store.max_metadata_bytes + 256 * 1024)
+            with self.assertRaisesRegex(Conflict, 'metadata quota'): store._quota(db, 1)
 
     def test_retained_update_history_does_not_consume_active_emergency_capacity(self):
         from processing.reference_store import ReferenceStore

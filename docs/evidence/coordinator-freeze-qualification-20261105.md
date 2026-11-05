@@ -76,9 +76,16 @@ Active freeze state/plan receipts, active epochs and operation pins have an
 independent 256 KiB control ceiling, with 512 bytes reserved for state closure/
 hold and at most 128 active pins. Completed plan receipts and closed/retired
 epochs/pins remain charged to the ordinary total metadata budget; retained
-history cannot consume active emergency capacity. Historical budget exhaustion
-holds new plans without discarding history or blocking existing ACK/status
-replay. A 120-cycle native regression retains 480 receipts and more than 256 KiB
+history cannot consume active emergency capacity. Combined measured metadata
+plus reserved future control cannot exceed the ordinary metadata ceiling plus
+256 KiB. A new plan has a bounded emergency path even at a full ordinary payload
+budget: intent reserves 8 KiB for all future finish/reopen records and known
+startup metadata, with each finish step bounded at 2 KiB. Unknown outcomes keep
+their reservation; exact replay allocates nothing. A verified frozen runtime's
+metadata startup may spend that reservation, while payload mutation stays
+denied and rollback restores the spent amount. Total headroom exhaustion holds
+new plans without discarding history or blocking existing ACK/status replay.
+A 120-cycle native regression retains 480 receipts and more than 256 KiB
 of history while active control uses less than 4 KiB and HTTP admission works.
 Operation kinds are a closed constant set; paths, raw
 query strings, headers and tokens are never persisted as operation metadata.
@@ -100,6 +107,12 @@ Ran 74 tests in 2.171s — OK
 
 Image: `sha256:57f01267c88439d872f6782b54511e314614a76145e32cfe2fad003e5ca0fac8`.
 Owned test container `ltds-coordinator-freeze-runtime` auto-removed.
+The final quota/abort/owned-drain followup passed **80/80 tests in 3.917s** with
+the same bounded command. It additionally checks full ordinary quota through
+new intent/drain/seal/resume cycles until total headroom holds the next plan,
+typed startup reservation rollback, and authorizer-denial typing without the
+Python 3.11 exception attributes (a simulated legacy error object, not a full
+Python 3.10 interpreter qualification).
 
 Evidence includes actual local HTTP rejection before body read, pre-intent
 nested closure and seal waiting, direct background DB refusal/pure reads,

@@ -21,6 +21,9 @@ from .maintenance import Conflict
 
 OPERATION_KINDS = frozenset(('http', 'viewer-dispatch', 'viewer-transfer',
     'source-io-admission', 'source-io', 'source-release-submit', 'source-release'))
+CONTROL_LIMIT = 256 * 1024
+TRANSITION_RESERVE = 2048
+PLAN_FINISH_RESERVE = 8192
 STARTUP_TABLES = frozenset(('coordinator_identity', 'jobs', 'nodes', 'owned_maintenance_schedules',
     'processing_node_inventory', 'reference_acceptances', 'reference_claims', 'reference_jobs',
     'reference_outbox', 'reference_recovery_receipts', 'reference_recovery_startup',
@@ -54,7 +57,9 @@ def request_scope(queue, method, path):
     pure = method in ('GET', 'HEAD') and (path in (
         '/healthz', '/v1/prototype/authority', '/v1/prototype/jobs', '/v1/prototype/nodes',
         '/v1/prototype/coordinator-freeze') or re.fullmatch(
-            r'/ltds/v[12]/jobs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}', path))
+            r'/ltds/v[12]/jobs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}', path)
+        or re.fullmatch(r'/v1/prototype/(?:nodes|jobs)/[A-Za-z0-9][A-Za-z0-9._-]{0,63}', path)
+        or re.fullmatch(r'/v1/prototype/nodes/[A-Za-z0-9][A-Za-z0-9._-]{0,63}/schedule-owned/[a-f0-9-]{36}', path))
     if queue is None or pure or path == '/v1/prototype/coordinator-freeze':
         yield
     else:
@@ -109,7 +114,8 @@ class FreezeGate:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS coordinator_freeze_state (
                   singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL,
-                  plan_id TEXT, phase TEXT NOT NULL, owner_sha256 TEXT, owner_epoch TEXT);
+                  plan_id TEXT, phase TEXT NOT NULL, owner_sha256 TEXT, owner_epoch TEXT,
+                  reserved_control_bytes INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS coordinator_freeze_receipts (
                   request_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, owner_sha256 TEXT NOT NULL,
                   request_sha256 TEXT NOT NULL, request_json TEXT NOT NULL, receipt_json TEXT NOT NULL);
@@ -119,8 +125,12 @@ class FreezeGate:
                 CREATE TABLE IF NOT EXISTS coordinator_operation_epochs (
                   epoch TEXT PRIMARY KEY, binding_json TEXT NOT NULL, binding_sha256 TEXT NOT NULL,
                   state TEXT NOT NULL, retired_by TEXT);
-                INSERT OR IGNORE INTO coordinator_freeze_state VALUES(1,0,NULL,'open',NULL,NULL);
             ''')
+            if 'reserved_control_bytes' not in {item[1] for item in db.execute('PRAGMA table_info(coordinator_freeze_state)')}:
+                db.execute('ALTER TABLE coordinator_freeze_state ADD COLUMN reserved_control_bytes INTEGER NOT NULL DEFAULT 0')
+            db.execute('''INSERT OR IGNORE INTO coordinator_freeze_state
+                (singleton,revision,plan_id,phase,owner_sha256,owner_epoch,reserved_control_bytes)
+                VALUES(1,0,NULL,'open',NULL,NULL,0)''')
             row = self._row(db)
             binding = self._binding()
             wire = _wire(binding)
@@ -176,12 +186,21 @@ class FreezeGate:
                     retire_pins.append(pin)
             charge = sum(len(value) for value in (queue.startup_id, wire, binding_sha, 'active'))
             charge += len(retire_pins) + 37 * sum(epochs[epoch]['state'] == 'active' for epoch in registered)
-            ordinary, ordinary_limit = self._ordinary_usage(db)
-            if active_metadata_bytes(db) + charge + 512 > 256 * 1024 or ordinary > ordinary_limit:
+            remaining = row['reserved_control_bytes']
+            reserved_after = remaining
+            if row['phase'] != 'open' and remaining:
+                reserved_after -= charge
+                if reserved_after < TRANSITION_RESERVE:
+                    uncertain = True
+            try:
+                self._quota(db, charge, reserved_after=max(0, reserved_after))
+            except CoordinatorFrozen:
                 uncertain = True
-            else:
+            if not uncertain:
                 db.execute('INSERT INTO coordinator_operation_epochs VALUES(?,?,?,?,NULL)',
                            (queue.startup_id, wire, binding_sha, 'active'))
+                if reserved_after != remaining:
+                    db.execute('UPDATE coordinator_freeze_state SET reserved_control_bytes=? WHERE singleton=1', (reserved_after,))
                 # Queue acquired this exact original private main lease before
                 # constructing the gate. A cloned/restored DB has a different
                 # inode/root/lease binding and cannot retire original pins.
@@ -227,7 +246,9 @@ class FreezeGate:
     def _row(self, db):
         row = db.execute('SELECT * FROM coordinator_freeze_state WHERE singleton=1').fetchone()
         if (row is None or row['phase'] not in ('open', 'intent', 'draining', 'frozen', 'held')
-                or type(row['revision']) is not int or not 0 <= row['revision'] <= 2**53 - 1):
+                or type(row['revision']) is not int or not 0 <= row['revision'] <= 2**53 - 1
+                or type(row['reserved_control_bytes']) is not int
+                or not 0 <= row['reserved_control_bytes'] <= PLAN_FINISH_RESERVE):
             raise CoordinatorFrozen('coordinator_freeze_journal_unavailable')
         if row['plan_id'] is None:
             if row['phase'] not in ('open', 'held') or row['owner_sha256'] is not None or row['owner_epoch'] is not None:
@@ -249,7 +270,8 @@ class FreezeGate:
             row = self._row(db)
             active = db.execute("SELECT count(*) FROM coordinator_operation_pins WHERE state IN ('active','uncertain')").fetchone()[0]
             return dict(authorityId=self.queue.authority_id, startupId=self.queue.startup_id,
-                        revision=row['revision'], planId=row['plan_id'], phase=row['phase'], operations=active)
+                        revision=row['revision'], planId=row['plan_id'], phase=row['phase'], operations=active,
+                        reservedControlBytes=row['reserved_control_bytes'])
 
     def authorize_connection(self, db):
         """Called under Queue's transaction/lifecycle mutex before yielding DB."""
@@ -275,6 +297,7 @@ class FreezeGate:
                   sqlite3.SQLITE_DROP_INDEX, sqlite3.SQLITE_DROP_TABLE,
                   sqlite3.SQLITE_DROP_TRIGGER, sqlite3.SQLITE_DROP_VIEW,
                   sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH}
+        denied_by_gate = [False]
         def authorize(action, first, second, database, source):
             startup = getattr(self._local, 'startup', None)
             if startup is not None and threading.get_ident() == self.queue._startup_thread:
@@ -292,6 +315,8 @@ class FreezeGate:
                     return sqlite3.SQLITE_OK
                 if action == sqlite3.SQLITE_UPDATE and first == 'jobs' and second in ('status', 'held_reason', 'updated_at'):
                     return sqlite3.SQLITE_OK
+                if action == sqlite3.SQLITE_UPDATE and first == 'coordinator_freeze_state' and second == 'reserved_control_bytes':
+                    return sqlite3.SQLITE_OK
                 if action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE) and first in (
                     'reference_recovery_startup', 'source_reader_binding', 'source_reader_epochs',
                     'source_reader_pins', 'processing_node_inventory'):
@@ -305,9 +330,11 @@ class FreezeGate:
             readonly_pragmas = {'table_info', 'table_xinfo', 'index_list', 'index_info',
                                 'foreign_key_list', 'quick_check', 'integrity_check'}
             if action in denied or (action == sqlite3.SQLITE_PRAGMA and second is not None and first not in readonly_pragmas):
+                denied_by_gate[0] = True
                 return sqlite3.SQLITE_DENY
             return sqlite3.SQLITE_OK
         db.set_authorizer(authorize)
+        return denied_by_gate
 
     @contextmanager
     def runtime_startup(self, runtime):
@@ -389,13 +416,17 @@ class FreezeGate:
         finally:
             self._local.control = previous
 
-    def _quota(self, db, extra):
+    def _quota(self, db, extra, *, reserved_after=None):
         # Bounded control reserve: exact ACK recovery and maintenance must work
         # even when ordinary payload admission has filled its metadata budget.
         # ReferenceStore still measures these bytes in its total, and cannot
         # allocate payload using this reserve. Census adds this 256KiB ceiling
         # explicitly when deriving the physical DB/headroom budget.
-        if active_metadata_bytes(db) + extra + 512 > 256 * 1024:
+        reserved = self._row(db)['reserved_control_bytes'] if reserved_after is None else reserved_after
+        ordinary, ordinary_limit = self._ordinary_usage(db)
+        active = active_metadata_bytes(db)
+        if (active + extra + reserved + 512 > CONTROL_LIMIT
+                or ordinary + active + extra + reserved + 512 > ordinary_limit + CONTROL_LIMIT):
             raise CoordinatorFrozen('coordinator_freeze_metadata_full')
 
     def _ordinary_usage(self, db):
@@ -419,6 +450,24 @@ class FreezeGate:
                         total += sum(len(value) if type(value) is bytes else len(str(value).encode('utf-8'))
                                      for value in row if value is not None)
         return max(0, total - active_metadata_bytes(db)), limit
+
+    def reserve_startup_metadata(self, db, extra):
+        """Borrow only a frozen plan's reserved, verified startup allocation.
+
+        The connection authorizer still denies job/receipt payload mutations;
+        only the reviewed real runtime metadata scope can reach this path.
+        """
+        if (getattr(self._local, 'startup', None) is not STARTUP_TABLES
+                or threading.get_ident() != self.queue._startup_thread
+                or type(extra) is not int or extra < 0):
+            return False
+        row = self._row(db)
+        if row['phase'] != 'frozen' or row['reserved_control_bytes'] - extra < TRANSITION_RESERVE:
+            return False
+        after = row['reserved_control_bytes'] - extra
+        self._quota(db, extra, reserved_after=after)
+        db.execute('UPDATE coordinator_freeze_state SET reserved_control_bytes=? WHERE singleton=1', (after,))
+        return True
 
     def _owned_drains(self, db, plan_id):
         """Only this freeze plan's exact durable node schedule may be adopted."""
@@ -523,9 +572,6 @@ class FreezeGate:
             if row['phase'] not in expected_phases:
                 raise Conflict('freeze phase changed')
             if request['action'] == 'intent':
-                used, limit = self._ordinary_usage(db)
-                if used > limit:
-                    raise CoordinatorFrozen('coordinator_historical_metadata_full')
                 if db.execute('SELECT 1 FROM coordinator_freeze_receipts WHERE plan_id=? LIMIT 1', (request['planId'],)).fetchone():
                     raise Conflict('freeze plan identity already used')
                 self._owned_drains(db, request['planId'])
@@ -546,9 +592,20 @@ class FreezeGate:
             receipt = dict(authorityId=self.queue.authority_id, startupId=self.queue.startup_id,
                 planId=request['planId'], revision=row['revision'] + 1, phase=target[1], requestId=request['requestId'])
             encoded = _wire(receipt)
-            self._quota(db, 512 + len(wire) + len(encoded) + len(owner) + len(digest) + len(request['requestId']) + len(request['planId']))
-            db.execute('UPDATE coordinator_freeze_state SET revision=?,plan_id=?,phase=?,owner_sha256=?,owner_epoch=? WHERE singleton=1',
-                       (receipt['revision'], request['planId'], target[1], owner, self.queue.startup_id))
+            charge = 512 + len(wire) + len(encoded) + len(owner) + len(digest) + len(request['requestId']) + len(request['planId'])
+            if charge > TRANSITION_RESERVE:
+                raise CoordinatorFrozen('freeze_transition_exceeds_reviewed_reservation')
+            if request['action'] == 'intent':
+                reserved_after = PLAN_FINISH_RESERVE
+            else:
+                if row['reserved_control_bytes'] < TRANSITION_RESERVE:
+                    raise CoordinatorFrozen('freeze_finish_reservation_unavailable')
+                reserved_after = (0 if target[1] == 'open'
+                                  else row['reserved_control_bytes'] - TRANSITION_RESERVE)
+            self._quota(db, charge, reserved_after=reserved_after)
+            db.execute('''UPDATE coordinator_freeze_state
+                SET revision=?,plan_id=?,phase=?,owner_sha256=?,owner_epoch=?,reserved_control_bytes=? WHERE singleton=1''',
+                       (receipt['revision'], request['planId'], target[1], owner, self.queue.startup_id, reserved_after))
             db.execute('INSERT INTO coordinator_freeze_receipts VALUES(?,?,?,?,?,?)',
                        (request['requestId'], request['planId'], owner, digest, wire, encoded))
             return receipt

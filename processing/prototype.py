@@ -150,17 +150,18 @@ class Queue(Maintenance):
             db = sqlite3.connect(self.path, timeout=10)
             db.row_factory = sqlite3.Row
             self._database_users += 1
+            freeze_denial = None
             try:
                 db.execute("PRAGMA synchronous=FULL")
                 gate = getattr(self, '_coordinator_freeze', None)
                 if gate is not None:
-                    gate.authorize_connection(db)
+                    freeze_denial = gate.authorize_connection(db)
                 with db:
                     yield db
                     if os.getpid() != self._creator_pid or self._lock.closed:
                         raise RuntimeError('coordinator ownership changed before commit')
             except sqlite3.DatabaseError as error:
-                if getattr(error, 'sqlite_errorcode', None) == sqlite3.SQLITE_AUTH:
+                if freeze_denial is not None and freeze_denial[0]:
                     from .coordinator_freeze import CoordinatorFrozen
                     raise CoordinatorFrozen('coordinator_maintenance') from None
                 raise
