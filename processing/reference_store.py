@@ -320,6 +320,8 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         # calculation, including range requests, custody pins and renewals.
         used += self._source_range_metadata_bytes(db)
         used += source_reader_metadata_bytes(db)
+        from .reference_acceptance_observed import metadata_bytes as observation_metadata_bytes
+        used += observation_metadata_bytes(db)
         return used
 
     def _quota(self, db, extra_bytes=0):
@@ -1158,6 +1160,15 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                     (item['receipt_id'],)).fetchone()
                 receipts.append(dict(acceptance=acceptance, viewerReceipt=json.loads(signed[0])) if signed else acceptance)
             return {'receipts': receipts, 'fullyAccepted': row['phase'] == 'completed'}
+
+    def observe_worker_acceptance(self, job_id, request, *, identity, claim_token):
+        """Record local worker receipt verification, without authorizing cleanup."""
+        from .reference_acceptance_observed import observe
+        return observe(self, job_id, request, identity=identity, claim_token=claim_token)
+
+    def worker_acceptance_observation(self, job_id):
+        from .reference_acceptance_observed import lookup
+        return lookup(self, job_id)
 
     def pending_outbox(self, *, now=None, limit=100):
         if type(limit) is not int or not 1 <= limit <= 1000:

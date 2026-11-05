@@ -580,6 +580,84 @@ class ReferenceDriver:
         source = self.execution_router if self.execution_router is not None else self.worker
         return source.apply_viewer_acceptance(job_id, receipts)
 
+    def _observation_retry_state(self, data):
+        attempts = data.get('acceptanceObservationAttempts', 0)
+        if type(attempts) is not int or not 0 <= attempts <= 32:
+            raise DriverHeld('acceptance_observation_retry_state_changed')
+        return (_now(self.clock), _now(lambda: data.get('acceptanceObservationNextAttemptAt', 0)),
+            _now(lambda: data.get('acceptanceObservationLastAttemptAt', 0)), attempts)
+
+    def _observation_deferred(self, claim, data):
+        if (claim.get('sourceIntakeVersion') != 2 or not data.get('acceptanceObservationRequest')
+                or data.get('acceptanceObservationAck')):
+            return False
+        try:
+            now, due, previous, _attempts = self._observation_retry_state(data)
+            return now < due or now < previous
+        except Exception:
+            return True
+
+    def _confirm_acceptance_observed(self, job_id, data, receipts):
+        """Persist/replay local V2 verification before native cleanup/completion.
+
+        Existing signed-copy scratch cleanup remains independent. This intent
+        uses durable metadata only and never reads source or cleaned result bytes.
+        """
+        from .reference_acceptance_observed import make_request, validate_request, validate_ack
+        claim = data['claim']
+        source_version = claim.get('sourceIntakeVersion')
+        submitted_version = claim.get('submission', {}).get('sourceIntakeVersion')
+        if source_version is None and submitted_version is None and 'sourceAcceptanceBinding' not in claim:
+            return True
+        if type(source_version) is not int or source_version != 2 or submitted_version != 2:
+            raise DriverHeld('source_acceptance_observation_binding_unavailable')
+        try:
+            result = self.outbox.get(data['outboxId'])['payload']['resultManifest']
+            intent = data.get('acceptanceObservationRequest')
+            if intent is None:
+                request = make_request(claim, result, receipts, str(uuid4()))
+                intent = p.canonical_json(request).decode('ascii')
+                data['acceptanceObservationRequest'] = intent
+                self._save(job_id, 'awaiting_acceptance', data)
+            else:
+                if type(intent) is not str or len(intent.encode('utf-8')) > p.MAX_BODY_BYTES:
+                    raise ValueError('invalid persisted observation')
+                request = validate_request(p.decode_submission(intent.encode('utf-8')))
+                expected = make_request(claim, result, receipts, request['observationId'])
+                if (any(request[key] != expected[key] for key in expected if key != 'receipts')
+                        or any(pair not in expected['receipts'] for pair in request['receipts'])
+                        or p.canonical_json(request).decode('ascii') != intent):
+                    raise ValueError('persisted observation changed')
+            identity = dict(node_id=self.node_id, worker_id=self.worker_id, worker_instance_id=self.worker_instance_id)
+            ack = data.get('acceptanceObservationAck')
+            if ack is None:
+                now, due, previous, attempts = self._observation_retry_state(data)
+                if now < previous:
+                    raise DriverWait('acceptance_observation_clock_rollback')
+                if now < due:
+                    raise DriverWait('acceptance_observation_backoff')
+                # Persist the bounded retry window before contacting the
+                # coordinator, so restart cannot turn an outage into a loop.
+                attempts = min(32, attempts + 1)
+                data.update(acceptanceObservationAttempts=attempts,
+                    acceptanceObservationLastAttemptAt=now,
+                    acceptanceObservationNextAttemptAt=now + min(300, 2 ** min(attempts, 9)))
+                self._save(job_id, 'awaiting_acceptance', data)
+                status, ack = self._request('POST', '/jobs/' + job_id + '/acceptance-observed',
+                    request, claim_token=claim['claimToken'])
+                if status != 200:
+                    raise DriverWait('acceptance_observation_unavailable')
+                ack = validate_ack(ack, request, identity)
+                data['acceptanceObservationAck'] = ack
+                self._save(job_id, 'awaiting_acceptance', data)
+            else:
+                validate_ack(ack, request, identity)
+            return True
+        except (DriverHeld, DriverWait):
+            raise
+        except Exception:
+            raise DriverWait('acceptance_observation_reconciliation_required') from None
+
     def _bind_claim(self, claim, data):
         self._validate_job(claim)
         if self._pipeline_kind(claim['submission'])=='combined' and self.combined_preparation is not None:
@@ -715,10 +793,25 @@ class ReferenceDriver:
             data = json.loads(row['data'])
             claim = data['claim']
             kind = 'acceptance' if row['stage'] == 'awaiting_acceptance' else 'terminal-acceptance'
-            status, relayed = self._request('GET', '/jobs/' + row['job'] + '/' + kind, claim_token=claim['claimToken'])
+            deferred = kind == 'acceptance' and self._observation_deferred(claim, data)
+            if deferred:
+                status, relayed = 409, None
+                observed = {'state': 'acceptance_observation_pending', 'jobId': row['job']}
+            else:
+                status, relayed = self._request('GET', '/jobs/' + row['job'] + '/' + kind, claim_token=claim['claimToken'])
             if status != 409:
                 if kind == 'acceptance':
                     accepted = self._apply_acceptance(row['job'], relayed['receipts'])['fullyAccepted']
+                    if accepted:
+                        try:
+                            accepted = self._confirm_acceptance_observed(row['job'], data, relayed['receipts'])
+                        except (DriverHeld, DriverWait):
+                            # Observation is a NAS-source-release prerequisite,
+                            # not an extra retention rule for already verified
+                            # result copies. Keep its intent and native task,
+                            # but allow the existing scratch cleanup policy below.
+                            accepted = False
+                            observed = {'state': 'acceptance_observation_pending', 'jobId': row['job']}
                 else:
                     receipt = relayed.get('receipt')
                     accepted = receipt is not None
@@ -1055,11 +1148,17 @@ class ReferenceDriver:
         if stage == 'failure_delivering':
             return self._deliver_failure(job_id, request_id, data)
         if stage == 'awaiting_acceptance':
+            if self._observation_deferred(claim, data):
+                return {'state': 'awaiting_acceptance', 'jobId': job_id}
             status, relayed = self._request('GET', suffix + '/acceptance', claim_token=token)
             if status == 409:
                 return {'state': 'awaiting_acceptance', 'jobId': job_id}
             observed = self._apply_acceptance(job_id, relayed['receipts'])
             if observed['fullyAccepted']:
+                self._confirm_acceptance_observed(job_id, data, relayed['receipts'])
+                if (data['claim'].get('sourceIntakeVersion') == 2 and self.engine_cleanup is not None
+                        and self._kind(job_id) == 'odm'):
+                    self.engine_cleanup.remove(job_id, viewer_receipts=relayed['receipts'])
                 self._save(job_id, 'completed', data)
                 return {'state': 'completed', 'jobId': job_id}
             return {'state': 'awaiting_acceptance', 'jobId': job_id}

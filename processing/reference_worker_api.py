@@ -347,6 +347,14 @@ class ReferenceWorkerAPI:
                 if method == 'POST' and operation == 'recover':
                     return Response(200, self.recovery.resume(job_id, protocol.decode_submission(body), identity=identity, claim_token=token))
                 return self._error(404, 'not_found')
+            observation = re.fullmatch(re.escape(PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/acceptance-observed", path) if type(path) is str else None
+            if method == 'POST' and observation:
+                claim_token = self._header(headers, 'X-Claim-Token')
+                if claim_token is None or not 1 <= len(claim_token) <= 128:
+                    return self._error(401, 'claim_authentication_required')
+                self._owned_job(observation[1], identity, claim_token)
+                return Response(200, self.store.observe_worker_acceptance(observation[1],
+                    protocol.decode_submission(body), identity=identity, claim_token=claim_token))
             match = re.fullmatch(re.escape(PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(transfer-grant|acceptance|terminal-acceptance|claim-state)", path) if type(path) is str else None
             if method == "GET" and match:
                 claim_token = self._header(headers, "X-Claim-Token")

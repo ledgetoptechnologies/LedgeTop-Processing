@@ -165,6 +165,16 @@ class ReferenceAPI:
                     trusted_source_keys=self.source_attestation_keys,authority_id=self.authority_id,
                     available_engines=("odm","treedar") if self.treedar_available else ("odm",))
                 return Response(201 if created else 200,job)
+            observation = re.fullmatch(r'/ltds/v2/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/source/acceptance-observation', path)
+            if observation:
+                if self._job(observation[1], environment) is None:
+                    return self._error(404, 'not_found')
+                if method != 'GET':
+                    return self._error(405, 'method_not_allowed')
+                if body not in (b'', ''):
+                    return self._error(400, 'invalid_request')
+                ack = self.store.worker_acceptance_observation(observation[1])
+                return Response(200, ack) if ack is not None else self._error(404, 'observation_pending')
             source_job=re.fullmatch(r"/ltds/v2/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(/source/complete)?",path)
             if source_job:
                 job_id,suffix=source_job.groups();job=self._job(job_id,environment)
