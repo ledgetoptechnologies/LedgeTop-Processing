@@ -17,8 +17,8 @@ not be added together or described as a complete suite.
 | Production/staging queue and ordered per-node routing | Actual Viewer/Python synthetic pairings; 332-test integrated selection | Installed source intake and concurrent two-node jobs |
 | Durable result return and selective cleanup | Signed ready proof, real Viewer process death/recovery, synthetic 24-hour timer and preserved raw GCP/originals | Installed credentials, NAS durability and actual return to Viewer |
 | Coordinator/worker maintenance | Independently generated startup policy, crash-safe cutover journal and 121-test combined qualification | Concrete cutover transport, real worker update/drain/resume |
-| Long transfer after coordinator outage | Existing range/resume contracts | Claude's expired source-grant renewal and scratch-settlement corrections; not integrated |
-| Viewer GCP workflow | Exact `36f26839` peer-reported 125 passing cases across two bounded runs and successful Operations production build | Introduced response-union type errors and unrelated workspace diagnostics remain; rendered acceptance still needed |
+| Long transfer after coordinator outage | Reviewed `481058c` source-renewal changes integrated through `ece54b2`, with registered NAS reader custody | Combined renewal qualification; actual coordinator-restart fetching/processing recovery, per-receipt operator-resolution delivery and mint-I/O coverage remain open |
+| Viewer GCP workflow | Viewer `ae43303b`, successful Operations production build and 46 selected Viewer tests on the paired branch | Explicit source-vs-ellipsoidal height choice/provenance, target runtime/geoid qualification, unrelated workspace type diagnostics and rendered acceptance |
 | TreeDar and Gaussian splats | Genuine-LiDAR validation/scaffolding | Typed usable TreeDar output registration and real processing; Gaussian remains disabled |
 | Customer/project/task workspace | Historical #406 behavior and hierarchy tests | Current owner/release reconciliation and rendered/deployed acceptance |
 
@@ -35,6 +35,25 @@ A fresh read-only installed metadata probe still passes with 202 files, seven
 archive/intent pairs and 90,778 metadata bytes; its process exited. It does not
 hash retained artifacts, exclude writers, prove pilot closure or establish
 Viewer acceptance. No live service, NAS setting or client job was changed.
+
+The later inactive transport foundation is integrated through `751aced`.
+Its combined checkpoint passed **148/148 Python tests** and **46/46 Viewer
+tests**, no skips. Three no-GCP actual Viewer/Python intake/result/conversion
+cases also passed with Viewer `ae43303b`; see
+`evidence/combined-foundation-viewer-gcp-20261105.md`. Actual local Docker
+qualification passed twelve checks, including cold private readback and a
+17 MiB bounded streamed archive; see
+`evidence/coordinator-image-daemon-qualification-20261105.md`. These are distinct
+selections, not a summed full-suite claim. The local image predates subsequent
+renewal work and remains unpublished. Installed PID1-holder/worker/NAS acceptance
+and the complete cutover driver are still required.
+
+The installed NodeODX accepts the corrected compound GCP CRS, but accepted
+syntax does not establish the desired geoid transformation. The offline
+synthetic NAVD88 conversion lacked a non-ballpark operation; explicit retained
+ellipsoidal heights and output-datum provenance are separate pending work.
+See `evidence/installed-gcp-crs-probes-20261105.md`. This issue does not apply
+to the agreed no-GCP photo dataset.
 
 ## Latest combined and native-host preparation checkpoint
 
