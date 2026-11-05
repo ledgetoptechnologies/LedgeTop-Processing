@@ -5,20 +5,26 @@ anything, or authorize engine-cache cleanup. The cutover controller must prove
 writer exclusion separately and compare offline/backup snapshots under one key.
 """
 from datetime import datetime
+import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 from pathlib import Path
 import re
 import sqlite3
 import stat
+import sys
+import time
 import uuid
 
 PROFILE = 'installed-693cb7e-closed-v1'
+PROBE_PROFILE = 'installed-693cb7e-metadata-diagnostic-v1'
 SOURCE = '693cb7eca32295da959a4f42399f317577ef8a8a'
 SCHEMA_SHA256 = '4368b50f2ba34bb969e9750b49fdd85478f88183276a1aa164744a5cc2188642'
-SCHEMA_PATH = Path(__file__).resolve().parents[1] / 'contracts/coordinator-693cb7e-schema.json'
+_MODULE_PATH = Path(__file__) if globals().get('__file__') and not __file__.startswith('<') else Path('/__diagnostic__/probe.py')
+SCHEMA_PATH = _MODULE_PATH.resolve().parents[1] / 'contracts/coordinator-693cb7e-schema.json'
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 
 
@@ -70,16 +76,43 @@ def _owned(path, uid, *, directory=False, root=False):
     return info
 
 
-def _hash_file(path, uid, limit, key):
+class _ReadBudget:
+    """Cooperative bounds for direct retained-file reads; no timeout thread."""
+    def __init__(self, seconds, maximum):
+        _require(seconds is None or type(seconds) in (int,float) and math.isfinite(seconds) and seconds > 0,
+                 'positive_duration_bound_required')
+        _require(maximum is None or type(maximum) is int and maximum > 0, 'positive_read_bound_required')
+        self.deadline = time.monotonic() + seconds if seconds is not None else None
+        self.maximum, self.used = maximum, 0
+
+    def check(self):
+        _require(self.deadline is None or time.monotonic() < self.deadline, 'census_duration_exceeded')
+
+    def preflight(self, amount):
+        self.check()
+        _require(self.maximum is None or amount <= self.maximum-self.used, 'census_read_budget_exceeded')
+
+    def read(self, descriptor, amount):
+        self.preflight(amount)
+        value = os.read(descriptor, amount)
+        self.used += len(value)
+        self.check()
+        return value
+
+
+def _hash_file(path, uid, limit, key, budget):
     before = _owned(path, uid)
     _require(before.st_size <= limit, 'retained_file_budget_exceeded')
+    budget.preflight(before.st_size)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         _require(_same(os.fstat(fd)) == _same(before), 'retained_file_identity_changed')
         plain = hashlib.sha256()
         keyed = hmac.new(key, b'file\0', hashlib.sha256)
         size = 0
-        while chunk := os.read(fd, 1024 * 1024):
+        while size < before.st_size:
+            chunk = budget.read(fd, min(1024 * 1024, before.st_size-size))
+            _require(bool(chunk), 'retained_file_changed')
             size += len(chunk)
             _require(size <= before.st_size, 'retained_file_changed')
             plain.update(chunk); keyed.update(chunk)
@@ -91,13 +124,14 @@ def _hash_file(path, uid, limit, key):
         os.close(fd)
 
 
-def _read_small_json(path, uid):
+def _read_small_json(path, uid, budget=None):
+    budget = budget or _ReadBudget(None,None)
     before = _owned(path, uid)
     _require(before.st_size <= 65536, 'receipt_metadata_budget_exceeded')
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         _require(_same(before) == _same(os.fstat(fd)), 'receipt_identity_changed')
-        data = os.read(fd, before.st_size + 1)
+        data = budget.read(fd, before.st_size)
         _require(len(data) == before.st_size and _same(before) == _same(os.fstat(fd)) == _same(path.lstat()),
                  'receipt_identity_changed')
         return _json(data.decode('utf-8'))
@@ -105,18 +139,53 @@ def _read_small_json(path, uid):
         os.close(fd)
 
 
-def _schema(db):
-    profile = _json(SCHEMA_PATH.read_text())
+def _schema(db, reviewed_schema_bytes=None):
+    if reviewed_schema_bytes is None:
+        reviewed_schema_bytes = SCHEMA_PATH.read_bytes()
+    _require(type(reviewed_schema_bytes) is bytes and len(reviewed_schema_bytes) <= 65536,
+             'reviewed_schema_bytes_required')
+    profile = _json(reviewed_schema_bytes.decode('utf-8'))
     _require(hashlib.sha256(_canonical(profile)).hexdigest() == SCHEMA_SHA256,
              'reviewed_schema_profile_changed')
     _require(profile['profile'] == PROFILE and profile['sourceCommit'] == SOURCE,
              'reviewed_schema_profile_required')
+    _require(db.execute('SELECT COUNT(*) FROM sqlite_master').fetchone()[0] == len(profile['objects']),
+             'unreviewed_predecessor_schema')
+    schema_bytes = db.execute("SELECT COALESCE(SUM(length(CAST(type AS BLOB))+length(CAST(name AS BLOB))+"
+        "length(CAST(tbl_name AS BLOB))+COALESCE(length(CAST(sql AS BLOB)),0)),0) FROM sqlite_master").fetchone()[0]
+    _require(schema_bytes <= max(65536,2*len(_canonical(profile['objects']))), 'schema_metadata_budget_exceeded')
     objects = [list(row) for row in db.execute(
         'SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name')]
     normalize = lambda entries: [row[:3] + [re.sub(r'\s+', ' ', row[3]).strip() if row[3] else None]
                                   for row in entries]
     _require(normalize(objects) == normalize(profile['objects']), 'unreviewed_predecessor_schema')
     return objects
+
+
+def _row_bytes(value, remaining, budget):
+    """Exact ASCII JSON length before allocating a potentially expanded string."""
+    size = 2
+    def count(item, limit):
+        if type(item) is not str:
+            _require(item is None or type(item) in (int,float), 'unreviewed_binary_metadata')
+            return len(_canonical(item))
+        result = 2
+        for start in range(0,len(item),4096):
+            budget.check()
+            for char in item[start:start+4096]:
+                code = ord(char)
+                result += (2 if char in '\\"' or char in '\b\f\n\r\t' else
+                           6 if code < 32 or 126 < code <= 65535 else 12 if code > 65535 else 1)
+            _require(result <= limit, 'predecessor_metadata_budget_exceeded')
+        return result
+    for index, (key, item) in enumerate(sorted(value.items())):
+        budget.check()
+        size += (1 if index else 0) + count(key,remaining-size) + 1
+        size += count(item,remaining-size)
+        _require(size <= remaining, 'predecessor_metadata_budget_exceeded')
+    encoded = _canonical(value)
+    _require(len(encoded) == size and size <= remaining, 'predecessor_metadata_budget_exceeded')
+    return encoded
 
 
 def _maintenance_history(nodes, schedules, authority_id, jobs):
@@ -196,15 +265,19 @@ def _maintenance_history(nodes, schedules, authority_id, jobs):
                          'node_resume_completion_invalid')
 
 
-def census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
-           max_metadata_bytes=64 * 1024 * 1024, expected_counts=None,
-           logical_root='/prototype-state'):
+def _census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
+            metadata_only, reviewed_schema_bytes=None, max_duration_seconds=None,
+            max_read_bytes=None, max_database_bytes=None,
+            max_metadata_bytes=64 * 1024 * 1024, expected_counts=None,
+            logical_root='/prototype-state'):
     """Return private keyed equality evidence; no controller/ownership assertion.
 
     ``expected_counts`` is an optional reviewed plan checkpoint, never a hardcoded
     terminal-job count. All fields, including callback flags, remain in row hashes.
     Budgets are explicit and independent: artifacts cannot borrow metadata quota.
     """
+    budget = _ReadBudget(max_duration_seconds,max_read_bytes)
+    budget.check()
     _require(type(key) is bytes and len(key) == 32, 'private_census_key_required')
     _uuid(authority_id)
     _require(type(uid) is int and uid >= 0 and type(max_artifact_bytes) is int and
@@ -218,27 +291,59 @@ def census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
     database = root / 'jobs.sqlite3'
     initial = _owned(database, uid)
     _require(stat.S_IMODE(initial.st_mode) == 0o600, 'private_database_required')
+    coarse_physical_bound = 8*max_metadata_bytes + 100000*1024 + 1024*1024
+    _require(initial.st_size <= coarse_physical_bound, 'sqlite_coarse_physical_budget_exceeded')
+    _require(max_database_bytes is None or type(max_database_bytes) is int and max_database_bytes > 0
+             and initial.st_size <= max_database_bytes, 'diagnostic_database_size_exceeded')
     _require(not any(Path(str(database) + suffix).exists() or Path(str(database) + suffix).is_symlink()
                      for suffix in ('-journal', '-wal', '-shm')), 'sqlite_io_not_quiescent')
-    with database.open('rb') as stream:
-        header = stream.read(100)
+    descriptor = os.open(database,os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        _require(_same(initial) == _same(os.fstat(descriptor)), 'database_header_identity_changed')
+        header = budget.read(descriptor,100)
+    finally:
+        os.close(descriptor)
     _require(len(header) == 100 and header[:16] == b'SQLite format 3\0' and header[18:20] == b'\1\1',
              'reviewed_rollback_database_required')
     db = sqlite3.connect(database.as_uri() + '?mode=ro&immutable=1', uri=True)
     db.row_factory = sqlite3.Row
     try:
+        def progress():
+            return int(budget.deadline is not None and time.monotonic() >= budget.deadline)
+        db.set_progress_handler(progress,1000)
+        _require(callable(getattr(db,'setlimit',None)), 'bounded_sqlite_reader_required')
+        db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,65536)
         db.execute('BEGIN')
-        _require(db.execute('PRAGMA quick_check').fetchall()[0][0] == 'ok', 'sqlite_integrity_failed')
-        schema = _schema(db)
-        _require(not db.execute('PRAGMA foreign_key_check').fetchall(), 'detached_retained_reference')
+        schema = _schema(db,reviewed_schema_bytes)
+        db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH,max(65536,max_metadata_bytes))
+        table_names = sorted(item[1] for item in schema if item[0] == 'table')
+        sizes, raw_total, total_rows = {}, 0, 0
+        for name in table_names:
+            budget.check()
+            count = db.execute('SELECT COUNT(*) FROM "'+name+'"').fetchone()[0]
+            total_rows += count
+            _require(total_rows <= 100000, 'predecessor_metadata_budget_exceeded')
+            columns = [row['name'] for row in db.execute('PRAGMA table_info("'+name+'")')]
+            length_sql = '+'.join('COALESCE(length(CAST("'+column+'" AS BLOB)),0)' for column in columns)
+            sizes[name] = []
+            for identity, length in db.execute('SELECT rowid,'+length_sql+' FROM "'+name+'"'):
+                budget.check()
+                raw_total += length
+                _require(raw_total <= max_metadata_bytes, 'predecessor_metadata_budget_exceeded')
+                sizes[name].append((identity,length))
+        _require(db.execute('PRAGMA quick_check').fetchone()[0] == 'ok', 'sqlite_integrity_failed')
+        _require(db.execute('PRAGMA foreign_key_check').fetchone() is None, 'detached_retained_reference')
         tables, rows, logical_bytes, row_count = {}, {}, 0, 0
-        for name in sorted(item[1] for item in schema if item[0] == 'table'):
-            values = [dict(row) for row in db.execute('SELECT * FROM "' + name + '"')]
-            encoded = sorted(_canonical(row) for row in values)
-            logical_bytes += sum(len(value) for value in encoded)
-            row_count += len(values)
-            _require(logical_bytes <= max_metadata_bytes and row_count <= 100000,
-                     'predecessor_metadata_budget_exceeded')
+        for name in table_names:
+            values, encoded = [], []
+            for identity, length in sizes[name]:
+                budget.check()
+                _require(length <= max_metadata_bytes-logical_bytes, 'predecessor_metadata_budget_exceeded')
+                value = dict(db.execute('SELECT * FROM "'+name+'" WHERE rowid=?',(identity,)).fetchone())
+                wire = _row_bytes(value,max_metadata_bytes-logical_bytes,budget)
+                logical_bytes += len(wire); row_count += 1
+                values.append(value); encoded.append(wire)
+            encoded.sort()
             digest = hmac.new(key, b'table\0' + name.encode() + b'\0', hashlib.sha256)
             for value in encoded:
                 digest.update(len(value).to_bytes(8, 'big')); digest.update(value)
@@ -329,7 +434,7 @@ def census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
                          'viewer_archive_path_changed')
             if (root / archive).exists() or task['archive_path'] is not None:
                 receipt_path = archive + '.receipt'
-                receipt = _read_small_json(root / receipt_path, uid)
+                receipt = _read_small_json(root / receipt_path, uid, budget)
                 identity_fields = dict(version=1, task=identifier, generation=generation,
                     job=task['job_id'], node=task['node_id'], engine=task['engine_uuid'])
                 _require(type(receipt) is dict and set(receipt) == set(identity_fields) | {'bytes', 'sha256'}
@@ -349,6 +454,7 @@ def census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
         _require(page_count * page_size == initial.st_size <= sqlite_bound, 'sqlite_physical_budget_exceeded')
         files, total_artifact, directories = {}, 0, {}
         for path in root.rglob('*'):
+            budget.check()
             relative = path.relative_to(root).as_posix()
             info = path.lstat()
             if stat.S_ISDIR(info.st_mode):
@@ -356,10 +462,17 @@ def census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
                 directories[relative] = _same(_owned(path, uid, directory=True))
                 continue
             _require(relative in expected_files, 'unknown_predecessor_path')
-            result = _hash_file(path, uid, sqlite_bound if relative == 'jobs.sqlite3' else max_artifact_bytes, key)
+            limit = sqlite_bound if relative == 'jobs.sqlite3' else max_artifact_bytes
             expected = expected_files[relative]
-            _require(expected is None or (result['bytes'], result['sha256']) == expected,
-                     'retained_artifact_digest_mismatch')
+            if metadata_only:
+                observed = _owned(path,uid)
+                _require(observed.st_size <= limit and (expected is None or observed.st_size == expected[0]),
+                         'retained_artifact_size_mismatch')
+                result = dict(bytes=observed.st_size,mode=stat.S_IMODE(observed.st_mode))
+            else:
+                result = _hash_file(path, uid, limit, key, budget)
+                _require(expected is None or (result['bytes'], result['sha256']) == expected,
+                         'retained_artifact_digest_mismatch')
             if relative not in ('jobs.sqlite3', 'coordinator.lock'):
                 total_artifact += result['bytes']
                 _require(total_artifact <= max_artifact_bytes, 'retained_artifact_budget_exceeded')
@@ -371,11 +484,82 @@ def census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
                  'retained_directory_changed_during_census')
         _require(_same(initial) == _same(database.lstat()) and _same(root_info) == _same(root.lstat()),
                  'predecessor_changed_during_census')
-        return dict(schemaVersion=1, profile=PROFILE, sourceCommit=SOURCE, authorityId=authority_id,
+        budget.check()
+        return dict(schemaVersion=1, profile=PROBE_PROFILE if metadata_only else PROFILE,
+                    validationScope='metadata-paths-receipts-only' if metadata_only else 'full-retained-custody',
+                    retainedFilesValidated=not metadata_only, directFileBytesRead=budget.used,
+                    sourceCommit=SOURCE, authorityId=authority_id,
                     schemaSha256=hashlib.sha256(_canonical(schema)).hexdigest(), tables=tables, files=files,
                     metadataBytes=logical_bytes, artifactBytes=total_artifact, sqliteBytes=initial.st_size,
-                    sqlitePhysicalBound=sqlite_bound, archiveReceipts=len(archive_checks),
+                    sqlitePhysicalBound=sqlite_bound, sqliteCoarsePhysicalBound=coarse_physical_bound,
+                    archiveReceipts=len(archive_checks),
                     rootMode=stat.S_IMODE(root_info.st_mode), writerExclusionProven=False,
                     signedViewerAcceptanceProven=False)
+    except sqlite3.DataError:
+        raise CensusRefused('predecessor_metadata_budget_exceeded') from None
+    except sqlite3.OperationalError:
+        budget.check()
+        raise
     finally:
         db.close()
+
+
+def census(root, **kwargs):
+    """Full retained-content census; default behavior retains full hashing."""
+    return _census(root,metadata_only=False,**kwargs)
+
+
+def metadata_probe(root, *, reviewed_schema_bytes, max_duration_seconds=5,
+                   max_read_bytes=1024*1024, max_database_bytes=8*1024*1024, **kwargs):
+    """Diagnostic only; independently bounded metadata and direct receipt reads."""
+    _require(type(reviewed_schema_bytes) is bytes, 'reviewed_schema_bytes_required')
+    _require(max_duration_seconds is not None and max_read_bytes is not None and max_database_bytes is not None,
+             'diagnostic_bounds_required')
+    return _census(root,metadata_only=True,reviewed_schema_bytes=reviewed_schema_bytes,
+                   max_duration_seconds=max_duration_seconds,max_read_bytes=max_read_bytes,
+                   max_database_bytes=max_database_bytes,**kwargs)
+
+
+def probe_wire(raw):
+    """Exact closed JSON wire bytes; aggregate/keyed diagnostic output only."""
+    try:
+        _require(type(raw) is bytes, 'diagnostic_request_bytes_required')
+        _require(len(raw) <= 131072, 'diagnostic_request_too_large')
+        request = _json(raw.decode('utf-8'))
+        fields = {'schemaBase64','keyHex','root','authorityId','nodeIds','uid','maxArtifactBytes',
+                  'maxMetadataBytes','expectedCounts','logicalRoot','maxDurationSeconds','maxReadBytes','maxDatabaseBytes'}
+        _require(type(request) is dict and set(request) == fields, 'diagnostic_request_fields_invalid')
+        _require(type(request['keyHex']) is str and HEX.fullmatch(request['keyHex']), 'private_census_key_required')
+        schema = base64.b64decode(request['schemaBase64'],validate=True)
+        result = metadata_probe(request['root'], reviewed_schema_bytes=schema,key=bytes.fromhex(request['keyHex']),
+            authority_id=request['authorityId'],node_ids=request['nodeIds'],uid=request['uid'],
+            max_artifact_bytes=request['maxArtifactBytes'],max_metadata_bytes=request['maxMetadataBytes'],
+            expected_counts=request['expectedCounts'],logical_root=request['logicalRoot'],
+            max_duration_seconds=request['maxDurationSeconds'],max_read_bytes=request['maxReadBytes'],
+            max_database_bytes=request['maxDatabaseBytes'])
+        inventory = result.pop('files')
+        result['fileCount'] = len(inventory)
+        result['fileInventorySha256'] = hashlib.sha256(_canonical(inventory)).hexdigest()
+        print(json.dumps(dict(ok=True,result=result),sort_keys=True,separators=(',',':')))
+        return 0
+    except Exception as error:
+        reason = str(error) if type(error) is CensusRefused else 'diagnostic_probe_failed'
+        if not re.fullmatch('[a-z][a-z0-9_]{0,100}',reason): reason = 'diagnostic_probe_failed'
+        print(json.dumps(dict(ok=False,error=reason),sort_keys=True,separators=(',',':')))
+        return 2
+
+
+def probe_stdin():
+    return probe_wire(sys.stdin.buffer.read(131073))
+
+
+def serializable_probe_source(request=None):
+    """Reviewed module source; accepts reviewed schema bytes entirely in memory.
+
+    With ``request`` supplied, run the returned source via ``python -`` stdin.
+    Otherwise run via ``python -c SOURCE`` and supply the closed JSON on stdin.
+    No target file/package is needed. In-memory schemaBase64 is always pinned.
+    Keep the generated source private: it embeds the ephemeral census key.
+    """
+    tail = 'raise SystemExit(probe_stdin())' if request is None else 'raise SystemExit(probe_wire('+repr(_canonical(request))+'))'
+    return Path(__file__).read_text() + '\n' + tail + '\n'

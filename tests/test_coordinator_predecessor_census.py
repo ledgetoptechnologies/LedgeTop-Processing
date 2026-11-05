@@ -1,9 +1,12 @@
 """Exact frozen-693 SQL, synthetic retained data; no engine/NAS/runtime mutation."""
+import base64
 import hashlib
 import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
@@ -195,6 +198,99 @@ class ClosedPredecessorCensusTests(unittest.TestCase):
     def test_unbound_foreign_residual_plan_refused(self):
         self.mutate("UPDATE nodes SET plan_id=?,revision=2,target_image=? WHERE id='main'",(str(uuid.uuid4()),'sha256:'+'a'*64))
         with self.assertRaisesRegex(c.CensusRefused,'current_node_plan_not_closed'): self.census()
+
+    def probe(self, **kwargs):
+        args=dict(key=self.key,authority_id=self.authority,node_ids=('cluster','main'),uid=os.geteuid(),
+                  max_artifact_bytes=16*1024*1024,reviewed_schema_bytes=c.SCHEMA_PATH.read_bytes())
+        args.update(kwargs)
+        return c.metadata_probe(self.root,**args)
+
+    def test_incremental_canonical_size_matches_escaped_unicode(self):
+        value=dict(text='quote" backslash\\ controls\n\t\x00 del\x7f unicode\u00e9 astral\U0001f600',integer=42,real=2.5,empty=None)
+        expected=c._canonical(value)
+        self.assertEqual(c._row_bytes(value,len(expected),c._ReadBudget(None,None)),expected)
+        with self.assertRaisesRegex(c.CensusRefused,'predecessor_metadata_budget_exceeded'):
+            c._row_bytes(value,len(expected)-1,c._ReadBudget(None,None))
+
+    def test_diagnostic_metadata_probe_never_hashes_retained_content(self):
+        with patch.object(c,'_hash_file',side_effect=AssertionError('bulk content must not be opened')):
+            result=self.probe()
+        self.assertEqual(result['profile'],c.PROBE_PROFILE)
+        self.assertFalse(result['retainedFilesValidated'])
+        self.assertFalse(result['writerExclusionProven'])
+        self.assertLess(result['directFileBytesRead'],65536)
+        self.assertTrue(all('content' not in item for item in result['files'].values()))
+        full=self.census()
+        self.assertEqual(full['profile'],c.PROFILE)
+        self.assertTrue(full['retainedFilesValidated'])
+        self.assertGreater(full['directFileBytesRead'],result['directFileBytesRead'])
+
+    def test_diagnostic_does_not_claim_same_size_content_integrity(self):
+        target=next(self.tasks[0][2].glob('input-*'));data=target.read_bytes();target.write_bytes(b'x'*len(data))
+        result=self.probe()
+        self.assertFalse(result['retainedFilesValidated'])
+        with self.assertRaisesRegex(c.CensusRefused,'retained_artifact_digest_mismatch'): self.census()
+
+    def test_diagnostic_rejects_schema_bytes_mutation(self):
+        changed=json.loads(c.SCHEMA_PATH.read_text());changed['sourceCommit']='0'*40
+        with self.assertRaisesRegex(c.CensusRefused,'reviewed_schema_profile_changed'):
+            self.probe(reviewed_schema_bytes=json.dumps(changed).encode())
+
+    def test_coarse_database_budget_refuses_before_connect(self):
+        maximum=1024
+        coarse=8*maximum+100000*1024+1024*1024
+        with self.path.open('r+b') as stream: stream.truncate(coarse+4096)
+        with patch.object(c.sqlite3,'connect',side_effect=AssertionError('must refuse before SQLite')):
+            with self.assertRaisesRegex(c.CensusRefused,'sqlite_coarse_physical_budget_exceeded'):
+                self.census(max_metadata_bytes=maximum)
+            with self.assertRaisesRegex(c.CensusRefused,'sqlite_coarse_physical_budget_exceeded'):
+                self.probe(max_metadata_bytes=maximum,max_database_bytes=coarse+8192)
+
+    def test_huge_cell_refuses_before_full_row_materialization(self):
+        self.mutate('UPDATE jobs SET result=? WHERE id=?',('x'*100000,self.tasks[0][1]))
+        trace=[];original=c.sqlite3.connect
+        def tracked(*args,**kwargs):
+            connection=original(*args,**kwargs);connection.set_trace_callback(trace.append);return connection
+        for action in (self.census,self.probe):
+            with self.subTest(action=action.__name__):
+                trace.clear()
+                with patch.object(c.sqlite3,'connect',side_effect=tracked):
+                    with self.assertRaisesRegex(c.CensusRefused,'predecessor_metadata_budget_exceeded'):
+                        action(max_metadata_bytes=32768)
+                self.assertFalse(any('SELECT * FROM "jobs" WHERE rowid' in sql for sql in trace))
+                self.assertFalse(any('quick_check' in sql for sql in trace))
+
+    def test_full_hash_direct_read_budget_and_duration_are_cooperative(self):
+        with self.assertRaisesRegex(c.CensusRefused,'census_read_budget_exceeded'):
+            self.census(max_read_bytes=100)
+        with patch.object(c.time,'monotonic',side_effect=[0,0,2]):
+            with self.assertRaisesRegex(c.CensusRefused,'census_duration_exceeded'):
+                self.census(max_duration_seconds=1)
+        with self.assertRaisesRegex(c.CensusRefused,'diagnostic_database_size_exceeded'):
+            self.probe(max_database_bytes=1)
+
+    def test_serialized_stdin_probe_needs_no_contract_file_or_package(self):
+        request=dict(schemaBase64=base64.b64encode(c.SCHEMA_PATH.read_bytes()).decode(),keyHex=self.key.hex(),
+                     root=str(self.root),authorityId=self.authority,nodeIds=['cluster','main'],uid=os.geteuid(),
+                     maxArtifactBytes=16*1024*1024,maxMetadataBytes=64*1024*1024,expectedCounts=None,
+                     logicalRoot='/prototype-state',maxDurationSeconds=5,maxReadBytes=1024*1024,
+                     maxDatabaseBytes=8*1024*1024)
+        result=subprocess.run([sys.executable,'-I','-'],input=c.serializable_probe_source(request),
+                              cwd=self.temp.name,capture_output=True,text=True,timeout=10,check=False)
+        self.assertEqual(result.returncode,0,result.stderr)
+        answer=json.loads(result.stdout)
+        self.assertTrue(answer['ok'])
+        self.assertEqual(answer['result']['profile'],c.PROBE_PROFILE)
+        self.assertFalse(answer['result']['retainedFilesValidated'])
+        self.assertNotIn('files',answer['result'])
+        self.assertGreater(answer['result']['fileCount'],155)
+        self.assertNotIn(self.key.hex(),result.stdout)
+        self.assertNotIn(self.tasks[0][0],result.stdout)
+        request['schemaBase64']=base64.b64encode(b'{}').decode()
+        rejected=subprocess.run([sys.executable,'-I','-'],input=c.serializable_probe_source(request),
+                                cwd=self.temp.name,capture_output=True,text=True,timeout=10,check=False)
+        self.assertEqual(rejected.returncode,2)
+        self.assertEqual(json.loads(rejected.stdout),dict(ok=False,error='reviewed_schema_profile_changed'))
 
     def test_unknown_table_refused(self):
         self.mutate('CREATE TABLE future_state(x TEXT)')
