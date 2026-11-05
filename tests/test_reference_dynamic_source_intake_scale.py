@@ -539,12 +539,16 @@ def _external_cgroup_profile():
     helper = ReferenceSourceIntakeTests()
     helper.setUp()
     source_root = Path(__file__).resolve().parents[1]
-    image = os.environ.get("LTDS_PROCESSING_TEST_IMAGE", "ledgetop-processing:integration-8ff9a72")
+    image = os.environ.get("LTDS_PROCESSING_TEST_IMAGE",
+        "sha256:57f01267c88439d872f6782b54511e314614a76145e32cfe2fad003e5ca0fac8")
     port_probe = socket.socket()
     port_probe.bind(("127.0.0.1", 0))
     port = port_probe.getsockname()[1]
     port_probe.close()
-    container_name = "ltds-source-intake-cgroup-20261105"
+    run_id = uuid.uuid4().hex
+    container_name = "ltds-source-intake-cgroup-" + run_id[:12]
+    owner_label = "codex-reference-source-intake-cgroup-20261105-" + run_id
+    owner_label_key = "com.ledgetop.codex-task"
     process = None
     output_queue = queue_module.Queue()
     output_reader = None
@@ -564,11 +568,13 @@ def _external_cgroup_profile():
                 config_path.chmod(0o600)
             fixture_mount = ("type=bind,source=" + root.as_posix() + ",target=/fixture,readonly")
             source_mount = ("type=bind,source=" + source_root.as_posix() + ",target=/processing,readonly")
-            command = ["docker", "run", "--rm", "-i", "--name", container_name,
+            command = ["docker", "run", "--rm", "-i", "--read-only", "--name", container_name,
+                "--label", f"{owner_label_key}={owner_label}",
                 "--cpus=0.5", "--memory=256m", "--memory-swap=256m", "--pids-limit=32",
                 "--tmpfs", "/tmp:rw,size=64m,noexec,nosuid", "-p",
                 f"127.0.0.1:{port}:{port}", "--mount", source_mount, "--mount", fixture_mount,
-                "-w", "/processing", "-e", "PYTHONPATH=/processing", image, "python",
+                "-w", "/processing", "-e", "PYTHONPATH=/processing",
+                "-e", "PYTHONDONTWRITEBYTECODE=1", image, "python",
                 "tests/test_reference_dynamic_source_intake_scale.py", "--server", "/fixture/server.json"]
             process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, bufsize=1)
@@ -600,7 +606,7 @@ def _external_cgroup_profile():
                 raise AssertionError("server listened on an unexpected port")
             if ready["cgroup"]["memoryMax"] != str(256 * 1024**2):
                 raise AssertionError("server container does not have the requested 256 MiB cgroup")
-            if ready["cgroup"]["cpuMax"].split()[0] != "50000":
+            if ready["cgroup"]["cpuMax"] != "50000 100000":
                 raise AssertionError("server container does not have the requested 0.5 CPU quota")
 
             tls_context = ssl.create_default_context(cafile=str(certificate_path))
@@ -628,8 +634,10 @@ def _external_cgroup_profile():
 
             legacy = {key: payload[key] for key in (
                 "schemaVersion", "submissionId", "manifest", "pipeline", "capabilityFingerprint")}
+            legacy_connection = connect()
             legacy_status = DynamicSourceIntakeScaleTests._content_length_only(
-                connect(), "/ltds/v1/jobs", len(protocol.canonical_json(legacy)), bearer=VIEWER_BEARER)
+                legacy_connection, "/ltds/v1/jobs", len(protocol.canonical_json(legacy)), bearer=VIEWER_BEARER)
+            legacy_connection.close()
             if legacy_status != 413:
                 raise AssertionError("legacy V1 path did not keep its four MiB cap")
 
@@ -781,8 +789,15 @@ def _external_cgroup_profile():
             try:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                subprocess.run(["docker", "stop", container_name],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                identity = subprocess.run(["docker", "inspect", "--format",
+                    '{{.Name}}|{{index .Config.Labels "' + owner_label_key + '"}}', container_name],
+                    capture_output=True, text=True, check=False)
+                expected_identity = "/" + container_name + "|" + owner_label
+                if identity.returncode == 0 and identity.stdout.strip() == expected_identity:
+                    subprocess.run(["docker", "stop", container_name],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                elif identity.returncode == 0:
+                    raise RuntimeError("refusing to stop a container without this run's owner label")
                 process.wait(timeout=10)
         if process is not None:
             if process.stdin:
