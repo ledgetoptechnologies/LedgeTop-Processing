@@ -6,7 +6,9 @@ The v2 queued job adds a closed ``transferRequest`` envelope containing
 ``protocol, reservationId, generation, expiresAt, manifestSha256, sourceVersion,
 objectIds, chunkBytes, requestBudget, byteBudget, nonce, attemptBudget``. The short-lived v2
 grant echoes the reservation identity and budgets, adds jobId, environment, and
-token, and has a shorter ``expiresAt`` than the reservation lease. The
+token, and has a shorter ``expiresAt`` than the reservation lease. A journaled
+renewal from the coordinator may outlive that lease, because the claim, not the
+reservation deadline, keeps a transfer in progress; see ``past_reservation``. The
 ``attemptBudget`` caps all HTTP attempts, including retries, and is charged
 durably before each request; ``requestBudget`` charges unique range intents.
 This keeps reservation/source identity in the transfer envelope; v1 queued
@@ -184,9 +186,14 @@ class ValidatedSourceGrant:
     token: str = field(repr=False)
 
 
-def validate_source_grant(grant, *, job, clock=time.time, allow_expired=False):
-    """Validate a closed v2 grant against the immutable queued job envelope."""
-    if type(allow_expired) is not bool:
+def validate_source_grant(grant, *, job, clock=time.time, allow_expired=False, past_reservation=False):
+    """Validate a closed v2 grant against the immutable queued job envelope.
+
+    ``past_reservation`` lifts only the reservation-deadline bound. Pass it for
+    a grant the caller holds through the renewal journal, never for a first
+    grant: the coordinator mints those strictly inside the reservation.
+    """
+    if type(allow_expired) is not bool or type(past_reservation) is not bool:
         raise TransferError("invalid source grant validation mode")
     fields = ("protocol", "reservationId", "generation", "expiresAt", "manifestSha256",
               "sourceVersion", "jobId", "environment", "objectIds", "nonce", "token", "chunkBytes",
@@ -284,7 +291,7 @@ def validate_source_grant(grant, *, job, clock=time.time, allow_expired=False):
     lease_expires = timestamp(transfer["expiresAt"], "source reservation expiry")
     if expires <= _now(clock) and not allow_expired:
         raise TransferError("source grant expired")
-    if expires > lease_expires or lease_expires <= _now(clock):
+    if not past_reservation and (expires > lease_expires or lease_expires <= _now(clock)):
         raise TransferError("source grant exceeds reservation lease")
     return ValidatedSourceGrant(identity, expires, tuple(objects), grant["chunkBytes"],
                                 grant["requestBudget"], grant["byteBudget"], grant["attemptBudget"], token)
@@ -310,19 +317,29 @@ class SourceRangeClient:
     """Durably fetch canonical byte ranges and publish one verified object."""
 
     def __init__(self, origin, ledger_path, *, opener=None, ssl_context=None,
-                 clock=time.time, timeout=60):
-        parsed = urlsplit(origin)
-        if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
-                or parsed.password is not None or parsed.path not in ("", "/")
-                or parsed.query or parsed.fragment or "\\" in origin
-                or any(ord(c) <= 32 or ord(c) == 127 or c.isspace() for c in origin)):
-            raise ValueError("source broker must be a configured HTTPS origin")
+                 clock=time.time, timeout=60, renewal_origin=None, renewal_headers=None):
+        """``renewal_headers(route, payload)`` adds the worker's own credentials.
+
+        They go only to ``renewal_origin``, the coordinator; range reads keep
+        using just the grant token, so the broker origin never sees them.
+        """
+        for candidate in (origin, origin if renewal_origin is None else renewal_origin):
+            parsed = urlsplit(candidate)
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+                    or parsed.password is not None or parsed.path not in ("", "/")
+                    or parsed.query or parsed.fragment or "\\" in candidate
+                    or any(ord(c) <= 32 or ord(c) == 127 or c.isspace() for c in candidate)):
+                raise ValueError("source broker must be a configured HTTPS origin")
+        if renewal_headers is not None and not callable(renewal_headers):
+            raise ValueError("invalid source renewal credentials")
         context = ssl_context or ssl.create_default_context()
         if not context.check_hostname or context.verify_mode != ssl.CERT_REQUIRED:
             raise ValueError("source broker TLS verification is required")
         if type(timeout) not in (int, float) or isinstance(timeout, bool) or not 0 < timeout <= 300:
             raise ValueError("invalid source transfer timeout")
         self.origin, self.clock, self.timeout = origin.rstrip("/"), clock, timeout
+        self.renewal_origin = self.origin if renewal_origin is None else renewal_origin.rstrip("/")
+        self.renewal_headers = renewal_headers
         self._open = opener or build_opener(_RefuseRedirects(), HTTPSHandler(context=context)).open
         self.ledger_path = Path(ledger_path).absolute()
         if any(p.is_symlink() for p in (self.ledger_path.parent, *self.ledger_path.parent.parents)):
@@ -349,11 +366,12 @@ class SourceRangeClient:
             raise SourceRenewalInvalid("invalid source renewal request") from None
         if len(body) > MAX_RENEWAL_BODY_BYTES:
             raise SourceRenewalInvalid("source renewal request exceeds protocol limit")
-        url = self.origin + route
-        request = Request(url, data=body, method="POST", headers={
-            "Accept": "application/json", "Accept-Encoding": "identity",
-            "Content-Type": "application/json",
-        })
+        url = self.renewal_origin + route
+        headers = {"Accept": "application/json", "Accept-Encoding": "identity",
+                   "Content-Type": "application/json"}
+        if self.renewal_headers is not None:
+            headers.update(self.renewal_headers(route, payload))
+        request = Request(url, data=body, method="POST", headers=headers)
         try:
             try:
                 response = self._open(request, timeout=self.timeout)
