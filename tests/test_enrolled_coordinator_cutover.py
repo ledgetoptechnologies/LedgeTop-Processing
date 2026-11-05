@@ -63,7 +63,8 @@ class Boundary:
 
     def observe_not_applied(self,action,intent,state):
         return dict(intentId=intent['intentId'],bindingSha256=c.digest(intent),
-            factsSha256=c.digest({'syntheticBeforeState':action}),outcome='not-applied',proofKind='authenticated-rejection' if self.rejectionVerified else 'pre-dispatch')
+            factsSha256=c.digest({'syntheticBeforeState':action}),
+            dispatchId=state['dispatch']['dispatchId'] if state['dispatch'] is not None else None,outcome='not-applied',proofKind='authenticated-rejection' if self.rejectionVerified else 'pre-dispatch')
 
     def verify_not_applied(self,action,observation,intent,state):
         return action not in self.effects and self.guard_ready and (observation['proofKind']=='pre-dispatch' or self.rejectionVerified)
@@ -186,6 +187,22 @@ class EnrolledCutoverJournalTests(unittest.TestCase):
             with self.assertRaisesRegex(c.CutoverHeld,'bounded_not_applied'):
                 self.actor.reconcile_not_applied(disposition='rearm')
         self.assertEqual(self.actor.journal.read()['noEffect'],[])
+
+    def test_old_rejection_cannot_clear_rearmed_unknown_dispatch(self):
+        self.driver.loss='disable-predecessor-restart';self.driver.rejectionVerified=True
+        with self.assertRaises(c.CutoverHeld):self.actor.advance()
+        first=self.actor.journal.read();intent=first['pending']
+        old_rejection=self.driver.observe_not_applied(intent['action'],intent,first)
+        self.actor.reconcile_not_applied(disposition='rearm')
+        with self.assertRaises(c.CutoverHeld):self.actor.advance()
+        second=self.actor.journal.read()
+        self.assertEqual(second['pending'],intent)
+        self.assertNotEqual(first['dispatch']['dispatchId'],second['dispatch']['dispatchId'])
+        with patch.object(self.driver,'observe_not_applied',return_value=old_rejection):
+            with self.assertRaisesRegex(c.CutoverHeld,'bounded_not_applied'):
+                self.actor.reconcile_not_applied(disposition='rearm')
+        self.assertEqual(self.actor._load()['dispatchSequence'],2)
+        self.assertIsNotNone(self.actor.journal.read()['pending'])
 
     def child_exit_at_durable_boundary(self, dispatched):
         child=os.fork()

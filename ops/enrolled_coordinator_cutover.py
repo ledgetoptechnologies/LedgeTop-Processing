@@ -218,20 +218,21 @@ class FirstEnrolledCutover:
                     evidence['predecessorVerified'] is True and evidence['readOnly'] is True,
                     'exact_readonly_preflight_required')
             state=dict(schemaVersion=1,mode=MODE,operationId=self.plan['operationId'],planSha256=self.plan_sha,
-                       phase='prepared',direction='forward',rollbackScope='none',index=0,pending=None,events=[],proofs={},admissionOpened=False,noEffect=[],dispatch=None)
+                       phase='prepared',direction='forward',rollbackScope='none',index=0,pending=None,events=[],proofs={},admissionOpened=False,noEffect=[],dispatch=None,dispatchSequence=0)
             self.journal.write(state)
             return state
 
     def _load(self):
         state=self.journal.read()
         fields={'schemaVersion','mode','operationId','planSha256','phase','direction','index','pending',
-                'events','proofs','admissionOpened','rollbackScope','noEffect','dispatch'}
+                'events','proofs','admissionOpened','rollbackScope','noEffect','dispatch','dispatchSequence'}
         require(type(state) is dict and set(state)==fields and type(state['schemaVersion']) is int and state['schemaVersion']==1 and state['mode']==MODE and
                 state['operationId']==self.plan['operationId'] and state['planSha256']==self.plan_sha and
                 state['direction'] in ('forward','rollback') and state['rollbackScope'] in ('none','restart-only','original-only','declared-v2')
                 and type(state['index']) is int and
                 type(state['admissionOpened']) is bool and type(state['events']) is list and len(state['events'])<=64 and
-                type(state['proofs']) is dict and type(state['noEffect']) is list and len(state['noEffect'])<=64,
+                type(state['proofs']) is dict and type(state['noEffect']) is list and len(state['noEffect'])<=64 and
+                type(state['dispatchSequence']) is int and 0<=state['dispatchSequence']<=128,
                 'first_cutover_journal_binding_changed')
         steps=self._steps(state)
         require(0<=state['index']<=len(steps),'first_cutover_phase_invalid')
@@ -240,7 +241,7 @@ class FirstEnrolledCutover:
         require(state['phase']==expected,'first_cutover_phase_invalid')
         forward_count=rollback_count=0;seen_rollback=False;proofs={};admission=False
         for event in state['events']:
-            require(type(event) is dict and set(event)=={'intentSha256','action','observation','phase','direction','step'},
+            require(type(event) is dict and set(event)=={'intentSha256','action','observation','phase','direction','step','dispatch'},
                     'cutover_history_shape_changed')
             direction=event['direction'];require(direction in ('forward','rollback'),'cutover_history_direction_changed')
             if direction=='rollback':seen_rollback=True
@@ -256,6 +257,9 @@ class FirstEnrolledCutover:
                     observation['intentId']==past['intentId'] and all(type(observation[key]) is str and HASH.fullmatch(observation[key])
                     for key in ('bindingSha256','factsSha256')) and observation['bindingSha256']==digest(past),
                     'cutover_history_observation_changed')
+            self._dispatch_shape(event['dispatch'],past)
+            require((event['dispatch'] is None)==(event['action'] in READ_ACTIONS or event['action'] in ROLLBACK_READS),
+                    'completed_dispatch_marker_missing')
             proofs[event['action']]=observation
             if event['action']=='resume-final-gate':admission=True
             if direction=='forward':forward_count+=1
@@ -278,15 +282,20 @@ class FirstEnrolledCutover:
             number=len(prior)
             require(number<len(sequence) and intent==self._intent(dict(direction=direction,index=number),sequence[number][0]) and
                     (record['disposition']!='rollback' or direction=='forward'),'not_applied_intent_changed')
-            self._no_effect_shape(record['observation'],intent)
-            require(record['dispatch'] in (None,digest(intent)) and
+            self._dispatch_shape(record['dispatch'],intent)
+            self._no_effect_shape(record['observation'],intent,record['dispatch'])
+            require(
                     (record['observation']['proofKind']!='pre-dispatch' or record['dispatch'] is None),
                     'not_applied_dispatch_evidence_changed')
         if state['pending'] is not None:
             require(state['index']<len(steps) and state['pending']==self._intent(state,steps[state['index']][0]),
                     'first_cutover_pending_intent_changed')
-        require(state['dispatch'] is None or state['pending'] is not None and state['dispatch']==digest(state['pending']),
-                'dispatch_marker_changed')
+        self._dispatch_shape(state['dispatch'],state['pending'])
+        markers=[event['dispatch'] for event in state['events'] if event['dispatch'] is not None]
+        markers += [record['dispatch'] for record in state['noEffect'] if record['dispatch'] is not None]
+        if state['dispatch'] is not None:markers.append(state['dispatch'])
+        require(sorted(marker['attempt'] for marker in markers)==list(range(1,state['dispatchSequence']+1)),
+                'dispatch_attempt_history_changed')
         return state
 
     @staticmethod
@@ -311,7 +320,7 @@ class FirstEnrolledCutover:
                     for key in ('bindingSha256','factsSha256')) and observation['bindingSha256']==digest(intent),
                     'bounded_verified_observation_required')
         event=dict(intentSha256=digest(intent),action=action,observation=observation,phase=next_phase,
-                   direction=state['direction'],step=state['index'])
+                   direction=state['direction'],step=state['index'],dispatch=state['dispatch'])
         state['events'].append(event);state['proofs'][action]=observation
         state.update(index=state['index']+1,phase=next_phase,pending=None,dispatch=None)
         if action=='resume-final-gate':state['admissionOpened']=True
@@ -326,6 +335,7 @@ class FirstEnrolledCutover:
             steps=self._steps(state)
             if state['index']==len(steps):return state
             require(state['pending'] is None,'ambiguous_outcome_inspection_only')
+            require(len(state['events'])<64 and state['dispatchSequence']<128,'cutover_history_capacity_reached')
             action,next_phase=steps[state['index']];intent=self._intent(state,action)
             require(not any(record['intent']==intent and record['disposition']=='rollback' for record in state['noEffect']),
                     'proven_not_applied_requires_rollback')
@@ -335,7 +345,11 @@ class FirstEnrolledCutover:
             if action in READ_ACTIONS or action in ROLLBACK_READS:
                 observation=self.driver.observe(action,intent,state)
             else:
-                state['dispatch']=digest(intent);self.journal.write(state)  # Before any possible external dispatch.
+                state['dispatchSequence']+=1
+                state['dispatch']=dict(intentSha256=digest(intent),attempt=state['dispatchSequence'],
+                    dispatchId=str(uuid.uuid5(uuid.UUID(self.plan['operationId']),
+                        'dispatch:'+str(state['dispatchSequence'])+':'+digest(intent))))
+                self.journal.write(state)  # Before any possible external dispatch.
                 try:self.driver.execute(action,intent,state)
                 except Exception:raise CutoverHeld('mutation_outcome_uncertain_inspection_only') from None
                 observation=self.driver.observe(action,intent,state)
@@ -354,9 +368,18 @@ class FirstEnrolledCutover:
             observation=self.driver.observe(action,intent,state)
             return self._finish(state,action,next_phase,intent,observation)
 
+    def _dispatch_shape(self,marker,intent):
+        if marker is None:return
+        require(type(marker) is dict and set(marker)=={'intentSha256','attempt','dispatchId'} and
+                type(marker['attempt']) is int and 1<=marker['attempt']<=128 and type(intent) is dict and
+                marker['intentSha256']==digest(intent) and marker['dispatchId']==str(uuid.uuid5(
+                    uuid.UUID(self.plan['operationId']),'dispatch:'+str(marker['attempt'])+':'+digest(intent))),
+                'dispatch_marker_changed')
+
     @staticmethod
-    def _no_effect_shape(observation,intent):
-        require(type(observation) is dict and set(observation)=={'intentId','bindingSha256','factsSha256','outcome','proofKind'} and
+    def _no_effect_shape(observation,intent,dispatch):
+        require(type(observation) is dict and set(observation)=={'intentId','bindingSha256','factsSha256','outcome','proofKind','dispatchId'} and
+                observation['dispatchId']==(dispatch['dispatchId'] if dispatch is not None else None) and
                 observation['outcome']=='not-applied' and observation['proofKind'] in ('pre-dispatch','authenticated-rejection') and observation['intentId']==intent['intentId'] and
                 observation['bindingSha256']==digest(intent) and
                 all(type(observation[key]) is str and HASH.fullmatch(observation[key])
@@ -373,12 +396,13 @@ class FirstEnrolledCutover:
             state=self._load();intent=state['pending']
             require(intent is not None and not state['admissionOpened'] and
                     (disposition!='rollback' or state['direction']=='forward'),'pending_closed_intent_required')
+            require(len(state['noEffect'])<64,'not_applied_history_capacity_reached')
             action=intent['action']
             observe=getattr(self.driver,'observe_not_applied',None)
             verify=getattr(self.driver,'verify_not_applied',None)
             require(callable(observe) and callable(verify),'not_applied_boundary_unsupported')
             require(self.driver.guard(action,intent,state,inspection=True) is True,'current_inspection_boundary_not_qualified')
-            observation=observe(action,intent,state);self._no_effect_shape(observation,intent)
+            observation=observe(action,intent,state);self._no_effect_shape(observation,intent,state['dispatch'])
             require(observation['proofKind']!='pre-dispatch' or state['dispatch'] is None,
                     'dispatched_outcome_cannot_be_inferred_absent')
             require(verify(action,observation,intent,state) is True and

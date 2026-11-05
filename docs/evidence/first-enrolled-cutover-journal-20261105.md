@@ -102,3 +102,23 @@ same intent, forged/wrong-intent proofs refuse, and guard/complete-proof failure
 retain pending. These tests use a synthetic transport boundary; concrete daemon
 and authenticated-rejection qualification remains transport-owned. The bounded
 one-CPU/512MiB network-none container auto-removed; exact label inventory empty.
+
+
+### Distinct dispatch attempts
+
+A logical intent/request remains stable for backend idempotency, but every
+possible dispatch now has a separate durable global attempt ordinal and UUID5
+`dispatchId`. Completed events, no-effect receipts and a pending unknown outcome
+retain their exact marker. Reopen validates the complete contiguous attempt
+sequence, marker/intent binding and unique deterministic ID. No-effect proof must
+include its exact current dispatch ID (null only before dispatch). A retained
+attempt1 rejection therefore cannot clear rearmed attempt2 after a lost response.
+History capacity is checked before dispatch or receipt allocation.
+
+The followup suite passed31/31 journal cases within the51/51 combined Linux run
+in2.751 seconds, no skips. It explicitly proves valid rejection/rearm followed by
+unknown second dispatch refuses the old first-dispatch proof while preserving
+the same logical request. The two real child-death cases remain green. Concrete
+transport proof production still needs independent review/qualification. The
+one-CPU/768MiB network-none runner exited0 and was auto-removed; exact task-label
+inventory was empty.
