@@ -367,8 +367,20 @@ class RecoveryAttemptTests(RecoveryHarness):
                 self.admit()
         self.assertEqual(self.attempts(), 0)
 
+    def refuse_recovery_posts(self):
+        """Every recovery POST is refused, so nothing ever commits."""
+        real, posts = self.driver._request, []
+
+        def refused(method, suffix, *args, **kwargs):
+            if method == 'POST':
+                posts.append(suffix)
+                return 409, None
+            return real(method, suffix, *args, **kwargs)
+        self.driver._request = refused
+        return posts
+
     def test_eight_unresolved_attempts_then_a_hold_that_keeps_everything(self):
-        self.down.add('recover')
+        posts = self.refuse_recovery_posts()
         for attempt in range(1, SOURCE_RECOVERY_ATTEMPTS + 1):
             self.restart_coordinator()
             with self.assertRaises(DriverWait):
@@ -376,15 +388,62 @@ class RecoveryAttemptTests(RecoveryHarness):
             self.assertEqual(self.attempts(), attempt)
         self.restart_coordinator()
         before = self.rows()
-        sent = len(self.requests)
+        with self.assertRaisesRegex(DriverHeld, 'source_recovery_attempts_exhausted'):
+            self.admit()
+        sent = len(posts)
         for _ in range(2):
             with self.assertRaisesRegex(DriverHeld, 'source_recovery_attempts_exhausted'):
                 self.admit()
         self.assertEqual(self.rows(), before)
-        self.assertNotIn(('POST', 'recover'), self.requests[sent:])
+        self.assertEqual(len(posts), sent)
+        self.assertIsNone(self.data['sourceRecovery']['pending'])
         self.assertEqual(self.status(), ('held', 'coordinator_restart'))
         self.assertEqual(self.attempts(), SOURCE_RECOVERY_ATTEMPTS)
         self.assertEqual(self.receipts(), [])
+
+    def test_an_intent_that_never_committed_stays_counted_when_retired(self):
+        self.restart_coordinator()
+        self.down.add('recover')
+        with self.assertRaises(DriverWait):
+            self.admit()
+        self.down.clear()
+        self.restart_coordinator()
+        self.refuse_recovery_posts()
+        with self.assertRaises(DriverWait):
+            self.admit()
+        self.assertEqual((self.attempts(), self.receipts()), (2, []))
+
+    def test_a_committed_intent_is_resolved_by_its_own_receipt_when_retired(self):
+        self.restart_coordinator()
+        self.lose_reply.add('recover')
+        with self.assertRaises(DriverWait):
+            self.admit()
+        old = self.data['sourceRecovery']['pending']['request']['requestId']
+        self.restart_coordinator()
+        real = self.driver._request
+
+        def only_the_old_one(method, suffix, payload=None, **kwargs):
+            if method == 'POST' and payload['requestId'] != old:
+                return 409, None
+            return real(method, suffix, payload, **kwargs)
+        self.driver._request = only_the_old_one
+        with self.assertRaises(DriverWait):
+            self.admit()
+        # The old attempt resolved to zero, so only the new one counts.
+        self.assertEqual(self.attempts(), 1)
+        self.assertNotEqual(self.data['sourceRecovery']['pending']['request']['requestId'], old)
+
+    def test_replaying_an_accepted_receipt_is_idempotent(self):
+        self.restart_coordinator()
+        self.lose_reply.add('recover')
+        with self.assertRaises(DriverWait):
+            self.admit()
+        request = self.data['sourceRecovery']['pending']['request']
+        spent = self.usage()
+        first = self.resume(request)
+        self.assertEqual(self.resume(request), first)
+        self.assertIsNone(self.admit())
+        self.assertEqual((self.attempts(), len(self.receipts()), self.usage()), (0, 1, spent))
 
     def test_a_refusal_without_a_receipt_clears_no_attempt(self):
         self.restart_coordinator()
