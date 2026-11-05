@@ -178,6 +178,7 @@ class RenewalHarness(unittest.TestCase):
         driver._combined_policy = driver._combined_policy_initial = None
         driver.clock, driver.source_range_client = (lambda: self.now[0]), self.client
         driver.worker = SimpleNamespace(authority_id=self.queue.authority_id)
+        driver.ledger = SimpleNamespace(transfer_fenced=lambda _reservation: True)
         driver.node_id, driver.worker_id, driver.worker_instance_id = 'cluster', 'worker', 'instance'
         driver._request = self.worker_request
         driver._save = self.save

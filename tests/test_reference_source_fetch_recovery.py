@@ -810,6 +810,50 @@ class StepThroughRecoveryTests(RecoveryHarness):
         self.assert_bound(reservation, 'processing_pending')
         self.step('execution_pending')
 
+    def lost_phase_reply(self):
+        self.step('awaiting_grant')
+        self.step('fetching_pending')
+        self.lose_reply.add('phase')
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertEqual((self.row()[0], self.store.get(self.job_id)['phase']), ('fetching_pending', 'fetching'))
+        return self.row()[1]['reservation']
+
+    def test_lost_fetching_phase_reply_recovers_instead_of_looping_on_409(self):
+        reservation = self.lost_phase_reply()
+        self.restart_coordinator()
+        self.assertEqual(self.status(), ('held', 'coordinator_restart'))
+        self.step('fetching_pending')
+        self.assertEqual(self.status(), ('running', None))
+        self.assertEqual(self.receipts()[0]['transferRequestSha256'], protocol.digest(reservation))
+        self.step('fetching')
+        self.finish_fetch()
+        self.assertEqual(self.fenced(reservation), ('reserved', True, 1))
+
+    def test_fetching_pending_attests_no_fence_because_the_ledger_has_none(self):
+        reservation = self.lost_phase_reply()
+        self.restart_coordinator()
+        self.lose_reply.add('recover')
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertEqual(self.fenced(reservation), ('reserved', False, 1))
+        self.assertIs(self.row()[1]['sourceRecovery']['pending']['evidence']['transferFenced'], False)
+
+    def test_processing_pending_attests_the_fence_it_really_has(self):
+        reservation = self.to_fetching()
+        self.finish_fetch()
+        self.restart_coordinator()
+        self.lose_reply.add('recover')
+        self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertEqual(self.fenced(reservation), ('reserved', True, 1))
+        self.assertIs(self.row()[1]['sourceRecovery']['pending']['evidence']['transferFenced'], True)
+
+    def test_unfenced_lapsed_lease_stays_held_and_asks_for_nothing(self):
+        reservation = self.lost_phase_reply()
+        self.now[0] = stamp(reservation['expiresAt']) + 1
+        self.restart_coordinator()
+        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'reservation_expired'})
+        self.assertEqual((self.receipts(), self.status()), ([], ('held', 'coordinator_restart')))
+        self.assertNotIn('sourceRecovery', self.row()[1])
+
     def test_nine_restarts_of_one_claim_all_recover_and_reset_no_budget(self):
         reservation = self.to_fetching()
         claim = self.row()[1]['claim']['claimToken']

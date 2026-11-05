@@ -43,6 +43,10 @@ from .treedar_engine import TreeDarHeld
 
 PREFIX = '/ltds/worker/v1'
 SOURCE_RECOVERY_ATTEMPTS = 8
+# Worker stage -> coordinator phases it can resume from. Any other pairing means
+# the worker is ahead of the coordinator, whose history was lost, so it stays held.
+SOURCE_RECOVERY_PHASES = {'fetching_pending': ('fetching',), 'fetching': ('fetching',),
+    'processing_pending': ('fetching',)}
 # Consecutive bad engine reads before they are reported; a good read resets both.
 ENGINE_TASK_MISSING_READS = 10
 ENGINE_SUSPECT_SECONDS = 1800
@@ -1225,7 +1229,7 @@ class ReferenceDriver:
             raise DriverHeld('source_fetch_not_admitted')
         if state['status'] in ('failed', 'cancelled'):
             return self._unstarted(job_id, stage, data, 'source_fetch_ended')
-        if source_range_v2 and self._restart_recoverable(state, data):
+        if source_range_v2 and self._restart_recoverable(state, data, stage):
             self._recover_source_fetch(job_id, stage, data)
             state = self._claim_state(job_id, data['claim'])
             if state is None:
@@ -1235,9 +1239,9 @@ class ReferenceDriver:
         raise DriverHeld('source_fetch_held')
 
     @staticmethod
-    def _restart_recoverable(state, data):
-        """A restart hold on a fetch, or an unresolved intent from an earlier one."""
-        return state['executionPhase'] == 'fetching' and (
+    def _restart_recoverable(state, data, stage):
+        """A restart hold this stage can resume, or an unresolved intent from an earlier one."""
+        return state['executionPhase'] in SOURCE_RECOVERY_PHASES.get(stage, ()) and (
             (state['status'], state['heldReason']) == ('held', 'coordinator_restart')
             or (data.get('sourceRecovery') or {}).get('pending') is not None)
 
@@ -1333,6 +1337,12 @@ class ReferenceDriver:
             return
         if not state['eligible']:
             raise DriverHeld('source_recovery_ineligible')
+        reservation = data['reservation']['reservationId']
+        fenced = self.ledger.transfer_fenced(reservation)
+        # An unfenced lease that lapsed can never begin its transfer, so resuming
+        # the claim would only move the same hold past a coordinator round trip.
+        if not fenced and self._lease_lapsed(data):
+            raise DriverHeld('reservation_expired')
         if journal['attempts'] >= SOURCE_RECOVERY_ATTEMPTS:
             raise DriverHeld('source_recovery_attempts_exhausted')
         checked = validate_source_grant(data['grant'], job=claim, clock=self.clock,
@@ -1340,7 +1350,7 @@ class ReferenceDriver:
         ranges, committed = self.source_range_client.committed_progress(checked.identity)
         sequence = data.get('sourceRenewalSequence', 0)
         grant_sha = p.digest(data['grant'])
-        evidence = dict(schemaVersion=1, reservationId=data['reservation']['reservationId'], transferFenced=True,
+        evidence = dict(schemaVersion=1, reservationId=reservation, transferFenced=fenced,
             grantSha256=grant_sha, renewalSequence=sequence, committedRanges=ranges, committedBytes=committed,
             inputObjects=len(data.get('inputPaths', {})))
         binding = {key: state['claim'][key] for key in ('jobId', 'generation', 'environment', 'nodeId', 'workerId',
@@ -1608,11 +1618,11 @@ class ReferenceDriver:
             phase = 'fetching' if stage == 'fetching_pending' else 'processing'
             status, public = self._request('POST', suffix + '/phase', {'claimToken': token, 'phase': phase})
             if status == 409:
-                # Every object arrived but the coordinator is still in fetching:
-                # the same hold, with no GET left to make.
-                if stage == 'processing_pending' and (claim.get('transferRequest') or {}).get('protocol') == 'source-range-v2':
+                # A hold with no GET to gate: every object arrived, or the reply to
+                # an earlier /phase was lost and the coordinator is already fetching.
+                if (claim.get('transferRequest') or {}).get('protocol') == 'source-range-v2':
                     state = self._claim_state(job_id, claim)
-                    if state is not None and self._restart_recoverable(state, data):
+                    if state is not None and self._restart_recoverable(state, data, stage):
                         self._recover_source_fetch(job_id, stage, data)
                 return {'state': stage, 'jobId': job_id}
             claim.update(public)
