@@ -60,8 +60,8 @@ Operation `54103935-f4bf-4b40-b078-84f90d4064b5` has stopped outer controller
 `ltds-phase-forward-54103935f4bf4b40`, exact ID
 `461d6948ec245963997f0639bffacff15fd69f1e565787d89749289c49ad940c`.
 PID0, exit1, no OOM and its exact operation label were independently checked.
-Private artifact volume `ltds-phase-forward-artifacts-54103935f4bf4b40` remains
-mounted only by that stopped controller, pending root-agent cleanup review.
+Private artifact volume `ltds-phase-forward-artifacts-54103935f4bf4b40` was
+initially retained with only that stopped controller as a mount reference.
 
 Cold read-only copies of the journal, backup receipt, baseline and TAR were
 recovered without restarting it. Unchanged production `validate_tar` again
@@ -70,10 +70,14 @@ matched the durable receipt:467968archive bytes,202files,13directories,
 `b1fe610e83c9a6ae34e5bf2ab5c75dd43cbd1acec7ff5f32b4b36813d6e2f351`.
 `restoreAuthorized=false`; the copied archive is never original lease authority.
 
-Proposed disposition after review: preserve the private diagnostic copies,
-verify the exact stopped owner/PID/exit/label and absence of other volume
-references, then retire only this outer controller and its artifact volume.
-Do not replay this operation: its disposable original fixtures are gone.
+The root agent reviewed the cold TAR proof and explicitly authorized exact
+resource cleanup. Fresh owner/operation label, PID0, exit1 and no OOM were
+checked before removing only the stopped outer controller, without force.
+The exact volume name and owner were checked, then zero remaining mount users
+were proved before removing only that volume, without force. Filtered operation
+container **and** volume inventories were empty afterward. Private diagnostic
+copies remain; no keys were printed or foreign resources touched. The operation
+was not replayed: its disposable original fixtures are gone.
 
 ## Next step
 
