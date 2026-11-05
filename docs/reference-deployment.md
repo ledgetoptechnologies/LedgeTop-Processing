@@ -1,5 +1,20 @@
 # Reference runtime installation and preflight
 
+## Candidate V2 source intake and pull-only result return
+
+For the coordinated V2 Viewer path, use runtime schema 6 with an explicit
+`"viewerAcceptance": {}`. This selects Viewer-driven result download and signed
+copy acknowledgement without constructing the legacy background push sender.
+Keep nonempty `viewerReceiptKeys` and `sourceAttestationKeys`: an empty push
+target map does not disable receipt or source-proof verification. Source spool,
+TLS, worker identity and recovery bindings still require qualification.
+
+Schema 4/5 configurations continue to require nonempty environment-scoped push
+targets. Nonempty targets select the legacy sender; do not configure that sender
+for V2 source jobs or treat its V1 receipt path as the V2 accepted-copy workflow.
+This configuration option is candidate code, not evidence that the installed
+coordinator or Viewer uses it.
+
 ## Current installation — October 28, 2026
 
 The sole coordinator now runs source `e2ccf489ab41160acff3f90e2b4bcd568f72cf24`,

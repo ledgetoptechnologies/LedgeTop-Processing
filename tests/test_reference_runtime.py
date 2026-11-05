@@ -246,7 +246,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
             self.value = value; self.write_config()
             with self.subTest(value=value), self.assertRaises(RuntimeConfigurationError): self.settings()
 
-    def test_schema6_loads_private_source_spool_and_pinned_attestation_signer(self):
+    def source_intake_config(self):
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
         spool_root=self.root/'source-spool';spool_root.mkdir(mode=0o700)
@@ -264,6 +264,9 @@ class ReferenceRuntimeTests(unittest.TestCase):
             sourceAttestationKeys=[{'environment':'staging','issuerId':'viewer-test','keyId':'source-v1',
                 'principalId':'viewer-staging','publicKeyPem':source_key}])
         self.write_config()
+
+    def test_schema6_loads_private_source_spool_and_pinned_attestation_signer(self):
+        self.source_intake_config()
         with patch('processing.source_spool.os.path.ismount',return_value=True):
             loaded=self.settings()
         self.assertIsNotNone(loaded.source_spool)
@@ -272,6 +275,51 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.value['sourceAttestationKeys'][0]['publicKeyPem']='not-a-key';self.write_config()
         with patch('processing.source_spool.os.path.ismount',return_value=True):
             with self.assertRaises(RuntimeConfigurationError):self.settings()
+
+    def test_schema6_pull_only_starts_no_legacy_sender_and_keeps_receipt_pins(self):
+        self.source_intake_config()
+        self.value['viewerAcceptance'] = {}
+        queue = Queue(self.config.prototype_state_dir, node_ids=('cluster','main'), reference_enabled=True)
+        self.addCleanup(queue.close)
+        for binding in self.value['recoveryBindings'].values():
+            binding['authorityId'] = queue.authority_id
+        self.write_config()
+        with patch('processing.source_spool.os.path.ismount',return_value=True):
+            loaded = self.settings()
+        self.assertIsNone(loaded.viewer_acceptance_targets)
+        self.assertTrue(loaded.viewer_receipt_keys)
+        self.assertIsNotNone(loaded.source_attestation_keys)
+        first, second = self.tls_patches()
+        server = FakeServer()
+        with first, second, patch('processing.reference_recovery.ClaimRecoveryService',return_value=object()), \
+                patch('processing.source_spool.os.path.ismount',return_value=True):
+            runtime = ReferenceRuntime(queue, replace(self.config,viewer_enabled=False), loaded,
+                discover=lambda:self.snapshot, server_factory=lambda *args,**kwargs:server)
+        try:
+            self.assertIsNone(runtime._viewer_transfer_worker)
+            self.assertTrue(runtime.control.viewer.viewer_receipt_keys)
+            runtime.start()
+            self.assertIsNone(runtime._viewer_transfer_thread)
+        finally:
+            runtime.close()
+        self.assertEqual(server.events[-2:],['shutdown','closed'])
+        self.value['viewerReceiptKeys'] = {}
+        self.write_config()
+        with patch('processing.source_spool.os.path.ismount',return_value=True):
+            with self.assertRaises(RuntimeConfigurationError):self.settings()
+
+    def test_empty_push_targets_stay_invalid_in_legacy_runtime_schemas(self):
+        self.source_intake_config()
+        self.value['viewerAcceptance'] = {}
+        self.value.pop('sourceAttestationKeys')
+        for version in (4,5):
+            value = copy.deepcopy(self.value)
+            value['schemaVersion'] = version
+            if version == 4:value.pop('sourceSpool')
+            self.path.write_text(json.dumps(value))
+            with self.subTest(version=version),self.assertRaises(RuntimeConfigurationError):
+                self.settings()
+
     def test_schema2_rejects_duplicate_engine_ids_and_accepts_unique_daemon_bindings(self):
         self.value=self.recovery_config();self.write_config()
         self.assertEqual(set(self.settings().recovery_bindings),{'cluster','main'})

@@ -284,7 +284,11 @@ def load_reference_settings(path, config):
         viewer_targets = {}
         if value["schemaVersion"] in (4,5,6):
             configured = value["viewerAcceptance"]
-            if (type(configured) is not dict or not configured
+            # Schema 6 can use Viewer's authenticated pull/copy-ACK path without
+            # starting the legacy push sender. Receipt pins remain mandatory
+            # below, including when this explicit target map is empty.
+            if (type(configured) is not dict
+                    or (not configured and value["schemaVersion"] != 6)
                     or not set(configured) <= {"production", "staging"}):
                 raise RuntimeConfigurationError("explicit environment-scoped Viewer targets required")
             target_secrets = []
