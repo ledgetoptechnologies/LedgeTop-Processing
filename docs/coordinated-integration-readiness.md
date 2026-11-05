@@ -25,6 +25,20 @@ startup only, not configured reference dispatch or a deployed PC worker.
 
 ## Integrated source
 
+### Canonical execution path
+
+The coordinated version uses Viewer reference-attempt admission into
+ReferenceStore, then the per-node ReferenceDriver/ReferenceEngineWorker pull
+path, its persistent completion outbox and the existing Viewer accepted-copy
+receipt chain. Source transfer and engine execution must join that same job
+and claim identity. The legacy ViewerService direct NodeODM mutation lane does
+not have the durable accepted-copy release contract and must not be enabled
+as an alternate multi-node executor in the coordinated configuration.
+The experimental node-execution gateway is not part of this release branch;
+adding another execution/receipt protocol is not the integration plan.
+Local worker identity verification, source admission/custody and installed
+worker services are still required before this path can run jobs.
+
 Code commit `c7aa1ce66e91b3b3c985ed3d5789d7527f21402f` combines:
 
 | Component | Exact source | Review |
