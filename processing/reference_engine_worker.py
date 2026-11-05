@@ -299,24 +299,29 @@ class ReferenceEngineWorker:
     def task_observation(self, job_id):
         """Read-only: ('present', info), ('missing', None) or ('unreachable', None).
 
-        A failed task read is 'missing' only when the engine answers /task/list
-        without the task, so an engine replying 200 {error} reads like a 404.
+        Present needs the exact task and a known status code. Missing needs an
+        info read that found nothing (404, or NativeEngine's failure on 200
+        {error}) AND a well-formed /task/list census without the task. Anything
+        else, such as a malformed 200, is unknown and proves neither.
         """
         try:
             info = self.engine.read('/task/' + job_id + '/info', missing=True)
         except Exception:
-            try:
-                tasks = self.engine.read('/task/list')
-            except Exception:
-                return 'unreachable', None
-            if type(tasks) is not list or any(type(task) is not dict or task.get('uuid') == job_id for task in tasks):
-                return 'unreachable', None
-            return 'missing', None
-        if info is None:
-            return 'missing', None
-        if type(info) is not dict or info.get('uuid') != job_id or type(info.get('status')) is not dict:
+            info = None
+        if info is not None:
+            status = info.get('status') if type(info) is dict else None
+            code = status.get('code') if type(status) is dict else None
+            if type(info) is dict and info.get('uuid') == job_id and type(code) is int and code in (10, 20, 30, 40, 50):
+                return 'present', info
             return 'unreachable', None
-        return 'present', info
+        try:
+            tasks = self.engine.read('/task/list')
+        except Exception:
+            return 'unreachable', None
+        if (type(tasks) is not list or len(tasks) > p.MAX_OBJECTS
+                or any(type(task) is not dict or type(task.get('uuid')) is not str or task['uuid'] == job_id for task in tasks)):
+            return 'unreachable', None
+        return 'missing', None
 
     def poll(self, job_id):
         """Read-only engine reconciliation; terminal files stay until Viewer ACK."""
