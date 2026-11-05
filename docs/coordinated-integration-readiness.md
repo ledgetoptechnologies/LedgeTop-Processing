@@ -37,15 +37,37 @@ rfc8785 0.1.4, and pycparser 2.23 on main / 3.12 on cluster. No system Python
 packages, running containers, active-version symlinks, service units or NAS
 configuration were changed. These are preparation artifacts, not active workers.
 
-**Next result-path mismatch:** the current Viewer emits signed
-`ltds-viewer-accepted-copy-v2` receipts, while Processing Store acceptance and
-engine cleanup still use the strict V1 verifier. The intake pair does not execute
-an engine or prove result return, Viewer accepted-copy acknowledgement or
-cleanup. Add the exact V2 verifier and authenticated source/preclaim binding to
-the existing acceptance chain; never translate away V2 fields or accept unsigned
-metadata as V2 copy custody. Until that path is paired on the combined revision,
-the photo workflow remains unqualified for client work. Large transfer lease
-renewal, installed NAS qualification and real-data processing remain open too.
+### Source-bound result acceptance checkpoint
+
+Combined code through `32ac9c4` includes the exact signed
+`ltds-viewer-accepted-copy-v2` verifier, authenticated source/preclaim binding on
+private worker jobs, Store acceptance and exact receipt replay, and worker
+acceptance/cache-cleanup verification. V2 source jobs cannot use unsigned or V1
+copy acknowledgements; partial or malformed V2 markers cannot select legacy
+cleanup. The Store persists receipt identity and rejects conflicting reuse.
+
+Focused worker/cleanup/binding/receipt/result tests passed **59/59 on Linux**
+without skips at `e6e0ab1`. Subsequent Store V2 replay tests passed **2/2 on
+Windows**, including restart and conflicting receipt reuse. At `32ac9c4`, the
+actual Viewer TLS intake pair passed **1/1**, and the source completion test
+passed **1/1** after adding worker-progress and reopened-Store coverage. Source
+completion now returns its immutable receipt ACK even if a lost reply allows a
+worker to progress before Viewer retries; dynamic job state stays on GET job.
+
+The coordinator image built from `32ac9c4776136f26bd51ff6b2d0f125f72d98607` is
+`sha256:3ea5232a75c1e00bdd195ac8dd9d7b38c5c6cb68ba330946ef32c907764c011f`.
+A network-isolated, read-only container imported the worker/Store/V2 verifier
+modules and served health HTTP 200 as UID 10001; its listener was joined and
+the task-owned container removed. This proves image construction and basic
+startup only, not configured reference execution or installed services.
+
+The production worker daemon already assembles `ReferenceResults` and
+`ReferenceResultAPI` on its HTTPS listener. A full synthetic source → worker →
+result download → actual Viewer outbox/signer → Store ACK → cleanup test is
+being assembled; the separate component tests do not prove that whole path.
+The photo workflow remains unqualified for client work until that pairing and
+installed acceptance pass. Large transfer lease renewal, installed NAS
+qualification and real-data processing remain open too.
 
 ### Combined intake/worker checkpoint
 
