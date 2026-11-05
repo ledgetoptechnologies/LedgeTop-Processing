@@ -435,7 +435,7 @@ def validate_recipe(recipe, *, bootstrap=False):
                 'closed_mount_recipe_required')
         target = _absolute_path(mount['target'])
         require(target not in targets and target not in ('/', '/app', '/usr', '/bin', '/lib', '/lib64', '/etc', '/proc', '/sys', '/dev')
-                and not target.startswith(('/app/', '/usr/', '/bin/', '/lib/', '/lib64/', '/proc/', '/sys/', '/dev/'))
+                and not target.startswith(('/app/', '/usr/', '/bin/', '/lib/', '/lib64/', '/etc/', '/proc/', '/sys/', '/dev/'))
                 and 'docker.sock' not in target, 'application_source_or_host_control_mount_refused')
         require(not any(target.startswith(old + '/') or old.startswith(target + '/') for old in targets),
                 'overlapping_mount_recipe_refused')

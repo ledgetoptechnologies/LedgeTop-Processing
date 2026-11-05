@@ -59,41 +59,71 @@ def hold(settings, *, proof_path=PROOF):
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     lease = acquire(settings['leaseDirectory'], settings['stateRoot'])
-    require(lease.authority == settings['authorityId'])
-    path = Path(settings['stateRoot']) / 'coordinator.lock'
-    before = path.lstat()
-    require(path.resolve() == path and stat.S_ISREG(before.st_mode) and before.st_nlink == 1
-            and before.st_uid == 10001 and not before.st_mode & 0o022)
-    main = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
-    require(key(os.fstat(main)) == key(before) and not os.get_inheritable(main))
-    fcntl.flock(main, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    require(not os.get_inheritable(lease._descriptor))
     external = lease._descriptor
-    value = dict(schemaVersion=1, settings=settings, pid=os.getpid(), startTime=_start(os.getpid()),
-                 mainDescriptor=main, leaseDescriptor=external,
-                 mainIdentity=key(os.fstat(main)), leaseIdentity=key(os.fstat(external)))
-    proof = Path(proof_path)
-    descriptor = os.open(proof, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    # From successful external acquisition onward, no ordinary error may exit
+    # this process and silently release its flock. A lost proof/check is a hold.
+    main = None
+    main_identity = None
+    external_identity = None
     try:
-        raw = canonical(value)
-        require(len(raw) < 4096 and os.write(descriptor, raw) == len(raw))
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    while not stop.wait(.1):
-        lease.check(settings['stateRoot'])
-        require(key(os.fstat(main)) == key(path.lstat()) == value['mainIdentity'])
-        # PID1 is the reaper for task-owned docker-exec observers.
+        external_identity = key(os.fstat(external))
+        require(lease.authority == settings['authorityId'])
+        path = Path(settings['stateRoot']) / 'coordinator.lock'
+        before = path.lstat()
+        require(path.resolve() == path and stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                and before.st_uid == 10001 and not before.st_mode & 0o022)
+        main = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        main_identity = key(os.fstat(main))
+        require(main_identity == key(before) and not os.get_inheritable(main))
+        fcntl.flock(main, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        require(not os.get_inheritable(external))
+        value = dict(schemaVersion=1, settings=settings, pid=os.getpid(), startTime=_start(os.getpid()),
+                     mainDescriptor=main, leaseDescriptor=external,
+                     mainIdentity=main_identity, leaseIdentity=external_identity)
+        proof = Path(proof_path)
+        descriptor = os.open(proof, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         try:
-            while os.waitpid(-1, os.WNOHANG)[0]: pass
-        except ChildProcessError:
+            raw = canonical(value)
+            require(len(raw) < 4096 and os.write(descriptor, raw) == len(raw))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        while not stop.wait(.1):
+            lease.check(settings['stateRoot'])
+            require(key(os.fstat(main)) == key(path.lstat()) == main_identity)
+            try:
+                while os.waitpid(-1, os.WNOHANG)[0]: pass
+            except ChildProcessError:
+                pass
+    except BaseException:
+        # Best-effort status can never become a reason to drop acquired FDs.
+        # The observer refuses this marker even if the earlier ready proof exists.
+        try:
+            held = Path(str(proof_path) + '.held')
+            descriptor = os.open(held, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            try:
+                raw = canonical(dict(schemaVersion=1, status='held', settings=settings))
+                require(os.write(descriptor, raw) == len(raw))
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except BaseException:
             pass
+        # Only an explicit signal to this exact helper requests release. No
+        # timeout, liveness-check failure or proof-publication failure does so.
+        while not stop.wait(.1):
+            try:
+                while os.waitpid(-1, os.WNOHANG)[0]: pass
+            except BaseException:
+                pass
     try:
-        require(key(os.fstat(main)) == value['mainIdentity'])
-        os.close(main)
-        try: os.fstat(main)
-        except OSError as error: require(error.errno == errno.EBADF)
-        else: require(False)
+        if main is not None:
+            require(main_identity is not None and key(os.fstat(main)) == main_identity)
+            os.close(main)
+            try: os.fstat(main)
+            except OSError as error: require(error.errno == errno.EBADF)
+            else: require(False)
+        require(external_identity is not None and key(os.fstat(external)) == external_identity)
         lease.close()
         try: os.fstat(external)
         except OSError as error: require(error.errno == errno.EBADF)
@@ -108,6 +138,7 @@ def observe(settings, *, expected_pid=1, proof_path=PROOF):
     """Read-only actual-process/descriptor/flock proof, not a readiness boolean."""
     validate_settings(settings)
     require(type(expected_pid) is int and expected_pid > 0)
+    require(not os.path.lexists(str(proof_path) + '.held'))
     path = Path(proof_path)
     before = path.lstat()
     require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == 10001

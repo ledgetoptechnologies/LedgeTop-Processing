@@ -54,7 +54,8 @@ class StructuredTransportTests(unittest.TestCase):
             value=recipe();value.update(change)
             with self.assertRaises(t.TransportHeld):t.validate_recipe(value,bootstrap=True)
         for mount in (dict(type='bind',source='/private/tls,readonly=false',target='/safe',readOnly=True),
-                      dict(type='bind',source='/private/shadow',target='/app/processing',readOnly=True)):
+                      dict(type='bind',source='/private/shadow',target='/app/processing',readOnly=True),
+                      dict(type='bind',source='/private/shadow',target='/etc/ld.so.preload',readOnly=True)):
             value=recipe();value['mounts'].append(mount)
             with self.assertRaises(t.TransportHeld):t.validate_recipe(value,bootstrap=True)
 
@@ -243,6 +244,43 @@ class OriginalLeaseHolderTests(unittest.TestCase):
         self.start();proof=json.loads(self.proof.read_text())
         proof['mainDescriptor']=proof['leaseDescriptor'];self.proof.write_text(json.dumps(proof))
         with self.assertRaises(RuntimeError):holder.observe(self.settings,expected_pid=self.child.pid,proof_path=str(self.proof))
+
+    def test_post_acquisition_check_failure_holds_original_locks_until_explicit_release(self):
+        self._failure_retains('check')
+
+    def test_proof_fsync_failure_holds_original_locks_until_explicit_release(self):
+        self._failure_retains('fsync')
+
+    def _failure_retains(self, fault):
+        import fcntl
+        source='''import json,sys
+from unittest.mock import patch
+from ops.enrolled_coordinator_lease_helper import hold
+from processing.authority_lease import AuthorityLease
+original=AuthorityLease.check;calls=0
+def check(self,*args,**kwargs):
+ global calls
+ calls+=1
+ if calls>1:raise OSError('synthetic post-acquisition failure')
+ return original(self,*args,**kwargs)
+target='processing.authority_lease.AuthorityLease.check' if sys.argv[3]=='check' else 'ops.enrolled_coordinator_lease_helper.os.fsync'
+options={'new':check} if sys.argv[3]=='check' else {'side_effect':OSError('synthetic injected failure')}
+with patch(target,**options):
+ raise SystemExit(hold(json.loads(sys.argv[1]),proof_path=sys.argv[2]))
+'''
+        self.child=subprocess.Popen([sys.executable,'-B','-c',source,json.dumps(self.settings),str(self.proof),fault],
+                                    stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        held=Path(str(self.proof)+'.held');deadline=time.monotonic()+3
+        while not held.exists() and self.child.poll() is None and time.monotonic()<deadline:time.sleep(.01)
+        self.assertTrue(held.exists());self.assertIsNone(self.child.poll())
+        with self.assertRaises(RuntimeError):holder.observe(self.settings,expected_pid=self.child.pid,proof_path=str(self.proof))
+        for path in (self.main,self.external):
+            with path.open('rb') as file:
+                with self.assertRaises(BlockingIOError):fcntl.flock(file,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        self.child.send_signal(signal.SIGTERM);_,error=self.child.communicate(timeout=3)
+        self.assertEqual(self.child.returncode,0,error.decode())
+        for path in (self.main,self.external):
+            with path.open('rb') as file:fcntl.flock(file,fcntl.LOCK_EX|fcntl.LOCK_NB)
 
 
 if __name__=='__main__':unittest.main()

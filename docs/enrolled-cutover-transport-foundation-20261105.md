@@ -26,6 +26,19 @@ container and task-label inventory are absent after completion. The active-plan
 binding is intentionally retained on disk after lock release: another receipt
 directory or operation does not authorize a competing cutover.
 
+Independent review identified a post-acquisition sentinel failure gap. The
+helper now catches proof-publication and ongoing identity/check failures after
+external-lease acquisition, retains every acquired descriptor and waits for an
+explicit release signal. A best-effort held marker invalidates prior readiness;
+failure to publish that marker never causes process exit. Both ongoing-check
+and proof-fsync faults are qualified with actual children and competing original
+kernel flocks. The affected suite passed 18/18 Linux cases in 1.869 seconds with
+verified task-container removal. Mounts below `/etc` are also refused.
+
+Local Docker CLI timeout cleanup does not prove the remote Docker-exec Python
+process exited. Its lifecycle and safe retirement before holder release remain
+an explicit incomplete transport predicate at this checkpoint.
+
 ## Historical pilot record provenance
 
 A bounded local history lookup located the original operator artifacts:
