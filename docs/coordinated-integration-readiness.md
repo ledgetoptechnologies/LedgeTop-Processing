@@ -6,6 +6,12 @@ approval. Runtime acceptance remains incomplete.
 
 ## Latest combined and native-host preparation checkpoint
 
+Processing `3cfcf46` passed **582/582 selected Linux tests, no skips**, in
+193.601 seconds across 36 modules. This repeats the complete 542-test scope with
+the private scratch-directory fix and adds all 40 scratch-policy cases. Frozen
+Viewer, converter, simulated native processing and installed/NAS boundaries are
+unchanged. The one-CPU/2 GiB runner and its owned disk volume were removed.
+
 Both PCs subsequently prepared inactive source `e11231a` and passed **130/130
 native synthetic tests each, no skips**. This adds private job-parent creation
 independent of the shell umask; the initial cluster attempt at `89c3dc4` exposed

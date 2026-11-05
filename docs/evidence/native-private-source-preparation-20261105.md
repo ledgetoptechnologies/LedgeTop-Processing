@@ -39,6 +39,11 @@ container, engine image, hardware job, NAS directory/mount/ACL or client data wa
 changed. These are native-host synthetic code checks, not installed worker,
 photogrammetry, licensed converter or NAS durability acceptance.
 
-The full cross-language checkpoint remains `89c3dc4`: 542/542 tests with frozen
-Viewer and simulated photogrammetry. The new directory fix is qualified above;
-do not relabel the earlier combined run as having executed the newer source.
+The earlier cross-language checkpoint was `89c3dc4`: 542/542 tests with frozen
+Viewer and simulated photogrammetry. A subsequent combined run at `3cfcf46`
+passed **582/582 tests, no skips**, in 193.601 seconds across 36 modules, including
+the directory fix, all prior cross-language cases and 40 scratch-policy tests.
+It used the same frozen Viewer/old synthetic-only converter, one CPU/2 GiB,
+read-only source/dependencies, no external network and an owned temporary volume.
+Its container and volume were removed. This does not change any installed/NAS or
+real photogrammetry acceptance boundary.
