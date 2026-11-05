@@ -239,3 +239,77 @@ restart, maintenance revision, race/concurrency and corruption without client
 data or live nodes. These tests qualify this source contract, not installed
 acceptance or complete processing-pipeline recovery. Engine stage reconciliation,
 outer-v2 TreeDar delivery, Viewer acceptance and cleanup remain separate work.
+
+## Source transfer recovery
+
+A `source-range-v2` job does not use `OriginalClaimRecovery`, which serves only
+the combined preparation path. `ReferenceDriver` asks the same `/recover` route
+directly, and the coordinator lifts the hold with the same compare and set. It
+restores `running` on the original claim and nothing else: no queued transition,
+no new execution, no reset of any byte, request, source, grant or range budget.
+
+| Worker stage | Coordinator phase | Request | Engine class |
+|---|---|---|---|
+| `reservation_pending`, `awaiting_grant` | `awaiting_transfer` | schema 3 | `unstarted` |
+| `fetching_pending` | `awaiting_transfer` | schema 3 | `unstarted` |
+| `fetching_pending`, `fetching`, `processing_pending` | `fetching` | schema 2 | none |
+| `processing_pending`, `execution_pending` with no row | `processing` | schema 3 | `unstarted` |
+| `executing` | `processing` | schema 3 | `started` |
+
+Any other pairing means the worker is ahead of the coordinator, whose history was
+lost, so it stays held. A phase takes exactly one schema: schema 2 is refused in
+`processing` and schema 3 in `fetching`. Schema 1 is unchanged. `grantSha256` may
+be null only in `awaiting_transfer`, and `started` only in `processing`.
+
+The coordinator's evidence is a closure. It recomputes both manifests from their
+stored JSON, ties them to the signed proof and retention receipts, and requires
+every retained object receipt to be the exact spool receipt for its entry, including
+raw inputs a grant excludes. Pins are required only for grant-selected inputs. In
+`processing` it also needs every range served: `requestBudget` is exactly the
+job's range count and a retried range adds no row, so the admitted requests and
+bytes reach those totals only once each range was served, and the request must
+report the same counts. Before the transfer the closure needs no renewal and no
+range use, and an unexpired reservation when no grant exists. Freeze, a reader
+fence, a release, an updating, held or failed node, or an operator hold refuses
+recovery. A draining node resumes the exact claim only; it admits no new one.
+
+The worker's evidence is local and is checked again before any POST, a replay
+included. `unstarted` needs an ODM job with no execution row, a `reserved` ledger
+entry with no result, an empty gate and no engine task. Before the transfer it
+needs no fence, no allocation and no input paths, and past it a fence and every
+input byte. A lapsed unfenced lease holds as `reservation_expired`. `started` runs
+only when `poll` returned nothing. The row, gate receipt, `engine_started` ledger
+state and exact task must agree, with status 10 or 20. Status 20 and processing
+time are never evidence: a `commit_pending` row also needs engine output. A refused
+`started` check raises no hold and never stops polling. `transferFenced` in the
+evidence comes from the ledger.
+
+A receipt grants nothing. Fresh `running` state is still needed before `start()`,
+and the normal idempotent `/reservation`, `/transfer-grant`, `/phase` and `/claim`
+calls then run. `initialize_pending`, `upload_pending`, `prepared`, `commit_pending`
+with no output, an occupied gate with no row and a live task with no row are never
+adopted. Exactly one engine initialize happens in every recovered case.
+
+`SOURCE_RECOVERY_ATTEMPTS` caps consecutive unresolved attempts, not restarts of a
+claim. The intent is saved before its POST and replayed exactly, so an outage or
+lost reply spends nothing. An exact receipt, once saved, clears that counter and
+nothing else. A retired intent is replayed once: a stored receipt resolves it, and
+a refusal means it never committed and it stays counted. That replay cannot commit,
+because the epoch, node and closure compares refuse it. The metadata quota bounds
+retained receipts, and a full quota refuses recovery without deleting history.
+
+A row whose ledger settled an unstarted claim before the row was saved advances on
+its next step, through the same terminal word. A `source_transfer_unavailable`
+watch is retired by a recovery that returned the claim to running or by an object
+that arrived, not by running state alone. An engine that finishes under a restart
+hold delivers, completes and reaches signed acceptance without any recovery.
+
+### Limits
+
+A claim held with no reservation stays held for an operator; same-claim reservation
+recovery is required later work. TreeDar and combined jobs stay held. `/phase`
+reports `processing` before `start()`, so that word does not mean an engine began.
+Tests use a real coordinator, worker, gate and ledger, and SIGKILL both processes,
+but the engine is synthetic: NodeODM `/task/list`, `/output` and commit behaviour,
+power loss, fsync, Viewer display and real-size `/recover` timing are unqualified.
+Deployment must set `recoveryBindings`.
