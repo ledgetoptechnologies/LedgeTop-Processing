@@ -6,6 +6,15 @@ approval. Runtime acceptance remains incomplete.
 
 ## Latest combined and native-host preparation checkpoint
 
+At `9126aa2`, the reviewed held-work recovery integration passed **332/332
+selected Processing Linux tests** in 239.595 seconds and **26/26 focused Viewer
+tests**, no skips. The prior actual pairings, signed cleanup and legacy lifecycle
+remain included. See `evidence/held-work-integration-20261105.md`.
+The full Viewer image from `3c90cebc` also built and passed packaged runtime,
+API/worker startup and final-filesystem license-secret checks; see
+`evidence/viewer-image-3c90-runtime-20261105.md`. It remains a local candidate,
+and excludes the later GCP UI/workflow commit.
+
 Processing `7b33720` with Viewer `3426fa69` passed **178/178 Linux tests** across
 18 selected modules in 177.992 seconds, then **26/26 focused Viewer tests**;
 no skips. This includes the signed 24-hour cleanup round trip, permanent GCP
