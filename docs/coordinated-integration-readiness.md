@@ -4,6 +4,36 @@ This record describes the review branch
 `codex/viewer-accepted-copy-integration-candidate-20261103`. It is not a deployment
 approval. Runtime acceptance remains incomplete.
 
+## Current release boundary (November 5 restart resumption)
+
+This section and the remaining-delivery list at the end describe current gates.
+Intermediate checkpoints below are historical; their statements that source
+release or Viewer hold retirement are unimplemented have been superseded by
+the signed cleanup qualification. Test totals from different selections must
+not be added together or described as a complete suite.
+
+| Requirement | Current evidence | Remaining acceptance |
+| --- | --- | --- |
+| Production/staging queue and ordered per-node routing | Actual Viewer/Python synthetic pairings; 332-test integrated selection | Installed source intake and concurrent two-node jobs |
+| Durable result return and selective cleanup | Signed ready proof, real Viewer process death/recovery, synthetic 24-hour timer and preserved raw GCP/originals | Installed credentials, NAS durability and actual return to Viewer |
+| Coordinator/worker maintenance | Frozen restart, authority/source-reader checks and bounded transport primitives | Concrete cutover driver, independently pinned startup policy, real worker update/drain/resume |
+| Long transfer after coordinator outage | Existing range/resume contracts | Claude's expired source-grant renewal and scratch-settlement corrections; not integrated |
+| Viewer GCP workflow | Exact `36f26839` peer-reported 125 passing cases across two bounded runs | Operations frontend build/typecheck and rendered acceptance; Viewer image alone cannot compile `GcpWorkspace.tsx` |
+| TreeDar and Gaussian splats | Genuine-LiDAR validation/scaffolding | Typed usable TreeDar output registration and real processing; Gaussian remains disabled |
+| Customer/project/task workspace | Historical #406 behavior and hierarchy tests | Current owner/release reconciliation and rendered/deployed acceptance |
+
+The cutover journal at isolated commits `57514af`/`f98c693`/`7843b39` has a
+reviewed recovery defect: a crash after persisting an intent but before its
+effect can strand the operation even when inspection proves no effect. The
+pending intent blocks both advancement and rollback. A supported, durably
+recorded not-applied reconciliation path is required before live cutover;
+unknown effects must continue to hold. These commits are not yet integrated.
+
+A fresh read-only installed metadata probe still passes with 202 files, seven
+archive/intent pairs and 90,778 metadata bytes; its process exited. It does not
+hash retained artifacts, exclude writers, prove pilot closure or establish
+Viewer acceptance. No live service, NAS setting or client job was changed.
+
 ## Latest combined and native-host preparation checkpoint
 
 At `9126aa2`, the reviewed held-work recovery integration passed **332/332
@@ -880,8 +910,10 @@ are not operational.
    recovery and source-reader leases against the installed NAS-backed path.
    The combined synthetic tests above prove code paths, not server/export
    durability, ACL isolation or physical-host power-loss behavior. Authenticated
-   explicit source release/deletion and Viewer operational-hold retirement
-   remain unimplemented. Beau controls all TrueNAS changes. The selected spool
+   explicit source release/deletion and Viewer operational-hold retirement now
+   pass the signed synthetic paired qualification described above; installed
+   custody and durability remain unqualified. Beau controls all TrueNAS changes.
+   The selected spool
    subfolder under existing Model-Viewer Storage is not yet provisioned or
    ACL-qualified.
 3. **Source pairing:** the V2 signed-intake, whole/range transfer and receipt
