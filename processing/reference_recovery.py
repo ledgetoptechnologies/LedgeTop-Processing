@@ -32,6 +32,14 @@ SOURCE_TRANSFER_FIELDS=('protocol','reservationId','generation','expiresAt','man
 SOURCE_REQUEST_FIELDS=('schemaVersion','requestId','coordinatorEpoch','expectedNodeRevision','claimBinding',
                        'transferRequestSha256','sourceClosureSha256','grantSha256','renewalSequence',
                        'committedRanges','committedBytes','workerEvidenceSha256')
+# Schema 3 resumes a claim whose engine never started, past the fetch. Schema 2
+# stays the fetch wire, and each phase takes exactly one of the two.
+SOURCE_UNSTARTED_REQUEST_FIELDS=SOURCE_REQUEST_FIELDS+('executionPhase','engineClass')
+SOURCE_UNSTARTED_PHASES=('processing',)
+SOURCE_ENGINE_CLASSES=('unstarted',)
+# Starting an already claimed job on a draining node matches a run with no restart.
+# Drop 'draining' here to make such a job wait for an operator instead.
+SOURCE_UNSTARTED_NODE_STATES=('active','scheduled','draining')
 SOURCE_CLAIM_FIELDS=('jobId','generation','environment','nodeId','workerId','workerInstanceId','authorityId',
                      'claimRequestId','claimTokenSha256','manifestSha256','pipelineDigest','reservationId','inputBytes')
 # The transfer wire lists every object, so it scales with the manifest and is
@@ -134,7 +142,7 @@ class ClaimRecoveryService:
         source_range=type(wire) is str and SOURCE_TRANSFER_MARK in wire
         if source_range:
             reservation=self._source_reservation(row,claim)
-            source=self._source_transfer(db,job_id,claim)
+            source=self._source_transfer(db,job_id,claim,row)
         elif wire is not None:
             if type(wire) is not str or len(wire.encode())>4096:raise Conflict('recovery reservation unavailable')
             transfer=p.decode_submission(wire.encode())
@@ -147,15 +155,17 @@ class ClaimRecoveryService:
             submission=json.loads(row['input_json'])
             reservation=dict(reservationId=transfer['reservationId'],transferRequestSha256=p.digest(transfer),
                 inputBytes=submission['manifest']['totalBytes'])
+        unstarted=source_range and claim['executionPhase'] in SOURCE_UNSTARTED_PHASES
         eligible=(claim['status']=='held' and claim['heldReason']=='coordinator_restart'
-            and claim['executionPhase']==('fetching' if source_range else 'processing')
+            and (unstarted or claim['executionPhase']==('fetching' if source_range else 'processing'))
             and row['error'] is None and row['result_json'] is None and row['terminal_failure_json'] is None
-            and reservation is not None and node['state'] in ('active','scheduled','draining')
+            and reservation is not None
+            and node['state'] in (SOURCE_UNSTARTED_NODE_STATES if unstarted else ('active','scheduled','draining'))
             and (source is not None or not source_range))
         state=dict(schemaVersion=1,protocol=STATE_PROTOCOL,authorityId=self._authority,coordinatorEpoch=self._epoch,
             claim=claim,physicalBinding=asdict(self.bindings[node_id]),reservation=reservation,
             node=dict(id=node_id,state=node['state'],revision=node['revision'],planId=node['plan_id']),eligible=eligible)
-        if source_range:state.update(schemaVersion=2,protocol=SOURCE_STATE_PROTOCOL,sourceTransfer=source)
+        if source_range:state.update(schemaVersion=3 if unstarted else 2,protocol=SOURCE_STATE_PROTOCOL,sourceTransfer=source)
         return state
 
     def _source_reservation(self,row,claim):
@@ -171,13 +181,31 @@ class ClaimRecoveryService:
         return dict(reservationId=transfer['reservationId'],transferRequestSha256=p.digest(transfer),
             inputBytes=json.loads(row['input_json'])['manifest']['totalBytes'])
 
-    def _source_transfer(self,db,job_id,claim):
+    def _source_transfer(self,db,job_id,claim,row):
         """None, not an error: a refused job stays held with everything retained."""
-        if claim['executionPhase']!='fetching':return None
+        phase=claim['executionPhase']
+        if phase!='fetching' and phase not in SOURCE_UNSTARTED_PHASES:return None
         freeze=db.execute('SELECT phase FROM coordinator_freeze_state WHERE singleton=1').fetchone()
         if freeze is not None and freeze['phase']!='open':return None
-        try:return self.store._source_fetch_closure(db,job_id)
+        try:
+            closure=self.store._source_fetch_closure(db,job_id)
+            if phase=='processing' and not self._source_fetch_complete(row,closure):return None
+            return closure
         except (Conflict,ValueError,KeyError,TypeError,AttributeError):return None
+
+    @staticmethod
+    def _source_fetch_complete(row,closure):
+        """Every range was served, for an ODM-only job.
+
+        requestBudget is exactly the job's range count (reserve refuses any other)
+        and a replayed range adds no request or byte, so both totals reach their
+        limit only once each distinct range has been admitted.
+        """
+        submission=json.loads(row['input_json']);pipeline=submission['pipeline']
+        return (closure['requestsAdmitted']==json.loads(row['transfer_json'])['requestBudget']
+            and closure['bytesAdmitted']==submission['manifest']['totalBytes']
+            and pipeline['odm']['requested'] is True and not pipeline['treedar']['requested']
+            and not pipeline['gaussian_splat']['requested'])
 
     def state(self,job_id,*,identity,claim_token):
         self._check()
@@ -186,7 +214,7 @@ class ClaimRecoveryService:
 
     @staticmethod
     def _request(value):
-        if type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion']==2:
+        if type(value) is dict and type(value.get('schemaVersion')) is int and value['schemaVersion'] in (2,3):
             return ClaimRecoveryService._source_request(value)
         p._closed(value,REQUEST_FIELDS,'claim recovery request')
         if type(value['schemaVersion']) is not int or value['schemaVersion']!=1:raise ValueError('recovery version required')
@@ -206,7 +234,10 @@ class ClaimRecoveryService:
 
     @staticmethod
     def _source_request(value):
-        p._closed(value,SOURCE_REQUEST_FIELDS,'source fetch recovery request')
+        unstarted=type(value) is dict and value.get('schemaVersion')==3
+        p._closed(value,SOURCE_UNSTARTED_REQUEST_FIELDS if unstarted else SOURCE_REQUEST_FIELDS,'source fetch recovery request')
+        if unstarted and (value['executionPhase'] not in SOURCE_UNSTARTED_PHASES or value['engineClass'] not in SOURCE_ENGINE_CLASSES):
+            raise ValueError('source recovery class required')
         p._uuid(value['requestId'],'recovery request');p._uuid(value['coordinatorEpoch'],'startup epoch')
         for key in ('expectedNodeRevision','renewalSequence','committedRanges','committedBytes'):
             p._integer(value[key],key,allow_zero=True)
@@ -232,6 +263,9 @@ class ClaimRecoveryService:
             or request['grantSha256']==source['predecessorGrantSha256'] and not source['renewalPending'] and sequence==latest-1)
         if (not known or request['committedRanges']>source['requestsAdmitted']
                 or request['committedBytes']>source['bytesAdmitted']):raise Conflict('worker source state exceeds the coordinator')
+        # Past the fetch the worker must hold every range the coordinator served.
+        if request.get('executionPhase')=='processing' and (request['committedRanges'],request['committedBytes'])!=(
+                source['requestsAdmitted'],source['bytesAdmitted']):raise Conflict('worker source state is incomplete')
 
     def receipt(self,job_id,request_id,*,identity,claim_token):
         p._uuid(request_id,'recovery request');self._check()
@@ -245,16 +279,17 @@ class ClaimRecoveryService:
     @staticmethod
     def _make_receipt(request):
         digest=p.digest(request)
-        if request['schemaVersion']==2:
+        if request['schemaVersion'] in (2,3):
             claim=request['claimBinding']
-            return dict(schemaVersion=2,protocol=SOURCE_RECEIPT_PROTOCOL,receiptId='recovery-'+digest[:32],requestId=request['requestId'],
+            extra=dict(engineClass=request['engineClass']) if request['schemaVersion']==3 else {}
+            return dict(schemaVersion=request['schemaVersion'],protocol=SOURCE_RECEIPT_PROTOCOL,receiptId='recovery-'+digest[:32],requestId=request['requestId'],
                 requestSha256=digest,coordinatorEpoch=request['coordinatorEpoch'],authorityId=claim['authorityId'],jobId=claim['jobId'],
                 generation=claim['generation'],environment=claim['environment'],claimBindingSha256=p.digest(claim),
                 workerEvidenceSha256=request['workerEvidenceSha256'],transferRequestSha256=request['transferRequestSha256'],
                 sourceClosureSha256=request['sourceClosureSha256'],grantSha256=request['grantSha256'],
                 renewalSequence=request['renewalSequence'],committedRanges=request['committedRanges'],
                 committedBytes=request['committedBytes'],nodeRevision=request['expectedNodeRevision'],
-                priorStatus='held',resumedStatus='running',executionPhase='fetching')
+                priorStatus='held',resumedStatus='running',executionPhase=request.get('executionPhase','fetching'),**extra)
         parent=request['parentBinding']
         return dict(schemaVersion=1,protocol=RECEIPT_PROTOCOL,receiptId='recovery-'+digest[:32],requestId=request['requestId'],
             requestSha256=digest,coordinatorEpoch=request['coordinatorEpoch'],authorityId=parent['authorityId'],jobId=parent['jobId'],
@@ -267,7 +302,7 @@ class ClaimRecoveryService:
         try:
             request=ClaimRecoveryService._request(p.decode_submission(row['request_json'].encode()))
             receipt=p.decode_submission(row['receipt_json'].encode())
-            parent=request['claimBinding'] if request['schemaVersion']==2 else request['parentBinding']
+            parent=request['claimBinding'] if request['schemaVersion'] in (2,3) else request['parentBinding']
             if (p.digest(request)!=row['request_sha256'] or request['requestId']!=row['request_id']
                     or request['coordinatorEpoch']!=row['epoch_id'] or parent['jobId']!=row['job_id']
                     or any(not exact(parent[key],claim[key]) for key in ('jobId','generation','environment','nodeId','workerId',
@@ -296,7 +331,8 @@ class ClaimRecoveryService:
             expected.update(reservationId=reservation['reservationId'],inputBytes=reservation['inputBytes'])
             source='sourceTransfer' in state
             if source:
-                if request['schemaVersion']!=2 or request['sourceClosureSha256']!=state['sourceTransfer']['closureSha256']:
+                if (request['schemaVersion']!=state['schemaVersion'] or request['sourceClosureSha256']!=state['sourceTransfer']['closureSha256']
+                        or request.get('executionPhase',claim['executionPhase'])!=claim['executionPhase']):
                     raise Conflict('original recovery binding differs')
                 self._source_attestation(request,state['sourceTransfer'])
             elif request['schemaVersion']!=1:raise Conflict('original recovery binding differs')
