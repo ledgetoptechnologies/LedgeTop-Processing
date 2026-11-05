@@ -96,11 +96,15 @@ def child_case(directory, kind):
                 os._exit(2)
             pid = os.fork()
             if pid == 0:
-                try:
-                    reader.close()
-                except SourceReaderError:
-                    os._exit(0)
-                os._exit(3)
+                # Both the descriptor and Store accessor must check PID before
+                # acquiring either mutex inherited locked from the parent.
+                for operation in (reader.close, store.source_readers):
+                    try:
+                        operation()
+                    except SourceReaderError:
+                        continue
+                    os._exit(3)
+                os._exit(0)
             try:
                 deadline = time.monotonic() + 3
                 while time.monotonic() < deadline:
