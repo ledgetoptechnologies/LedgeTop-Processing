@@ -15,6 +15,7 @@ not be added together or described as a complete suite.
 | Requirement | Current evidence | Remaining acceptance |
 | --- | --- | --- |
 | Production/staging queue and ordered per-node routing | Actual Viewer/Python synthetic pairings; 332-test integrated selection | Installed source intake and concurrent two-node jobs |
+| Private per-node engine boundary and dynamic flags | Execution already uses the worker's configured loopback engine; new authenticated catalog relay candidate under review | Qualify and install worker relay, route coordinator discovery through it, and verify native engine submission cannot bypass the worker boundary |
 | Durable result return and selective cleanup | Signed ready proof, real Viewer process death/recovery, synthetic 24-hour timer and preserved raw GCP/originals | Installed credentials, NAS durability and actual return to Viewer |
 | Coordinator/worker maintenance | Independently generated startup policy, crash-safe cutover journal and 121-test combined qualification | Concrete cutover transport, real worker update/drain/resume |
 | Long transfer after coordinator outage | Reviewed renewal and initial-mint reader registration integrated; 148/148 combined Linux mint/renewal/readers/custody/probe checks passed in 43.760 s at `ee9b479` | Actual coordinator-restart fetching/processing recovery and per-receipt operator-resolution delivery remain open |
