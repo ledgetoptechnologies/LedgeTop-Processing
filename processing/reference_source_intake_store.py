@@ -383,12 +383,17 @@ class ReferenceSourceIntakeMethods:
         from datetime import datetime
         from .reference_transfer import validate_grant
         read_clock = time.time if clock is None else clock
+        previous_clock = None
 
         def checked_now():
+            nonlocal previous_clock
             value = read_clock()
             if (isinstance(value, bool) or not isinstance(value, (int, float))
                     or not math.isfinite(value)):
                 raise Conflict('invalid source grant clock')
+            if previous_clock is not None and value < previous_clock:
+                raise Conflict('source grant clock moved backwards')
+            previous_clock = value
             return value
 
         def capture(db):
@@ -427,6 +432,8 @@ class ReferenceSourceIntakeMethods:
             db.commit()
 
         now = checked_now()
+        if snapshot['grant'] is None and snapshot['tokens']:
+            raise Conflict('orphan source grant token history')
         if row['status'] != 'running' or row['phase'] != 'awaiting_transfer':
             raise Conflict('source grant requires a running transfer reservation')
         if (row['source_state'] != 'accepted' or row['derived_state'] != 'accepted'
@@ -513,6 +520,8 @@ class ReferenceSourceIntakeMethods:
                     or current['generation'] != row['generation']
                     or current['transfer_json'] != row['transfer_json']):
                 raise Conflict('source grant reservation changed during verification')
+            if current_snapshot['grant'] is None and current_snapshot['tokens']:
+                raise Conflict('orphan source grant token history')
             # Another identical verifier may have won the CAS while this thread
             # was hashing. Return only that exact persisted, still-live grant.
             if current_snapshot['grant'] is not None:
@@ -529,15 +538,17 @@ class ReferenceSourceIntakeMethods:
                         or persisted.get('environment') != current['environment']
                         or persisted.get('objectIds') != [item['id'] for item in objects]):
                     raise Conflict('persisted source grant binding changed')
-                validate_grant(persisted, job=self._record(current, True), clock=checked_now)
+                commit_now = checked_now()
+                validate_grant(persisted, job=self._record(current, True), clock=lambda: commit_now)
                 return persisted
-            if checked_now() >= expiry:
+            commit_now = checked_now()
+            if commit_now >= expiry:
                 raise Conflict('worker reservation expired during source verification')
             grant = {key: request[key] for key in
                      ('reservationId', 'generation', 'expiresAt', 'manifestSha256', 'byteBudget', 'nonce')}
             grant.update(jobId=job_id, environment=current['environment'],
                          objectIds=[item['id'] for item in objects], token=secrets.token_urlsafe(32))
-            validate_grant(grant, job=self._record(current, True), clock=checked_now)
+            validate_grant(grant, job=self._record(current, True), clock=lambda: commit_now)
             encoded = _json(grant)
             digest = protocol.digest(grant)
             token_sha = hashlib.sha256(grant['token'].encode('ascii')).hexdigest()

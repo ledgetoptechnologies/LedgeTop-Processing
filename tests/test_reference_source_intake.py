@@ -273,6 +273,54 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
             finally:
                 mount_patch.stop()
                 if queue is not None: queue.close()
+
+    def test_orphan_grant_token_history_blocks_mint_before_and_after_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "spool"
+            root.mkdir(mode=0o700)
+            marker = root / ".ltds-source-spool-id"
+            marker.write_text("a" * 64, encoding="ascii")
+            if os.name != "nt": marker.chmod(0o600)
+            mount_patch = patch("processing.source_spool.os.path.ismount", return_value=True)
+            mount_patch.start()
+            queue = None
+            try:
+                spool = SourceSpool(root, mount_id="a" * 64, safety_floor_bytes=0,
+                    max_object_bytes=1024, chunk_bytes=3)
+                queue, store, _control, job, _claim_token = self._make_reserved_source_job(
+                    directory, spool, "orphan")
+                with queue._db() as db:
+                    db.execute('''INSERT INTO reference_source_grant_tokens(token_sha256,job_id,generation)
+                        VALUES(?,?,1)''', ("f" * 64, job["jobId"]))
+                with self.assertRaisesRegex(Conflict, "orphan source grant token history"):
+                    store.mint_source_transfer_grant(job["jobId"], source_spool=spool)
+                with queue._db() as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM reference_source_grant_tokens").fetchone()[0], 1)
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM reference_transfer_grants").fetchone()[0], 0)
+                    db.execute("DELETE FROM reference_source_grant_tokens WHERE token_sha256=?", ("f" * 64,))
+
+                original = spool.verify_object
+                injected = False
+
+                def inject_orphan_while_verifying(**kwargs):
+                    nonlocal injected
+                    if not injected:
+                        injected = True
+                        with queue._db() as db:
+                            db.execute('''INSERT INTO reference_source_grant_tokens(token_sha256,job_id,generation)
+                                VALUES(?,?,1)''', ("e" * 64, job["jobId"]))
+                    return original(**kwargs)
+
+                with patch.object(spool, "verify_object", side_effect=inject_orphan_while_verifying):
+                    with self.assertRaisesRegex(Conflict, "orphan source grant token history"):
+                        store.mint_source_transfer_grant(job["jobId"], source_spool=spool)
+                with queue._db() as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM reference_source_grant_tokens").fetchone()[0], 1)
+                    self.assertEqual(db.execute("SELECT token_sha256 FROM reference_source_grant_tokens").fetchone()[0], "e" * 64)
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM reference_transfer_grants").fetchone()[0], 0)
+            finally:
+                mount_patch.stop()
+                if queue is not None: queue.close()
     def rehash(self):
         for key in ("sourceManifest", "derivedManifest"):
             manifest = self.payload[key]
@@ -672,6 +720,12 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                             "transferRequest":reservation}),protected_transport=True)
                     self.assertEqual(reserved.status,200,reserved.body)
                     expiry_time=datetime.fromisoformat(expires.replace("Z","+00:00")).timestamp()
+                    wall_time=datetime.now(timezone.utc).timestamp()
+                    rollback_clock=iter([wall_time,wall_time-1])
+                    with self.assertRaisesRegex(Conflict,"source grant clock moved backwards"):
+                        store.mint_source_transfer_grant(job["jobId"],source_spool=spool,
+                            clock=lambda:next(rollback_clock))
+                    self.assertIsNone(store.private_transfer_grant(job["jobId"]))
                     grant_clock=iter([datetime.now(timezone.utc).timestamp(),expiry_time+1])
                     with self.assertRaisesRegex(Conflict,"expired during source verification"):
                         store.mint_source_transfer_grant(job["jobId"],source_spool=spool,
