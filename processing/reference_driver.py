@@ -1007,14 +1007,20 @@ class ReferenceDriver:
 
     def _terminal_status(self, job_id, data):
         """Exact authenticated terminal word for this claim, else None (keep trying)."""
-        claim = data['claim']
         try:
-            status, state = self._request('GET', '/jobs/' + job_id + '/claim-state', claim_token=claim['claimToken'])
-            if status != 200:
-                return None
-            validate_claim_fields(state)
+            state = self._claim_state(job_id, data['claim'])
         except (DriverHeld, DriverWait, ValueError):
             return None
+        if state is None:
+            return None
+        return state['status'] if state['status'] in ('failed', 'cancelled') else None
+
+    def _claim_state(self, job_id, claim):
+        """Fresh coordinator view of this exact claim, else None."""
+        status, state = self._request('GET', '/jobs/' + job_id + '/claim-state', claim_token=claim['claimToken'])
+        if status != 200:
+            return None
+        validate_claim_fields(state)
         with self._db() as db:
             request_id = db.execute('SELECT claim_request FROM driver_jobs WHERE job=?', (job_id,)).fetchone()[0]
         expected = dict(authorityId=self.worker.authority_id, jobId=job_id, generation=claim['generation'],
@@ -1022,9 +1028,7 @@ class ReferenceDriver:
             workerInstanceId=self.worker_instance_id, claimRequestId=request_id,
             claimTokenSha256=hashlib.sha256(claim['claimToken'].encode()).hexdigest(),
             manifestSha256=claim['manifestSha256'], pipelineDigest=claim['pipelineDigest'])
-        if any(state[key] != value for key, value in expected.items()):
-            return None
-        return state['status'] if state['status'] in ('failed', 'cancelled') else None
+        return None if any(state[key] != value for key, value in expected.items()) else state
 
     def _delivery_owed(self, job_id, data):
         """Durable evidence only: poll and failure sealing commit before the row hears."""
@@ -1196,6 +1200,30 @@ class ReferenceDriver:
                 self.cleanup_executor.execute(item['reservation'], item['id'], generation=item['generation'],
                     sha256=item['sha'], byte_size=item['bytes'], relative_path=item['path'])
         return observed
+
+    def _fetch_refusal(self, job_id, stage, data, source_range_v2):
+        """Stop before a source attempt is charged if no GET would be admitted.
+
+        The source budgets charge before the request, so asking a held job over
+        and over would spend them with nothing served. A v1 broker is a separate
+        origin that an unreachable coordinator says nothing about, so only a v2
+        fetch waits for one. Returns the outcome to report, or None to fetch.
+        """
+        try:
+            state = self._claim_state(job_id, data['claim'])
+        except DriverWait:
+            if source_range_v2:
+                raise
+            return None
+        except ValueError:
+            raise DriverHeld('source_fetch_not_admitted') from None
+        if state is None:
+            raise DriverHeld('source_fetch_not_admitted')
+        if state['status'] == 'running' and state['executionPhase'] == 'fetching':
+            return None
+        if state['status'] in ('failed', 'cancelled'):
+            return self._unstarted(job_id, stage, data, 'source_fetch_ended')
+        raise DriverHeld('source_fetch_held')
 
     def _unstarted(self, job_id, stage, data, reason):
         """A claim that can no longer start ends only on the coordinator's word.
@@ -1469,6 +1497,9 @@ class ReferenceDriver:
                     self.worker._file(reservation, relative, obj['byteSize'], obj['sha256'])
                 else:
                     if source_range_v2:
+                        refusal = self._fetch_refusal(job_id, stage, data, source_range_v2)
+                        if refusal is not None:
+                            return refusal
                         grant = self._source_range_grant(job_id, claim, data)
                         from .source_range_transfer import SourceRenewalInvalid, SourceRenewalUnavailable
                         def renew_during_transfer():
@@ -1489,6 +1520,9 @@ class ReferenceDriver:
                         attempts = data.setdefault('fetchAttempts', {}).get(obj['id'], 0)
                         if attempts >= 3:
                             return self._unstarted(job_id, stage, data, 'worker_fetch_attempt_budget_exhausted')
+                        refusal = self._fetch_refusal(job_id, stage, data, source_range_v2)
+                        if refusal is not None:
+                            return refusal
                         data['fetchAttempts'][obj['id']] = attempts + 1
                         self._save(job_id, stage, data)
                         self.broker.download_object(grant, obj['id'], target)

@@ -1237,6 +1237,86 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(sent[0].full_url.split('/api/')[0], self.driver.origin)
         self.assertEqual(sent[0].get_header('X-claim-token'), data['claim']['claimToken'])
 
+    def source_attempts(self, job):
+        import sqlite3
+        from contextlib import closing
+        with closing(sqlite3.connect(self.driver.source_range_client.ledger_path)) as db:
+            row = db.execute('SELECT attempts_used FROM source_budgets').fetchone()
+        return 0 if row is None else row[0]
+
+    def assert_no_source_get(self, job, reason):
+        gets = []
+
+        def refused(request, timeout):
+            gets.append(request.full_url)
+            raise OSError('synthetic refused source read')
+
+        self.driver.source_range_client._open = refused
+        results = [self.driver.step() for _ in range(6)]
+        self.assertEqual((len(gets), self.source_attempts(job)), (0, 0))
+        self.assertEqual(results, [reason] * 6)
+
+    def test_held_job_charges_no_source_attempt(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-held.sqlite')
+        job = self.submit(contents=(b'held-photo',))
+        self.advance(job, 'fetching')
+        self.queue.operator(job['jobId'], 'hold', dict(note='synthetic'))
+        self.assert_no_source_get(job, {'state': 'held', 'reason': 'source_fetch_held'})
+
+    def test_unreachable_coordinator_charges_no_source_attempt(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-outage.sqlite')
+        job = self.submit(contents=(b'outage-photo',))
+        self.advance(job, 'fetching')
+        self.driver._request = lambda *args, **kwargs: (_ for _ in ()).throw(DriverWait('coordinator_unavailable'))
+        self.assert_no_source_get(job, {'state': 'retry_wait', 'reason': 'coordinator_unavailable'})
+
+    def test_refused_claim_state_charges_no_source_attempt(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-refused.sqlite')
+        job = self.submit(contents=(b'refused-photo',))
+        self.advance(job, 'fetching')
+        self.driver._request = lambda *args, **kwargs: (409, None)
+        self.assert_no_source_get(job, {'state': 'held', 'reason': 'source_fetch_not_admitted'})
+
+    def test_held_job_keeps_its_whole_object_attempts(self):
+        job = self.submit(contents=(b'held-v1-photo',))
+        self.advance(job, 'fetching')
+        self.queue.operator(job['jobId'], 'hold', dict(note='synthetic'))
+        with patch.object(self.broker, 'download_object') as download:
+            for _ in range(6):
+                self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'source_fetch_held'})
+        download.assert_not_called()
+        self.assertNotIn('fetchAttempts', self.data(job)[1])
+
+    def test_whole_object_fetch_survives_an_unreachable_coordinator(self):
+        # Control: the v1 broker is a separate origin, so an unknown claim state
+        # proves nothing and the fetch goes ahead as it always did.
+        job = self.submit(contents=(b'outage-v1-photo',))
+        self.advance(job, 'fetching')
+        original = self.driver._request
+
+        def outage(method, suffix, *args, **kwargs):
+            if suffix.endswith('/claim-state'):
+                raise DriverWait('coordinator_unavailable')
+            return original(method, suffix, *args, **kwargs)
+
+        self.driver._request = outage
+        with patch.object(self.broker, 'download_object', side_effect=self.download) as download:
+            self.assertEqual(self.driver.step()['state'], 'fetching')
+        download.assert_called_once()
+
+    def test_failed_job_settles_its_unstarted_fetch_without_a_get(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-ended.sqlite')
+        job = self.submit(contents=(b'ended-photo',))
+        self.advance(job, 'fetching')
+        self.end_job(job)
+        with patch.object(self.driver.source_range_client, 'download_object') as download:
+            self.assert_unstarted_terminal(job, 'source_fetch_ended', self.driver.step())
+        download.assert_not_called()
+
     def test_mid_transfer_renewal_wait_and_rejection_keep_driver_state(self):
         from processing.source_range_transfer import validate_source_grant
         self.driver = self.make_driver(source_range_v2_enabled=True,
