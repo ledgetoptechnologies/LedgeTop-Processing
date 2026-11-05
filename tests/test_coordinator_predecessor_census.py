@@ -143,6 +143,59 @@ class ClosedPredecessorCensusTests(unittest.TestCase):
             with self.assertRaisesRegex(c.CensusRefused,'original_path_required'):
                 c._read_small_json(target,os.geteuid())
 
+    def add_closed_maintenance_history(self):
+        latest = {}
+        with self.db() as db:
+            for index in range(16):
+                node = 'cluster' if index % 2 else 'main'
+                expected_revision = (index//2)*2
+                request = dict(schemaVersion=1,requestId=str(uuid.uuid4()),authorityId=self.authority,
+                    expectedRevision=expected_revision,drainAt='2026-11-01T00:00:00Z',notBefore='2026-11-01T00:00:00Z',
+                    afterJobId=None,targetImage='sha256:'+str(index%10)*64)
+                digest=hashlib.sha256(c._canonical(dict(nodeId=node,request=request))).hexdigest()
+                receipt=dict(schemaVersion=1,requestId=request['requestId'],authorityId=self.authority,nodeId=node,
+                    requestSha256=digest,expectedRevision=expected_revision,revision=expected_revision+1,
+                    planId=str(uuid.uuid4()),state='draining',drainAt=request['drainAt'],notBefore=request['notBefore'],
+                    afterJobId=None,targetImage=request['targetImage'])
+                receipt['receiptSha256']=hashlib.sha256(c._canonical(receipt)).hexdigest()
+                db.execute('INSERT INTO owned_maintenance_schedules VALUES(?,?,?,?,?,?)',
+                    (request['requestId'],node,self.authority,digest,c._canonical(request).decode(),c._canonical(receipt).decode()))
+                db.execute("UPDATE nodes SET state='active',revision=?,plan_id=?,drain_at=?,not_before=?,target_image=? WHERE id=?",
+                    (expected_revision+2,receipt['planId'],receipt['drainAt'],receipt['notBefore'],receipt['targetImage'],node))
+                latest[node] = request['requestId']
+        return latest
+
+    def test_sixteen_owned_receipts_and_active_residual_plans_are_preserved(self):
+        self.add_closed_maintenance_history()
+        self.mutate('UPDATE nodes SET result=? WHERE id=?',
+                    (json.dumps(dict(operatorAction='resume',note='synthetic healthy resume',workerStopped=True,healthy=True)),'main'))
+        result=self.census()
+        self.assertEqual(result['tables']['owned_maintenance_schedules']['count'],16)
+        self.assertEqual(result,self.census())
+
+    def test_corrupt_old_owned_receipt_is_not_ignored(self):
+        self.add_closed_maintenance_history()
+        self.mutate("UPDATE owned_maintenance_schedules SET request_sha256=? WHERE request_id=(SELECT request_id FROM owned_maintenance_schedules ORDER BY rowid LIMIT 1)",('0'*64,))
+        with self.assertRaisesRegex(c.CensusRefused,'owned_schedule_receipt_mismatch'): self.census()
+
+    def test_current_residual_plan_must_match_latest_owned_receipt(self):
+        self.add_closed_maintenance_history()
+        self.mutate("UPDATE nodes SET target_image=? WHERE id='main'",('sha256:'+'f'*64,))
+        with self.assertRaisesRegex(c.CensusRefused,'current_node_plan_binding_mismatch'): self.census()
+
+    def test_receipted_plan_still_draining_or_updating_is_refused(self):
+        self.add_closed_maintenance_history()
+        for state in ('scheduled','draining','updating','held','failed'):
+            with self.subTest(state=state):
+                self.mutate("UPDATE nodes SET state=? WHERE id='main'",(state,))
+                with self.assertRaisesRegex(c.CensusRefused,'foreign_node_maintenance_pending'): self.census()
+        self.mutate("UPDATE nodes SET state='active',revision=revision-1 WHERE id='main'")
+        with self.assertRaisesRegex(c.CensusRefused,'current_node_plan_not_closed'): self.census()
+
+    def test_unbound_foreign_residual_plan_refused(self):
+        self.mutate("UPDATE nodes SET plan_id=?,revision=2,target_image=? WHERE id='main'",(str(uuid.uuid4()),'sha256:'+'a'*64))
+        with self.assertRaisesRegex(c.CensusRefused,'current_node_plan_not_closed'): self.census()
+
     def test_unknown_table_refused(self):
         self.mutate('CREATE TABLE future_state(x TEXT)')
         with self.assertRaisesRegex(c.CensusRefused,'unreviewed_predecessor_schema'): self.census()

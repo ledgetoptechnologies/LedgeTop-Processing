@@ -58,8 +58,20 @@ Open integration boundaries:
 - Actual mounts, image/revision/config pins, backup/headroom qualification,
   candidate additive startup transforms, rollback without restoring over new
   writes, and an installed end-to-end cutover remain unqualified here.
-- Nonempty owned node-maintenance history and active rows retaining plan/update
-  fields stay held pending review of the exact installed historical relationships.
+- Owned node-maintenance history is preserved and checked against the exact old
+  canonical request/digest/receipt reconstruction. An active residual plan must
+  match its latest retained receipt and a later closed revision, with cancellation,
+  explicit healthy operator-resume, or successful update metadata. Pending states,
+  foreign/unbound plans, tampered old receipts and target/date mismatches hold.
 - The new current-V2/source-release tables remain unsupported by this predecessor
   profile. NAS custody, signed Viewer acceptance, and hot-journal recovery are
   separate proof boundaries, not claims made by this census.
+
+Maintenance-history followup: 26/26 Linux tests passed, no skips, in 0.654 seconds
+(23 census cases plus 3 optimized-safety cases), with the same resource limits.
+The fixture now retains 16 owned historical schedule receipts and both active
+residual plans, matching the reported aggregate shape. A malformed historical
+request, current target mismatch, unclosed plan, and unknown current plan all
+refuse. The task container was removed and filtered inventory was empty. This is
+synthetic shape qualification; the actual installed rows/files have not yet been
+read through this component.

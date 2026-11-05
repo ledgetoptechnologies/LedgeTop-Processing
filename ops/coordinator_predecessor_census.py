@@ -4,6 +4,7 @@ This does not stop a writer, acquire a lease, reconcile a source spool, delete
 anything, or authorize engine-cache cleanup. The cutover controller must prove
 writer exclusion separately and compare offline/backup snapshots under one key.
 """
+from datetime import datetime
 import hashlib
 import hmac
 import json
@@ -118,6 +119,83 @@ def _schema(db):
     return objects
 
 
+def _maintenance_history(nodes, schedules, authority_id, jobs):
+    """Validate retained 693 owned receipts without refreshing/adopting a plan."""
+    node_by_id = {node['id']: node for node in nodes}
+    receipts_by_node = {identifier: [] for identifier in node_by_id}
+    requests, plans, revisions = set(), set(), set()
+    request_fields = {'schemaVersion','requestId','authorityId','expectedRevision',
+                      'drainAt','notBefore','afterJobId','targetImage'}
+    receipt_fields = request_fields | {'nodeId','requestSha256','revision','planId','state','receiptSha256'}
+    def stamp(value):
+        _require(type(value) is str and re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)',value),
+                 'invalid_owned_schedule_timestamp')
+        parsed = datetime.fromisoformat(value.replace('Z','+00:00'))
+        return parsed, parsed.isoformat().replace('+00:00','Z')
+    for row in schedules:
+        request, receipt = _json(row['request_json']), _json(row['receipt_json'])
+        _require(type(request) is dict and set(request) == request_fields and type(receipt) is dict
+                 and set(receipt) == receipt_fields, 'unreviewed_owned_schedule_receipt')
+        identifier = row['node_id']
+        _require(identifier in node_by_id and row['authority_id'] == authority_id and
+                 request['authorityId'] == authority_id and request['requestId'] == row['request_id'] and
+                 type(request['schemaVersion']) is int and request['schemaVersion'] == 1 and
+                 type(request['expectedRevision']) is int and 0 <= request['expectedRevision'] < 2**53-1,
+                 'owned_schedule_authority_mismatch')
+        _uuid(request['requestId']); _uuid(receipt['planId'])
+        if request['afterJobId'] is not None:
+            _uuid(request['afterJobId'])
+            after = jobs.get(request['afterJobId'])
+            _require(after is not None and after['node_id'] == identifier, 'owned_schedule_job_binding_invalid')
+        drain, drain_text = stamp(request['drainAt']); earliest, earliest_text = stamp(request['notBefore'])
+        _require(earliest >= drain and type(request['targetImage']) is str and
+                 re.fullmatch(r'sha256:[0-9a-f]{64}',request['targetImage']), 'owned_schedule_request_invalid')
+        digest = hashlib.sha256(_canonical(dict(nodeId=identifier,request=request))).hexdigest()
+        expected = dict(schemaVersion=1, requestId=request['requestId'], authorityId=authority_id,
+                        nodeId=identifier, requestSha256=digest, expectedRevision=request['expectedRevision'],
+                        revision=request['expectedRevision']+1, planId=receipt['planId'], state=receipt['state'],
+                        drainAt=drain_text, notBefore=earliest_text, afterJobId=request['afterJobId'],
+                        targetImage=request['targetImage'])
+        expected['receiptSha256'] = hashlib.sha256(_canonical(expected)).hexdigest()
+        _require(row['request_json'] == _canonical(request).decode() and row['request_sha256'] == digest and
+                 row['receipt_json'] == _canonical(expected).decode() and _canonical(receipt) == _canonical(expected) and
+                 receipt['state'] in ('scheduled','draining') and
+                 (request['afterJobId'] is None or receipt['state'] == 'draining'), 'owned_schedule_receipt_mismatch')
+        revision_key = (identifier, receipt['revision'])
+        _require(row['request_id'] not in requests and receipt['planId'] not in plans and
+                 revision_key not in revisions, 'duplicate_owned_schedule_history')
+        requests.add(row['request_id']); plans.add(receipt['planId']); revisions.add(revision_key)
+        receipts_by_node[identifier].append(receipt)
+    for node in nodes:
+        _require(node['state'] == 'active' and type(node['revision']) is int and 0 <= node['revision'] < 2**53,
+                 'foreign_node_maintenance_pending')
+        history = sorted(receipts_by_node[node['id']], key=lambda receipt: receipt['revision'])
+        if node['plan_id'] is None:
+            _require(not history and all(node[field] is None for field in
+                     ('drain_at','not_before','after_job_id','target_image','result','update_hash','finish_status')),
+                     'unbound_node_maintenance_history')
+            continue
+        _uuid(node['plan_id'])
+        _require(history and history[-1]['planId'] == node['plan_id'] and
+                 node['revision'] > history[-1]['revision'], 'current_node_plan_not_closed')
+        last = history[-1]
+        _require(all(node[column] == last[field] for column, field in
+                 (('drain_at','drainAt'),('not_before','notBefore'),('after_job_id','afterJobId'),('target_image','targetImage'))),
+                 'current_node_plan_binding_mismatch')
+        result = _json(node['result']) if node['result'] is not None else None
+        if node['finish_status'] == 'succeeded':
+            _require(type(node['update_hash']) is str and HEX.fullmatch(node['update_hash']) and
+                     type(result) is dict and result.get('healthy') is True, 'node_update_completion_invalid')
+        else:
+            _require(node['finish_status'] is None and node['update_hash'] is None,
+                     'foreign_node_maintenance_pending')
+            if result is not None:
+                _require(type(result) is dict and set(result) == {'operatorAction','note','workerStopped','healthy'} and
+                         result['operatorAction'] == 'resume' and result['workerStopped'] is True and result['healthy'] is True and
+                         type(result['note']) is str and 0 < len(result['note']) <= 256 and result['note'].strip(),
+                         'node_resume_completion_invalid')
+
+
 def census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
            max_metadata_bytes=64 * 1024 * 1024, expected_counts=None,
            logical_root='/prototype-state'):
@@ -174,12 +252,11 @@ def census(root, *, key, authority_id, node_ids, uid, max_artifact_bytes,
                  rows['coordinator_authority_lease'] == [dict(singleton=1, required=1)],
                  'enrolled_predecessor_authority_changed')
         _require({r['id'] for r in rows['nodes']} == set(node_ids), 'predecessor_nodes_changed')
-        _require(all(r['state'] == 'active' and not r['plan_id'] and not r['update_hash']
-                     for r in rows['nodes']), 'foreign_node_maintenance_pending')
-        _require(not rows['owned_maintenance_schedules'] and not rows['viewer_reservations'] and
+        jobs = {r['id']: r for r in rows['jobs']}
+        _maintenance_history(rows['nodes'], rows['owned_maintenance_schedules'], authority_id, jobs)
+        _require(not rows['viewer_reservations'] and
                  not any(values for name, values in rows.items() if name.startswith('reference_')),
                  'unsettled_predecessor_execution')
-        jobs = {r['id']: r for r in rows['jobs']}
         _require(all(r['status'] in ('succeeded', 'failed') and r['environment'] in ('production', 'staging')
                      for r in jobs.values()), 'predecessor_jobs_not_closed')
         for r in jobs.values():
