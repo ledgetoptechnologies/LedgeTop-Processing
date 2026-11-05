@@ -169,6 +169,14 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             return False
 
         def _dispatch(self):
+            from .coordinator_freeze import CoordinatorFrozen, request_scope
+            try:
+                with request_scope(getattr(api, 'coordinator_queue', None), self.command, self.path):
+                    self._dispatch_open()
+            except CoordinatorFrozen:
+                self._reply(Response(503, {'error': 'coordinator_maintenance'}), retry_after='2')
+
+        def _dispatch_open(self):
             source_put = (self.command == "PUT" and re.fullmatch(
                 r"/ltds/v2/jobs/[A-Za-z0-9][A-Za-z0-9_-]{0,127}/source/"
                 r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\?generation=[1-9][0-9]{0,8}", self.path))

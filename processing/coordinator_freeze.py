@@ -13,12 +13,37 @@ import sqlite3
 import threading
 import uuid
 import re
+from functools import wraps
 
 from .maintenance import Conflict
+
+OPERATION_KINDS = frozenset(('http', 'viewer-dispatch', 'viewer-transfer',
+    'source-io-admission', 'source-io', 'source-release-submit', 'source-release'))
+STARTUP_TABLES = frozenset(('coordinator_identity', 'jobs', 'nodes', 'owned_maintenance_schedules',
+    'processing_node_inventory', 'reference_acceptances', 'reference_claims', 'reference_jobs',
+    'reference_outbox', 'reference_recovery_receipts', 'reference_recovery_startup',
+    'reference_source_grant_renewals', 'reference_source_grant_tokens', 'reference_source_intakes',
+    'reference_source_object_pins', 'reference_source_object_receipts', 'reference_source_range_requests',
+    'reference_source_range_usage', 'reference_terminal_acceptances', 'reference_transfer_grants',
+    'reference_viewer_receipts', 'reference_viewer_transfers', 'reference_worker_acceptance_observations',
+    'reference_worker_failures', 'reference_worker_receipts', 'source_reader_binding',
+    'source_reader_epochs', 'source_reader_fences', 'source_reader_pins', 'sqlite_sequence',
+    'viewer_files', 'viewer_incarnations', 'viewer_tasks', 'coordinator_freeze_state',
+    'coordinator_freeze_receipts', 'coordinator_operation_pins'))
 
 
 class CoordinatorFrozen(RuntimeError):
     """Retryable service maintenance; producers must retain their outboxes."""
+
+
+def runtime_constructor(function):
+    """Keep the startup authority scope around the real runtime constructor."""
+    @wraps(function)
+    def guarded(runtime, queue, *args, **kwargs):
+        runtime.queue = queue
+        with queue._coordinator_freeze.runtime_startup(runtime):
+            return function(runtime, queue, *args, **kwargs)
+    return guarded
 
 
 @contextmanager
@@ -68,6 +93,11 @@ class FreezeGate:
                   start_revision INTEGER NOT NULL, state TEXT NOT NULL);
                 INSERT OR IGNORE INTO coordinator_freeze_state VALUES(1,0,NULL,'open',NULL,NULL);
             ''')
+            row = self._row(db)
+            uncertain = db.execute('SELECT 1 FROM coordinator_operation_pins WHERE epoch!=? LIMIT 1', (queue.startup_id,)).fetchone()
+            if ((row['phase'] in ('intent', 'draining') and row['owner_epoch'] != queue.startup_id)
+                    or uncertain):
+                db.execute("UPDATE coordinator_freeze_state SET phase='held',revision=revision+1 WHERE singleton=1")
 
     def _check(self):
         if os.getpid() != self._pid or self.queue._lock.closed:
@@ -112,16 +142,54 @@ class FreezeGate:
                   sqlite3.SQLITE_DROP_TRIGGER, sqlite3.SQLITE_DROP_VIEW,
                   sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH}
         def authorize(action, first, second, database, source):
+            startup = getattr(self._local, 'startup', None)
+            if startup is not None and threading.get_ident() == self.queue._startup_thread:
+                # A real runtime's constructor/start may add only this reviewed
+                # local schema and ownership overlays. It cannot admit work or
+                # mutate ordinary job/receipt bodies under a frozen gate.
+                tables = startup
+                if action == sqlite3.SQLITE_CREATE_TABLE and first in tables:
+                    return sqlite3.SQLITE_OK
+                if action == sqlite3.SQLITE_CREATE_INDEX and second in tables:
+                    return sqlite3.SQLITE_OK
+                if action == sqlite3.SQLITE_ALTER_TABLE and second in tables:
+                    return sqlite3.SQLITE_OK
+                if first == 'sqlite_master' and action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE):
+                    return sqlite3.SQLITE_OK
+                if action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE) and first in (
+                    'reference_recovery_startup', 'source_reader_binding', 'source_reader_epochs',
+                    'source_reader_pins', 'processing_node_inventory'):
+                    return sqlite3.SQLITE_OK
             if (getattr(self._local, 'lifecycle', None) == 'source-reader-close'
                     and action == sqlite3.SQLITE_UPDATE and first == 'source_reader_epochs' and second == 'state'):
                 return sqlite3.SQLITE_OK
             if (getattr(self._local, 'lifecycle', None) == 'source-pin-retire'
                     and action == sqlite3.SQLITE_UPDATE and first == 'source_reader_pins' and second == 'state'):
                 return sqlite3.SQLITE_OK
-            if action in denied or (action == sqlite3.SQLITE_PRAGMA and second is not None):
+            readonly_pragmas = {'table_info', 'table_xinfo', 'index_list', 'index_info',
+                                'foreign_key_list', 'quick_check', 'integrity_check'}
+            if action in denied or (action == sqlite3.SQLITE_PRAGMA and second is not None and first not in readonly_pragmas):
                 return sqlite3.SQLITE_DENY
             return sqlite3.SQLITE_OK
         db.set_authorizer(authorize)
+
+    @contextmanager
+    def runtime_startup(self, runtime):
+        """Known real runtime metadata bootstrap, never a user bypass flag."""
+        from .reference_runtime import ReferenceRuntime
+        if type(runtime) is not ReferenceRuntime or runtime.queue is not self.queue:
+            raise CoordinatorFrozen('verified_runtime_startup_required')
+        if self.status()['phase'] == 'open':
+            yield
+            return
+        if threading.get_ident() != self.queue._startup_thread:
+            raise CoordinatorFrozen('coordinator_startup_thread_required')
+        previous = getattr(self._local, 'startup', None)
+        self._local.startup = STARTUP_TABLES
+        try:
+            yield
+        finally:
+            self._local.startup = previous
 
     @contextmanager
     def source_readers_shutdown(self, session):
@@ -176,16 +244,19 @@ class FreezeGate:
             self._local.control = previous
 
     def _quota(self, db, extra):
-        store = getattr(self.queue, '_reference_scheduler', None)
-        if store is not None:
-            store._quota(db, extra)
-        elif metadata_bytes(db) + extra > 256 * 1024:
+        # Bounded control reserve: exact ACK recovery and maintenance must work
+        # even when ordinary payload admission has filled its metadata budget.
+        # ReferenceStore still measures these bytes in its total, and cannot
+        # allocate payload using this reserve. Census adds this 256KiB ceiling
+        # explicitly when deriving the physical DB/headroom budget.
+        if metadata_bytes(db) + extra > 256 * 1024:
             raise CoordinatorFrozen('coordinator_freeze_metadata_full')
 
     @contextmanager
     def operation(self, kind):
         self._check()
-        self.queue.slug(kind)
+        if kind not in OPERATION_KINDS:
+            raise ValueError('closed coordinator operation kind required')
         if getattr(self._local, 'operation', None) is not None:
             token = self._local.operation
             if self._active.get(token) != threading.get_ident():
@@ -198,6 +269,8 @@ class FreezeGate:
             row = self._row(db)
             if row['phase'] != 'open':
                 raise CoordinatorFrozen('coordinator_maintenance')
+            if db.execute('SELECT count(*) FROM coordinator_operation_pins').fetchone()[0] >= 128:
+                raise CoordinatorFrozen('coordinator_operation_capacity')
             values = (token, self.queue.startup_id, kind, row['revision'], 'active')
             self._quota(db, sum(len(str(value).encode('utf-8')) for value in values))
             db.execute('INSERT INTO coordinator_operation_pins VALUES(?,?,?,?,?)', values)
@@ -247,6 +320,8 @@ class FreezeGate:
             if row['phase'] != target[0]:
                 raise Conflict('freeze phase changed')
             if request['action'] == 'intent':
+                if db.execute('SELECT 1 FROM coordinator_freeze_receipts WHERE plan_id=? LIMIT 1', (request['planId'],)).fetchone():
+                    raise Conflict('freeze plan identity already used')
                 if db.execute("SELECT 1 FROM nodes WHERE state NOT IN ('active','draining') LIMIT 1").fetchone():
                     raise Conflict('node maintenance ownership must resolve first')
                 if db.execute('SELECT 1 FROM coordinator_operation_pins WHERE epoch!=? LIMIT 1', (self.queue.startup_id,)).fetchone():

@@ -3,6 +3,8 @@ import tempfile
 import threading
 import unittest
 import uuid
+import http.client
+import time
 
 from processing.coordinator_freeze import CoordinatorFrozen
 from processing.maintenance import Conflict
@@ -42,7 +44,7 @@ class FreezeTests(unittest.TestCase):
             thread.start(); thread.join(2)
             self.assertFalse(thread.is_alive())
             self.assertEqual(outcome, ['retry'])
-            with self.queue.coordinator_operation('receipt-closure'):
+            with self.queue.coordinator_operation('http'):
                 self.queue.submit(dict(requestId='existing', profile='treedar-synthetic-v1', environment='staging'))
             self.change('drain')
             with self.assertRaisesRegex(Conflict, 'still draining'): self.change('seal')
@@ -89,6 +91,54 @@ class FreezeTests(unittest.TestCase):
         self.assertEqual(self.gate.status()['phase'], 'frozen')
         with self.assertRaises(CoordinatorFrozen), self.queue.coordinator_operation('http'): pass
         self.assertEqual(self.change('resume', healthy=True)['phase'], 'open')
+
+    def test_control_reserve_preserves_replay_and_freeze_at_full_payload_quota(self):
+        from processing.reference_store import ReferenceStore
+        self.queue.allowed_profiles.add('reference-pipeline-v1')
+        store = ReferenceStore(self.queue)
+        store.max_metadata_bytes = 1
+        with self.queue.coordinator_operation('http'):
+            self.assertEqual(self.queue.list(), [])
+            with self.assertRaisesRegex(Conflict, 'metadata quota'), self.queue._db() as db:
+                store._quota(db, 1)
+        request = self.request('intent')
+        receipt = self.gate.transition(request, owner_secret=self.owner)
+        self.assertEqual(self.gate.transition(request, owner_secret=self.owner), receipt)
+        self.change('drain'); self.change('seal')
+        self.assertEqual(self.gate.status()['phase'], 'frozen')
+
+    def test_reference_freeze_rejects_before_large_body_read_with_retry_after(self):
+        from processing.reference_http import create_reference_http_server
+        from processing.reference_api import Response
+        queue = self.queue
+        class API:
+            coordinator_queue = queue
+            calls = 0
+            def handle(self, *args, **kwargs):
+                self.calls += 1
+                return Response(200, {})
+        api = API()
+        server = create_reference_http_server(api)
+        thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .01})
+        thread.start()
+        try:
+            self.change('intent')
+            connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+            try:
+                connection.putrequest('POST', '/ltds/v2/jobs')
+                connection.putheader('Content-Length', str(16 * 1024 * 1024))
+                connection.endheaders()  # Deliberately send none of the body.
+                response = connection.getresponse()
+                self.assertEqual(response.status, 503)
+                self.assertEqual(response.getheader('Retry-After'), '2')
+                response.read()
+            finally:
+                connection.close()
+            self.assertEqual(api.calls, 0)
+            self.assertEqual(self.gate.status()['operations'], 0)
+        finally:
+            server.shutdown(); server.server_close(); thread.join(2)
+            self.assertFalse(thread.is_alive())
 
 
 if __name__ == '__main__': unittest.main()

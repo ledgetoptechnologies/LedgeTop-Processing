@@ -307,6 +307,7 @@ def validate_discovered_option_values(payload, snapshot, allowed):
 class _DynamicAPI:
     def __init__(self, control, config, settings, discover, discover_capacities):
         self.control, self.config, self.settings, self.discover = control, config, settings, discover
+        self.coordinator_queue = control.coordinator_queue
         self.discover_capacities = discover_capacities
         self._worker_refresh_lock = threading.RLock()
 
@@ -383,7 +384,11 @@ class _DynamicAPI:
             protected_transport=protected_transport)
 
 
+from .coordinator_freeze import runtime_constructor
+
+
 class ReferenceRuntime:
+    @runtime_constructor
     def __init__(self, queue, config, settings, *, discover=None, discover_capacities=None,
                  server_factory=None):
         """Construct services around the existing authority; never create a Queue."""
@@ -433,7 +438,8 @@ class ReferenceRuntime:
                 node_option_validator=self._node_options_valid)
             from .node_inventory import pin_reference_inventory
             pin_reference_inventory(self.store, config, settings)
-            self.source_reconciliation=self.store.reconcile_source_spool(settings.source_spool)
+            self.source_reconciliation = (self.store.reconcile_source_spool(settings.source_spool)
+                if queue._coordinator_freeze.status()['phase'] == 'open' else {'state': 'maintenance_frozen'})
             if settings.source_spool is not None:
                 self._source_readers = self.store.source_readers()
             self._streams = threading.BoundedSemaphore(settings.stream_budget["maxConcurrent"])
@@ -524,7 +530,8 @@ class ReferenceRuntime:
         if self._server is not None:
             return
         if self.settings.source_spool is not None:
-            self._source_readers = self.store.source_readers()
+            with self.queue._coordinator_freeze.runtime_startup(self):
+                self._source_readers = self.store.source_readers()
         self._viewer_transfer_stop.clear()
         listener = self.settings.listener
         server = self._server_factory(self.api, listener["host"], listener["port"], ssl_context=self._server_context)

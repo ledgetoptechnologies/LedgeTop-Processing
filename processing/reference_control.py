@@ -10,6 +10,7 @@ class ReferenceControlAPI:
                  allowed_odm_options=(), treedar_available=False, result_proxy=None,
                  recovery_bindings=None, viewer_receipt_keys=None, source_spool=None,
                  source_attestation_keys=None, authority_id=None):
+        self.coordinator_queue = store.queue
         if set(viewer_bearers) & set(worker_bearers):
             raise ValueError('Viewer and worker credentials must be separate')
         self.viewer = ReferenceAPI(store, bearer_tokens=viewer_bearers,

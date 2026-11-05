@@ -83,12 +83,16 @@ def make_handler(config: Config):
             # Request paths/headers and opaque claim credentials stay out of logs.
             pass
 
-        def _reply(self, status: int, payload: dict):
+        def _reply(self, status: int, payload: dict, *, retry_after=None):
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            if retry_after is not None:
+                self.close_connection = True
+                self.send_header('Retry-After', retry_after)
+                self.send_header('Connection', 'close')
             self.end_headers()
             self.wfile.write(body)
 
@@ -127,6 +131,18 @@ def make_handler(config: Config):
             return result
 
         def do_GET(self):
+            from .coordinator_freeze import CoordinatorFrozen, request_scope
+            try:
+                with request_scope(queue, 'GET', self.path):
+                    self._do_GET_open()
+            except CoordinatorFrozen:
+                self._reply(503, {'error': 'coordinator_maintenance'}, retry_after='2')
+
+        def _do_GET_open(self):
+            if self.path == '/v1/prototype/coordinator-freeze':
+                if self._authorized(operator=True):
+                    self._reply(200, queue._coordinator_freeze.status()) if queue else self._reply(404, {'error': 'prototype_disabled'})
+                return
             if facade and facade.handle(self):
                 return
             if self.path.startswith("/v1/prototype/"):
@@ -189,6 +205,14 @@ def make_handler(config: Config):
                 self._reply(404, {"error": "not_found"})
 
         def do_POST(self):
+            from .coordinator_freeze import CoordinatorFrozen, request_scope
+            try:
+                with request_scope(queue, 'POST', self.path):
+                    self._do_POST_open()
+            except CoordinatorFrozen:
+                self._reply(503, {'error': 'coordinator_maintenance'}, retry_after='2')
+
+        def _do_POST_open(self):
             if facade and facade.handle(self):
                 return
             prototype = self.path.startswith("/v1/prototype/")
@@ -196,7 +220,8 @@ def make_handler(config: Config):
                 self._reply(404, {"error": "not_found"})
                 return
             operator = prototype and (self.path.endswith(("/hold", "/resolve"))
-                                      or self.path.startswith("/v1/prototype/nodes/"))
+                                      or self.path.startswith("/v1/prototype/nodes/")
+                                      or self.path == '/v1/prototype/coordinator-freeze')
             if not self._authorized(operator=operator):
                 return
             if prototype and queue is None:
@@ -225,7 +250,11 @@ def make_handler(config: Config):
                 else:
                     request=json.loads(raw)
                 if prototype:
-                    if self.path == "/v1/prototype/jobs":
+                    if self.path == '/v1/prototype/coordinator-freeze':
+                        healthy = self.lifecycle_service is not None and self.lifecycle_service.healthy()
+                        self._reply(200, queue._coordinator_freeze.transition(request,
+                            owner_secret=config.prototype_operator_token, healthy=healthy))
+                    elif self.path == "/v1/prototype/jobs":
                         job, created = queue.submit(request)
                         self._reply(201 if created else 200, {"job": job})
                     elif self.path == "/v1/prototype/claim":

@@ -35,6 +35,7 @@ class Queue(Maintenance):
                 or len(set(node_ids)) != len(node_ids)):
             raise ValueError("node_ids must be unique configured slugs")
         self._creator_pid = os.getpid()
+        self._startup_thread = threading.get_ident()
         self._lifecycle_lock = threading.RLock()
         self._database_users = 0
         self.node_ids = tuple(node_ids)
@@ -111,6 +112,8 @@ class Queue(Maintenance):
         if os.getpid() != self._creator_pid:
             raise RuntimeError('coordinator process changed')
         with self._lifecycle_lock:
+            if self._lock.closed:
+                return
             if self._database_users:
                 raise RuntimeError('coordinator transaction still active')
             gate = getattr(self, '_coordinator_freeze', None)

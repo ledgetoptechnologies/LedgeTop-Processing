@@ -449,7 +449,8 @@ class ViewerService:
     def _run(self):
         while not self._stop.is_set():
             try:
-                self.tick()
+                with self.queue.coordinator_operation('viewer-dispatch'):
+                    self.tick()
             except Exception:
                 # No replay of mutations. Intents/claims remain durable; a
                 # restart retains their slot for reconciliation or inspection.
