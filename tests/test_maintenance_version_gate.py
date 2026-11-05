@@ -29,6 +29,7 @@ class VersionBoundaryTests(unittest.TestCase):
         adapter.node.json.return_value = dict(engine='odx',engineVersion='old')
         with patch.object(adapter,'inspect',return_value=dict(Image='target',State=dict(Running=True))):
             self.assertFalse(adapter.serving('target'), 'unbound version must not pass')
+            self.assertTrue(adapter.image_serving('target'), 'read-only baseline inventory remains available')
             adapter.bind_engine_version('new')
             self.assertFalse(adapter.serving('target'), 'right image with wrong version must not pass')
             adapter.node.json.return_value['engineVersion']='new'

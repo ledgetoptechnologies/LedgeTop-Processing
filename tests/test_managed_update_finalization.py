@@ -61,6 +61,7 @@ class ManagedFinalizationTests(unittest.TestCase):
         inspect=self.adapter.inspect
         self.adapter.inspect=lambda:dict(inspect(),Id='owned-backend')
         self.adapter.serving=lambda image:self.adapter.current==image and not (self.adapter.bad_health and image==update_fixture.NEW)
+        self.adapter.image_serving=self.adapter.serving
         replace=self.adapter.replace
         def closed_before_replace(image):
             self.assertEqual(json.loads((self.ingress.root/'state.json').read_text())['state'],'closed')

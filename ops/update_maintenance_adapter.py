@@ -17,7 +17,7 @@ import threading
 from types import MappingProxyType
 import uuid
 
-from processing.container_update import ComposeNode,loopback,finish_matches
+from processing.container_update import ComposeNode,loopback,finish_matches,reviewed_worker_mode,exact_engine_version
 from processing.node_gate import NodeGate,GateBusy
 from processing.odx_smoke_worker import Client
 from processing.update_supervisor import seal_receipt,UpdateSupervisor
@@ -28,7 +28,7 @@ from ops import node_maintenance as managed
 COMMON=('operationId','nodeId','engineId','authorityId','candidateId','manifestDigest',
         'configDigest','localImageId','supervisorPolicySha256','hostGeneration')
 REQUEST={'schemaVersion',*COMMON,'repository','platform','previousImageId','qualifierId',
-         'qualificationPolicySha256','receiptDirectory','qualificationSha256','requestSha256'}
+         'qualificationPolicySha256','receiptDirectory','qualificationSha256','requestSha256','targetEngineVersion'}
 
 
 class MaintenanceAdapterHeld(ValueError):pass
@@ -181,6 +181,7 @@ class UpdateMaintenanceAdapter:
         for key in ('operationId','candidateId','supervisorPolicySha256','qualificationPolicySha256','qualificationSha256','requestSha256'):sha(request[key])
         for key in ('manifestDigest','configDigest','localImageId','previousImageId'):sha(request[key],True)
         identity(request['qualifierId'])
+        exact_engine_version(request['targetEngineVersion'])
         if (any(request[key]!=self.binding[key] for key in ('nodeId','authorityId','engineId'))
                 or type(request['hostGeneration']) is not int or not 0<=request['hostGeneration']<=2**53-1
                 or request['platform']!='linux/amd64' or type(request['repository']) is not str
@@ -207,7 +208,7 @@ class UpdateMaintenanceAdapter:
         backend=json.loads(ingress.docker(['inspect',ingress.config['backendName']]))
         source=read_json(self.root/'compose.json')
         if (len(backend)!=1 or backend[0]['Id']!=item['Id'] or source['services'][settings['service']]['image']!=item['Image']
-                or not adapter.serving(item['Image'])):raise MaintenanceAdapterHeld('private_backend_identity_changed')
+                or not adapter.image_serving(item['Image'])):raise MaintenanceAdapterHeld('private_backend_identity_changed')
         ingress.inspect()
         return dict(nodeId=self.binding['nodeId'],authorityId=self.binding['authorityId'],engineId=self.binding['engineId'],imageId=item['Image'])
 
@@ -225,12 +226,14 @@ class UpdateMaintenanceAdapter:
         response=self.operator.json('GET','/v1/prototype/nodes/'+self.binding['nodeId']+'/schedule-owned/'+wire['requestId'])
         if type(response) is not dict or set(response)!={'receipt'}:raise MaintenanceAdapterHeld('owned_plan_receipt_required')
         receipt=response['receipt']
+        if wire.get('targetEngineVersion') != request['targetEngineVersion']:
+            raise MaintenanceAdapterHeld('qualified_target_version_changed')
         fields={'schemaVersion','requestId','authorityId','nodeId','requestSha256','expectedRevision','revision','planId','state',
-                'drainAt','notBefore','afterJobId','targetImage','receiptSha256'}
+                'drainAt','notBefore','afterJobId','targetImage','receiptSha256','targetEngineVersion'}
         if (type(receipt) is not dict or set(receipt)!=fields or type(receipt['schemaVersion']) is not int or receipt['schemaVersion']!=1
                 or receipt['receiptSha256']!=digest({key:value for key,value in receipt.items() if key!='receiptSha256'})
                 or receipt['requestSha256']!=digest(dict(nodeId=self.binding['nodeId'],request=wire))
-                or any(receipt[key]!=wire[key] for key in ('requestId','authorityId','expectedRevision','afterJobId','targetImage'))
+                or any(receipt[key]!=wire[key] for key in ('requestId','authorityId','expectedRevision','afterJobId','targetImage','targetEngineVersion'))
                 or receipt['nodeId']!=self.binding['nodeId'] or type(receipt['revision']) is not int
                 or receipt['revision']!=wire['expectedRevision']+1):raise MaintenanceAdapterHeld('owned_plan_binding_changed')
         for key in ('drainAt','notBefore'):
@@ -240,12 +243,14 @@ class UpdateMaintenanceAdapter:
         if current:
             node=self.api.json('GET','/v1/prototype/nodes/'+self.binding['nodeId'])['node']
             if (node.get('id')!=self.binding['nodeId'] or node['planId']!=receipt['planId'] or node['targetImage']!=wire['targetImage']
+                    or node.get('targetEngineVersion')!=wire['targetEngineVersion']
                     or type(node.get('revision')) is not int or node['revision']<receipt['revision']
                     or any(node.get(key)!=receipt[key] for key in ('drainAt','notBefore','afterJobId'))):
                 raise MaintenanceAdapterHeld('owned_plan_is_no_longer_current')
         value=dict(schemaVersion=1,requestSha256=request['requestSha256'],**{key:request[key] for key in COMMON},
             planId=receipt['planId'],previousImageId=request['previousImageId'],targetImageId=request['localImageId'],
             qualificationSha256=request['qualificationSha256'])
+        value['targetEngineVersion']=request['targetEngineVersion']
         value=UpdateSupervisor._receipt(seal_receipt(value,'planSha256'),request,'schedule')
         if row['receipt'] is not None and row['receipt']!=canonical(value):raise MaintenanceAdapterHeld('sealed_plan_changed')
         return value,receipt
@@ -256,6 +261,8 @@ class UpdateMaintenanceAdapter:
 
     def schedule(self,request):
         with self._operation():
+            settings=read_json(self.root/'maintenance.json')
+            reviewed_worker_mode(settings.get('workerMode'))
             request=self._request(request,'schedule');row=self._schedule_row(request)
             if row:
                 if row['request']!=canonical(request):raise MaintenanceAdapterHeld('schedule_cycle_already_bound')
@@ -268,7 +275,7 @@ class UpdateMaintenanceAdapter:
             wire=dict(schemaVersion=1,requestId=str(uuid.uuid4()),authorityId=self.binding['authorityId'],expectedRevision=node['revision'],
                 drainAt=(now+timedelta(seconds=self.window.drain_after_seconds)).isoformat().replace('+00:00','Z'),
                 notBefore=(now+timedelta(seconds=self.window.not_before_after_seconds)).isoformat().replace('+00:00','Z'),
-                afterJobId=None,targetImage=request['localImageId'])
+                afterJobId=None,targetImage=request['localImageId'],targetEngineVersion=request['targetEngineVersion'])
             with self._db(write=True) as db:
                 existing=db.execute('SELECT * FROM schedule_intents WHERE operation=? AND generation=?',
                     (request['operationId'],request['hostGeneration'])).fetchone()
@@ -308,6 +315,7 @@ class UpdateMaintenanceAdapter:
         if self._host()['imageId']!=request['previousImageId']:raise MaintenanceAdapterHeld('previous_image_changed')
         node=self.api.json('GET','/v1/prototype/nodes/'+self.binding['nodeId'])['node']
         if (node.get('id')!=self.binding['nodeId'] or node.get('planId')!=plan['planId']
+                or node.get('targetEngineVersion')!=request['targetEngineVersion']
                 or node.get('targetImage')!=request['localImageId'] or node['state'] not in ('scheduled','draining')):
             raise MaintenanceAdapterHeld('frozen_plan_not_eligible')
         if node['state']!='draining' or stamp(node['notBefore'])>aware(self.clock()):return False
@@ -364,11 +372,13 @@ class UpdateMaintenanceAdapter:
         if state.get('stage')!='completed' or private.get('stage')!='completed':return None
         settings,ingress,adapter=self._context(root)
         expected=dict(healthy=True,image=request['localImageId'],previousImage=request['previousImageId'],
-            composePinUpdateRequired=False,persistentComposePin=request['localImageId'],ingress='open')
+            composePinUpdateRequired=False,persistentComposePin=request['localImageId'],ingress='open',engineVersion=request['targetEngineVersion'])
         if (state.get('binding')!=managed.operation_binding(self.api,settings,ingress,adapter.args)
                 or state.get('planId')!=request['plan']['planId'] or state.get('targetImage')!=request['localImageId']
                 or state.get('oldImage')!=request['previousImageId'] or state.get('persistentComposePin')!=request['localImageId']
+                or state.get('targetEngineVersion')!=request['targetEngineVersion']
                 or private.get('planId')!=request['plan']['planId'] or private.get('targetImage')!=request['localImageId']
+                or private.get('targetEngineVersion')!=request['targetEngineVersion']
                 or private.get('nodeId')!=self.binding['nodeId'] or private.get('oldImage')!=request['previousImageId']
                 or private.get('status')!='succeeded' or private.get('finishResult')!=expected
                 or state.get('result')!=dict(status='succeeded',nodeId=self.binding['nodeId'],**expected)):
@@ -376,6 +386,7 @@ class UpdateMaintenanceAdapter:
         self._authority();node=self.api.json('GET','/v1/prototype/nodes/'+self.binding['nodeId'])['node']
         if not finish_matches(node,private,expected):raise MaintenanceAdapterHeld('coordinator_finish_not_proven')
         source=read_json(self.root/'compose.json')
+        adapter.bind_engine_version(request['targetEngineVersion'])
         if (source['services'][settings['service']]['image']!=request['localImageId']
                 or managed.compose_base(source,settings['service'])!=state['composeBaseSha256']
                 or self._host()['imageId']!=request['localImageId'] or not adapter.serving(request['localImageId'])):
@@ -385,6 +396,7 @@ class UpdateMaintenanceAdapter:
             planId=request['plan']['planId'],planSha256=request['plan']['planSha256'],previousImageId=request['previousImageId'],
             targetImageId=request['localImageId'],qualificationSha256=request['qualificationSha256'],imageId=request['localImageId'],
             healthy=True,hostPinDurable=True,ingressOpen=True,coordinatorFinished=True)
+        value['engineVersion']=request['targetEngineVersion']
         value=UpdateSupervisor._receipt(seal_receipt(value,'completionSha256'),request,'run')
         if row['receipt'] is not None and row['receipt']!=canonical(value):raise MaintenanceAdapterHeld('sealed_completion_changed')
         return value

@@ -98,14 +98,16 @@ engineId}`. Required methods are `inspect_host()`, `schedule(request)`,
 `lookup_completion(request)`.
 `inspect_host()` returns exactly `{nodeId, authorityId, engineId, imageId}`;
 the last two lookup methods are read-only. Schedule receives the accepted
-qualification SHA. Its closed plan receipt contains the qualification receipt's
+qualification SHA and `targetEngineVersion`, copied from the validated persisted
+qualification receipt rather than the running backend. Its closed plan receipt contains the qualification receipt's
 common host/candidate/policy/request fields, `planId` (canonical UUID),
-`previousImageId`, `targetImageId`, `qualificationSha256`, and self-excluded
+`previousImageId`, `targetImageId`, `qualificationSha256`, `targetEngineVersion`, and self-excluded
 `planSha256`. The schedule request has its own fixed owned receipt directory.
 
 The run request additionally contains that exact sealed plan and a fixed owned
 run receipt directory. Completion has the common fields plus `planId`,
 `planSha256`, `previousImageId`, `targetImageId`, `qualificationSha256`, `imageId`,
+`engineVersion` (equal to the request and sealed plan target),
 `healthy:true`, `hostPinDurable:true`, `ingressOpen:true`,
 `coordinatorFinished:true`, and self-excluded `completionSha256`. The physical
 host must independently report the exact target image. A completion claiming

@@ -54,6 +54,7 @@ class UpdateMaintenanceAdapterTests(unittest.TestCase):
             manifestDigest='sha256:'+'d'*64,configDigest=update_fixture.NEW,localImageId=update_fixture.NEW,platform='linux/amd64',
             previousImageId=update_fixture.OLD,hostGeneration=0,supervisorPolicySha256='c'*64,
             qualifierId='separate-qualifier',qualificationPolicySha256='e'*64,qualificationSha256='f'*64,
+            targetEngineVersion='new-version',
             receiptDirectory=str(self.receipts/self.operation/kind))
         if kind=='run':value['plan']=plan
         value['requestSha256']=module.digest(value)
@@ -240,3 +241,11 @@ class UpdateMaintenanceAdapterTests(unittest.TestCase):
         with self.assertRaises(module.MaintenanceAdapterHeld):self.adapter.schedule(changed)
         with self.assertRaises(module.MaintenanceAdapterHeld):self.open(window=module.ScheduleWindow(1,2,0,60))
         self.assertEqual(self.host.adapter.calls,[])
+
+    def test_legacy_unbound_request_is_not_upgraded_from_live_backend(self):
+        request=dict(self.schedule_request);request.pop('targetEngineVersion')
+        request['requestSha256']=module.digest({key:value for key,value in request.items() if key!='requestSha256'})
+        with self.assertRaisesRegex(module.MaintenanceAdapterHeld,'closed_supervisor_request'):
+            self.adapter.schedule(request)
+        self.assertEqual(self.host.adapter.calls,[])
+        self.assertEqual(self.host.fixture.queue.get_node('cluster')['state'],'active')

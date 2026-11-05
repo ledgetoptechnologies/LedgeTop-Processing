@@ -41,24 +41,37 @@ The separate managed finalization/resume suite passed **15/15**, including an
 ingress wrong-version refusal before reopen, in the same setup. These
 checks establish metadata/host orchestration behavior, not an installed update.
 
-## Known surrounding adapter migration still required
+## Original gate checkpoint and subsequent adapter migration
 
-`ops/update_maintenance_adapter.py` currently creates schedules without reviewed
-engine-version metadata and reconstructs older completion proofs. Its legacy
-unbound plans now refuse execution; four existing broader adapter tests expose
-that deliberate missing migration. Do not merge or deploy this patch as a
-complete unattended update release. The next patch must use existing qualified
-release metadata to bind target engine version and worker mode, migrate exact
-schedule/completion validation, and then qualify full supervisor → node update
-recovery. A separate digest-to-version registry must not be introduced without
-first reviewing existing qualification authority.
+At the original gate checkpoint, `ops/update_maintenance_adapter.py` created
+schedules without reviewed engine-version metadata and reconstructed older
+completion proofs. Its unbound plans refused execution, exposing four broader
+adapter test failures. The follow-up below resolves that missing propagation.
+Neither checkpoint constitutes a complete reference-worker unattended update
+release: that still needs the worker handover and installed qualification.
+
+The follow-up candidate completes this schema propagation for the explicit
+legacy worker path. Schedule/run requests copy `targetEngineVersion` from the
+already validated, persisted qualification receipt and bind it into their request
+hashes. The owned schedule/current node and sealed plan retain it; the final
+completion's `engineVersion` must match the request and plan. No new version
+registry is introduced. `image_serving()` now supports read-only baseline image
+inventory, while `serving()`/`healthy()` still require a target version pin.
+
+The follow-up passed **63/63 Linux tests, no skips**, in 16.670 seconds, covering
+the supervisor, maintenance adapter, managed finalization/replay, and version
+boundaries. This resolves the four old adapter failures described above. A raw
+historical receipt and existing status remain readable, but a frozen unbound
+schedule/run intent is held and cannot be upgraded from a live `/info` response.
+The adapter refuses old unbound requests; it does not rewrite or delete its
+historical journal entries. Reference-worker mode still refuses updates until
+the separate config-pin and authenticated-readiness handover exists.
 
 The existing `StartupQualifier` already seals `engineVersion` with its exact
 staged/runtime-image and probe evidence in the persisted qualification receipt.
-`UpdateSupervisor` validates that receipt, but schedule/run requests propagate
-only its `qualificationSha256` today. The next patch should carry the validated
-receipt's version through those closed request schemas, owned schedule, plan,
-completion and recovery. An untrusted runtime `/info` observation or a second
+`UpdateSupervisor` validates that receipt. Its validated version now flows
+through the closed schedule/run request schemas, owned schedule, plan,
+completion and recovery. A running backend's `/info` observation or a second
 independent version registry is not the source for a new target pin.
 
 Dynamic per-node installation inventory and reference-worker stop/config-pin

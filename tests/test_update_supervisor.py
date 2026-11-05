@@ -57,13 +57,15 @@ class DurableAdapters:
             field='qualificationSha256'
         elif kind=='schedule':
             value.update(planId=str(uuid.uuid4()),previousImageId=request['previousImageId'],
-                targetImageId=request['localImageId'],qualificationSha256=request['qualificationSha256'])
+                targetImageId=request['localImageId'],qualificationSha256=request['qualificationSha256'],
+                targetEngineVersion=request['targetEngineVersion'])
             field='planSha256'
         else:
             value.update(planId=request['plan']['planId'],planSha256=request['plan']['planSha256'],
                 previousImageId=request['previousImageId'],targetImageId=request['localImageId'],
                 qualificationSha256=request['qualificationSha256'],imageId=request['localImageId'],
-                healthy=True,hostPinDurable=True,ingressOpen=True,coordinatorFinished=True)
+                healthy=True,hostPinDurable=True,ingressOpen=True,coordinatorFinished=True,
+                engineVersion=request['targetEngineVersion'])
             field='completionSha256'
         if fault=='mismatch':value['authorityId']=str(uuid.uuid4())
         if fault=='failed_qualification':value['passed']=False
@@ -165,6 +167,40 @@ class SupervisorTests(unittest.TestCase):
         self.backend.faults['readiness']=True
         self.assertEqual(self.supervisor.advance(identifier)['state'],'completed')
         self.assertEqual(self.backend.count('run'),1)
+
+    def test_reviewed_qualification_version_flows_through_requests_and_receipts(self):
+        identifier=self.discover();self.through(identifier,'completed')
+        row=self.supervisor._row(identifier)
+        qualification=json.loads(row['qualification_receipt'])
+        for column in ('schedule_request','run_request'):
+            self.assertEqual(json.loads(row[column])['targetEngineVersion'],qualification['engineVersion'])
+        self.assertEqual(json.loads(row['plan'])['targetEngineVersion'],qualification['engineVersion'])
+        self.assertEqual(json.loads(row['completion'])['engineVersion'],qualification['engineVersion'])
+
+    def test_historical_unbound_plan_stays_readable_but_cannot_run(self):
+        identifier=self.discover();self.through(identifier,'scheduled')
+        row=self.supervisor._row(identifier)
+        request=json.loads(row['schedule_request']);request.pop('targetEngineVersion')
+        request=seal_receipt({key:value for key,value in request.items() if key!='requestSha256'},'requestSha256')
+        plan=json.loads(row['plan']);plan.pop('targetEngineVersion');plan['requestSha256']=request['requestSha256']
+        plan=seal_receipt({key:value for key,value in plan.items() if key!='planSha256'},'planSha256')
+        with self.supervisor._db() as db:
+            db.execute('UPDATE supervisor_operations SET schedule_request=?,plan=? WHERE id=?',(_json(request),_json(plan),identifier))
+        self.assertEqual(self.supervisor.status(identifier)['state'],'scheduled')
+        self.assertEqual(UpdateSupervisor._receipt(plan,request,'schedule'),plan)
+        with self.assertRaisesRegex(SupervisorHeld,'target_engine_version_unbound'):
+            self.supervisor.advance(identifier)
+        self.assertIsNone(self.supervisor._row(identifier)['run_request'])
+        self.assertEqual(self.backend.count('run'),0)
+
+    def test_resealed_wrong_version_receipt_does_not_override_qualification(self):
+        identifier=self.discover();self.through(identifier,'scheduled')
+        row=self.supervisor._row(identifier)
+        request=json.loads(row['schedule_request']);plan=json.loads(row['plan'])
+        plan['targetEngineVersion']='wrong-version'
+        plan=seal_receipt({key:value for key,value in plan.items() if key!='planSha256'},'planSha256')
+        with self.assertRaises(SupervisorHeld):
+            UpdateSupervisor._receipt(plan,request,'schedule')
 
     def test_readiness_error_or_non_boolean_never_issues_run_intent(self):
         identifier=self.discover();self.through(identifier,'scheduled')

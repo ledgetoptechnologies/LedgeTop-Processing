@@ -257,14 +257,21 @@ class ComposeNode:
             raise UpdateError('engine identity unavailable')
         return exact_engine_version(info.get('engineVersion'))
 
-    def serving(self, image):
+    def _serving_info(self, image):
         item = self.inspect()
         if (item['Image'] != image or not item['State']['Running'] or item['State'].get('OOMKilled')
                 or item['State'].get('Health', {}).get('Status', 'healthy') != 'healthy'):
-            return False
+            return None
         info = self.node.json('GET', '/info')
-        return (isinstance(info, dict) and info.get('engine') == self.expected_engine
-                and self.expected_engine_version is not None
+        return info if isinstance(info, dict) and info.get('engine') == self.expected_engine else None
+
+    def image_serving(self, image):
+        """Read-only current-image inventory; never target-version authority."""
+        return self._serving_info(image) is not None
+
+    def serving(self, image):
+        info = self._serving_info(image)
+        return (info is not None and self.expected_engine_version is not None
                 and info.get('engineVersion') == self.expected_engine_version)
 
     def healthy(self, image):

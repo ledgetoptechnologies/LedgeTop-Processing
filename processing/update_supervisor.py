@@ -265,7 +265,13 @@ class UpdateSupervisor:
             receiptDirectory=str(self.path.parent/'receipts'/row['id']/kind))
         _digest(expected['previousImageId'])
         if previous is not None and previous!=expected['previousImageId']:raise ValueError()
-        if kind!='qualification':expected['qualificationSha256']=_load(row['qualification_receipt'])['qualificationSha256']
+        if kind!='qualification':
+            qualification=_load(row['qualification_receipt'])
+            expected['qualificationSha256']=qualification['qualificationSha256']
+            # Exact old records remain readable. They cannot advance/reconcile
+            # an unbound schedule or run into new execution authority.
+            if 'targetEngineVersion' in request:
+                expected['targetEngineVersion']=qualification['engineVersion']
         if kind=='run':expected['plan']=_load(row['plan'])
         expected['requestSha256']=_sha(expected)
         if request!=expected or type(request['schemaVersion']) is not int:raise ValueError()
@@ -356,7 +362,10 @@ class UpdateSupervisor:
             previousImageId=row['base_image'],hostGeneration=row['generation'],supervisorPolicySha256=self.policy_sha256,
             qualifierId=self.policy.qualifier_id,qualificationPolicySha256=self.policy.qualification_policy_sha256,
             receiptDirectory=self._directory(row['id'],kind))
-        if kind!='qualification':request['qualificationSha256']=_load(row['qualification_receipt'])['qualificationSha256']
+        if kind!='qualification':
+            qualification=_load(row['qualification_receipt'])
+            request['qualificationSha256']=qualification['qualificationSha256']
+            request['targetEngineVersion']=qualification['engineVersion']
         if kind=='run':request['plan']=_load(row['plan'])
         request['requestSha256']=_sha(request)
         return request
@@ -369,6 +378,8 @@ class UpdateSupervisor:
             'schedule':{'planId','previousImageId','targetImageId','qualificationSha256','planSha256'},
             'run':{'planId','planSha256','previousImageId','targetImageId','qualificationSha256','imageId','healthy',
                    'hostPinDurable','ingressOpen','coordinatorFinished','completionSha256'}}[kind]
+        if kind!='qualification' and 'targetEngineVersion' in request:
+            extra=extra|({'targetEngineVersion'} if kind=='schedule' else {'engineVersion'})
         field={'qualification':'qualificationSha256','schedule':'planSha256','run':'completionSha256'}[kind]
         try:
             if type(value) is not dict or set(value)!=base|extra:raise ValueError()
@@ -386,6 +397,12 @@ class UpdateSupervisor:
                 _uuid(value['planId'])
                 if (value['previousImageId']!=request['previousImageId'] or value['targetImageId']!=request['localImageId']
                         or value['qualificationSha256']!=request['qualificationSha256']):raise ValueError()
+                if 'targetEngineVersion' in request:
+                    _slug(request['targetEngineVersion'])
+                    if value['targetEngineVersion' if kind=='schedule' else 'engineVersion']!=request['targetEngineVersion']:
+                        raise ValueError()
+                    if kind=='run' and request['plan'].get('targetEngineVersion')!=request['targetEngineVersion']:
+                        raise ValueError()
                 if kind=='run' and (value['planId']!=request['plan']['planId'] or value['planSha256']!=request['plan']['planSha256']
                         or value['imageId']!=request['localImageId']
                         or any(value[key] is not True for key in ('healthy','hostPinDurable','ingressOpen','coordinatorFinished'))):raise ValueError()
@@ -410,6 +427,8 @@ class UpdateSupervisor:
             row=self._row(identifier);state=row['state']
             if state=='completed':return self.status(identifier)
             if state not in ('discovered','staged','qualified','scheduled'):raise SupervisorHeld('update_requires_read_only_reconciliation')
+            if state=='scheduled' and 'targetEngineVersion' not in _load(row['plan']):
+                raise SupervisorHeld('target_engine_version_unbound')
             if self._current_state()!=(row['base_image'],row['generation']):raise SupervisorHeld('supervisor_current_image_changed')
             self._host(row['base_image'])
             kind={'discovered':'staging','staged':'qualification','qualified':'schedule','scheduled':'run'}[state]
@@ -460,6 +479,8 @@ class UpdateSupervisor:
                 kind=state.removesuffix('_intent')
                 column={'qualification':'qualification_request','schedule':'schedule_request','run':'run_request'}[kind]
                 request=_load(row[column])
+                if kind!='qualification' and 'targetEngineVersion' not in request:
+                    raise SupervisorHeld('target_engine_version_unbound')
                 try:
                     lookup={'qualification':self.qualifier.lookup,'schedule':self.maintenance.lookup_schedule,
                             'run':self.maintenance.lookup_completion}[kind]
