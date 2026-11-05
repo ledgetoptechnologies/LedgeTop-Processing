@@ -171,9 +171,9 @@ class DockerCLI:
         require(type(binary) is str and PurePosixPath(binary).is_absolute(), 'absolute_docker_binary_required')
         self.runner, self.binary = runner or BoundedSubprocess(), binary
 
-    def command(self, *args, mutation=False, input_bytes=None, timeout=30, output_limit=1024 * 1024):
+    def command(self, *args, mutation=False, input_bytes=None, timeout=30, output_limit=1024 * 1024, sink=None):
         return self.runner.run([self.binary, '--host', 'unix:///run/docker.sock', *args],
-            mutation=mutation, input_bytes=input_bytes, timeout=timeout, output_limit=output_limit)
+            mutation=mutation, input_bytes=input_bytes, timeout=timeout, output_limit=output_limit, sink=sink)
 
     def inspect(self, identifier):
         require(type(identifier) is str and (ID.fullmatch(identifier) or NAME.fullmatch(identifier)),

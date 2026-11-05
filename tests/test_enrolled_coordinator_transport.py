@@ -96,6 +96,18 @@ class StructuredTransportTests(unittest.TestCase):
         with self.assertRaises(t.TransportHeld):
             t.DockerCLI(runner=runner).read_private_file('a'*64,'/prototype-state/jobs.sqlite3')
 
+    def test_archive_stream_seam_forwards_sink_bounds_and_exact_original_path(self):
+        receipt=dict(clientExitCode=0,streamClosed=True,bytes=10240,sha256='b'*64)
+        runner=FakeRunner(receipt);sink=lambda chunk:None
+        result=t.DockerCLI(runner=runner).archive_to('a'*64,'/prototype-state',sink,max_bytes=50000000,timeout=45)
+        self.assertEqual(result,receipt)
+        args,options=runner.calls[0]
+        self.assertEqual(args[3:],['container','cp','a'*64+':/prototype-state/.','-'])
+        self.assertIs(options['sink'],sink);self.assertEqual(options['output_limit'],50000000)
+        self.assertEqual(options['timeout'],45);self.assertFalse(options['mutation'])
+        with self.assertRaises(t.TransportHeld):
+            t.DockerCLI(runner=runner).archive_to('a'*64,'/different',sink,max_bytes=100,timeout=1)
+
     def test_gate_receipt_lookup_is_sql_read_only_not_a_mutating_rpc_replay(self):
         request=dict(requestId=str(uuid.uuid4()),planId=str(uuid.uuid4()),expectedRevision=0,
                      action='intent',startupId=str(uuid.uuid4()))
