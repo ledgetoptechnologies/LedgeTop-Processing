@@ -480,13 +480,14 @@ class ReferenceDriver:
                     or response.headers.get('Content-Type', '').split(';')[0] != 'application/json'
                     or response.headers.get('Content-Encoding', 'identity') != 'identity'):
                 raise DriverWait('invalid_control_response')
-            raw = response.read(p.MAX_BODY_BYTES + 1)
-            if len(raw) > p.MAX_BODY_BYTES:
+            from .reference_limits import PRIVATE_CONTROL_RESPONSE_BYTES
+            raw = response.read(PRIVATE_CONTROL_RESPONSE_BYTES + 1)
+            if len(raw) > PRIVATE_CONTROL_RESPONSE_BYTES:
                 raise DriverWait('control_response_too_large')
             expected = response.headers.get('Content-Length')
             if expected is not None and (not expected.isascii() or not expected.isdecimal() or int(expected) != len(raw)):
                 raise DriverWait('truncated_control_response')
-            payload = p.decode_submission(raw)
+            payload = p.decode_submission(raw, max_bytes=PRIVATE_CONTROL_RESPONSE_BYTES)
             if type(payload) is not dict:
                 raise DriverWait('invalid_control_response')
             return 200, payload

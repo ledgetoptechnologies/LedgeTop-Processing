@@ -104,12 +104,15 @@ def manifest_sha256(manifest):
     return digest({k: v for k, v in manifest.items() if k != "sha256"})
 
 
-def decode_submission(body):
+def decode_submission(body, *, max_bytes=MAX_BODY_BYTES):
     """Decode bounded wire JSON while rejecting duplicate object keys."""
     _require(isinstance(body, (str, bytes)), "body must be JSON text")
+    from .reference_limits import V2_SOURCE_INTAKE_BYTES
+    _require(type(max_bytes) is int and 0 < max_bytes <= V2_SOURCE_INTAKE_BYTES,
+             "invalid bounded decoder limit")
     try:
         encoded = body.encode("utf-8") if isinstance(body, str) else body
-        _require(len(encoded) <= MAX_BODY_BYTES, "body exceeds 4 MiB")
+        _require(len(encoded) <= max_bytes, "body exceeds configured metadata limit")
 
         def pairs(items):
             result = {}
@@ -127,16 +130,19 @@ def decode_submission(body):
 
 def validate_submission(payload, *, environment, capability_fingerprint,
                         available_engines=("odm",), options_fingerprint=None,
-                        allowed_odm_options=None):
+                        allowed_odm_options=None, max_body_bytes=MAX_BODY_BYTES):
     """Validate metadata and return a detached normalized record.
 
     Caller must enforce submission-ID idempotency against durable state and
     supply capabilities/environment from trusted authentication/configuration.
     """
+    from .reference_limits import V2_SOURCE_INTAKE_BYTES
+    _require(type(max_body_bytes) is int and 0 < max_body_bytes <= V2_SOURCE_INTAKE_BYTES,
+             "invalid bounded submission limit")
     if isinstance(payload, (str, bytes)):
-        payload = decode_submission(payload)
+        payload = decode_submission(payload, max_bytes=max_body_bytes)
     _environment(environment)
-    _require(len(canonical_json(payload)) <= MAX_BODY_BYTES, "body exceeds 4 MiB")
+    _require(len(canonical_json(payload)) <= max_body_bytes, "body exceeds configured metadata limit")
     _closed(payload, ("schemaVersion", "submissionId", "manifest", "pipeline",
                       "capabilityFingerprint"), "submission")
     _require(type(payload["schemaVersion"]) is int and payload["schemaVersion"] == 1,

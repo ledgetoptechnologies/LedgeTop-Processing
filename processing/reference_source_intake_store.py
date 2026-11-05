@@ -52,11 +52,13 @@ class ReferenceSourceIntakeMethods:
         pipeline_raw = {key: raw[key] for key in (
             'schemaVersion', 'submissionId', 'manifest', 'pipeline', 'capabilityFingerprint')}
         pipeline_raw['schemaVersion'] = 1
+        from .reference_limits import V2_SOURCE_INTAKE_BYTES
         submission = protocol.validate_submission(pipeline_raw,
             environment=validated['environment'],
             capability_fingerprint=capability_fingerprint,
             options_fingerprint=options_fingerprint,
-            allowed_odm_options=allowed_odm_options, available_engines=available_engines)
+            allowed_odm_options=allowed_odm_options, available_engines=available_engines,
+            max_body_bytes=V2_SOURCE_INTAKE_BYTES)
         from .reference_source_intake_canonical import pipeline_digest as v2_pipeline_digest
         submission['pipelineDigest'] = v2_pipeline_digest(submission['pipeline'])
         if submission['pipelineDigest'] != validated['pipelineDigest']:
@@ -114,8 +116,9 @@ class ReferenceSourceIntakeMethods:
             reserved = db.execute('SELECT COALESCE(SUM(reserved_bytes),0) FROM reference_source_intakes').fetchone()[0]
         available = source_spool.available_bytes()
         maximum = max(0, available - source_spool.safety_floor_bytes - reserved)
+        from .reference_limits import V2_SOURCE_INTAKE_BYTES
         return {"enabled": True, "maxObjects": protocol.MAX_OBJECTS,
-            "maxManifestBytes": protocol.MAX_BODY_BYTES,
+            "maxManifestBytes": V2_SOURCE_INTAKE_BYTES,
             "maxObjectBytes": source_spool.max_object_bytes,
             "maxSourceBytes": maximum, "chunkBytes": source_spool.chunk_bytes}
 

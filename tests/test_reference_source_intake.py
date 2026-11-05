@@ -149,6 +149,109 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
         result["sourceManifest"]["objects"].clear()
         self.assertEqual(len(self.payload["sourceManifest"]["objects"]), 2)
 
+    def _large_dji_payload(self, count):
+        payload = copy.deepcopy(self.payload)
+        source_objects = []
+        pipeline_objects = []
+        base = 0x10000000000040008000000000000000
+        for index in range(count):
+            object_id = str(__import__('uuid').UUID(int=base + index))
+            name = f"DJI_{index:05d}_{'X' * 230}.JPG"
+            source_objects.append({"id": object_id, "name": name, "byteSize": 1,
+                "sha256": "a" * 64, "sourceType": "raw_input",
+                "retentionClass": "release_after_acceptance", "retentionHoldId": None})
+            pipeline_objects.append({"id": object_id, "name": name, "byteSize": 1,
+                "sha256": "a" * 64, "kind": "image", "mediaType": "image/jpeg"})
+        payload["sourceManifest"].update(totalBytes=count, objectCount=count, objects=source_objects)
+        payload["manifest"].update(id="large-dji-synthetic", revision=1, totalBytes=count,
+            objectCount=count, inputCounts={"images": count, "lidarObjects": 0, "points": 0},
+            objects=pipeline_objects)
+        payload["derivedManifest"]["objects"] = []
+        self.payload = payload
+        self.rehash()
+        return copy.deepcopy(self.payload)
+
+    def test_v2_large_signed_dji_metadata_admits_without_processing(self):
+        from processing.reference_limits import V2_SOURCE_INTAKE_BYTES
+        from processing.reference_source_intake import validate_source_intake
+        payload = self._large_dji_payload(10_000)
+        normalized = self.validate(payload)
+        request = copy.deepcopy(payload)
+        request["sourceAttestation"] = normalized["sourceAttestation"]
+        body = p.canonical_json(request)
+        self.assertGreater(len(body), p.MAX_BODY_BYTES)
+        self.assertLessEqual(len(body), V2_SOURCE_INTAKE_BYTES)
+        pipeline_v1 = {key: payload[key] for key in
+                       ("schemaVersion", "submissionId", "manifest", "pipeline", "capabilityFingerprint")}
+        self.assertGreater(len(p.canonical_json(pipeline_v1)), p.MAX_BODY_BYTES)
+        with self.assertRaisesRegex(p.ProtocolError, "configured metadata limit"):
+            p.validate_submission(pipeline_v1, environment="staging",
+                capability_fingerprint="a" * 64, allowed_odm_options=set())
+
+        class Spool:
+            safety_floor_bytes = 0
+            max_object_bytes = 10_000_000
+            chunk_bytes = 1_000_000
+            def available_bytes(self):
+                return 1_000_000_000
+            def check_capacity(self, required_bytes, *, reserved_bytes=0):
+                self.asserted = (required_bytes, reserved_bytes)
+        spool = Spool()
+        with tempfile.TemporaryDirectory() as directory:
+            queue = Queue(directory)
+            queue.allowed_profiles.add(PROFILE)
+            try:
+                store = ReferenceStore(queue)
+                api = ReferenceAPI(store, bearer_tokens={"synthetic-staging-token": "staging"},
+                    capability_fingerprint="a" * 64,
+                    options_fingerprint=payload["pipeline"]["odm"]["optionsFingerprint"],
+                    source_spool=spool, source_attestation_keys=self.trusted_keys,
+                    authority_id=AUTHORITY)
+                response = api.handle("POST", "/ltds/v2/jobs",
+                    {"Authorization": "Bearer synthetic-staging-token"}, body,
+                    protected_transport=True)
+                self.assertEqual(response.status, 201, response.body)
+                self.assertEqual(response.body["phase"], "source_receiving")
+                self.assertEqual(response.body["sourceState"], "receiving")
+                self.assertEqual(normalized["sourceManifest"]["objectCount"], 10_000)
+                self.assertEqual(len(store.list()), 1)
+                capabilities = api.handle("GET", "/ltds/v2/capabilities",
+                    {"Authorization": "Bearer synthetic-staging-token"}, protected_transport=True)
+                self.assertEqual(capabilities.body["sourceIntake"]["maxMetadataBytes"],
+                                 V2_SOURCE_INTAKE_BYTES)
+                self.assertEqual(capabilities.body["sourceIntake"]["maxManifestBytes"],
+                                 V2_SOURCE_INTAKE_BYTES)
+                oversized = api.handle("POST", "/ltds/v2/jobs",
+                    {"Authorization": "Bearer synthetic-staging-token"},
+                    b" " * (V2_SOURCE_INTAKE_BYTES + 1), protected_transport=True)
+                self.assertEqual((oversized.status, oversized.body),
+                                 (400, {"error": "invalid_request"}))
+            finally:
+                queue.close()
+        # The same valid serialized envelope is accepted by the bounded V2 validator.
+        self.assertEqual(validate_source_intake(body, environment="staging",
+            capability_fingerprint="a" * 64,
+            options_fingerprint=payload["pipeline"]["odm"]["optionsFingerprint"],
+            allowed_odm_options=set(), trusted_source_keys=self.trusted_keys,
+            authority_id=AUTHORITY)["sourceManifest"]["objectCount"], 10_000)
+
+    def test_v2_object_count_and_v2_metadata_size_are_bounded(self):
+        from processing.reference_limits import V2_SOURCE_INTAKE_BYTES
+        oversized_count = self._large_dji_payload(10_001)
+        with self.assertRaisesRegex(p.ProtocolError, "invalid source object count"):
+            self.validate(oversized_count)
+        with self.assertRaises(p.ProtocolError):
+            p.decode_submission(b" " * (V2_SOURCE_INTAKE_BYTES + 1),
+                                max_bytes=V2_SOURCE_INTAKE_BYTES)
+
+    def test_v1_decoder_remains_four_mib_and_v2_keeps_strict_json(self):
+        from processing.reference_limits import V2_SOURCE_INTAKE_BYTES
+        with self.assertRaisesRegex(p.ProtocolError, "body exceeds configured"):
+            p.decode_submission(b" " * (p.MAX_BODY_BYTES + 1))
+        for body in (b'{"x":1,"x":2}', b'{"x":NaN}'):
+            with self.assertRaises(p.ProtocolError):
+                p.decode_submission(body, max_bytes=V2_SOURCE_INTAKE_BYTES)
+
     def test_empty_derived_manifest_is_a_valid_attempt_bound_closure(self):
         self.payload["derivedManifest"]["objects"] = []
         self.payload["manifest"]["objects"].pop()

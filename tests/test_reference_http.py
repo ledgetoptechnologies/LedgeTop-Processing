@@ -430,6 +430,37 @@ class ReferenceHTTPTests(unittest.TestCase):
                 self.assertIn(b"Cache-Control: no-store", headers)
                 self.assertNotIn(b"secret", json.dumps(body).encode())
 
+    def test_v2_submission_body_budget_is_exact_route_only(self):
+        seen = []
+        class Adapter:
+            def handle(self, method, path, headers, body, *, protected_transport=False):
+                seen.append((method, path, len(body), protected_transport))
+                return Response(200, {"acceptedBytes": len(body)})
+        server = create_reference_http_server(Adapter(), request_timeout=1)
+        thread = threading.Thread(target=server.serve_forever,
+                                  kwargs={"poll_interval": 0.02}, daemon=True)
+        thread.start()
+        try:
+            body = b" " * (MAX_BODY_BYTES + 1)
+            connection = http.client.HTTPConnection(*server.server_address, timeout=3)
+            connection.request("POST", "/ltds/v2/jobs", body=body,
+                headers={"Authorization": "Bearer " + STAGING})
+            response = connection.getresponse()
+            self.assertEqual((response.status, json.loads(response.read())),
+                             (200, {"acceptedBytes": len(body)}))
+            connection.close()
+            for path in ("/ltds/v1/jobs", "/ltds/v2/jobs/"):
+                request = (f"POST {path} HTTP/1.1\r\nHost: localhost\r\n"
+                           f"Content-Length: {len(body)}\r\n\r\n").encode()
+                self.assertEqual(self.raw(request)[:2], (413, {"error": "metadata_too_large"}))
+            from processing.reference_limits import V2_SOURCE_INTAKE_BYTES
+            request = (f"POST /ltds/v2/jobs HTTP/1.1\r\nHost: localhost\r\n"
+                       f"Content-Length: {V2_SOURCE_INTAKE_BYTES + 1}\r\n\r\n").encode()
+            self.assertEqual(self.raw(request)[:2], (413, {"error": "metadata_too_large"}))
+            self.assertEqual(seen, [("POST", "/ltds/v2/jobs", MAX_BODY_BYTES + 1, True)])
+        finally:
+            server.shutdown(); server.server_close(); thread.join(2)
+
     def test_truncated_body_and_read_timeout_return_safe_json(self):
         request = b"POST /ltds/v1/jobs HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n{}"
         self.assertEqual(self.raw(request, eof=True)[:2], (400, {"error": "truncated_request_body"}))

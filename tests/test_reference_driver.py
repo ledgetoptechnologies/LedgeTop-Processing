@@ -44,6 +44,42 @@ TOKEN = 'synthetic-operational-worker-token'
 VIEWER = 'synthetic-operational-viewer-token'
 
 
+class ReferenceDriverResponseBudgetTests(unittest.TestCase):
+    class Response:
+        status = 200
+        headers = {'Content-Type': 'application/json; charset=utf-8',
+                   'Content-Encoding': 'identity'}
+        def __init__(self, url, body):
+            self.url, self.body, self.closed = url, body, False
+            self.headers['Content-Length'] = str(len(body))
+        def geturl(self): return self.url
+        def read(self, size): return self.body[:size]
+        def close(self): self.closed = True
+
+    def make_driver(self, body):
+        driver = object.__new__(ReferenceDriver)
+        driver.origin = 'https://reference.invalid'
+        driver._bearer = TOKEN
+        from processing.reference_driver import PREFIX
+        response = self.Response(driver.origin + PREFIX + '/probe', body)
+        driver._open = lambda request, timeout: response
+        return driver, response
+
+    def test_private_control_json_has_separate_bounded_sixteen_mib_limit(self):
+        from processing.reference_limits import PRIVATE_CONTROL_RESPONSE_BYTES
+        body = b'{"metadata":"' + b'x' * (5 * 1024 * 1024) + b'"}'
+        driver, response = self.make_driver(body)
+        status, payload = driver._request('GET', '/probe')
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload['metadata']), 5 * 1024 * 1024)
+        self.assertTrue(response.closed)
+
+        driver, response = self.make_driver(b' ' * (PRIVATE_CONTROL_RESPONSE_BYTES + 1))
+        with self.assertRaisesRegex(DriverWait, 'control_response_too_large'):
+            driver._request('GET', '/probe')
+        self.assertTrue(response.closed)
+
+
 class EngineTransport:
     def __init__(self):
         self.calls, self.tasks = [], {}

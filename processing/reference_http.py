@@ -10,6 +10,7 @@ import ssl
 from .reference_api import Response
 from .reference_binary import BinaryResponse
 from .reference_protocol import MAX_BODY_BYTES
+from .reference_limits import V2_SOURCE_INTAKE_BYTES
 
 
 def _loopback(address):
@@ -184,7 +185,10 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                 if not re.fullmatch(r"[0-9]+", text):
                     self._error(400, "invalid_content_length")
                     return
-                if len(text) > 20 or (self.command != "PUT" and int(text) > MAX_BODY_BYTES):
+                body_limit = (V2_SOURCE_INTAKE_BYTES if
+                              self.command == "POST" and self.path == "/ltds/v2/jobs"
+                              else MAX_BODY_BYTES)
+                if len(text) > 20 or (self.command != "PUT" and int(text) > body_limit):
                     self._error(413, "metadata_too_large")
                     return
                 length = int(text)

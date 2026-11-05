@@ -88,7 +88,9 @@ class ReferenceAPI:
                                         "admissionVersion": protocol.TREEDAR_ADMISSION_VERSION},
                             "gaussian_splat": {"available": False, "enabled": False}}}
         if self.source_spool is not None and self.source_attestation_keys is not None and self.authority_id:
-            result['sourceIntake']={**self.store.source_capacity(self.source_spool), 'enabled': True}
+            from .reference_limits import V2_SOURCE_INTAKE_BYTES
+            result['sourceIntake']={**self.store.source_capacity(self.source_spool),
+                                    'maxMetadataBytes': V2_SOURCE_INTAKE_BYTES, 'enabled': True}
         elif self.source_spool is not None:
             result['sourceIntake']={'enabled': False}
         return result
@@ -127,7 +129,9 @@ class ReferenceAPI:
                         or not self.authority_id):
                     return self._error(503, "source_intake_unavailable")
                 from .reference_source_intake import validate_source_intake
-                validated=validate_source_intake(protocol.decode_submission(body),
+                from .reference_limits import V2_SOURCE_INTAKE_BYTES
+                validated=validate_source_intake(protocol.decode_submission(
+                    body, max_bytes=V2_SOURCE_INTAKE_BYTES),
                     environment=environment,capability_fingerprint=self.capability_fingerprint,
                     options_fingerprint=self.options_fingerprint,allowed_odm_options=self.allowed_odm_options,
                     available_engines=("odm","treedar") if self.treedar_available else ("odm",),

@@ -147,9 +147,11 @@ def validate_source_intake(payload, *, environment, capability_fingerprint,
     separately established by the configured storage owner.
     """
     if isinstance(payload, (str, bytes)):
-        payload = p.decode_submission(payload)
-    p._require(len(p.canonical_json(payload)) <= p.MAX_BODY_BYTES,
-               "source-intake body exceeds 4 MiB")
+        from .reference_limits import V2_SOURCE_INTAKE_BYTES
+        payload = p.decode_submission(payload, max_bytes=V2_SOURCE_INTAKE_BYTES)
+    from .reference_limits import V2_SOURCE_INTAKE_BYTES
+    p._require(len(p.canonical_json(payload)) <= V2_SOURCE_INTAKE_BYTES,
+               "source-intake body exceeds 16 MiB")
     p._require(type(payload) is dict and set(payload) == set(INTAKE_FIELDS),
                "source-intake request has missing or unknown fields")
     p._require(type(payload["schemaVersion"]) is int and payload["schemaVersion"] == 2,
@@ -183,7 +185,8 @@ def validate_source_intake(payload, *, environment, capability_fingerprint,
         capability_fingerprint=capability_fingerprint,
         options_fingerprint=options_fingerprint,
         allowed_odm_options=allowed_odm_options,
-        available_engines=available_engines)
+        available_engines=available_engines,
+        max_body_bytes=V2_SOURCE_INTAKE_BYTES)
     from .reference_source_intake_canonical import pipeline_digest as v2_pipeline_digest
     checked["pipelineDigest"] = v2_pipeline_digest(checked["pipeline"])
 
