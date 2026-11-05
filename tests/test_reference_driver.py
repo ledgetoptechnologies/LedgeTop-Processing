@@ -327,6 +327,65 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(transfer['objectIds'], [obj['id'] for obj in persisted['submission']['manifest']['objects']])
         self.assertEqual(downloads, [(transfer['sourceVersion'], transfer['objectIds'][0])])
 
+    def fence_trace(self):
+        events = []
+        original = self.ledger.begin_transfer
+        def fence(reservation):
+            original(reservation)
+            events.append('fence')
+        fenced = patch.object(self.ledger, 'begin_transfer', side_effect=fence)
+        fenced.start()
+        self.addCleanup(fenced.stop)
+        return events
+
+    def test_whole_object_fetch_fences_before_each_first_byte(self):
+        job = self.submit(contents=(b'first-photo', b'second-photo'))
+        events = self.fence_trace()
+        def download(grant, object_id, destination):
+            events.append('byte')
+            return self.download(grant, object_id, destination)
+        with patch.object(self.broker, 'download_object', side_effect=download):
+            self.advance(job, 'processing_pending')
+        self.assertEqual(events, ['fence', 'byte', 'fence', 'byte'])
+
+    def test_source_range_fetch_fences_before_any_byte(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-fence.sqlite')
+        job = self.submit(contents=(b'v2-first-photo', b'v2-second-photo'))
+        events = self.fence_trace()
+        def download(*, grant, object_id, destination, grant_provider=None):
+            events.append('byte')
+            Path(destination).write_bytes(self.contents[object_id])
+            return Path(destination)
+        with patch.object(self.driver.source_range_client, 'download_object', side_effect=download):
+            self.advance(job, 'processing_pending')
+        self.assertEqual(events, ['fence', 'byte', 'fence', 'byte'])
+
+    def assert_expired_lease_writes_nothing(self, job, client):
+        self.advance(job, 'fetching')
+        with self.driver._db() as db:
+            reservation = json.loads(db.execute('SELECT data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()[0])['reservation']['reservationId']
+        self.ledger.clock = lambda: time.time() + 10**6
+        with patch.object(client, 'download_object') as download:
+            result = self.driver.step()
+        self.assertEqual(result, {'state': 'retry_wait', 'reason': 'driver_step_unavailable'})
+        download.assert_not_called()
+        with self.driver._db() as db:
+            row = db.execute('SELECT stage,data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+        self.assertEqual(row[0], 'fetching')
+        self.assertNotIn('fetchAttempts', json.loads(row[1]))
+        self.assertEqual(list((self.scratch / 'jobs' / reservation).iterdir()), [])
+        with self.ledger._transaction() as db:
+            self.assertEqual(self.ledger._reservation(db, reservation)['state'], 'expired')
+
+    def test_whole_object_lease_expired_before_first_byte_writes_nothing_and_retries(self):
+        self.assert_expired_lease_writes_nothing(self.submit(contents=(b'unwritten-photo',)), self.broker)
+
+    def test_source_range_lease_expired_before_first_byte_writes_nothing_and_retries(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-expired.sqlite')
+        self.assert_expired_lease_writes_nothing(self.submit(contents=(b'unwritten-photo',)), self.driver.source_range_client)
+
     def test_expired_source_grant_is_durably_renewed_and_ack_replays_without_new_grant(self):
         from processing.source_range_transfer import SourceRenewalUnavailable
         state_path = self.root / 'driver-source-range-renewal.sqlite'
