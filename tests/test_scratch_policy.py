@@ -363,6 +363,15 @@ class ScratchPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(module.PolicyConflict,'insufficient unreserved scratch'):self.old_reserve(old)
         self.assertEqual(self.row()[6:9],('reserved',400,0));self.assertIsNone(self.row('old-res'))
 
+    def test_latch_keeps_an_older_allocator_refused_after_every_fence_ends(self):
+        module=self.legacy_module();self.reserve();self.ledger.begin_transfer('r1')
+        self.reserve(job_id='j2',reservation_id='r2');self.ledger.begin_transfer('r2')
+        self.ledger.settle_unstarted('r1',transfer_ended=True);self.ledger.set_engine_state('r2','terminal',terminal_attested=True)
+        self.assertEqual((self.row()[6],self.row('r2')[6]),('terminal','terminal'));before=self.ledger.path.read_bytes()
+        with self.assertRaises(module.PolicyConflict):self.old_open(module)
+        self.assertEqual(self.ledger.path.read_bytes(),before);self.assertEqual(self.config()['transferFenceVersion'],1)
+        self.ledger=self.open();self.reserve(job_id='j3',reservation_id='r3')
+
     def test_every_order_of_fence_and_control_charge_keeps_old_code_refused(self):
         module=self.legacy_module()
         self.reserve();self.ledger.record_allocated('r1',100);self.control();self.ledger.begin_transfer('r1')
