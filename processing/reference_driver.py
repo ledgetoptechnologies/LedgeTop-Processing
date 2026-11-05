@@ -26,6 +26,7 @@ from . import reference_protocol as p
 from .reference_engine_worker import WorkerHeld
 from .reference_sender import ReferenceSender
 from .reference_transfer import BrokerClient, _now, validate_grant
+from .scratch_policy import LeaseLapsed, lease_lapsed
 from .viewer_service import NativeEngine
 from .node_gate import NodeGate
 from .reference_failure import FailureOutbox, make_failure
@@ -356,6 +357,14 @@ class ReferenceDriver:
             db.close()
 
     def _save(self, job_id, stage, data):
+        if stage == 'completed' and 'reservation' in data:
+            # Nothing can write for a completed row, and only this row could ever
+            # end its fence, so however it ended a never-started reservation ends too.
+            self.ledger.settle_unstarted(data['reservation']['reservationId'], transfer_ended=True)
+        if stage == 'completed':
+            # Before the row: a death here costs a replay, the other order leaks an entry.
+            with NodeGate(self.worker.engine_id) as gate:
+                gate.retire_job(job_id)
         with self._db() as db:
             db.execute('UPDATE driver_jobs SET stage=?,data=? WHERE job=?',
                        (stage, p.canonical_json(data).decode(), job_id))
@@ -869,7 +878,7 @@ class ReferenceDriver:
                 current = self.ledger._reservation(db, reservation)
         except PolicyConflict:
             return False
-        return current['state'] == 'expired' or (current['state'] == 'reserved' and current['expires'] <= now)
+        return current['state'] == 'expired' or lease_lapsed(current, now)
 
     def _hold(self, reason):
         """Journal irreversible evidence before contact; the row then stops advancing.
@@ -1017,19 +1026,13 @@ class ReferenceDriver:
             return None
         return state['status'] if state['status'] in ('failed', 'cancelled') else None
 
-    def _operator_terminal(self, job_id, stage, data, record):
-        """An operator ended this job: end its row, but never a live physical fence.
+    def _delivery_owed(self, job_id, data):
+        """Durable evidence only: poll and failure sealing commit before the row hears."""
+        return (self.outbox.holds(job_id) or self.failure_outbox.holds(job_id)
+            or self.ledger.result_registered((data.get('reservation') or {}).get('reservationId')))
 
-        While the gate still names the job the row stays and says so, publicly,
-        so the node is fenced visibly. gate.resolve is the operator's physical
-        step; scratch, engine files and any task are left exactly as they are.
-        """
-        if 'outboxId' in data or 'failureOutboxId' in data:
-            return None
-        status = self._terminal_status(job_id, data)
-        if status is None:
-            return None
-        result = {'jobId': job_id, 'reason': record['reasonCode'], 'terminalStatus': status}
+    def _physical_fence(self, job_id, stage, data, record, result):
+        """A live gate stays public and held; a cleared one retires its report. None once clear."""
         if self._physically_live(job_id):
             data.setdefault('fence', dict(holdId=record['holdId'], sequence=record['sequence'] + 1,
                 reasonCode='physical_reservation_retained', observation=None, engineStatusCode=None, ack=None))
@@ -1043,6 +1046,24 @@ class ReferenceDriver:
                 self._save(job_id, stage, data)
             if self._post_report(job_id, stage, data, 'fence') == 'pending':
                 return dict(result, state='held', reconciliation='physical_reservation_clearing')
+        return None
+
+    def _operator_terminal(self, job_id, stage, data, record):
+        """An operator ended this job: end its row, but never a live physical fence.
+
+        While the gate still names the job the row stays and says so, publicly,
+        so the node is fenced visibly. gate.resolve is the operator's physical
+        step; scratch, engine files and any task are left exactly as they are.
+        """
+        if self._delivery_owed(job_id, data):
+            return None
+        status = self._terminal_status(job_id, data)
+        if status is None:
+            return None
+        result = {'jobId': job_id, 'reason': record['reasonCode'], 'terminalStatus': status}
+        fenced = self._physical_fence(job_id, stage, data, record, result)
+        if fenced is not None:
+            return fenced
         data['operatorTerminal'] = dict(status=status, reasonCode=record['reasonCode'], stage=stage)
         self._save(job_id, 'completed', data)
         return dict(result, state='operator_terminal')
@@ -1176,6 +1197,56 @@ class ReferenceDriver:
                     sha256=item['sha'], byte_size=item['bytes'], relative_path=item['path'])
         return observed
 
+    def _unstarted(self, job_id, stage, data, reason):
+        """A claim that can no longer start ends only on the coordinator's word.
+
+        The step lock proves no transfer is running, and a reserved ledger row
+        proves no engine was told, so the job is the one doubt left. Only the exact
+        terminal word for this claim settles it; until then, outage included, the
+        row stays held under its named reason and a fence keeps its capacity. An
+        operator ends the job, then this ends the row, unless a crash left a live
+        physical intent: gate.resolve is the operator's step, so until it happens
+        the row, its capacity and the reported hold all stay. A started engine is
+        not this path's to judge and keeps its own reconciliation.
+        """
+        reservation = data['reservation']['reservationId']
+        status = self._terminal_status(job_id, data)
+        if status is None:
+            if data.get('unstartedHold') != reason:
+                data['unstartedHold'] = reason
+                self._save(job_id, stage, data)
+            raise DriverHeld(reason)
+        if self.ledger.never_started(reservation):
+            record = data.get('hold') or data.get('watch') or dict(holdId=str(uuid4()), sequence=-1)
+            fenced = self._physical_fence(job_id, stage, data, record,
+                {'jobId': job_id, 'reason': reason, 'terminalStatus': status})
+            if fenced is not None:
+                return fenced
+        # The ledger decides, not this row: poll commits a result before the row hears.
+        if self.ledger.settle_unstarted(reservation, transfer_ended=True) not in (None, 'expired', 'unstarted'):
+            raise DriverHeld('engine_reconciliation_required')
+        data['unstartedOutcome'] = dict(reason=reason, stage=stage, terminalStatus=status)
+        self._save(job_id, 'completed', data)
+        return {'state': 'unstarted_terminal', 'jobId': job_id, 'reason': reason}
+
+    def reconcile_unstarted(self, job_id):
+        """Operator entry: end one never-started claim row once its job has ended."""
+        if not self._lock.acquire(blocking=False):
+            return {'state': 'busy'}
+        try:
+            with self._db() as db:
+                row = db.execute('SELECT * FROM driver_jobs WHERE job=?', (job_id,)).fetchone()
+            data = json.loads(row['data']) if row is not None else {}
+            if 'reservation' not in data or 'claim' not in data or row['stage'] == 'completed':
+                raise DriverHeld('unstarted_reconciliation_unavailable')
+            return self._unstarted(job_id, row['stage'], data, 'unstarted_claim_requires_reconciliation')
+        except DriverHeld as error:
+            return {'state': 'held', 'reason': str(error)}
+        except DriverWait as error:
+            return {'state': 'retry_wait', 'reason': str(error)}
+        finally:
+            self._lock.release()
+
     def _seal_failure(self, job_id, data, code):
         claim = data['claim']
         failure = make_failure(job_id=job_id, generation=claim['generation'], environment=claim['environment'],
@@ -1199,7 +1270,8 @@ class ReferenceDriver:
         if local['phase'] == 'failure_delivered' and self.failure_outbox.get(data['failureOutboxId'])['state'] == 'acknowledged':
             return
         with NodeGate(self.worker.engine_id) as gate:
-            if self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, self._failure_completion(data['failure'])):
+            if (gate.resolved(local['receipt'], job_id)
+                    or self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, self._failure_completion(data['failure']))):
                 return
             if gate.snapshot()['reservation'] is None:
                 if self.failure_outbox.get(data['failureOutboxId'])['state'] != 'acknowledged':
@@ -1250,7 +1322,7 @@ class ReferenceDriver:
                 completion = self._failure_completion(data['failure'])
                 ack = dict(id=job_id, workerId=self.worker_id, nodeId=self.node_id,
                     authorityId=self.worker.authority_id, **completion)
-                if not self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, completion):
+                if not gate.resolved(local['receipt'], job_id) and not self._gate_ack_matches(gate.snapshot(), local['receipt'], job_id, completion):
                     gate.acknowledge(local['receipt'], ack)
         self.worker._phase(job_id, 'failure_delivered')
         self._save(job_id, 'awaiting_failure_acceptance', data)
@@ -1383,6 +1455,10 @@ class ReferenceDriver:
             reservation = data['reservation']['reservationId']
             directory = self.ledger.prepare_job_directory(reservation)
             paths = dict(data.get('inputPaths', {}))
+            try:
+                self.ledger.begin_transfer(reservation)
+            except LeaseLapsed:
+                return self._unstarted(job_id, stage, data, 'reservation_expired')
             for obj in claim['submission']['manifest']['objects']:
                 if obj['id'] in paths:
                     continue
@@ -1412,7 +1488,7 @@ class ReferenceDriver:
                     else:
                         attempts = data.setdefault('fetchAttempts', {}).get(obj['id'], 0)
                         if attempts >= 3:
-                            raise DriverHeld('worker_fetch_attempt_budget_exhausted')
+                            return self._unstarted(job_id, stage, data, 'worker_fetch_attempt_budget_exhausted')
                         data['fetchAttempts'][obj['id']] = attempts + 1
                         self._save(job_id, stage, data)
                         self.broker.download_object(grant, obj['id'], target)
@@ -1442,9 +1518,13 @@ class ReferenceDriver:
             except (WorkerHeld, TreeDarHeld):
                 pass
             if not exists:
+                try:
+                    self.ledger.claim_engine_lease(data['reservation']['reservationId'])
+                except LeaseLapsed:
+                    return self._unstarted(job_id, stage, data, 'reservation_expired')
                 status, fresh = self._request('POST', '/claim', {'jobId': job_id, 'claimRequestId': request_id})
                 if status == 409 or fresh['status'] != 'running':
-                    raise DriverHeld('unstarted_claim_requires_reconciliation')
+                    return self._unstarted(job_id, stage, data, 'unstarted_claim_requires_reconciliation')
                 self._refresh_options()
                 self._bind_claim(fresh, data)
                 data['claim'] = fresh

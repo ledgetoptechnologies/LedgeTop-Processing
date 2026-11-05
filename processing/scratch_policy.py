@@ -4,8 +4,16 @@ Capacity probes return *current free bytes*, already excluding allocated bytes.
 Remaining bytes plus retained precharged control holds are subtracted from that
 snapshot. Control holds remain conservative after metadata materializes; no TTL
 or ordinary terminal settlement releases them. Call record_allocated only
-after writes consume disk; it moves bytes from remaining to allocated. Production
-and staging are immutable reservation settings, not interchangeable namespaces.
+after writes consume disk; it moves bytes from remaining to allocated. Call
+begin_transfer before the first input byte: a fence replaces the lease deadline in
+the row itself with a marker, so the reservation keeps its whole remaining budget
+and can no longer lapse at any clock. Every reader asks lease_lapsed, never the
+timestamp, so that same reservation continues. A fenced claim that never reaches
+an engine ends through settle_unstarted, never by time. The first fence latches
+the config in its own transaction: older allocators refuse this ledger, and one
+with no fence stays old-compatible. The latch is one-way: it outlives every fence,
+so older images stay refused after fences end and rollback is not automatic.
+Production and staging are immutable reservation settings, not interchangeable namespaces.
 Confirmed terminal attestation releases only unused reservation budget; allocated
 files still occupy the probe's free-space snapshot until an executor removes them.
 """
@@ -28,6 +36,8 @@ import unicodedata
 
 MAX_INTEGER = 2**53 - 1
 ACCOUNTING_VERSION = 1
+TRANSFER_FENCE_VERSION = 1
+FENCED_LEASE = float(MAX_INTEGER)
 CONTROL_SCHEMA='''CREATE TABLE IF NOT EXISTS control_charges (
  reservation TEXT PRIMARY KEY,charge_id TEXT NOT NULL UNIQUE,scope TEXT NOT NULL,
  identity TEXT NOT NULL CHECK(length(CAST(identity AS BLOB))<=4096),
@@ -38,6 +48,18 @@ CONTROL_SCHEMA='''CREATE TABLE IF NOT EXISTS control_charges (
 
 class PolicyConflict(ValueError):
     """Identity or state conflict (HTTP adapters may map to 409)."""
+
+
+class LeaseLapsed(PolicyConflict):
+    """The lease ended with no fence: nothing may start, and no bytes were written for it."""
+
+
+def lease_lapsed(row, now):
+    """Whether a reserved row's deadline has passed; a fence's marker is no deadline.
+
+    The marker is compared for identity, never order, so no clock can reach it.
+    """
+    return row["state"] == "reserved" and row["expires"] != FENCED_LEASE and row["expires"] <= now
 
 
 def _integer(value, name, minimum=0):
@@ -107,6 +129,8 @@ class ScratchLedger:
             schema = """
                 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS job_environments (job TEXT PRIMARY KEY, environment TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS transfer_fences (reservation TEXT PRIMARY KEY, started_at REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS unstarted_settlements (reservation TEXT PRIMARY KEY, settled_at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS reservations (
                   id TEXT PRIMARY KEY, settings TEXT NOT NULL, job TEXT NOT NULL,
                   generation INTEGER NOT NULL, environment TEXT NOT NULL,
@@ -160,7 +184,7 @@ class ScratchLedger:
             config = _json(dict(root=str(self.root), floor=self.floor, grace=self.grace))
             previous = db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
             if previous is None and any(db.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone() is not None for table in
-                    ('metadata','job_environments','reservations','results','objects','receipts','pins','cleanup_intents','control_charges')):
+                    ('metadata','job_environments','reservations','results','objects','receipts','pins','cleanup_intents','control_charges','transfer_fences','unstarted_settlements')):
                 raise PolicyConflict('existing accounting configuration missing')
             db.execute("INSERT OR IGNORE INTO metadata VALUES('config',?)", (config,))
             self.validate_accounting(db)
@@ -198,11 +222,16 @@ class ScratchLedger:
 
         No cached version flag: the first control charge latches its marker in
         the same transaction as the receipt, counter and retained capacity hold.
+        The first fence latches its own marker the same way, beside either form.
         """
         base=dict(root=str(self.root),floor=self.floor,grace=self.grace)
         config=db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
         count=db.execute('SELECT COUNT(*) FROM control_charges').fetchone()[0]
         if config is None:raise PolicyConflict('accounting configuration missing')
+        if db.execute('SELECT 1 FROM transfer_fences LIMIT 1').fetchone():
+            base['transferFenceVersion']=TRANSFER_FENCE_VERSION
+            if db.execute('SELECT 1 FROM transfer_fences f LEFT JOIN reservations r ON r.id=f.reservation WHERE r.id IS NULL OR r.expires!=? LIMIT 1',(FENCED_LEASE,)).fetchone():
+                raise PolicyConflict('fenced lease changed')
         if config[0]==_json(base):
             if count:raise PolicyConflict('control accounting marker missing')
             return base
@@ -247,9 +276,32 @@ class ScratchLedger:
         return float(db.execute("SELECT value FROM metadata WHERE key='clock'").fetchone()[0])
 
     def _expire(self, db, now):
-        # Neither engine-started nor uncertain reservations may expire automatically.
+        # Neither engine-started, uncertain nor fenced reservations may expire
+        # automatically, whatever the clock says.
         db.execute("UPDATE reservations SET state='expired', remaining=0 "
-                   "WHERE state='reserved' AND expires<=? AND allocated=0", (now,))
+                   "WHERE state='reserved' AND expires<=? AND allocated=0 "
+                   "AND id NOT IN (SELECT reservation FROM transfer_fences)", (now,))
+
+    @staticmethod
+    def _lapsed(row, now):
+        return row["state"] == "expired" or lease_lapsed(row, now)
+
+    def _latch(self, db, **marker):
+        # One-way on purpose: no path clears a marker, even once its records end.
+        value = json.loads(db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()[0])
+        db.execute("UPDATE metadata SET value=? WHERE key='config'", (_json(dict(value, **marker)),))
+
+    def _fence(self, db, reservation_id, now):
+        """Fence, deadline and latch commit together, or none of them do.
+
+        The deadline goes, so an older allocator's live process cannot release
+        what it sees as unexpired. The latch stays after this fence ends: older
+        images then keep refusing this ledger, which is what prevents rollback to
+        them. Removing it would need a separately proven quiescent migration.
+        """
+        if db.execute("INSERT OR IGNORE INTO transfer_fences VALUES(?,?)", (reservation_id, now)).rowcount:
+            db.execute("UPDATE reservations SET expires=? WHERE id=?", (FENCED_LEASE, reservation_id))
+            self._latch(db, transferFenceVersion=TRANSFER_FENCE_VERSION)
 
     def reserve(self, *, job_id, generation, reservation_id, manifest_sha256,
                 input_bytes, output_budget, environment, ttl_seconds, worker_ready):
@@ -268,6 +320,8 @@ class ScratchLedger:
         with self._transaction() as db:
             now = self._now(db)
             self._expire(db, now)
+            if now + ttl_seconds >= FENCED_LEASE:
+                raise PolicyConflict("lease deadline outside supported range")
             binding = db.execute("SELECT environment FROM job_environments WHERE job=?", (job_id,)).fetchone()
             if binding and binding[0] != environment:
                 raise PolicyConflict("job environment is immutable")
@@ -292,6 +346,75 @@ class ScratchLedger:
             except sqlite3.IntegrityError as exc:
                 raise PolicyConflict("job generation already reserved") from exc
             return dict(self._reservation(db, reservation_id))
+
+    def begin_transfer(self, reservation_id):
+        """Durably fence input writes before the first byte; idempotent.
+
+        Bytes in flight are not yet allocated, so the fence is what keeps them
+        budgeted. An unfenced lease past its deadline refuses before any byte,
+        allocated or not, because a fence must never revive a lapsed lease.
+        """
+        with self._transaction() as db:
+            now = self._now(db)
+            self._expire(db, now)
+            row = self._reservation(db, reservation_id)
+            if self._lapsed(row, now):
+                raise LeaseLapsed("allocation outside reservation")
+            if row["state"] not in ("reserved", "engine_started", "uncertain"):
+                raise PolicyConflict("allocation outside reservation")
+            self._fence(db, reservation_id, now)
+
+    def claim_engine_lease(self, reservation_id):
+        """Before any gate or prepared commit: refuse a lapsed lease with nothing
+        committed, else fence a live one so it cannot lapse before engine_started."""
+        with self._transaction() as db:
+            now = self._now(db)
+            self._expire(db, now)
+            row = self._reservation(db, reservation_id)
+            if self._lapsed(row, now):
+                raise LeaseLapsed("lease expired before engine mutation")
+            if row["state"] == "reserved":
+                self._fence(db, reservation_id, now)
+
+    def settle_unstarted(self, reservation_id, *, transfer_ended=False):
+        """Durable end of a claim that never reached an engine; returns the state.
+
+        Every start path sets engine_started before its first engine mutation, so
+        reserved proves no engine was told. transfer_ended is the caller's promise
+        that no writer remains; until someone can say so the fence keeps the
+        budget. "unstarted" means this path ended the row, now or on an earlier
+        call. Any other state is left alone and returned, and "terminal" is one of
+        them: it is an engine outcome that may still owe a delivery.
+        Input bytes on disk stay in the probe's free-space snapshot.
+        """
+        if transfer_ended is not True:
+            raise PolicyConflict("settlement must guarantee no transfer remains")
+        with self._transaction() as db:
+            now = self._now(db)
+            self._expire(db, now)
+            row = db.execute("SELECT * FROM reservations WHERE id=?", (reservation_id,)).fetchone()
+            if row is None:
+                return None
+            if row["state"] == "reserved":
+                db.execute("UPDATE reservations SET state='terminal',terminal_at=?,remaining=0 WHERE id=?", (now, reservation_id))
+                db.execute("INSERT INTO unstarted_settlements VALUES(?,?)", (reservation_id, now))
+                return "unstarted"
+            return "unstarted" if self._settled(db, row) else row["state"]
+
+    @staticmethod
+    def _settled(db, row):
+        return row["state"] == "terminal" and db.execute(
+            "SELECT 1 FROM unstarted_settlements WHERE reservation=?", (row["id"],)).fetchone() is not None
+
+    def result_registered(self, reservation_id):
+        with self._transaction() as db:
+            return db.execute("SELECT 1 FROM results WHERE reservation=?", (reservation_id,)).fetchone() is not None
+
+    def never_started(self, reservation_id):
+        """Whether the ledger proves no engine outcome exists for this reservation."""
+        with self._transaction() as db:
+            row = db.execute("SELECT * FROM reservations WHERE id=?", (reservation_id,)).fetchone()
+            return row is None or row["state"] in ("reserved", "expired") or self._settled(db, row)
 
     def record_allocated(self, reservation_id, allocated_bytes):
         """Set monotonic total allocation after disk writes; never a delta."""
@@ -376,7 +499,7 @@ class ScratchLedger:
                 if old['identity']!=_json(identity):raise PolicyConflict('control charge replay differs')
                 return self._control(old,reservation)
             settings=json.loads(reservation['settings'])
-            if (reservation['state']!='reserved' or reservation['expires']<=self._now(db) or reservation['terminal_at'] is not None
+            if (reservation['state']!='reserved' or lease_lapsed(reservation,self._now(db)) or reservation['terminal_at'] is not None
                     or reservation['allocated']!=expected_allocated or expected_allocated!=settings['input_bytes'] or allowance_bytes>reservation['remaining']):raise PolicyConflict('fresh input-only control baseline required')
             if db.execute('SELECT COUNT(*) FROM control_charges WHERE scope=?',(scope_sha256,)).fetchone()[0]>=maximum_scope_charges:raise PolicyConflict('control scope cap reached')
             receipt=dict(schemaVersion=1,protocol='ltds-scratch-control-charge-v1',**identity,jobId=reservation['job'],generation=reservation['generation'],environment=reservation['environment'],
@@ -384,7 +507,7 @@ class ScratchLedger:
             receipt['receiptSha256']=hashlib.sha256(_json(receipt).encode()).hexdigest()
             db.execute('UPDATE reservations SET allocated=?,remaining=remaining-? WHERE id=?',(target,allowance_bytes,reservation_id))
             db.execute('INSERT INTO control_charges VALUES(?,?,?,?,?,?,NULL)',(reservation_id,charge_id,scope_sha256,_json(identity),_json(receipt),allowance_bytes))
-            db.execute("UPDATE metadata SET value=? WHERE key='config'",(_json(dict(root=str(self.root),floor=self.floor,grace=self.grace,accountingVersion=ACCOUNTING_VERSION)),))
+            self._latch(db,accountingVersion=ACCOUNTING_VERSION)
             return dict(receipt,publicationSha256=None,publicationDescriptor=None)
 
     def publish_control_charge(self,reservation_id,*,charge_id,scope_sha256,parent_binding_sha256,publication_descriptor):
@@ -400,7 +523,7 @@ class ScratchLedger:
             if receipt['publicationSha256'] is not None:
                 if receipt['publicationSha256']!=publication_sha256 or row['publication']!=serialized:raise PolicyConflict('control publication differs')
                 return receipt
-            if reservation['state']!='reserved' or reservation['expires']<=self._now(db):raise PolicyConflict('pre-execution control publication required')
+            if reservation['state']!='reserved' or lease_lapsed(reservation,self._now(db)):raise PolicyConflict('pre-execution control publication required')
             db.execute('UPDATE control_charges SET publication=? WHERE reservation=? AND publication IS NULL',(serialized,reservation_id))
             return dict(receipt,publicationSha256=publication_sha256,publicationDescriptor=json.loads(serialized))
 
@@ -414,7 +537,7 @@ class ScratchLedger:
             now = self._now(db)
             self._expire(db, now)
             row = self._reservation(db, reservation_id)
-            if row["state"] == "reserved" and row["expires"] <= now:
+            if lease_lapsed(row, now):
                 raise PolicyConflict("lease expired before engine mutation")
             if row["state"] == "expired" or (row["state"] == "terminal" and state != "terminal"):
                 raise PolicyConflict("invalid engine transition")

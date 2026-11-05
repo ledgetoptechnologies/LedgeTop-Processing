@@ -1,4 +1,5 @@
 """Real durable components and NativeEngine with transport mocked at its edge."""
+from contextlib import ExitStack, closing, contextmanager
 import copy
 from datetime import datetime, timezone
 import hashlib
@@ -6,12 +7,14 @@ import io
 import http.client
 import json
 from pathlib import Path
+import sqlite3
 import ssl
 import os
 import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from unittest.mock import patch
 import uuid
@@ -21,7 +24,7 @@ from processing.node_gate import NodeGate
 from processing.prototype import Queue
 from processing.reference_control import ReferenceControlAPI
 from processing.reference_driver import ReferenceDriver, DriverHeld, DriverWait
-from processing.reference_engine_worker import ReferenceEngineWorker
+from processing.reference_engine_worker import ReferenceEngineWorker, WorkerHeld
 from processing.reference_failure import FailureOutbox
 from processing.reference_protocol import manifest_sha256, validate_submission
 from processing.reference_store import ReferenceStore
@@ -326,6 +329,718 @@ class ReferenceDriverTests(unittest.TestCase):
         self.assertEqual(transfer['sourceVersion'], source_version_for_manifest(persisted['submission']['manifest']))
         self.assertEqual(transfer['objectIds'], [obj['id'] for obj in persisted['submission']['manifest']['objects']])
         self.assertEqual(downloads, [(transfer['sourceVersion'], transfer['objectIds'][0])])
+
+    def fence_trace(self):
+        events = []
+        original = self.ledger.begin_transfer
+        def fence(reservation):
+            original(reservation)
+            events.append('fence')
+        fenced = patch.object(self.ledger, 'begin_transfer', side_effect=fence)
+        fenced.start()
+        self.addCleanup(fenced.stop)
+        return events
+
+    def test_whole_object_fetch_fences_before_each_first_byte(self):
+        job = self.submit(contents=(b'first-photo', b'second-photo'))
+        events = self.fence_trace()
+        def download(grant, object_id, destination):
+            events.append('byte')
+            return self.download(grant, object_id, destination)
+        with patch.object(self.broker, 'download_object', side_effect=download):
+            self.advance(job, 'processing_pending')
+        self.assertEqual(events[:4], ['fence', 'byte', 'fence', 'byte'])
+
+    def test_source_range_fetch_fences_before_any_byte(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-fence.sqlite')
+        job = self.submit(contents=(b'v2-first-photo', b'v2-second-photo'))
+        events = self.fence_trace()
+        def download(*, grant, object_id, destination, grant_provider=None):
+            events.append('byte')
+            Path(destination).write_bytes(self.contents[object_id])
+            return Path(destination)
+        with patch.object(self.driver.source_range_client, 'download_object', side_effect=download):
+            self.advance(job, 'processing_pending')
+        self.assertEqual(events[:4], ['fence', 'byte', 'fence', 'byte'])
+
+    def data(self, job):
+        with self.driver._db() as db:
+            row = db.execute('SELECT stage,data FROM driver_jobs WHERE job=?', (job['jobId'],)).fetchone()
+        return row[0], json.loads(row[1])
+
+    def lease(self, job):
+        with self.ledger._transaction() as db:
+            return dict(self.ledger._reservation(db, self.data(job)[1]['reservation']['reservationId']))
+
+    def past_lease(self):
+        self.ledger.clock = lambda: time.time() + 10**6
+
+    def end_job(self, job):
+        if self.queue.get(job['jobId'])['status'] != 'held':
+            self.queue.operator(job['jobId'], 'hold', dict(note='synthetic'))
+        self.queue.operator(job['jobId'], 'resolve', dict(note='synthetic', workerStopped=True))
+
+    def assert_unstarted_terminal(self, job, reason, result):
+        # A published worker hold reaches the same end through its operator path.
+        self.assertIn(result['state'], ('unstarted_terminal', 'operator_terminal'))
+        stage, data = self.data(job)
+        self.assertEqual(stage, 'completed')
+        if result['state'] == 'unstarted_terminal':
+            self.assertEqual(result, {'state': 'unstarted_terminal', 'jobId': job['jobId'], 'reason': reason})
+            self.assertEqual(data['unstartedOutcome']['reason'], reason)
+            self.assertEqual(data['unstartedOutcome']['terminalStatus'], self.store.get(job['jobId'], private=True)['status'])
+        self.assertEqual(self.lease(job)['remaining'], 0)
+
+    def assert_expired_lease_writes_nothing(self, job, client):
+        self.advance(job, 'fetching')
+        reservation = self.data(job)[1]['reservation']['reservationId']
+        self.past_lease()
+        with patch.object(client, 'download_object') as download:
+            results = [self.driver.step(), self.driver.step()]
+            self.assertEqual([(item['state'], item['reason']) for item in results], [('held', 'reservation_expired')] * 2)
+            stage, data = self.data(job)
+            self.assertEqual((stage, data['unstartedHold']), ('fetching', 'reservation_expired'))
+            self.assertNotIn('fetchAttempts', data)
+            self.assertEqual(list((self.scratch / 'jobs' / reservation).iterdir()), [])
+            self.assertEqual(self.lease(job)['state'], 'expired')
+            self.end_job(job)
+            self.assert_unstarted_terminal(job, 'reservation_expired', self.driver.step())
+        download.assert_not_called()
+        self.assertEqual(self.lease(job)['state'], 'expired')
+        second = self.submit(contents=(b'next-photo',))
+        self.assertEqual(self.driver.step()['state'], 'claim_pending')
+        self.assertEqual(self.store.get(second['jobId'], private=True)['status'], 'queued')
+
+    def test_whole_object_lease_expired_before_first_byte_is_a_named_durable_hold(self):
+        self.assert_expired_lease_writes_nothing(self.submit(contents=(b'unwritten-photo',)), self.broker)
+
+    def test_source_range_lease_expired_before_first_byte_is_a_named_durable_hold(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-expired.sqlite')
+        self.assert_expired_lease_writes_nothing(self.submit(contents=(b'unwritten-photo',)), self.driver.source_range_client)
+
+    def assert_started_past_lease(self, job):
+        self.assertEqual(self.data(job)[0], 'executing')
+        row = self.lease(job)
+        self.assertEqual(row['state'], 'engine_started')
+        self.assertGreater(row['allocated'], 0)
+        self.assertIn(('initialize', job['jobId']), self.transport.calls)
+        with NodeGate('engine') as gate:
+            self.assertEqual(gate.snapshot()['reservation']['job']['id'], job['jobId'])
+
+    def test_actual_whole_object_transfer_longer_than_lease_starts_its_engine(self):
+        job = self.submit(contents=(b'first-photo', b'second-photo'))
+        self.advance(job, 'fetching')
+        def slow(grant, object_id, destination):
+            self.past_lease()
+            return self.download(grant, object_id, destination)
+        with patch.object(self.broker, 'download_object', side_effect=slow):
+            self.advance(job, 'executing')
+        self.assert_started_past_lease(job)
+
+    def test_actual_source_range_transfer_longer_than_lease_starts_its_engine(self):
+        self.driver = self.make_driver(source_range_v2_enabled=True,
+            state_path=self.root / 'driver-source-range-long.sqlite')
+        job = self.submit(contents=(b'v2-first-photo', b'v2-second-photo'))
+        self.advance(job, 'fetching')
+        def slow(*, grant, object_id, destination, grant_provider=None):
+            self.past_lease()
+            Path(destination).write_bytes(self.contents[object_id])
+            return Path(destination)
+        with patch.object(self.driver.source_range_client, 'download_object', side_effect=slow):
+            self.advance(job, 'executing')
+        self.assert_started_past_lease(job)
+
+    def test_lease_lapsing_between_transfer_and_prepare_still_commits_and_starts(self):
+        job = self.submit()
+        self.advance(job, 'execution_pending')
+        self.past_lease()
+        self.advance(job, 'executing')
+        self.assert_started_past_lease(job)
+        with self.worker._db() as db:
+            self.assertNotEqual(db.execute('SELECT phase FROM executions WHERE job=?', (job['jobId'],)).fetchone()[0], 'prepared')
+
+    def test_unfenced_lapsed_lease_refuses_before_gate_and_prepared_commit(self):
+        job = self.submit()
+        with patch.object(self.ledger, 'begin_transfer'):
+            self.advance(job, 'execution_pending')
+        self.past_lease()
+        data = self.data(job)[1]
+        with self.assertRaisesRegex(WorkerHeld, 'reservation_expired'):
+            self.worker.start(data['claim'], reservation_id=data['reservation']['reservationId'], input_paths=data['inputPaths'])
+        self.assertEqual(self.driver.step()['reason'], 'reservation_expired')
+        with NodeGate('engine') as gate:
+            self.assertIsNone(gate.snapshot()['reservation'])
+        with self.worker._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM executions').fetchone()[0], 0)
+        self.assertNotIn(('initialize', job['jobId']), self.transport.calls)
+
+    def assert_physically_retained(self, job, kept, result, reason):
+        self.assertEqual({key: result[key] for key in ('state', 'jobId', 'terminalStatus', 'reconciliation')},
+            {'state': 'held', 'jobId': job['jobId'], 'terminalStatus': self.store.get(job['jobId'], private=True)['status'],
+             'reconciliation': 'physical_reservation_retained'})
+        stage, data = self.data(job)
+        self.assertNotEqual(stage, 'completed')
+        self.assertEqual(result['holdReport'], 'acknowledged')
+        self.assertEqual(data['fence']['reasonCode'], 'physical_reservation_retained')
+        self.assertEqual(self.store.get(job['jobId'])['queueReason'], 'physical_reservation_retained')
+        self.assertNotIn('unstartedOutcome', data)
+        self.assertEqual(self.lease(job), kept)
+        self.assertGreater(kept['remaining'], 0)
+
+    def resolve_gate(self):
+        with NodeGate('engine') as gate:
+            state = gate.snapshot()
+            gate.resolve(state['reservation']['receiptId'], state['generation'], old_worker_stopped=True,
+                coordinator_resolved=True, note='synthetic')
+
+    def reserve_gate(self):
+        with NodeGate('engine') as gate:
+            receipt = uuid.uuid4().hex
+            gate.reserve(self.worker.node_id, self.worker.origin, self.worker.authority_id, gate.snapshot()['generation'], receipt)
+        return receipt
+
+    def test_crash_after_prepared_keeps_capacity_then_ends_on_the_coordinator_word(self):
+        job = self.submit()
+        self.advance(job, 'execution_pending')
+        self.past_lease()
+        with patch.object(self.ledger, 'set_engine_state', side_effect=OSError('synthetic crash')):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        with self.worker._db() as db:
+            self.assertEqual(db.execute('SELECT phase FROM executions WHERE job=?', (job['jobId'],)).fetchone()[0], 'prepared')
+        results = [self.driver.step(), self.driver.step()]
+        self.assertEqual(results[-1]['state'], 'held')
+        kept = self.lease(job)
+        self.assertEqual(kept['state'], 'reserved')
+        self.assertGreater(kept['remaining'], 0)
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId'])['state'], 'held')
+        self.assertEqual(self.lease(job), kept)
+        self.end_job(job)
+        for _ in range(2):
+            self.assert_physically_retained(job, kept, self.driver.reconcile_unstarted(job['jobId']),
+                'unstarted_claim_requires_reconciliation')
+        with NodeGate('engine') as gate:
+            self.assertEqual(gate.snapshot()['reservation']['job']['id'], job['jobId'])
+        self.resolve_gate()
+        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+        self.assertNotIn(('initialize', job['jobId']), self.transport.calls)
+
+    def test_step_keeps_a_physical_hold_past_the_terminal_word(self):
+        job = self.submit(contents=(b'never-arrives',))
+        self.advance(job, 'fetching')
+        with patch.object(self.broker, 'download_object', side_effect=OSError('synthetic')):
+            for _ in range(3):
+                self.assertEqual(self.driver.step()['state'], 'retry_wait')
+            self.assertEqual(self.driver.step()['reason'], 'worker_fetch_attempt_budget_exhausted')
+            kept = self.lease(job)
+            self.reserve_gate()  # Unbound: a crash between reserve and bind may be this job's.
+            self.end_job(job)
+            self.assert_physically_retained(job, kept, self.driver.step(), 'worker_fetch_attempt_budget_exhausted')
+            self.resolve_gate()
+            self.assert_unstarted_terminal(job, 'worker_fetch_attempt_budget_exhausted', self.driver.step())
+
+    def test_gate_naming_another_job_retains_nothing_here(self):
+        job = self.submit()
+        self.advance(job, 'processing_pending')
+        self.end_job(job)
+        receipt = self.reserve_gate()
+        with NodeGate('engine') as gate:
+            gate.bind(receipt, dict(id=str(uuid.uuid4()), workerId=self.worker.worker_id, nodeId=self.worker.node_id,
+                authorityId=self.worker.authority_id))
+        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+
+    def test_treedar_controller_intent_is_a_physical_hold(self):
+        job = self.submit()
+        self.advance(job, 'processing_pending')
+        self.end_job(job)
+        kept = self.lease(job)
+        controller = types.SimpleNamespace(_row=lambda _job: {})
+        router = types.SimpleNamespace(treedar_worker=types.SimpleNamespace(controller=controller))
+        with patch.object(self.driver, 'execution_router', router):
+            self.assert_physically_retained(job, kept, self.driver.reconcile_unstarted(job['jobId']),
+                'unstarted_claim_requires_reconciliation')
+
+    def test_fetch_budget_exhaustion_keeps_fence_until_job_ends_then_frees_the_node(self):
+        job = self.submit(contents=(b'never-arrives',))
+        self.advance(job, 'fetching')
+        with patch.object(self.broker, 'download_object', side_effect=OSError('synthetic')):
+            for _ in range(3):
+                self.assertEqual(self.driver.step()['state'], 'retry_wait')
+            self.past_lease()
+            self.assertEqual(self.driver.step()['reason'], 'worker_fetch_attempt_budget_exhausted')
+            kept = self.lease(job)
+            self.assertEqual((kept['state'], kept['allocated']), ('reserved', 0))
+            self.assertGreater(kept['remaining'], 0)
+            self.assertEqual(self.data(job)[1]['unstartedHold'], 'worker_fetch_attempt_budget_exhausted')
+            self.end_job(job)
+            self.assert_unstarted_terminal(job, 'worker_fetch_attempt_budget_exhausted', self.driver.step())
+        self.assertEqual(self.lease(job)['state'], 'terminal')
+
+    def test_operator_ends_a_claim_cancelled_between_transfer_and_start(self):
+        job = self.submit()
+        self.advance(job, 'processing_pending')
+        self.past_lease()
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']),
+            {'state': 'held', 'reason': 'unstarted_claim_requires_reconciliation'})
+        self.assertEqual(self.lease(job)['state'], 'reserved')
+        self.end_job(job)
+        self.assertEqual(self.driver.step()['state'], 'processing_pending')
+        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+
+    def completion(self, job):
+        with closing(sqlite3.connect(self.outbox.path)) as db:
+            return db.execute('SELECT state FROM completions WHERE job=?', (job['jobId'],)).fetchone()
+
+    def die_inside_poll(self, job):
+        # After the result, terminal ledger and outbox commit; before executions and the row.
+        self.advance(job, 'executing')
+        with patch.object(NodeGate, 'prepare_completion', side_effect=OSError('synthetic death')):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+
+    def die_after_poll(self, job):
+        # poll returned; only the Driver checkpoint is lost.
+        self.advance(job, 'executing')
+        original = self.driver._save
+        def lost(job_id, stage, data):
+            if stage == 'delivering':
+                raise OSError('synthetic death')
+            return original(job_id, stage, data)
+        with patch.object(self.driver, '_save', side_effect=lost):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+
+    def assert_result_owed(self, job):
+        stage, data = self.data(job)
+        self.assertNotEqual(stage, 'completed')
+        self.assertNotIn('unstartedOutcome', data)
+        self.assertEqual(self.lease(job)['state'], 'terminal')
+        self.assertEqual(self.completion(job), ('pending',))
+        reservation = self.lease(job)['id']
+        with self.ledger._transaction() as db:
+            self.assertIsNotNone(db.execute('SELECT 1 FROM results WHERE reservation=?', (reservation,)).fetchone())
+
+    def assert_ended_claim_keeps_its_owed_result(self, die):
+        job = self.submit()
+        die(job)
+        self.assertNotIn('outboxId', self.data(job)[1])
+        self.assert_result_owed(job)
+        self.end_job(job)
+        self.resolve_gate()
+        self.driver = self.make_driver()
+        held = {'state': 'held', 'reason': 'engine_reconciliation_required'}
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), held)
+        self.assert_result_owed(job)
+        self.assertEqual(self.driver.step()['state'], 'delivering')
+        self.assertEqual(self.driver.step()['state'], 'delivering')  # The ended job refuses it, and it stays owed.
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), held)
+        self.assert_result_owed(job)
+
+    def test_death_inside_poll_keeps_an_owed_result_from_an_ended_claim(self):
+        self.assert_ended_claim_keeps_its_owed_result(self.die_inside_poll)
+
+    def test_death_before_the_checkpoint_keeps_an_owed_result_from_an_ended_claim(self):
+        self.assert_ended_claim_keeps_its_owed_result(self.die_after_poll)
+
+    def assert_owed_result_resumes_to_delivery(self, die):
+        job = self.submit()
+        die(job)
+        self.assertNotIn('outboxId', self.data(job)[1])
+        self.resolve_gate()
+        self.driver = self.make_driver()
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']),
+            {'state': 'held', 'reason': 'unstarted_claim_requires_reconciliation'})
+        self.assert_result_owed(job)
+        self.advance(job, 'awaiting_acceptance')
+        self.assertEqual(self.completion(job), ('acknowledged',))
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'succeeded')
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], 'delivered')
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.transport.calls), 1)
+
+    def test_death_inside_poll_resumes_to_delivery_after_the_gate_is_resolved(self):
+        self.assert_owed_result_resumes_to_delivery(self.die_inside_poll)
+
+    def test_death_before_the_checkpoint_resumes_to_delivery_after_the_gate_is_resolved(self):
+        self.assert_owed_result_resumes_to_delivery(self.die_after_poll)
+
+    def resolve_another_job(self):
+        receipt, other = self.reserve_gate(), str(uuid.uuid4())
+        with NodeGate('engine') as gate:
+            gate.bind(receipt, dict(id=other, workerId=self.worker.worker_id, nodeId=self.worker.node_id,
+                authorityId=self.worker.authority_id))
+        self.resolve_gate()
+        return receipt, other
+
+    def assert_result_delivers_past_a_later_resolve(self, die):
+        job = self.submit()
+        die(job)
+        self.resolve_gate()
+        receipt, other = self.resolve_another_job()
+        with NodeGate('engine') as gate:
+            self.assertEqual(gate.snapshot()['lastResolution']['reservation']['receiptId'], receipt)
+        self.driver = self.make_driver()
+        self.advance(job, 'awaiting_acceptance')
+        self.assertEqual(self.completion(job), ('acknowledged',))
+        self.assertEqual(self.queue.get(job['jobId'])['status'], 'succeeded')
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], 'delivered')
+        mine = self.worker._row(job['jobId'])['receipt']
+        self.driver._save(job['jobId'], 'completed', self.data(job)[1])
+        with NodeGate('engine') as gate:
+            self.assertFalse(gate.resolved(mine, job['jobId']))
+            self.assertTrue(gate.resolved(receipt, other))
+
+    def test_death_inside_poll_delivers_past_a_later_resolve(self):
+        self.assert_result_delivers_past_a_later_resolve(self.die_inside_poll)
+
+    def test_death_before_the_checkpoint_delivers_past_a_later_resolve(self):
+        self.assert_result_delivers_past_a_later_resolve(self.die_after_poll)
+
+    def test_sealed_failure_delivers_past_a_later_resolve(self):
+        job = self.submit()
+        self.die_sealing_failure(job)
+        self.resolve_gate()
+        self.resolve_another_job()
+        self.driver = self.make_driver()
+        self.advance(job, 'awaiting_failure_acceptance')
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], 'failure_delivered')
+        self.assertEqual(self.store.get(job['jobId'], private=True)['status'], 'failed')
+
+    def restart_process(self):
+        # A replacement process over the same files. The driver journal pins the old gate
+        # generation, so this process can finish owed rows but takes no new work.
+        self.ledger = ScratchLedger(self.root / 'ledger.sqlite', self.scratch, capacity_probe=lambda _: 10**9,
+            safety_floor_bytes=1024, cleanup_grace_seconds=0)
+        self.outbox = WorkerOutbox(self.root / 'outbox.sqlite')
+        self.failures = FailureOutbox(self.root / 'failures.sqlite')
+        self.worker = ReferenceEngineWorker(self.root / 'worker.sqlite', ledger=self.ledger, outbox=self.outbox,
+            engine=self.native, engine_id='engine', node_id='cluster', authority_id=self.queue.authority_id,
+            coordinator_origin=self.gate_origin, gate_generation=1, worker_id='worker',
+            engine_version='pinned-engine-1', engine_probe=lambda deadline: 'engine')
+        self.driver = self.make_driver()
+
+    def accept_result(self, job):
+        result = self.store.get(job['jobId'], private=True)['resultManifest']
+        self.store.accept(job['jobId'], dict(schemaVersion=1, receiptId='retire-viewer', storageReceiptId='retire-storage',
+            jobId=job['jobId'], generation=1, environment='staging', inputManifestSha256=job['manifestSha256'],
+            pipelineDigest=job['pipelineDigest'], resultManifestSha256=result['resultManifestSha256'],
+            acceptedObjectIds=[obj['id'] for obj in result['objects']], acceptedAt='2026-11-02T00:00:00Z',
+            validationVersion='ltds-reference-v1'))
+
+    def accept_failure(self, job):
+        failure = self.api.viewer.terminal.outcome(job['jobId'], 'staging')
+        self.api.viewer.terminal.accept(job['jobId'], dict(schemaVersion=1, receiptId='retire-terminal',
+            storageReceiptId='retire-terminal-storage', jobId=job['jobId'], generation=1, environment='staging',
+            inputManifestSha256=job['manifestSha256'], pipelineDigest=job['pipelineDigest'],
+            failureSha256=failure['failureSha256'], acceptedAt='2026-10-27T22:00:00Z',
+            validationVersion='ltds-reference-v1'), 'staging')
+
+    @contextmanager
+    def death_after_retirement(self):
+        real = NodeGate.retire_job
+        deaths = []
+        def die(gate, job_id):
+            real(gate, job_id)  # The replaced file is fsynced before this returns.
+            deaths.append(job_id)
+            raise OSError('synthetic death')
+        with patch.object(NodeGate, 'retire_job', autospec=True, side_effect=die):
+            yield deaths
+
+    @contextmanager
+    def replay_without_evidence(self):
+        with ExitStack() as stack:
+            for method in ('resolved', 'prepare_completion', 'acknowledge'):
+                stack.enter_context(patch.object(NodeGate, method, side_effect=AssertionError('replay touched gate completion')))
+            yield
+
+    def assert_evidence_gone(self, job, receipt):
+        with NodeGate('engine') as gate:
+            self.assertFalse(gate.resolved(receipt, job['jobId']))
+            self.assertEqual(gate.resolutions(), {})
+
+    def assert_replay_completes_without_evidence(self, job, phase, stage):
+        receipt = self.worker._row(job['jobId'])['receipt']
+        with self.death_after_retirement() as deaths:
+            self.driver.step()
+        self.assertEqual(deaths, [job['jobId']])
+        self.assertEqual(self.data(job)[0], stage)
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], phase)
+        self.assert_evidence_gone(job, receipt)
+        self.restart_process()
+        with self.replay_without_evidence():
+            self.driver.step()
+        self.assertEqual(self.data(job)[0], 'completed')
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], phase)
+        self.assert_evidence_gone(job, receipt)
+
+    def test_delivered_replay_after_death_past_retirement_needs_no_evidence(self):
+        job = self.submit()
+        self.die_inside_poll(job)
+        self.resolve_gate()
+        self.restart_process()
+        self.advance(job, 'awaiting_acceptance')
+        self.accept_result(job)
+        self.assert_replay_completes_without_evidence(job, 'delivered', 'awaiting_acceptance')
+
+    def test_failure_delivered_replay_after_death_past_retirement_needs_no_evidence(self):
+        job = self.submit()
+        self.die_sealing_failure(job)
+        self.resolve_gate()
+        self.restart_process()
+        self.advance(job, 'awaiting_failure_acceptance')
+        self.accept_failure(job)
+        self.assert_replay_completes_without_evidence(job, 'failure_delivered', 'awaiting_failure_acceptance')
+        self.assertEqual(self.data(job)[1]['terminalAcceptance']['receiptId'], 'retire-terminal')
+
+    def test_unstarted_replay_after_death_past_retirement_needs_no_evidence(self):
+        job = self.submit()
+        self.advance(job, 'execution_pending')
+        with patch.object(self.ledger, 'set_engine_state', side_effect=OSError('synthetic crash')):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        receipt = self.worker._row(job['jobId'])['receipt']
+        self.end_job(job)
+        self.resolve_gate()
+        with self.death_after_retirement(), self.assertRaises(OSError):
+            self.driver.reconcile_unstarted(job['jobId'])
+        self.assertNotEqual(self.data(job)[0], 'completed')
+        self.assert_evidence_gone(job, receipt)
+        self.restart_process()
+        with self.replay_without_evidence():
+            self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+        self.assert_evidence_gone(job, receipt)
+
+    def test_a_busy_gate_at_completion_retires_nothing_and_retries(self):
+        job = self.submit()
+        self.die_inside_poll(job)
+        self.resolve_gate()
+        self.restart_process()
+        self.advance(job, 'awaiting_acceptance')
+        self.accept_result(job)
+        receipt = self.worker._row(job['jobId'])['receipt']
+        with NodeGate('engine'):
+            self.driver.step()
+        self.assertEqual(self.data(job)[0], 'awaiting_acceptance')
+        with NodeGate('engine') as gate:
+            self.assertTrue(gate.resolved(receipt, job['jobId']))
+        self.driver.step()
+        self.assertEqual(self.data(job)[0], 'completed')
+        self.assert_evidence_gone(job, receipt)
+
+    def observe_then_end(self, job):
+        stage, data = self.data(job)
+        self.driver._observe(job['jobId'], stage, data, 'node_lost')
+        self.end_job(job)
+        self.resolve_gate()
+        self.driver = self.make_driver()
+
+    def assert_operator_terminal_keeps_owed_result(self, die):
+        job = self.submit()
+        die(job)
+        self.assertNotIn('outboxId', self.data(job)[1])
+        self.observe_then_end(job)
+        self.driver.step()
+        self.assertNotIn('operatorTerminal', self.data(job)[1])
+        self.assert_result_owed(job)
+
+    def test_operator_terminal_keeps_a_result_committed_inside_poll(self):
+        self.assert_operator_terminal_keeps_owed_result(self.die_inside_poll)
+
+    def test_operator_terminal_keeps_a_result_committed_before_the_checkpoint(self):
+        self.assert_operator_terminal_keeps_owed_result(self.die_after_poll)
+
+    def test_operator_terminal_never_drops_a_failure_already_sealed(self):
+        job = self.submit()
+        self.die_sealing_failure(job)
+        self.assertNotIn('failureOutboxId', self.data(job)[1])
+        self.observe_then_end(job)
+        self.driver.step()
+        stage, data = self.data(job)
+        self.assertNotEqual(stage, 'completed')
+        self.assertNotIn('operatorTerminal', data)
+
+    def test_a_never_resolved_receipt_stays_blocked_on_a_clear_gate(self):
+        job = self.submit()
+        self.die_inside_poll(job)
+        self.resolve_gate()
+        with self.worker._db() as db:
+            db.execute('UPDATE executions SET receipt=? WHERE job=?', ('f' * 32, job['jobId']))
+        self.driver = self.make_driver()
+        for _ in range(2):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertEqual(self.data(job)[0], 'executing')
+        self.assert_result_owed(job)
+
+    def die_sealing_failure(self, job, stage='failure_delivering'):
+        self.transport.code = 30
+        self.advance(job, 'executing')
+        original = self.driver._save
+        def lost(job_id, saved, data):
+            if saved == stage:
+                raise OSError('synthetic death')
+            return original(job_id, saved, data)
+        with patch.object(self.driver, '_save', side_effect=lost):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+
+    def test_death_sealing_a_failure_keeps_it_from_an_ended_claim(self):
+        job = self.submit()
+        self.die_sealing_failure(job)
+        self.assertNotIn('failureOutboxId', self.data(job)[1])
+        self.end_job(job)
+        self.resolve_gate()
+        self.driver = self.make_driver()
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'held', 'reason': 'engine_reconciliation_required'})
+        self.assertEqual(self.data(job)[0], 'executing')
+        for _ in range(3):
+            self.assertEqual(self.driver.step()['state'], 'failure_delivering')
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'held', 'reason': 'engine_reconciliation_required'})
+        self.assertEqual(self.data(job)[0], 'failure_delivering')
+
+    def test_terminal_failure_ledger_is_not_settled_as_unstarted(self):
+        self.transport.code = 30
+        job = self.submit()
+        self.advance(job, 'executing')
+        with patch.object(NodeGate, 'prepare_completion', side_effect=OSError('synthetic death')):
+            self.assertEqual(self.driver.step()['state'], 'retry_wait')
+        self.assertEqual((self.data(job)[0], self.lease(job)['state']), ('failure_delivering', 'terminal'))
+        self.end_job(job)
+        self.resolve_gate()
+        self.driver = self.make_driver()
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'held', 'reason': 'engine_reconciliation_required'})
+        self.assertEqual(self.data(job)[0], 'failure_delivering')
+        self.assertNotIn('unstartedOutcome', self.data(job)[1])
+
+    def test_sealed_failure_resumes_to_delivery_after_the_gate_is_resolved(self):
+        job = self.submit()
+        self.die_sealing_failure(job)
+        self.resolve_gate()
+        self.driver = self.make_driver()
+        self.advance(job, 'awaiting_failure_acceptance')
+        self.assertEqual(self.lease(job)['state'], 'terminal')
+        self.assertEqual(self.worker._row(job['jobId'])['phase'], 'failure_delivered')
+        self.assertEqual(self.store.get(job['jobId'], private=True)['status'], 'failed')
+
+    def test_step_path_never_settles_an_engine_terminal_ledger(self):
+        job = self.submit()
+        self.advance(job, 'execution_pending')
+        self.ledger.set_engine_state(self.lease(job)['id'], 'terminal', terminal_attested=True)
+        self.end_job(job)
+        self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'engine_reconciliation_required'})
+        self.assertEqual(self.data(job)[0], 'execution_pending')
+        self.assertNotIn('unstartedOutcome', self.data(job)[1])
+
+    def test_settlement_replays_after_death_before_the_row_completes(self):
+        job = self.submit()
+        self.advance(job, 'processing_pending')
+        self.end_job(job)
+        original = self.driver._save
+        def lost(job_id, stage, data):
+            if stage == 'completed':
+                self.ledger.settle_unstarted(data['reservation']['reservationId'], transfer_ended=True)
+                raise OSError('synthetic death')
+            return original(job_id, stage, data)
+        with patch.object(self.driver, '_save', side_effect=lost), self.assertRaises(OSError):
+            self.driver.reconcile_unstarted(job['jobId'])
+        self.assertEqual(self.lease(job)['state'], 'terminal')
+        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+
+    def test_reconciliation_never_touches_a_started_engine_or_runs_beside_a_step(self):
+        job = self.submit()
+        self.advance(job, 'executing')
+        before = self.lease(job)
+        self.end_job(job)
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'held', 'reason': 'engine_reconciliation_required'})
+        self.assertEqual(self.lease(job), before)
+        self.assertEqual(self.data(job)[0], 'executing')
+        self.assertEqual(self.driver.reconcile_unstarted('unknown'), {'state': 'held', 'reason': 'unstarted_reconciliation_unavailable'})
+        with self.driver._lock:
+            self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'busy'})
+
+    def assert_word_settles_nothing(self, job, word):
+        # Served on both routes so no settlement path can dodge the bad body.
+        real = self.driver._request
+        def request(method, suffix, payload=None, *, claim_token=None):
+            if suffix == '/claim' or suffix.endswith('/claim-state'):
+                return 200, word
+            return real(method, suffix, payload, claim_token=claim_token)
+        before = self.data(job), self.lease(job)
+        with patch.object(self.driver, '_request', side_effect=request):
+            self.assertEqual(self.driver.reconcile_unstarted(job['jobId']),
+                {'state': 'held', 'reason': 'unstarted_claim_requires_reconciliation'})
+        stage, data = self.data(job)
+        self.assertEqual(stage, before[0][0])
+        self.assertNotIn('unstartedOutcome', data)
+        self.assertEqual(self.lease(job), before[1])
+        self.assertGreater(self.lease(job)['remaining'], 0)
+
+    def ended_claim_state(self, job):
+        self.advance(job, 'processing_pending')
+        self.end_job(job)
+        token = self.data(job)[1]['claim']['claimToken']
+        return self.driver._request('GET', '/jobs/' + job['jobId'] + '/claim-state', claim_token=token)[1]
+
+    def test_malformed_terminal_body_settles_nothing(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        for word in ({'jobId': job['jobId'], 'status': 'cancelled'}, {'jobId': job['jobId'], 'status': 'failed'},
+                {'jobId': job['jobId'], 'status': 'cancelled', 'claimState': 'ended'},
+                dict(state, unknown=True), {key: value for key, value in state.items() if key != 'generation'}):
+            with self.subTest(word=sorted(word)):
+                self.assert_word_settles_nothing(job, word)
+
+    def test_cross_generation_terminal_word_settles_nothing(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        self.assert_word_settles_nothing(job, dict(state, generation=state['generation'] + 1))
+
+    def test_claim_shaped_terminal_word_with_any_wrong_binding_settles_nothing(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        self.assertIn(state['status'], ('failed', 'cancelled'))
+        for key, wrong in (('authorityId', '00000000-0000-4000-8000-000000000000'), ('jobId', 'other-job'),
+                ('environment', 'production' if state['environment'] == 'staging' else 'staging'),
+                ('nodeId', 'other-node'), ('workerId', 'other-worker'), ('workerInstanceId', 'other-instance'),
+                ('claimRequestId', 'driver-other'), ('claimTokenSha256', 'f' * 64),
+                ('manifestSha256', 'f' * 64), ('pipelineDigest', 'f' * 64)):
+            with self.subTest(key=key):
+                self.assertNotEqual(state[key], wrong)
+                self.assert_word_settles_nothing(job, dict(state, **{key: wrong}))
+
+    def test_exact_word_for_a_live_or_succeeded_job_settles_nothing(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        for status in ('running', 'held', 'succeeded'):
+            with self.subTest(status=status):
+                self.assert_word_settles_nothing(job, dict(state, status=status))
+
+    def test_the_exact_word_still_settles_after_every_refusal(self):
+        job = self.submit()
+        state = self.ended_claim_state(job)
+        self.assert_word_settles_nothing(job, dict(state, generation=state['generation'] + 1))
+        self.assert_unstarted_terminal(job, 'unstarted_claim_requires_reconciliation', self.driver.reconcile_unstarted(job['jobId']))
+
+    def test_row_without_its_claim_cannot_be_reconciled(self):
+        job = self.submit()
+        self.advance(job, 'fetching')
+        stage, data = self.data(job)
+        del data['claim']
+        with self.driver._db() as db:
+            db.execute('UPDATE driver_jobs SET stage=?,data=? WHERE job=?', ('claim_pending', json.dumps(data), job['jobId']))
+        self.assertEqual(self.driver.reconcile_unstarted(job['jobId']), {'state': 'held', 'reason': 'unstarted_reconciliation_unavailable'})
+
+    def test_outage_during_the_coordinator_check_keeps_the_named_hold(self):
+        job = self.submit()
+        self.advance(job, 'fetching')
+        self.past_lease()
+        for error in (DriverWait('coordinator_unavailable'), DriverHeld('control_request_rejected')):
+            with patch.object(self.driver, '_request', side_effect=error):
+                result = self.driver.step()
+            self.assertEqual((result['state'], result['reason']), ('held', 'reservation_expired'))
+        self.assertEqual(self.data(job)[0], 'fetching')
+
+    def test_a_completed_row_never_leaves_a_fence_behind(self):
+        job = self.submit()
+        self.advance(job, 'processing_pending')
+        stage, data = self.data(job)
+        self.driver._save(job['jobId'], 'completed', data)
+        self.assertEqual((self.lease(job)['state'], self.lease(job)['remaining']), ('terminal', 0))
 
     def test_expired_source_grant_is_durably_renewed_and_ack_replays_without_new_grant(self):
         from processing.source_range_transfer import SourceRenewalUnavailable

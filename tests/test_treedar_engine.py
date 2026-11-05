@@ -14,7 +14,7 @@ import uuid
 
 from processing import reference_protocol as p
 from processing.node_gate import NodeGate, GateError
-from processing.scratch_policy import ScratchLedger
+from processing.scratch_policy import LeaseLapsed, ScratchLedger
 from processing.treedar_engine import (TreeDarEngine, TreeDarConfig, TreeDarHeld,
     SOURCE_FILES, REQUIRED_OUTPUTS, source_digest, _entries)
 
@@ -134,6 +134,17 @@ class TreeDarEngineTests(unittest.TestCase):
         (output / 'proof.json').write_bytes(p.canonical_json(dict(schemaVersion=1,job=identity['job'],engineVersion='0.0.1',admission=admission,objects=objects)))
         self.docker.state = 'exited'
         return output
+
+    def test_lapsed_unfenced_lease_commits_nothing(self):
+        real=self.ledger.clock;self.ledger.clock=lambda:real()+10**6
+        with self.assertRaises(LeaseLapsed):self.start()
+        with NodeGate(self.config.engine_id) as gate:self.assertIsNone(gate.snapshot()['reservation'])
+        with self.engine._db() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM treedar_executions').fetchone()[0],0)
+        self.assertFalse(any(args[0]=='create' for args in self.docker.calls))
+
+    def test_fenced_lease_past_its_deadline_starts(self):
+        real=self.ledger.clock;self.ledger.begin_transfer('r1');self.ledger.clock=lambda:real()+10**6
+        self.assertEqual(self.start(),'processing')
 
     def test_fixed_command_private_mounts_and_no_main_resource_limits(self):
         self.assertEqual(self.start(),'processing')

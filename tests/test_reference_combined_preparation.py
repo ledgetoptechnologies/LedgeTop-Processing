@@ -129,6 +129,11 @@ class CombinedPreparationTests(unittest.TestCase):
         self.assertEqual(self.native_fixture.counts()['initialize'],0)
         self.assertEqual(self.driver.step()['state'],'combined_prepared_held')
 
+    def test_no_accepted_clock_makes_a_fenced_original_reservation_lapse(self):
+        self.drive()
+        with closing(sqlite3.connect(self.driver.path)) as db:data=json.loads(db.execute('SELECT data FROM driver_jobs').fetchone()[0])
+        with patch.object(self.driver,'clock',lambda:1e300):self.driver.combined_preparation._inputs(self.intent()['parentBinding'],data,data['claim'])
+
     def intent(self):
         with closing(sqlite3.connect(self.driver.path)) as db:return json.loads(db.execute('SELECT identity FROM combined_parent_preparations').fetchone()[0])
 

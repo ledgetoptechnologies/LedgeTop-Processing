@@ -288,6 +288,14 @@ class WorkerRecoveryTests(unittest.TestCase):
         self.assertEqual([stage['outputBudget'] for stage in h.plan['stages']],[100,100])
         self.assertEqual(base.parent['outputBudget'],200+h.policy.recovery_control_budget)
 
+    def test_prepare_past_the_deadline_needs_the_fence_and_then_charges_and_publishes(self):
+        base,client=self.fresh();h=base.host;real=h.ledger.clock;h.ledger.clock=lambda:real()+10**6
+        with self.assertRaises(m.WorkerRecoveryHeld):client.prepare(base.parent)
+        self.assertIsNone(h.ledger.read_control_charge('parent-reservation'))
+        h.ledger.clock=real;h.ledger.begin_transfer('parent-reservation');h.ledger.clock=lambda:real()+10**6
+        receipt=client.prepare(base.parent);self.assertIsNotNone(receipt['publicationSha256'])
+        self.assertEqual(receipt['allowanceBytes'],client.policy.control_allowance)
+
     def test_typed_charge_committed_lost_ack_can_finish_without_counter_inference(self):
         base,client=self.fresh();original=base.host.ledger.prepare_control_charge
         def lose(*args,**kwargs):original(*args,**kwargs);raise OSError('lost control charge ACK')

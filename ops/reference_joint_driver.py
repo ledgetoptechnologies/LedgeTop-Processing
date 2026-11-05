@@ -24,6 +24,7 @@ from processing import reference_protocol as p
 from processing.reference_engine_worker import WorkerHeld
 from processing.reference_sender import ReferenceSender
 from processing.reference_transfer import BrokerClient, validate_grant
+from processing.scratch_policy import LeaseLapsed
 
 
 PREFIX = '/ltds/worker/v1'
@@ -285,6 +286,10 @@ class JointDriver:
                     attempts = data.get('fetchAttempts', 0)
                     if attempts >= 3:
                         raise DriverHeld('fixture_fetch_attempt_budget_exhausted')
+                    try:
+                        self.ledger.begin_transfer(reservation)
+                    except LeaseLapsed:
+                        raise DriverHeld('reservation_expired') from None
                     data['fetchAttempts'] = attempts + 1
                     self._save(job_id, stage, data)
                     self.broker.download_object(grant, obj['id'], target)
