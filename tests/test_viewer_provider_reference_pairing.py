@@ -229,7 +229,9 @@ class ViewerProviderReferencePairingTests(unittest.TestCase):
                 self.assertTrue(all(authenticated for _, _, authenticated, _, _ in dynamic_requests))
                 path_counts = {}
                 for method, path, _, status, _ in dynamic_requests:
-                    key = (method, "/ltds/v2/jobs/{id}" if path.startswith("/ltds/v2/jobs/")
+                    key = (method, "/ltds/v1/jobs/by-submission/{id}" if method == "GET"
+                           and path.startswith("/ltds/v1/jobs/by-submission/") else
+                           "/ltds/v2/jobs/{id}" if path.startswith("/ltds/v2/jobs/")
                            and path.endswith("/source/complete") is False
                            and method == "GET" else
                            "/ltds/v2/jobs/{id}/source/complete" if method == "POST"
@@ -239,10 +241,16 @@ class ViewerProviderReferencePairingTests(unittest.TestCase):
                 self.assertEqual(path_counts, {
                     ("GET", "/ltds/v2/capabilities"): 4,
                     ("GET", "/ltds/v1/options"): 2,
+                    ("GET", "/ltds/v1/jobs/by-submission/{id}"): 2,
                     ("POST", "/ltds/v2/jobs"): 2,
                     ("GET", "/ltds/v2/jobs/{id}"): 2,
                     ("POST", "/ltds/v2/jobs/{id}/source/complete"): 2,
                 }, f"unexpected actual backend route counts: {dynamic_requests}; viewer={result}")
+                self.assertEqual(
+                    [(path.rsplit("/", 1)[-1], status) for method, path, _, status, _ in dynamic_requests
+                     if method == "GET" and path.startswith("/ltds/v1/jobs/by-submission/")],
+                    [(attempt, 404) for attempt in result["queuedUpstreamAttempts"]],
+                    "each fresh attempt must establish exact submission absence before admission")
                 self.assertFalse(any("token=" in path.lower() or path.endswith("/info")
                                      or path.endswith("/task/new") for _, path, _, _, _ in dynamic_requests))
                 self.assertEqual(len(streamed_requests), 2, f"one source object must stream per job: {result}")

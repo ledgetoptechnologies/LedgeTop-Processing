@@ -216,8 +216,15 @@ class ViewerSourceIntakeV2PairingTests(unittest.TestCase):
                     "numericOptionExact": True, "sourceSignerPinned": True})
                 self.assertEqual(validation_errors, [])
                 self.assertEqual(drops, {"post": 1, "put": 1, "completion": 1})
-                self.assertEqual(len(post_hashes), 2)
-                self.assertEqual(post_hashes[0], post_hashes[1], "lost-response POST replay must use identical bytes")
+                self.assertEqual(len(post_hashes), 1,
+                    "lost admission response must recover the committed binding without another POST")
+                submission_reads = [(route, status) for method, route, status, _ in responses
+                    if method == "GET" and route.startswith("/ltds/v1/jobs/by-submission/")]
+                self.assertEqual(len(submission_reads), 2)
+                self.assertEqual(submission_reads[0][0], submission_reads[1][0],
+                    "restart must reconcile the exact original submission identity")
+                self.assertEqual([status for _, status in submission_reads], [404, 200],
+                    "fresh absence then durable accepted admission must be distinguished")
                 self.assertEqual(len(status_reads), 3, "upload/completion retry must reconcile from ACK status")
                 self.assertEqual(len(upload_routes), 1, "acknowledged stream must not be uploaded twice")
                 with queue._db() as db:
