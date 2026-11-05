@@ -6,6 +6,13 @@ approval. Runtime acceptance remains incomplete.
 
 ## Latest combined and native-host preparation checkpoint
 
+A local coordinator image from the qualified `ad9e9d3` source is now built and
+smoke-tested: `sha256:b2d972605b1e2a86851c434b3d4735a3d71dce56a72fd88eb466756a37147b87`,
+tag `ledgetop-processing:qualification-ad9e9d3`. Actual app health, UID 10001,
+read-only execution, closed unconfigured V2 route and graceful shutdown passed.
+The build/export runner is stopped; no publication or deployment occurred.
+See `evidence/coordinator-image-ad9-20261105.md` for identity and exact limits.
+
 Processing `ad9e9d3` passed **682/682 selected Linux tests, no skips**, in
 417.560 seconds across 46 modules. This combines the prior 582-test scope with
 source I/O operations/spool, generic node inventory/caps, release-contract vectors
