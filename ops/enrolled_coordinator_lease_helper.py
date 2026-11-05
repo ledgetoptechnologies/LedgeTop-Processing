@@ -10,7 +10,9 @@ import os
 from pathlib import Path
 import re
 import signal
+import socket
 import stat
+import struct
 import threading
 import uuid
 
@@ -49,9 +51,40 @@ def _start(pid):
     return Path('/proc/' + str(pid) + '/stat').read_text().rsplit(')', 1)[1].split()[19]
 
 
-def hold(settings, *, proof_path=PROOF):
+def _serve(listener, settings, ready):
+    try: connection, _ = listener.accept()
+    except socket.timeout: return
+    with connection:
+        connection.settimeout(.2)
+        raw = connection.recv(4097)
+        require(len(raw) <= 4096)
+        request = json.loads(raw)
+        require(type(request) is dict and set(request) == {'challenge'}
+                and type(request['challenge']) is str and re.fullmatch('[a-f0-9]{64}', request['challenge']))
+        packet = dict(challenge=request['challenge'], settings=settings, pid=os.getpid(),
+                      startTime=_start(os.getpid()), status='ready' if ready else 'held')
+        connection.sendall(canonical(packet))
+
+
+def _namespace_quiet():
+    """PID1 may release only after every other live exec process has exited."""
+    require(os.getpid() == 1)
+    count = 0
+    with os.scandir('/proc') as entries:
+        for entry in entries:
+            if not entry.name.isdecimal() or entry.name == '1': continue
+            count += 1; require(count <= 512)
+            try: fields = Path(entry.path, 'stat').read_text().rsplit(')', 1)[1].split()
+            except FileNotFoundError: continue
+            require(len(fields) > 19)
+            if fields[0] != 'Z': return False
+    return True
+
+
+def hold(settings, *, proof_path=PROOF, require_pid1=False):
     validate_settings(settings)
     require(os.name == 'posix' and os.geteuid() == 10001)
+    require(not require_pid1 or os.getpid() == 1)
     import fcntl
     # The image's exact reviewed package; never CWD/PYTHONPATH-based code.
     from processing.authority_lease import acquire
@@ -65,6 +98,7 @@ def hold(settings, *, proof_path=PROOF):
     main = None
     main_identity = None
     external_identity = None
+    listener = None
     try:
         external_identity = key(os.fstat(external))
         require(lease.authority == settings['authorityId'])
@@ -81,6 +115,11 @@ def hold(settings, *, proof_path=PROOF):
                      mainDescriptor=main, leaseDescriptor=external,
                      mainIdentity=main_identity, leaseIdentity=external_identity)
         proof = Path(proof_path)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.settimeout(.1)
+        listener.bind(str(proof_path) + '.sock')
+        os.chmod(str(proof_path) + '.sock', 0o600)
+        listener.listen(8)
         descriptor = os.open(proof, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
         try:
             raw = canonical(value)
@@ -88,9 +127,10 @@ def hold(settings, *, proof_path=PROOF):
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        while not stop.wait(.1):
+        while not stop.is_set():
             lease.check(settings['stateRoot'])
             require(key(os.fstat(main)) == key(path.lstat()) == main_identity)
+            _serve(listener, settings, True)
             try:
                 while os.waitpid(-1, os.WNOHANG)[0]: pass
             except ChildProcessError:
@@ -112,10 +152,28 @@ def hold(settings, *, proof_path=PROOF):
         # Only an explicit signal to this exact helper requests release. No
         # timeout, liveness-check failure or proof-publication failure does so.
         while not stop.wait(.1):
+            if listener is not None:
+                try: _serve(listener, settings, False)
+                except BaseException: pass
             try:
                 while os.waitpid(-1, os.WNOHANG)[0]: pass
             except BaseException:
                 pass
+    if require_pid1:
+        # An uncertain Docker-exec request can outlive its local CLI. Never
+        # release the physical locks while that process may still read state.
+        while True:
+            reap_verified = True
+            try:
+                while os.waitpid(-1, os.WNOHANG)[0]: pass
+            except ChildProcessError:
+                pass
+            except BaseException:
+                reap_verified = False
+            try: quiet = reap_verified and _namespace_quiet()
+            except BaseException: quiet = False
+            if quiet: break
+            threading.Event().wait(.1)
     try:
         if main is not None:
             require(main_identity is not None and key(os.fstat(main)) == main_identity)
@@ -139,6 +197,23 @@ def observe(settings, *, expected_pid=1, proof_path=PROOF):
     validate_settings(settings)
     require(type(expected_pid) is int and expected_pid > 0)
     require(not os.path.lexists(str(proof_path) + '.held'))
+    # Readiness is positive evidence from this actual holder's in-memory loop,
+    # not inferred from absence of a best-effort failure file.
+    challenge = os.urandom(32).hex()
+    endpoint = Path(str(proof_path) + '.sock'); endpoint_info = endpoint.lstat()
+    require(stat.S_ISSOCK(endpoint_info.st_mode) and endpoint_info.st_uid == 10001
+            and stat.S_IMODE(endpoint_info.st_mode) == 0o600)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(.5)
+        connection.connect(str(endpoint))
+        peer_pid, peer_uid, _ = struct.unpack('3i', connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        require(peer_pid == expected_pid and peer_uid == 10001)
+        connection.sendall(canonical(dict(challenge=challenge)))
+        raw = connection.recv(4097); require(len(raw) <= 4096)
+        answer = json.loads(raw)
+    require(type(answer) is dict and set(answer) == {'challenge', 'settings', 'pid', 'startTime', 'status'}
+            and answer['challenge'] == challenge and answer['settings'] == settings and answer['pid'] == expected_pid
+            and answer['startTime'] == _start(expected_pid) and answer['status'] == 'ready')
     path = Path(proof_path)
     before = path.lstat()
     require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == 10001
@@ -177,7 +252,12 @@ def serializable_source(settings, *, observer=False):
     source = Path(__file__).read_text()
     # No private key or token is embedded. Configuration contains only exact
     # physical lease paths and immutable operation identity, never client rows.
-    bootstrap = 'import sys;sys.path.insert(0,"/app")\n'
+    bootstrap = '''import sys,os,importlib.util,pathlib
+sys.path.insert(0,"/app")
+for name,expected in (("processing","/app/processing/__init__.py"),("processing.authority_lease","/app/processing/authority_lease.py")):
+ spec=importlib.util.find_spec(name)
+ if spec is None or spec.origin!=expected or pathlib.Path(expected).resolve()!=pathlib.Path(expected) or os.access(expected,os.W_OK):raise RuntimeError("reviewed_readonly_package_required")
+'''
     tail = ('print(json.dumps(observe(' + repr(settings) + '),sort_keys=True,separators=(",",":")))'
-            if observer else 'raise SystemExit(hold(' + repr(settings) + '))')
+            if observer else 'raise SystemExit(hold(' + repr(settings) + ',require_pid1=True))')
     return (bootstrap + source + '\n' + tail + '\n').encode()

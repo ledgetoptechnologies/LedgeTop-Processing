@@ -74,19 +74,21 @@ def _terminate_owned(process):
 class BoundedSubprocess:
     """Linux pipe I/O with output/deadline bounds, including exec stdin scripts."""
     def run(self, argv, *, input_bytes=None, timeout=30, output_limit=1024 * 1024,
-            error_limit=16384, mutation=False):
+            error_limit=16384, mutation=False, sink=None):
         require(os.name == 'posix', 'linux_transport_required')
         require(type(argv) in (list, tuple) and argv and all(type(value) is str and value
                 and '\x00' not in value for value in argv), 'structured_command_required')
         require(type(timeout) in (int, float) and 0 < timeout <= 900 and
-                type(output_limit) is int and 0 < output_limit <= 16 * 1024 * 1024 and
+                type(output_limit) is int and 0 < output_limit <= (1024**4 if sink is not None else 16 * 1024 * 1024) and
                 type(error_limit) is int and 0 < error_limit <= 65536,
                 'bounded_command_required')
+        require(sink is None or callable(sink), 'structured_stream_sink_required')
         require(input_bytes is None or type(input_bytes) is bytes and len(input_bytes) <= 1024 * 1024,
                 'bounded_private_stdin_required')
         process = None
         selector = selectors.DefaultSelector()
         output, error = bytearray(), bytearray()
+        output_bytes, output_hash = 0, hashlib.sha256()
         deadline, cursor = time.monotonic() + timeout, 0
         try:
             process = subprocess.Popen(list(argv), stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
@@ -113,6 +115,17 @@ class BoundedSubprocess:
                         if cursor == len(input_bytes):
                             selector.unregister(stream); stream.close()
                     else:
+                        if event.data == 'out' and sink is not None:
+                            try: chunk = os.read(stream.fileno(), min(65536, output_limit + 1 - output_bytes))
+                            except BlockingIOError: continue
+                            if not chunk:
+                                selector.unregister(stream); stream.close()
+                            else:
+                                output_bytes += len(chunk)
+                                require(output_bytes <= output_limit, 'command_output_budget_exceeded')
+                                sink(chunk)
+                                output_hash.update(chunk)
+                            continue
                         target, maximum = (output, output_limit) if event.data == 'out' else (error, error_limit)
                         try: chunk = os.read(stream.fileno(), min(65536, maximum + 1 - len(target)))
                         except BlockingIOError: continue
@@ -124,6 +137,9 @@ class BoundedSubprocess:
             require(time.monotonic() < deadline, 'command_deadline_exceeded')
             remaining = deadline - time.monotonic()
             require(process.wait(timeout=remaining) == 0, 'command_failed')
+            if sink is not None:
+                return dict(clientExitCode=0, streamClosed=True, bytes=output_bytes,
+                            sha256=output_hash.hexdigest())
             return bytes(output)
         except BaseException as error_value:
             if isinstance(error_value, (KeyboardInterrupt, SystemExit)):
@@ -242,6 +258,18 @@ class DockerCLI:
         except (OSError, tarfile.TarError, ValueError):
             raise TransportHeld('private_config_archive_unavailable') from None
 
+    def archive_to(self, identifier, state_root, sink_callable, *, max_bytes, timeout):
+        """Stream original read-only custody to a private caller-owned TAR sink.
+
+        This proves clean local CLI/stream completion only. The caller must
+        validate the complete TAR against held original custody before issuing
+        any backup completion receipt. No extraction, restore or copy lock.
+        """
+        require(type(identifier) is str and ID.fullmatch(identifier) and state_root == '/prototype-state',
+                'exact_original_archive_required')
+        return self.command('container', 'cp', identifier + ':' + state_root + '/.', '-',
+                            sink=sink_callable, output_limit=max_bytes, timeout=timeout)
+
 
 def _absolute_path(value):
     require(type(value) is str and value.startswith('/') and len(value) <= 4096
@@ -335,7 +363,7 @@ class PrivateProofs:
         require(kind != 'rejection' or dispatch is not None, 'rejection_dispatch_required')
         return kind + '-' + intent['intentId'] + '-' + suffix + '.json'
 
-    def retain(self, intent, facts, *, dispatch=None, kind='facts'):
+    def retain(self, intent, facts, *, dispatch=None, kind='facts', must_create=False):
         name = self.name(intent, dispatch, kind=kind)
         document = dict(schemaVersion=1, intentSha256=digest(intent), dispatch=dispatch, facts=facts)
         raw = canonical(document)
@@ -346,6 +374,7 @@ class PrivateProofs:
                 fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                              0o600, dir_fd=directory)
             except FileExistsError:
+                require(not must_create, 'existing_dispatch_is_inspection_only')
                 require(private_bytes(self.root / name) == raw, 'immutable_proof_changed')
             else:
                 try:
@@ -358,6 +387,26 @@ class PrivateProofs:
                 finally:
                     os.close(fd)
                 os.fsync(directory)
+            require(private_bytes(self.root / name) == raw, 'retained_proof_unverified')
+            # A previous write may have produced the exact bytes but failed its
+            # durability barrier. Exact replay must complete both barriers on a
+            # freshly verified descriptor before it may authorize lock entry.
+            verified = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory)
+            try:
+                opened, current = os.fstat(verified), os.stat(name, dir_fd=directory, follow_symlinks=False)
+                identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid,
+                                      s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+                require(identity(opened) == identity(current) and stat.S_ISREG(opened.st_mode)
+                        and opened.st_uid == os.geteuid() and opened.st_nlink == 1
+                        and stat.S_IMODE(opened.st_mode) == 0o600 and opened.st_size == len(raw),
+                        'retained_proof_identity_changed')
+                os.fsync(verified)
+                os.fsync(directory)
+                require(identity(opened) == identity(os.fstat(verified)) ==
+                        identity(os.stat(name, dir_fd=directory, follow_symlinks=False)),
+                        'retained_proof_identity_changed')
+            finally:
+                os.close(verified)
             require(private_bytes(self.root / name) == raw, 'retained_proof_unverified')
             # Revalidate the owned directory after the artifact, too.
             current = self._directory(); os.close(current)
@@ -389,6 +438,76 @@ class HostOperation:
             fixed = dict(intentId='b769525d-8f74-5b46-8bd6-430739377242')
             parent.retain(fixed, binding)
             yield
+
+
+class TrackedExec:
+    """One private remote request, never re-dispatched after local uncertainty.
+
+    The owning cutover journal supplies an exact request UUID derived from its
+    current dispatch nonce. This registry proves observer lifecycle only; it
+    does not establish whether an operator POST's deployment effect occurred.
+    """
+    def __init__(self, docker, operation_id, operation_directory):
+        self.docker = docker
+        self.operation_id = operation_id
+        self.proofs = PrivateProofs(operation_directory)
+
+    def _binding(self, identifier, request_id, source, maximum):
+        from ops import enrolled_coordinator_exec_helper as helper
+        require(type(identifier) is str and ID.fullmatch(identifier) and type(source) is bytes,
+                'exact_remote_request_required')
+        settings = dict(operationId=self.operation_id, requestId=request_id,
+                        sourceSha256=hashlib.sha256(source).hexdigest(), maximum=maximum)
+        helper.validate(settings)
+        intent = dict(intentId=request_id, containerId=identifier, settings=settings)
+        return helper, settings, intent
+
+    def dispatch(self, identifier, request_id, source, *, timeout=30, maximum=1024 * 1024):
+        helper, settings, intent = self._binding(identifier, request_id, source, maximum)
+        # Durable first, exclusive second-call refusal even if Docker never
+        # returned or the remote request directory is absent.
+        self.proofs.retain(intent, dict(dispatched=True), must_create=True)
+        self.docker.exec_python(identifier, helper.serializable_source(settings, source=source),
+                                timeout=timeout, output_limit=4096, mutation=True)
+        return self.inspect(identifier, request_id, source, maximum=maximum)
+
+    def reserved(self, identifier, request_id, source, *, maximum=1024 * 1024):
+        _, _, intent = self._binding(identifier, request_id, source, maximum)
+        path = self.proofs.root / self.proofs.name(intent)
+        directory = self.proofs._directory(); os.close(directory)
+        # Any entry, including malformed/partial evidence, is reserved. It may
+        # make inspection unavailable; it must never become fresh execution.
+        return os.path.lexists(path)
+
+    def __call__(self, identifier, source, *, request_id, timeout=30, output_limit=1024 * 1024):
+        if self.reserved(identifier, request_id, source, maximum=output_limit):
+            return self.inspect(identifier, request_id, source, maximum=output_limit)
+        return self.dispatch(identifier, request_id, source, timeout=timeout, maximum=output_limit)
+
+    def inspect(self, identifier, request_id, source, *, maximum=1024 * 1024, allow_failed=False):
+        helper, settings, intent = self._binding(identifier, request_id, source, maximum)
+        expected = dict(schemaVersion=1, intentSha256=digest(intent), dispatch=None,
+                        facts=dict(dispatched=True))
+        require(private_bytes(self.proofs.root / self.proofs.name(intent)) == canonical(expected),
+                'exact_prior_remote_dispatch_required')
+        value = self.docker.exec_python(identifier, helper.serializable_source(settings),
+                                       timeout=5, output_limit=min(16 * 1024 * 1024, maximum + 16384))
+        require(type(value) is dict and set(value) == {'settings', 'processRetired', 'pid', 'start', 'success', 'result'}
+                and value['settings'] == settings and value['processRetired'] is True
+                and type(value['pid']) is int and value['pid'] > 0 and type(value['start']) is str
+                and value['start'].isdigit() and type(value['success']) is bool,
+                'actual_remote_retirement_required')
+        envelope = dict(schemaVersion=1, protocol='ltds-cutover-exec-v1', operationId=self.operation_id,
+                        requestId=request_id, containerId=identifier, sourceSha256=settings['sourceSha256'],
+                        process=dict(pid=value['pid'], startTicks=value['start'], retired=True),
+                        scriptExitCode=0 if value['success'] else 1, result=value['result'])
+        retired = dict(intentId=str(uuid.uuid5(uuid.UUID(request_id), 'remote-retired')), request=intent)
+        # Retain only result digest; full client metadata never enters the
+        # controller lifecycle artifact or an exception.
+        self.proofs.retain(retired, dict(process=envelope['process'], scriptExitCode=envelope['scriptExitCode'],
+                                        resultSha256=digest(value['result'])))
+        require(allow_failed or value['success'], 'remote_script_failed_after_retirement')
+        return envelope
 
 
 RECIPE_FIELDS = frozenset(('schemaVersion', 'name', 'imageId', 'user', 'workingDir', 'environmentFile',

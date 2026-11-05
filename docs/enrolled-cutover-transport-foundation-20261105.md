@@ -79,3 +79,36 @@ lease custody before backup or projection verification. It must qualify the
 same-image bootstrap/final recipes and authenticated final runtime/worker
 readiness before reopening. Missing pilot, NAS, legacy-delivery or worker gates
 remain holds; this checkpoint does not create those authorities.
+
+## Lifecycle follow-up
+
+The holder now supplies positive in-memory ready/held responses on its private
+Unix socket. The observer verifies the actual peer PID/UID, fresh challenge,
+settings and start time before checking original FD/kernel-flock identities.
+Even simultaneous proof-fsync and failure-file publication errors cannot turn a
+visible old proof into readiness. Exact local proof replay repeats verified
+file and original-directory fsync barriers before yielding the fixed host lock.
+
+`TrackedExec` reserves each exact container/request/source digest durably before
+dispatch. A lost local reply is inspection-only; any existing reservation,
+including partial/malformed evidence, prevents redispatch. Its remote helper
+retains private bounded start/result/exit records. Retirement requires matching
+records and absence of the actual PID/start identity; an exit marker while that
+PID remains live is insufficient. These records establish helper lifecycle,
+not whether an operator mutation occurred. The journal still verifies effects.
+
+The expanded foundation suite passed 25/25 Linux cases in 3.370 seconds without
+skips, under one CPU/768 MiB/network-none/UID10001/read-only worktree. Actual
+process tests include live-PID refusal, missing-exit refusal, lost-reply recovery
+without redispatch, sentinel failures, original competing flocks and owned local
+descendant cleanup. Streaming TAR output is bounded without whole-archive
+buffering and returns a receipt only after clean EOF and client exit zero.
+That receipt alone does not validate archive custody or remote daemon effects.
+The exact task container and task-label inventory were absent afterward.
+
+The production holder additionally requires non-init PID1, checks fixed reviewed
+read-only `/app` package origins under isolated Python, and waits for all other
+live namespace processes to exit before releasing original locks. These exact
+Docker/PID1/package predicates still await the independent task-owned Docker
+harness; the ordinary subprocess suite does not qualify them. No installed
+coordinator, NAS files, live jobs or actual cutover were changed.

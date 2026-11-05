@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -18,6 +19,7 @@ from unittest.mock import patch
 
 from ops import enrolled_coordinator_transport as t
 from ops import enrolled_coordinator_lease_helper as holder
+from ops import enrolled_coordinator_exec_helper as remote
 
 
 def recipe(*, bootstrap=True):
@@ -150,6 +152,32 @@ class BoundedSubprocessTests(unittest.TestCase):
             runner.run([sys.executable,'-c','import sys;sys.stderr.write("synthetic-secret");sys.exit(1)'],mutation=True)
         self.assertEqual(str(caught.exception),'mutation_outcome_unknown')
 
+    def test_streamed_output_is_bounded_and_receipt_requires_clean_exit(self):
+        import hashlib
+        chunks=[]
+        result=t.BoundedSubprocess().run([sys.executable,'-c','import sys;sys.stdout.buffer.write(b"x"*200000)'],
+                         sink=chunks.append,output_limit=200000,timeout=3)
+        self.assertEqual(result,dict(clientExitCode=0,streamClosed=True,bytes=200000,
+                                    sha256=hashlib.sha256(b'x'*200000).hexdigest()))
+        self.assertTrue(all(len(c)<=65536 for c in chunks))
+        for source in ('import sys;sys.stdout.write("x"*101)',
+                       'import sys;sys.stdout.write("x");sys.exit(1)'):
+            with self.assertRaises(t.TransportHeld):
+                t.BoundedSubprocess().run([sys.executable,'-c',source],sink=lambda _:None,output_limit=100)
+
+    def test_exact_proof_replay_repeats_file_and_directory_durability_barriers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);root.chmod(0o700);proofs=t.PrivateProofs(root)
+            intent=dict(intentId=str(uuid.uuid4()))
+            with patch.object(t.os,'fsync',side_effect=OSError('synthetic lost durability')):
+                with self.assertRaises(OSError):proofs.retain(intent,{'bound':True})
+            calls=[];real=os.fsync
+            def sync(fd):calls.append(os.fstat(fd).st_mode);return real(fd)
+            with patch.object(t.os,'fsync',side_effect=sync):proofs.retain(intent,{'bound':True})
+            import stat
+            self.assertTrue(any(stat.S_ISREG(mode) for mode in calls))
+            self.assertTrue(any(stat.S_ISDIR(mode) for mode in calls))
+
     def test_output_overflow_and_deadline_are_bounded(self):
         runner=t.BoundedSubprocess()
         for script in ('import sys;sys.stdout.write("x"*100000)', 'import time;time.sleep(30)'):
@@ -251,10 +279,15 @@ class OriginalLeaseHolderTests(unittest.TestCase):
     def test_proof_fsync_failure_holds_original_locks_until_explicit_release(self):
         self._failure_retains('fsync')
 
+    def test_proof_and_failure_marker_errors_cannot_report_ready_from_visible_proof(self):
+        self._failure_retains('double')
+
     def _failure_retains(self, fault):
         import fcntl
         source='''import json,sys
 from unittest.mock import patch
+from contextlib import ExitStack
+import os
 from ops.enrolled_coordinator_lease_helper import hold
 from processing.authority_lease import AuthorityLease
 original=AuthorityLease.check;calls=0
@@ -265,14 +298,23 @@ def check(self,*args,**kwargs):
  return original(self,*args,**kwargs)
 target='processing.authority_lease.AuthorityLease.check' if sys.argv[3]=='check' else 'ops.enrolled_coordinator_lease_helper.os.fsync'
 options={'new':check} if sys.argv[3]=='check' else {'side_effect':OSError('synthetic injected failure')}
-with patch(target,**options):
+original_open=os.open
+def opened(path,*args,**kwargs):
+ if str(path).endswith('.held'):raise OSError('synthetic failure marker unavailable')
+ return original_open(path,*args,**kwargs)
+with ExitStack() as stack:
+ stack.enter_context(patch(target,**options))
+ if sys.argv[3]=='double':stack.enter_context(patch('ops.enrolled_coordinator_lease_helper.os.open',new=opened))
  raise SystemExit(hold(json.loads(sys.argv[1]),proof_path=sys.argv[2]))
 '''
         self.child=subprocess.Popen([sys.executable,'-B','-c',source,json.dumps(self.settings),str(self.proof),fault],
                                     stdout=subprocess.PIPE,stderr=subprocess.PIPE)
         held=Path(str(self.proof)+'.held');deadline=time.monotonic()+3
-        while not held.exists() and self.child.poll() is None and time.monotonic()<deadline:time.sleep(.01)
-        self.assertTrue(held.exists());self.assertIsNone(self.child.poll())
+        target=self.proof if fault=='double' else held
+        while not target.exists() and self.child.poll() is None and time.monotonic()<deadline:time.sleep(.01)
+        self.assertTrue(target.exists());self.assertIsNone(self.child.poll())
+        if fault=='double':
+            time.sleep(.15);self.assertFalse(held.exists())
         with self.assertRaises(RuntimeError):holder.observe(self.settings,expected_pid=self.child.pid,proof_path=str(self.proof))
         for path in (self.main,self.external):
             with path.open('rb') as file:
@@ -281,6 +323,77 @@ with patch(target,**options):
         self.assertEqual(self.child.returncode,0,error.decode())
         for path in (self.main,self.external):
             with path.open('rb') as file:fcntl.flock(file,fcntl.LOCK_EX|fcntl.LOCK_NB)
+
+
+@unittest.skipUnless(os.name=='posix','actual Linux remote-process lifecycle fixture')
+class RemoteExecLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        import hashlib
+        self.source=b'import json,time;time.sleep(.3);print(json.dumps({"bounded":True}))'
+        self.settings=dict(operationId=str(uuid.uuid4()),requestId=str(uuid.uuid4()),
+                           sourceSha256=hashlib.sha256(self.source).hexdigest(),maximum=4096)
+        self.root=remote.validate(self.settings);self.child=None;self.addCleanup(self.cleanup)
+
+    def cleanup(self):
+        if self.child is not None:
+            if self.child.poll() is None:self.child.terminate()
+            self.child.communicate(timeout=3)
+        self.assertEqual(self.root.parent,Path('/tmp'))
+        self.assertEqual(self.root,remote.validate(self.settings))
+        if self.root.exists():shutil.rmtree(self.root)
+
+    def launch(self,source=None):
+        self.child=subprocess.Popen([sys.executable,'-I','-'],stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        self.child.stdin.write(remote.serializable_source(self.settings,source=self.source if source is None else source))
+        self.child.stdin.close();self.child.stdin=None
+        deadline=time.monotonic()+2
+        while not (self.root/'start.json').exists() and self.child.poll() is None and time.monotonic()<deadline:time.sleep(.01)
+        self.assertTrue((self.root/'start.json').exists())
+
+    def test_actual_live_pid_cannot_retire_even_with_valid_start_record_then_exact_exit_recovers(self):
+        self.launch()
+        with self.assertRaises(RuntimeError):remote.inspect(self.settings)
+        _,error=self.child.communicate(timeout=3);self.assertEqual(self.child.returncode,0,error.decode())
+        value=remote.inspect(self.settings)
+        self.assertTrue(value['processRetired']);self.assertEqual(value['result'],{'bounded':True})
+
+    def test_child_death_without_exit_record_is_not_a_completed_observer(self):
+        self.launch();self.child.terminate();self.child.communicate(timeout=3)
+        with self.assertRaises((RuntimeError,FileNotFoundError)):remote.inspect(self.settings)
+        with self.assertRaises(FileExistsError):remote.execute(self.settings,self.source)
+
+    def test_exit_marker_written_while_its_pid_is_live_cannot_retire(self):
+        self.root.mkdir(mode=0o700)
+        identity=dict(settings=self.settings,pid=os.getpid(),start=remote.start_time(os.getpid()))
+        remote.write(self.root/'start.json',identity)
+        remote.write(self.root/'exit.json',dict(identity=identity,success=False,resultSha256=None))
+        with self.assertRaises(RuntimeError):remote.inspect(self.settings)
+
+    def test_tracked_lost_local_reply_retains_request_and_never_dispatches_twice(self):
+        import hashlib
+        source=self.source;case=self
+        class LostReply:
+            calls=0
+            def exec_python(self,identifier,script,**kwargs):
+                self.calls+=1
+                if self.calls==1:
+                    case.child=subprocess.Popen([sys.executable,'-I','-'],stdin=subprocess.PIPE,
+                                                stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                    case.child.stdin.write(script);case.child.stdin.close();case.child.stdin=None
+                    raise t.TransportHeld('synthetic local reply lost; remote still running')
+                raw=t.BoundedSubprocess().run([sys.executable,'-I','-'],input_bytes=script,timeout=3)
+                return t.decode(raw)
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory).chmod(0o700);docker=LostReply()
+            executor=t.TrackedExec(docker,self.settings['operationId'],directory)
+            with self.assertRaises(t.TransportHeld):executor.dispatch('a'*64,self.settings['requestId'],source,maximum=4096)
+            _,error=self.child.communicate(timeout=3);self.assertEqual(self.child.returncode,0,error.decode())
+            result=executor.inspect('a'*64,self.settings['requestId'],source,maximum=4096)
+            self.assertEqual(result['result'],{'bounded':True});self.assertTrue(result['process']['retired'])
+            before=docker.calls
+            with self.assertRaises(t.TransportHeld):executor.dispatch('a'*64,self.settings['requestId'],source,maximum=4096)
+            self.assertEqual(docker.calls,before)
 
 
 if __name__=='__main__':unittest.main()
