@@ -6,6 +6,33 @@ approval. Runtime acceptance remains incomplete.
 
 ## Latest combined and native-host preparation checkpoint
 
+Processing `ad9e9d3` passed **682/682 selected Linux tests, no skips**, in
+417.560 seconds across 46 modules. This combines the prior 582-test scope with
+source I/O operations/spool, generic node inventory/caps, release-contract vectors
+and all five worker readiness/handover/service-control/factory/routing modules.
+Actual Viewer photo/GCP whole/range intake, copied-result ingestion and controlled
+conversion/publication execute alongside the new maintenance paths. The same
+frozen Viewer and old synthetic-only converter are used; photogrammetry, systemd
+and Docker update actions are simulated. The one-CPU/2 GiB container and owned
+temporary volume were removed.
+
+Worker maintenance now requires explicit reviewed unit/config/source settings,
+separate authenticated nonce-bound readiness, effective loaded systemd policy,
+actual module/spec/package origins, read-only source access and repeated captured
+source identity/hash checks. It journals config CAS and factory pin migration,
+yields/reacquires the physical gate with ingress closed, and preserves unknown
+outcomes. Once persistent Compose pinning starts, failure holds the target rather
+than claiming rollback to mismatched old state. These are synthetic tests, not
+installed updates. Existing inactive `e11231a` source preparations are writable
+to their owner and do not yet meet the new optional automatic-maintenance source
+deployment requirement.
+
+The coordinator freeze/registered-epoch/census upgrade path, source-release
+backend/timer/executor, Viewer readiness inventory/outbox/hold retirement and
+Claude's revised staging fence remain on separate work branches. They are not
+included in this 682-test checkpoint. Installed NAS custody, licensed conversion,
+real-photo/real-LiDAR and multi-PC acceptance remain open.
+
 Processing `18e37ac` passed **126/126 focused Linux integration tests, no skips**,
 in 68.948 seconds across ten modules. This includes actual Viewer whole/range
 photo and GCP intake/result roundtrips and controlled conversion/publication,
