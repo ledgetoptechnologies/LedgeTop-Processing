@@ -252,10 +252,23 @@ finally:db.close()
             item=self._find('bootstrap');require(item is not None and item['State']['Running'] is True,'bootstrap_runtime_required')
             self.boundary.container(item['Id'],'bootstrap',self._creation(item))
         if action in ('verify-final-readiness','resume-final-gate'):
-            self.boundary('final',self._context('final',state))
-            if action=='resume-final-gate':
-                require(self._workers()==self._prior(state,'verify-final-readiness')['workers'],
-                        'qualified_workers_changed_before_admission')
+            final=self._find('final');require(final is not None,'known_final_required')
+            current=self.boundary.gate(final['Id']) if action=='resume-final-gate' and inspection else None
+            already_open=current is not None and current['snapshot']['phase']=='open'
+            if already_open:
+                # An accepted resume may already admit legitimate work. Do not
+                # demand idle workers/empty projections or repost the request.
+                # Exact stored receipt still must be verified by observe().
+                self.boundary.container(final['Id'],'final',self._creation(final));self._health(final)
+                expected=self._gate_request(action,state)
+                require(current['snapshot']['revision']==4 and current['snapshot']['planId']==expected['planId']
+                        and current['snapshot']['startupId']==expected['startupId']
+                        and current['ownerSha256']==self._preflight()['ownerSha256'],'unknown_open_gate_cannot_be_adopted')
+            else:
+                self.boundary('final',self._context('final',state))
+                if action=='resume-final-gate':
+                    require(self._workers()==self._prior(state,'verify-final-readiness')['workers'],
+                            'qualified_workers_changed_before_admission')
         if action=='enable-final-restart':
             final=self._find('final');require(final is not None,'final_runtime_required');self._health(final)
             gate=self.boundary.gate(final['Id'])
@@ -397,8 +410,17 @@ finally:db.close()
                     and snapshot['phase']==('open' if role=='bootstrap' else 'frozen')
                     and snapshot['revision']==(0 if role=='bootstrap' else 3),'candidate_start_gate_changed')
             token=self._window(action,intent,state);window=decode(private_bytes(self.root/self.proofs.name(token)))['facts']
-            require(datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')<=window['latest'],
-                    'candidate_startup_window_expired')
+            try:
+                started=datetime.fromisoformat(item['State']['StartedAt'].replace('Z','+00:00'))
+                require(started.tzinfo is not None,'authenticated_container_start_time_required')
+                stamp=started.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            except (ValueError,TypeError,AttributeError):
+                require(False,'authenticated_container_start_time_required')
+            # The immutable daemon start timestamp is bounded by the recorded
+            # dispatch window. A delayed/restarted inspector is not an expiry.
+            # Actual inventory startup-row time is additionally checked by the
+            # declared projection before final admission.
+            require(window['earliest']<=stamp<=window['latest'],'candidate_start_outside_dispatch_window')
             result=dict(container=self._summary(item),gate=gate,window=window)
             if role=='final':
                 context=dict(containerId=item['Id'],creationIntentId=self._creation(item),

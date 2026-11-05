@@ -48,3 +48,12 @@ complete driver still needs actual composed Docker qualification and review;
 no installed coordinator, service, NAS data or real client job was changed by
 this checkpoint. The preparation writer described in the bundle document is
 not implemented or invoked here.
+
+The follow-up suite passed 9/9 Linux control-flow cases in 0.556 seconds. It
+adds declared final rollback with retained authenticated source provenance,
+unknown-start inspection without replay, and accepted-resume/lost-reply recovery
+without requiring idle workers after legitimate admission has already opened.
+A recreated inspector five minutes later validates the original immutable
+Docker start timestamp against its saved window; inspection time does not expire
+that successful start or create a new future window. The projection separately
+checks the actual inventory-row creation timestamp before admission.

@@ -5,7 +5,7 @@ model checks phase ordering, real dispatch/readback code and recovery decisions.
 """
 import ast
 import copy
-from datetime import datetime,timezone
+from datetime import datetime,timezone,timedelta
 import hashlib
 import json
 import os
@@ -75,6 +75,7 @@ class ModelDocker:
                 planId=None if role=='bootstrap' else self.plan['operationId'],phase='open' if role=='bootstrap' else 'frozen',
                 operations=0,reservedControlBytes=0 if role=='bootstrap' else 4096)
             self.gates[identity]=gate
+        if self.lose=='start':self.lose=None;raise OSError('synthetic start reply lost after effect')
     def rename(self,identity,name):self.calls.append(('rename',identity));self.boxes[identity]['Name']='/'+name
 
 
@@ -212,6 +213,52 @@ class ConcreteDriverTests(unittest.TestCase):
         self.advance_until('final-ready');self.docker.workers_changed=True
         with self.assertRaises(t.TransportHeld):self.controller.advance()
         self.assertEqual(self.docker.gates[self.driver._find('final')['Id']]['phase'],'frozen')
+
+    def test_declared_final_rollback_preserves_source_provenance_and_retains_candidate(self):
+        self.advance_until('final-ready');started=self.driver._prior(self.controller.journal.read(),'start-final')
+        self.controller.begin_rollback();state=self.advance_until('rolled-back-rebaseline-required')
+        self.assertEqual(state['rollbackScope'],'declared-v2')
+        proof=self.driver._prior(state,'verify-rollback-projection')
+        self.assertEqual(proof['binding']['sourceReaderBinding'],started['boundary']['physical']['sourceBinding'])
+        self.assertEqual(proof['binding']['sourceCustody'],started['boundary']['custody'])
+        final=self.driver._find('final')
+        self.assertFalse(final['State']['Running']);self.assertIn('-candidate-retained-',final['Name'])
+        self.assertTrue(self.docker.original['State']['Running'])
+
+    def test_unknown_start_blocks_rollback_until_exact_running_start_is_inspected(self):
+        self.advance_until('final-created');self.docker.lose='start'
+        with self.assertRaises(j.CutoverHeld):self.controller.advance()
+        with self.assertRaises(j.CutoverHeld):self.controller.begin_rollback()
+        count=sum(call[0]=='start' for call in self.docker.calls)
+        state=self.controller.inspect();self.assertEqual(state['phase'],'final-frozen')
+        self.assertEqual(sum(call[0]=='start' for call in self.docker.calls),count)
+
+    def test_delayed_recreated_controller_uses_actual_start_not_current_inspection_clock(self):
+        self.advance_until('final-created');self.docker.lose='start'
+        with self.assertRaises(j.CutoverHeld):self.controller.advance()
+        pending=self.controller.journal.read();token=self.driver._window('start-final',pending['pending'],pending)
+        path=self.operation/self.driver.proofs.name(token);before=path.read_bytes()
+        class Later(datetime):
+            @classmethod
+            def now(cls,tz=None):return datetime.now(tz)+timedelta(minutes=5)
+        self.controller=j.FirstEnrolledCutover(self.operation,self.driver.plan,self.driver)
+        count=sum(call[0]=='start' for call in self.docker.calls)
+        with patch.object(d,'datetime',Later):state=self.controller.inspect()
+        self.assertEqual(state['phase'],'final-frozen');self.assertEqual(path.read_bytes(),before)
+        self.assertEqual(sum(call[0]=='start' for call in self.docker.calls),count)
+
+    def test_unknown_resume_is_read_back_without_repost_and_never_allows_rollback(self):
+        self.advance_until('final-ready');original=self.driver.tracked;count=0
+        def lost(*args,**kwargs):
+            nonlocal count
+            count+=1;original(*args,**kwargs);raise OSError('synthetic accepted resume response lost')
+        self.driver.tracked=lost
+        with self.assertRaises(j.CutoverHeld):self.controller.advance()
+        with self.assertRaises(j.CutoverHeld):self.controller.begin_rollback()
+        # Inspection uses authenticated exact existing SQL receipt, not POST.
+        self.driver.tracked=lambda *_a,**_k:(_ for _ in ()).throw(AssertionError('must not repost'))
+        state=self.controller.inspect();self.assertTrue(state['admissionOpened']);self.assertEqual(count,1)
+        with self.assertRaises(j.CutoverHeld):self.controller.begin_rollback()
 
 
 if __name__=='__main__':unittest.main()
