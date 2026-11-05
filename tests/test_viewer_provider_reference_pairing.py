@@ -108,7 +108,7 @@ class ViewerProviderReferencePairingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="ltds-viewer-provider-pairing-") as tmp:
             root = Path(tmp)
             queue_dir, spool_root = root / "queue", root / "source-spool"
-            queue_dir.mkdir(); spool_root.mkdir(mode=0o700)
+            queue_dir.mkdir(mode=0o700); spool_root.mkdir(mode=0o700)
             marker = spool_root / ".ltds-source-spool-id"
             marker.write_text("c" * 64, encoding="ascii")
             if os.name != "nt": marker.chmod(0o600)
