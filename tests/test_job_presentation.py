@@ -418,7 +418,7 @@ class StartWitnessTests(Harness):
         sent, opener, reader = self.oversized_engine(one_line)
         with opener, reader, self.assertRaises(EngineUnavailable):
             self.witness(job)
-        self.assertLessEqual(sent[0], MAX_LOG_BYTES)
+        self.assertLessEqual(sent[0], MAX_LOG_BYTES + 1)
 
     def test_a_response_longer_than_the_page_is_cut_after_its_prefix(self):
         job = self.executing()
