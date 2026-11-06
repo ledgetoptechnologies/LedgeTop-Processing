@@ -67,25 +67,25 @@ class WorkerListenerSettingsTest(unittest.TestCase):
             result = create_listener(path, boundary_kwargs={'ledger': object()}, tls_context=object())
             boundary.assert_called_once()
             server.assert_called_once_with(boundary.return_value, '127.0.0.1', 18181, ssl_context=unittest.mock.ANY)
-            self.assertIs(result, server.return_value)
+            self.assertIsInstance(result, ListenerOwner)
+            self.assertTrue(result.close(0))
+            server.return_value.server_close.assert_called_once()
 
     def test_owner_leaves_draining_server_alive_until_request_finishes(self):
         class Server:
             def __init__(self):
                 self.done = threading.Event(); self.in_request = True
                 self.drain_started = False; self.closed = False
-            def serve_forever(self, **_): self.done.wait(2)
+            def handle_request(self): self.done.wait(.01)
             def drain(self, timeout):
                 self.drain_started = True
                 return not self.in_request
-            def shutdown(self): self.done.set()
             def server_close(self): self.closed = True
         server = Server(); owner = ListenerOwner(server); owner.start()
         try:
             self.assertFalse(owner.close(0))
             self.assertTrue(server.drain_started)
             self.assertFalse(server.closed)
-            self.assertFalse(server.done.is_set())
             server.in_request = False
             self.assertTrue(owner.close(1))
             self.assertTrue(owner.close(1))
@@ -93,6 +93,29 @@ class WorkerListenerSettingsTest(unittest.TestCase):
         finally:
             server.in_request = False
             owner.close(1)
+
+    def test_thread_start_failure_closes_bound_socket(self):
+        server = unittest.mock.Mock(); owner = ListenerOwner(server)
+        with patch('processing.direct_worker_service_v2.threading.Thread.start', side_effect=RuntimeError('failed')):
+            with self.assertRaises(RuntimeError): owner.start()
+        server.server_close.assert_called_once()
+        self.assertTrue(owner.close(0))
+
+    def test_bounded_join_keeps_socket_open_until_accept_loop_exits(self):
+        entered = threading.Event(); release = threading.Event()
+        class Server:
+            closed = False
+            def handle_request(self): entered.set(); release.wait(3)
+            def drain(self, _): return True
+            def server_close(self): self.closed = True
+        server = Server(); owner = ListenerOwner(server); owner.start()
+        try:
+            self.assertTrue(entered.wait(1))
+            self.assertFalse(owner.close(.01))
+            self.assertFalse(server.closed)
+        finally:
+            release.set()
+            self.assertTrue(owner.close(2))
 
     @unittest.skipIf(os.name == 'nt', 'Linux scratch fixture required')
     def test_owner_drains_real_tls_upload_before_shutdown(self):

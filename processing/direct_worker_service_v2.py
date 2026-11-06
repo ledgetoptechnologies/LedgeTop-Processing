@@ -6,6 +6,8 @@ module never accepts reservation data from a remote request or starts a thread.
 import ipaddress
 import os
 import threading
+import math
+import time
 
 from . import reference_protocol as protocol
 from .reference_runtime import _file, RuntimeConfigurationError
@@ -49,7 +51,7 @@ def create_listener(settings_path=None, *, boundary_kwargs=None, tls_context=Non
     """Construct a pinned boundary and TLS listener, or return None if disabled.
 
     `boundary_kwargs` and `tls_context` must come from a trusted local owner;
-    neither may be populated from an HTTP request.  Caller owns server_close().
+    neither may be populated from an HTTP request. The result owns the socket.
     """
     settings = load_listener_settings(settings_path)
     if settings is None:
@@ -57,7 +59,8 @@ def create_listener(settings_path=None, *, boundary_kwargs=None, tls_context=Non
     if type(boundary_kwargs) is not dict:
         raise RuntimeConfigurationError('trusted V2 boundary dependencies required')
     boundary = DirectWorkerBoundaryV2(**boundary_kwargs)
-    return create_direct_worker_server(boundary, settings['host'], settings['port'], ssl_context=tls_context)
+    server = create_direct_worker_server(boundary, settings['host'], settings['port'], ssl_context=tls_context)
+    return ListenerOwner(server)
 
 
 class ListenerOwner:
@@ -69,26 +72,48 @@ class ListenerOwner:
         self._thread = None
         self._lock = threading.Lock()
         self._closed = False
+        self._stop = threading.Event()
+
+    def _serve(self):
+        self._server.timeout = 0.05
+        while not self._stop.is_set():
+            self._server.handle_request()
 
     def start(self):
         with self._lock:
             if self._closed or self._thread is not None:
                 raise RuntimeError('listener owner already started or closed')
-            self._thread = threading.Thread(target=self._server.serve_forever,
-                                            kwargs={'poll_interval': 0.05}, daemon=False)
-            self._thread.start()
+            thread = threading.Thread(target=self._serve, daemon=False)
+            try:
+                thread.start()
+            except BaseException:
+                self._server.server_close()
+                self._closed = True
+                raise
+            self._thread = thread
 
     def close(self, timeout):
         """Drain first; on timeout keep listener draining and owner alive."""
-        with self._lock:
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 <= timeout <= 3600:
+            raise ValueError('bounded drain timeout required')
+        deadline = time.monotonic() + timeout
+        if not self._lock.acquire(timeout=timeout):
+            return False
+        try:
             if self._closed:
                 return True
             if self._thread is None:
-                raise RuntimeError('listener owner not started')
-            if not self._server.drain(timeout):
+                self._server.server_close()
+                self._closed = True
+                return True
+            if not self._server.drain(max(0, deadline - time.monotonic())):
                 return False
-            self._server.shutdown()
-            self._thread.join()
+            self._stop.set()
+            self._thread.join(max(0, deadline - time.monotonic()))
+            if self._thread.is_alive():
+                return False
             self._server.server_close()
             self._closed = True
             return True
+        finally:
+            self._lock.release()
