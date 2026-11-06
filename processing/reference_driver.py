@@ -582,6 +582,29 @@ class ReferenceDriver:
         finally:
             response.close()
 
+    def direct_source_policy(self):
+        """Fetch authenticated coordinator policy; never authorize direct work."""
+        status,value=self._request('GET','/direct-source-policy')
+        try:
+            if status!=200:raise ValueError()
+            p._closed(value,('schemaVersion','authorityId','nodeId','workerId','workerInstanceId',
+                'capabilityFingerprint','optionsFingerprint','allowedOdmOptions',
+                'directPreparationEnabled','sourceCustodyAccepted'),'direct source policy')
+            if (type(value['schemaVersion']) is not int or value['schemaVersion']!=1
+                    or value['authorityId']!=self.worker.authority_id or value['nodeId']!=self.worker.node_id
+                    or value['workerId']!=self.worker.worker_id or value['workerInstanceId']!=self.worker_instance_id
+                    or value['directPreparationEnabled'] is not False or value['sourceCustodyAccepted'] is not False):
+                raise ValueError()
+            p._hash(value['capabilityFingerprint'],'capability fingerprint')
+            p._hash(value['optionsFingerprint'],'options fingerprint')
+            allowed=value['allowedOdmOptions']
+            if type(allowed) is not list or len(allowed)>1024 or len(set(allowed))!=len(allowed) or allowed!=sorted(allowed):
+                raise ValueError()
+            for name in allowed:p._slug(name,'ODM option')
+            return dict(value)
+        except (ValueError,TypeError,KeyError):
+            raise DriverHeld('direct_source_policy_invalid') from None
+
     def _validate_job(self, job):
         submission = job['submission']
         from .reference_source_intake_canonical import (
