@@ -112,7 +112,7 @@ class _PreparedManifest:
 
 
 def receive(ledger, spool, manifest, item, *, expected_worker, engine_id,
-            coordinator_origin, gate_generation, object_id, reader, derived_ids=None, _prepared=None):
+            coordinator_origin, gate_generation, object_id, reader, derived_ids=None, _prepared=None, _readiness_pin=None):
     """Durably publish one object; no complete-source or Viewer ACK is issued."""
     item, sha, scratch_id = require_fenced(ledger, item, expected_worker=expected_worker)
     if _prepared is None:
@@ -127,7 +127,8 @@ def receive(ledger, spool, manifest, item, *, expected_worker, engine_id,
         raise ValueError('owned open source reader required')
     with NodeGate(engine_id) as gate:
         check_scope(ledger,spool,item,sha,scratch_id,gate,coordinator_origin=coordinator_origin,gate_generation=gate_generation)
-        pin = ledger.begin_direct_writer(scratch_id, scratch_settings(item, scratch_id))
+        pin = (ledger.begin_direct_writer(scratch_id, scratch_settings(item, scratch_id)) if _readiness_pin is None else
+               ledger._handover_direct_writer(scratch_id, scratch_settings(item, scratch_id), _readiness_pin))
         # On any exception, including a close failure or process death, retain
         # the pin. Inspection/recovery must prove the reader has retired.
         receipt, replay = spool.receive_object(job_id=item['jobId'], generation=item['generation'],

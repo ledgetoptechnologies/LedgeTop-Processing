@@ -423,6 +423,27 @@ class ScratchLedger:
             if db.execute('DELETE FROM direct_writer_pins WHERE id=? AND reservation=?',(pin,reservation_id)).rowcount!=1:
                 raise PolicyConflict('direct writer retirement uncertain')
 
+    def _handover_direct_writer(self, reservation_id, expected_settings, readiness_pin):
+        """Replace exact local readiness pin with reader pin without a gap.
+
+        Caller must hold and verify the exact NodeGate and authenticate the
+        handover. A crash after commit leaves the new pin held for inspection.
+        This private prototype does not authenticate or release readiness pins.
+        """
+        if (not isinstance(reservation_id,str) or not re.fullmatch(r'direct-[a-f0-9]{64}',reservation_id)
+                or type(readiness_pin) is not str or not re.fullmatch(r'[a-f0-9]{32}',readiness_pin)):
+            raise PolicyConflict('direct readiness identity required')
+        with self._transaction() as db:
+            row=self._reservation(db,reservation_id)
+            if (row['state']!='reserved' or row['allocated']!=0 or row['settings']!=_json(expected_settings)
+                    or not db.execute('SELECT 1 FROM transfer_fences WHERE reservation=?',(reservation_id,)).fetchone()):
+                raise PolicyConflict('direct scratch fence changed')
+            replacement=uuid.uuid4().hex
+            changed=db.execute('UPDATE direct_writer_pins SET id=? WHERE reservation=? AND id=?',
+                               (replacement,reservation_id,readiness_pin)).rowcount
+            if changed!=1:raise PolicyConflict('direct readiness pin changed')
+            return replacement
+
     def claim_engine_lease(self, reservation_id):
         """Before any gate or prepared commit: refuse a lapsed lease with nothing
         committed, else fence a live one so it cannot lapse before engine_started."""
