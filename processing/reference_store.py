@@ -671,6 +671,11 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             if row['source_state'] is not None and (row['source_state']!='accepted' or row['derived_state']!='accepted'):
                 raise Conflict("reference source custody is incomplete")
             submission = json.loads(row["input_json"])
+            # Future direct-intake records must not enter ordinary execution
+            # before a separately qualified worker-custody transition exists.
+            # V1/V2 do not carry this reserved marker and retain their behavior.
+            if 'directIntakeVersion' in submission:
+                return None
             candidate = self._candidate_row(db, node_id)
             if candidate is None or candidate["job_id"] != job_id:
                 return None
