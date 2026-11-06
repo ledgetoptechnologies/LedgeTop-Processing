@@ -117,7 +117,8 @@ class TwoNodeViewerPipelineTests(unittest.TestCase):
                     worker_instance_id='paired-instance-'+role) for role in queue.node_ids},
                 capability_fingerprint=fixture.CAPABILITY_FINGERPRINT,options_fingerprint=fixture.OPTIONS_FINGERPRINT,
                 allowed_odm_options={'numeric-probe'},result_proxy=proxy,viewer_receipt_keys=copy_keys,
-                source_spool=spool,source_attestation_keys=source_keys,authority_id=queue.authority_id)
+                source_spool=spool,source_attestation_keys=source_keys,authority_id=queue.authority_id,
+                source_bearer_principals={viewer_bearer:'viewer-production'})
             original_handle=api.handle
             blocked={'cluster':False,'attempts':0};copies={};cluster_delivery_requests=[]
             def faults(method,path,headers,body=b'',**kwargs):
