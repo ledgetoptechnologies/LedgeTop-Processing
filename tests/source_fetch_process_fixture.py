@@ -39,6 +39,7 @@ WORKER_TOKEN = 'synthetic-worker-token-012345'
 CLAIM_REQUEST = 'source-claim-process'
 GATE_ORIGIN = 'http://127.0.0.1:18080'
 ENGINE_LOG = 'engine-calls.log'
+ENGINE_SCRIPT = 'engine-script.json'
 
 
 class FileEngine(NativeEngine):
@@ -56,6 +57,11 @@ class FileEngine(NativeEngine):
         if name == self.die_during:
             os.kill(os.getpid(), signal.SIGKILL)
 
+    def script(self):
+        """A test's status and output, which outlive either process; empty means 20 and the usual output."""
+        path = self.log.parent / ENGINE_SCRIPT
+        return json.loads(path.read_text()) if path.exists() else {}
+
     def started(self):
         return self.log.exists() and 'initialize' in self.log.read_text().split()
 
@@ -71,7 +77,8 @@ class FileEngine(NativeEngine):
 
     def output_page(self, identifier, *, line, limit):
         """Output exists only once a commit was sent, like a task that really began."""
-        return (['synthetic output'] if 'commit' in self.log.read_text().split() else []), False
+        default = ['synthetic output'] if 'commit' in self.log.read_text().split() else []
+        return self.script().get('output', default), False
 
     def read(self, route, **_kwargs):
         if route == '/info':
@@ -83,7 +90,7 @@ class FileEngine(NativeEngine):
             return [{'uuid': job}] if self.started() else []
         if not self.started():
             raise OSError('synthetic missing task')
-        return {'uuid': job, 'status': {'code': 20}}
+        return {'uuid': job, 'status': {'code': self.script().get('code', 20)}}
 
 
 def coordinator(config):
@@ -148,10 +155,11 @@ def die_around_recovery(driver, moment):
 
     def request(method, suffix, payload=None, **kwargs):
         recovering = method == 'POST' and suffix.endswith('/recover')
-        if recovering and moment == 'before_post':
+        witnessing = method == 'POST' and suffix.endswith('/start-witness')
+        if (recovering and moment == 'before_post') or (witnessing and moment == 'before_witness_post'):
             os.kill(os.getpid(), signal.SIGKILL)
         reply = real(method, suffix, payload, **kwargs)
-        if recovering and moment == 'after_post':
+        if (recovering and moment == 'after_post') or (witnessing and moment == 'after_witness_post'):
             os.kill(os.getpid(), signal.SIGKILL)
         if moment == 'after_processing_phase' and suffix.endswith('/phase') and payload['phase'] == 'processing':
             os.kill(os.getpid(), signal.SIGKILL)
