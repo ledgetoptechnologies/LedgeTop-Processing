@@ -179,7 +179,12 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                     from processing.direct_worker_receipt_v2 import verify_retention_challenge
                     with self.assertRaises(Conflict):
                         handoff.challenge_retention('wrong-viewer-token-012345678901234',protected_transport=True)
-                    fresh=handoff.challenge_retention(token,protected_transport=True)
+                    from processing.direct_worker_http import _BoundedReader
+                    original_read=_BoundedReader.read
+                    def fragmented(reader,count=-1):
+                        return original_read(reader,min(count,7))
+                    with patch.object(_BoundedReader,'read',fragmented):
+                        fresh=handoff.challenge_retention(token,protected_transport=True)
                     self.assertFalse(fresh['sourceCustodyAccepted'])
                     self.assertFalse(fresh['processingAuthorized'])
                     with self.assertRaises(ReceiptRejected):

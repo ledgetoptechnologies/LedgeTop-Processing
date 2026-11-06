@@ -220,7 +220,12 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
                     if length != 64:
                         self._reply(400, {'error': 'invalid_challenge'}); return
                     body = _BoundedReader(self, length, time.monotonic()+self.server.body_deadline)
-                    challenge = body.read(length).decode('ascii')
+                    parts=[];remaining=length
+                    while remaining:
+                        part=body.read(remaining)
+                        if not part:raise ValueError('incomplete challenge')
+                        parts.append(part);remaining-=len(part)
+                    challenge = b''.join(parts).decode('ascii')
                     if not re.fullmatch('[0-9a-f]{64}',challenge):
                         self._reply(400, {'error': 'invalid_challenge'}); return
                     result = boundary.retention_challenge(headers,protected_transport=True,challenge=challenge)
