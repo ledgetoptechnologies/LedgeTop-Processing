@@ -19,6 +19,7 @@ from processing.direct_worker_boundary import DirectWorkerBoundary
 from processing.direct_worker_http import _BoundedReader, _HeaderDeadline, create_direct_worker_server
 from processing.direct_worker_receipt import WorkerClosureSigner
 from processing.reference_tls import verified_client_context
+from processing.scratch_policy import PolicyConflict
 from tests import test_direct_worker_receiver as fixture
 
 
@@ -202,6 +203,52 @@ class DirectWorkerHTTPTests(unittest.TestCase):
         self.assertTrue(all(not thread.is_alive() for thread in threads))
         self.assertEqual(result, [False])
         connection.close.assert_called_once()
+
+    def test_buffered_late_headers_never_reach_handler(self):
+        original = _HeaderDeadline.finish
+        def expired_after_parse(guard):
+            original(guard)  # retire the real watchdog without leaking a timer
+            return False
+        with patch.object(_HeaderDeadline, 'finish', expired_after_parse), \
+             patch.object(self.boundary, 'put', side_effect=AssertionError('late dispatch')) as put:
+            with self.assertRaises((http.client.RemoteDisconnected, OSError)):
+                self.request('PUT', '/direct/v1/objects/object-1', b'x',
+                             {**self.headers, 'Content-SHA256':'0'*64})
+        put.assert_not_called()
+
+    def test_drain_waits_for_pinned_reader_and_refuses_new_connections(self):
+        entered = threading.Event(); release = threading.Event(); outcome = []
+        original = self.f.spool.receive_object
+        def blocked(*args, **kwargs):
+            underlying = kwargs['reader']
+            class BlockingReader:
+                def read(self, count):
+                    entered.set()
+                    if not release.wait(3): raise TimeoutError('test timed out')
+                    return underlying.read(count)
+            kwargs['reader'] = BlockingReader()
+            return original(*args, **kwargs)
+        obj = self.f.manifest['objects'][0]
+        def upload():
+            try:
+                outcome.append(self.request('PUT', '/direct/v1/objects/'+obj['id'], self.f.data,
+                    {**self.headers, 'Content-SHA256':obj['sha256']}))
+            except Exception as error:
+                outcome.append(error)
+        with patch.object(self.f.spool, 'receive_object', side_effect=blocked):
+            thread = threading.Thread(target=upload); thread.start()
+            try:
+                self.assertTrue(entered.wait(3))
+                self.assertFalse(self.server.drain(0.05))
+                with self.assertRaisesRegex(PolicyConflict, 'active or uncertain'):
+                    self.f.ledger.settle_unstarted(self.f.observation['scratchReservationId'],transfer_ended=True)
+                with self.assertRaises((OSError, http.client.HTTPException)):
+                    self.request('POST', '/direct/v1/complete')
+            finally:
+                release.set(); thread.join(4)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcome[0][0], 200)
+        self.assertTrue(self.server.drain(3))
 
 
 if __name__ == '__main__': unittest.main()

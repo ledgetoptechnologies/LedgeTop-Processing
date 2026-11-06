@@ -14,9 +14,12 @@ Viewer acceptance and processing.
 
 The listener limits concurrent connections, object length, idle time, an
 absolute TLS-handshake-and-header deadline, and the body read deadline. It has
-no installed configuration, credential provisioning,
-authenticated reservation creation, safe uncertain-pin recovery, coordinated
-shutdown/drain, or verified public response contract. Do not deploy it until
+no installed configuration, credential provisioning, authenticated reservation
+creation, safe uncertain-pin recovery, coordinated restart, or verified public
+response contract. Its in-process `drain(timeout)` blocks new connections and
+waits for accepted connections without interrupting their readers; timeout
+returns false and leaves drain enabled. Successful drain is not proof that
+previously uncertain pins have been reconciled or restart is safe. Do not deploy it until
 those contracts and real multi-process/worker failure paths are qualified.
 TLS certificate and bearer management stay with the eventual trusted runtime.
 The tests use a temporary loopback TLS server, a synthetic worker, tmpfs and

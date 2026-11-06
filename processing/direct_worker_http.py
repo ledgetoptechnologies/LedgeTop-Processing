@@ -146,6 +146,12 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
 
         def _dispatch(self):
             try:
+                # Serialize admission with drain. A request already admitted
+                # may finish; one not yet admitted cannot begin after drain.
+                with self.server._activity:
+                    draining = self.server._draining
+                if draining:
+                    self._reply(503, {'error': 'worker_draining'}); return
                 if not isinstance(self.connection, ssl.SSLSocket) or self.connection.cipher() is None:
                     self._reply(403, {'error': 'tls_required'}); return
                 if self.headers.get_all('Transfer-Encoding') or self.headers.get_all('Expect'):
@@ -192,7 +198,28 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
             self.max_object_bytes = max_object_bytes
             self._local = threading.local()
             self._slots = threading.BoundedSemaphore(max_connections)
+            self._activity = threading.Condition()
+            self._draining = False
+            self._active_connections = 0
             super().__init__((host, port), Handler)
+
+        def drain(self, timeout):
+            """Refuse new operations and wait without stopping existing readers.
+
+            A false result leaves drain enabled and means shutdown is unsafe;
+            this method never closes an active request or releases a writer pin.
+            """
+            if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 <= timeout <= 3600:
+                raise ValueError('bounded drain timeout required')
+            deadline = time.monotonic() + timeout
+            with self._activity:
+                self._draining = True
+                while self._active_connections:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    self._activity.wait(remaining)
+                return True
 
         def get_request(self):
             connection, address = self.socket.accept()
@@ -200,13 +227,20 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
             return connection, address
 
         def process_request(self, request, client_address):
-            if not self._slots.acquire(blocking=False):
+            with self._activity:
+                accepted = not self._draining and self._slots.acquire(blocking=False)
+                if accepted:
+                    self._active_connections += 1
+            if not accepted:
                 self.shutdown_request(request)
                 return
             try:
                 super().process_request(request, client_address)
             except BaseException:
-                self._slots.release()
+                with self._activity:
+                    self._active_connections -= 1
+                    self._slots.release()
+                    self._activity.notify_all()
                 raise
 
         def process_request_thread(self, request, client_address):
@@ -226,7 +260,10 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
                 if deadline is not None:
                     deadline.finish()
                 self.shutdown_request(wrapped if wrapped is not None else request)
-                self._slots.release()
+                with self._activity:
+                    self._active_connections -= 1
+                    self._slots.release()
+                    self._activity.notify_all()
 
         def handle_error(self, *_):
             pass
