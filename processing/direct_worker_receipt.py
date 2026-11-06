@@ -22,6 +22,8 @@ def validate_closure(value):
     try:
         if type(value) is not dict or (set(value)!=CLOSURE_FIELDS and set(value)!=CLOSURE_FIELDS | {'limitProfile'}):
             raise ValueError()
+        if 'limitProfile' in value and value['limitProfile'] != direct_limits.PROFILE:
+            raise ValueError()
         if (type(value['protocol']) is not str or value['protocol']!='ltds-direct-local-closure-v1'
                 or value['localClosureComplete'] is not True
                 or value['sourceCustodyAccepted'] is not False

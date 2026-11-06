@@ -47,6 +47,12 @@ class DirectProfileTests(unittest.TestCase):
         self.assertEqual(receipt.verify(signed,expected_closure=closure,issuer_id='test',key_id='test',public_key=key.public_key()),signed)
         changed=copy.deepcopy(closure);del changed['limitProfile']
         with self.assertRaises(receipt.ReceiptRejected):receipt.validate_closure(changed)
+        for invalid in (None,True,'unknown'):
+            changed=copy.deepcopy(closure);changed['limitProfile']=invalid
+            with self.assertRaises(receipt.ReceiptRejected):signer.issue(changed)
+            malformed=copy.deepcopy(signed);malformed['closure']['limitProfile']=invalid
+            with self.assertRaises(receipt.ReceiptRejected):receipt.verify(malformed,expected_closure=closure,
+                issuer_id='test',key_id='test',public_key=key.public_key())
 
     def test_unknown_profile_and_overlarge_metadata_rejected(self):
         with self.assertRaises(ValueError):limits.counts('unknown',1,0)
