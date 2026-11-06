@@ -121,6 +121,7 @@ class DirectWorkerSender:
             cert, _ = _file(client_cert_file, private=False)
             key, _ = _file(client_key_file, private=True)
             context.load_cert_chain(str(cert), str(key))
+        self._client_identity_configured = client_cert_file is not None
         if context.verify_mode!=ssl.CERT_REQUIRED or not context.check_hostname:raise ValueError('verified TLS required')
         self._context,self._host,self._port=context,parsed.hostname,port
         self._address=address

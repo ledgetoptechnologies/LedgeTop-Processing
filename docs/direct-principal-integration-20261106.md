@@ -57,6 +57,9 @@ The opt-in direct listener can require a pinned client certificate, but its
 mapped principal is now bound to a pre-enrolled reservation in the candidate.
 The merged synthetic check ran 140 tests with six older-code fixture skips,
 including actual loopback mTLS reservation and transfer. The bearer alone is
-not an installed coordinator identity. Coordinator-side grant submission,
-dynamic worker enrollment, credential provisioning, live recovery and the
-public Viewer route remain unwired; no installed behavior is established.
+not an installed coordinator identity. A candidate coordinator sender now
+submits the reservation over mutual TLS and retries the same durable operation
+after an uncertain response; this is not custody acceptance. A combined
+synthetic run passed 96 tests with three fixture skips. Dynamic worker
+enrollment, credential provisioning, actual runtime wiring, process-death
+recovery and the public Viewer route remain unfinished.

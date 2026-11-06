@@ -88,6 +88,30 @@ class DirectWorkerSenderV2(DirectWorkerSender):
             if guard is not None:guard.finish()
             if connection is not None:connection.close()
 
+    def authorize_reservation(self,operation_id):
+        """Replay the exact reservation grant; this never acknowledges custody."""
+        p._uuid(operation_id,'operation')
+        if not self._client_identity_configured:
+            raise ValueError('coordinator client certificate required')
+        body=p.canonical_json(dict(operationId=operation_id,item=self._item))
+        if len(body)>8192:raise ValueError('reservation grant exceeds body limit')
+        deadline=time.monotonic()+self._total;connection=guard=None
+        try:
+            connection,guard=self._connect(deadline)
+            connection.request('POST','/direct/v2/reservation',body=body,headers=self._headers())
+            result=self._response(connection,deadline)
+            expected=dict(reservationId=self._item['reservationId'],operationId=operation_id,
+                sourceCustodyAccepted=False,transferComplete=False,processingAuthorized=False)
+            if p.canonical_json(result)!=p.canonical_json(expected):
+                raise DirectDeliveryUncertain('worker grant acknowledgement changed')
+            if not guard.finish():raise DirectDeliveryUncertain('worker grant outcome uncertain')
+            return result
+        except DirectDeliveryUncertain:raise
+        except Exception:raise DirectDeliveryUncertain('worker grant outcome uncertain') from None
+        finally:
+            if guard is not None:guard.finish()
+            if connection is not None:connection.close()
+
     def _expected_closure(self):
         item=self._item
         return dict(protocol='ltds-direct-local-closure-v2',reservationId=item['reservationId'],
