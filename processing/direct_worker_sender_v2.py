@@ -118,6 +118,24 @@ class DirectWorkerSenderV2(DirectWorkerSender):
             if guard is not None:guard.finish()
             if connection is not None:connection.close()
 
+    def observe_retention(self, signed_closure):
+        """Verify the worker's local ledger fence, not Viewer custody."""
+        from .direct_worker_receipt_v2 import verify_retention
+        deadline=time.monotonic()+self._total;connection=guard=None
+        try:
+            connection,guard=self._connect(deadline)
+            connection.request('GET','/direct/v2/retention',headers={**self._headers(),'Content-Length':'0'})
+            result=self._response(connection,deadline)
+            checked=verify_retention(result,signed_closure=signed_closure,expected_closure=self._expected_closure(),
+                issuer_id=self._issuer,key_id=self._key,public_key=self._public)
+            if not guard.finish():raise DirectDeliveryUncertain('V2 retention outcome uncertain')
+            return checked
+        except DirectDeliveryUncertain:raise
+        except Exception:raise DirectDeliveryUncertain('V2 retention outcome uncertain') from None
+        finally:
+            if guard is not None:guard.finish()
+            if connection is not None:connection.close()
+
     def observe(self,object_id):
         """Retrieve exact durable worker observation; absence is not a negative ACK."""
         obj=self._inventory.object(object_id,reservation_binding=self._reservation)

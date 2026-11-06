@@ -178,6 +178,9 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
                 if version == 'v2' and self.command == 'GET' and match and length == 0:
                     result = boundary.observe(headers, protected_transport=True, object_id=match[1])
                     self._reply(200, result); return
+                if version == 'v2' and self.command == 'GET' and self.path == '/direct/v2/retention' and length == 0:
+                    result = boundary.retention(headers, protected_transport=True)
+                    self._reply(200, result); return
                 if self.command == 'POST' and self.path == '/direct/' + version + '/complete' and length == 0:
                     result = boundary.complete(headers, protected_transport=True)
                     self._reply(200, result); return

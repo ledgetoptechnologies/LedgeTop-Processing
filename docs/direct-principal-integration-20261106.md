@@ -33,3 +33,10 @@ readiness and writes after the custody fence. A 53-test isolated check passed
 with three old-code fixture skips. Reconciliation now holds jobs containing
 uncertain partials instead of automatically adopting or deleting those files;
 operator-safe recovery and cross-process spool confinement remain unfinished.
+
+The synthetic HTTPS worker and coordinator can now exchange and journal a
+signed local-retention observation. This is historical evidence of what the
+worker observed, not proof of current reachability, filesystem isolation,
+survival of disk rollback, Viewer custody acceptance, or processing approval.
+The merged observation and spool-fence check ran 54 tests with three skipped
+old-code fixtures. Journal corruption and old-writer handling require review.

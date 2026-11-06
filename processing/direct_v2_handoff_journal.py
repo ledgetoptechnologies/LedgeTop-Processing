@@ -32,6 +32,8 @@ def check_schema(db):
 
 
 def metadata_bytes(db):
+    from .direct_v2_retention_journal import validate as validate_retention
+    validate_retention(db)
     columns={row['name'] for row in db.execute('PRAGMA table_info(coordinator_identity)')}
     version=0 if 'direct_v2_handoff_version' not in columns else db.execute(
         'SELECT direct_v2_handoff_version FROM coordinator_identity WHERE singleton=1').fetchone()[0]
@@ -186,6 +188,29 @@ class DirectV2Handoff:
                                    (wire,self.item['reservationId'])).rowcount
                 if changed!=1:raise Conflict('V2 closure outcome uncertain')
             return result
+
+    def observe_retention(self,token,*,protected_transport):
+        """Persist/replay signed local evidence; never a Viewer custody ACK."""
+        from .direct_v2_retention_journal import ensure,save
+        self._auth(token,protected_transport)
+        with self.queue.coordinator_operation('source-io'):
+            with self.queue._db() as db:
+                db.execute('BEGIN IMMEDIATE');self._check(db);ensure(db)
+                row=db.execute('SELECT state,closure FROM direct_v2_handoff_sessions WHERE reservation=?',
+                               (self.item['reservationId'],)).fetchone()
+                if row is None or row['state']!='closure_observed' or row['closure'] is None:
+                    raise Conflict('V2 closure not durably observed')
+                signed=json.loads(row['closure'])
+                prior=db.execute('SELECT observation FROM direct_v2_retention_observations WHERE reservation=?',
+                                 (self.item['reservationId'],)).fetchone()
+                if prior is not None:
+                    return save(db,reservation=self.item['reservationId'],signed_closure=signed,
+                                observation=json.loads(prior['observation']),sender=self.sender)
+            observed=self.sender.observe_retention(signed)
+            with self.queue._db() as db:
+                db.execute('BEGIN IMMEDIATE');self._check(db)
+                return save(db,reservation=self.item['reservationId'],signed_closure=signed,
+                            observation=observed,sender=self.sender)
 
     def reconcile_object(self,token,*,protected_transport,object_id):
         """Recover exact durable observation, never infer absence or reupload."""
