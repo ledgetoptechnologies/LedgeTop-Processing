@@ -74,10 +74,16 @@ class FixtureProfileTests(unittest.TestCase):
 @unittest.skipUnless(os.name == 'posix', 'actual Linux readonly worker source')
 class ActualWorkerFixtureTests(unittest.TestCase):
     def test_normal_factory_tls_readiness_is_bound_and_stable(self):
-        operation,authority=str(uuid.uuid4()),str(uuid.uuid4())
+        layout_path=os.environ.get('LTDS_QUALIFICATION_WORKER_LAYOUT')
+        if not layout_path:self.skipTest('explicit readonly versioned layout required; no old thread fixture fallback')
+        from ops.qualify_enrolled_worker_preparation import load_layout
+        raw=json.loads(Path(layout_path).read_bytes());operation=raw['operationId'];authority=str(uuid.uuid4())
+        layout=load_layout(layout_path,operation,source_commit=os.environ['LTDS_QUALIFICATION_SOURCE_COMMIT'],
+            candidate_image=raw['candidateImageId'],expected_sha256=os.environ['LTDS_QUALIFICATION_WORKER_LAYOUT_SHA256'])
         material=q.configuration_material(operation,authority)
         with tempfile.TemporaryDirectory() as temporary:
-            with q.LocalWorkerReadinessFixtures(Path(temporary)/'workers',material,authority) as workers:
+            with q.LocalWorkerReadinessFixtures(Path(temporary)/'workers',material,authority,layout=layout,
+                    controller_id=os.environ['LTDS_QUALIFICATION_CONTROLLER_ID']) as workers:
                 planned=workers.manifests()
                 first=workers.ready(planned);second=workers.ready(planned)
                 self.assertEqual(first,second)
@@ -91,7 +97,7 @@ class ActualWorkerFixtureTests(unittest.TestCase):
                 # must control the live TLS readiness response.
                 import sqlite3
                 instance=workers.instances[0]
-                with sqlite3.connect(instance['root']/'state'/'driver.sqlite') as db:
+                with sqlite3.connect(Path(instance['config']['stateRoot'])/'driver.sqlite') as db:
                     db.execute("UPDATE driver_engine_pin SET pin='wrong-fixture-pin'")
                 with self.assertRaises(RuntimeError):workers.ready()
 

@@ -188,7 +188,7 @@ def capture_failure(docker, root, operation_id, *, driver=None, plan=None):
 
 def fixture_bundle(root, *, operation_id, authority_id, old, candidate_image,
                    candidate_source, state_volume, config_source, lease_source,
-                   spool_volume, physical, material, source_root, cli_sha, daemon_id, workers):
+                   spool_volume, physical, material, source_root, cli_sha, daemon_id, workers,worker_reviews):
     """Bind files/config/source independently, before candidate constructors.
 
     All qualification receipts explicitly describe this synthetic fixture; they
@@ -241,10 +241,11 @@ def fixture_bundle(root, *, operation_id, authority_id, old, candidate_image,
         if role!='holder':files[role+'Config']=dict(path=config_source+'/'+directory+'/'+role+'.json',
             containerPath='/run/processing-reference/'+role+'.json',sha256=hashlib.sha256(configs[role]).hexdigest())
     gates={};qualifications={}
-    for name in ('nasQualificationSha256','pilotClosureSha256','legacyDeliverySha256','workerQualificationSha256'):
+    for name in ('nasQualificationSha256','pilotClosureSha256','legacyDeliverySha256'):
         qualifications[name]=private_write(root/(name+'.json'),t.canonical(dict(schemaVersion=1,
             fixtureOnly=True,installedQualified=False,operationId=operation_id,kind=name)))
         gates[name]=qualifications[name]['sha256']
+    qualifications['workerQualificationSha256']=None;gates['workerQualificationSha256']=None
     target=dict(imageId=candidate_image,sourceCommit=candidate_source,
         bootstrapRecipeSha256=t.digest(recipes['bootstrap']),finalRecipeSha256=t.digest(recipes['final']),
         bootstrapConfigSha256=files['bootstrapConfig']['sha256'],finalConfigSha256=files['finalConfig']['sha256'],
@@ -268,12 +269,18 @@ def fixture_bundle(root, *, operation_id, authority_id, old, candidate_image,
             for name in MODULE_NAMES},budgets=dict(maxArtifactBytes=16*1024**2,maxBackupBytes=64*1024**2,
             maxMetadataBytes=4*1024**2,maxSeconds=120,safetyFloorBytes=64*1024**2),nodeEndpoints=endpoints,
         workers=workers,qualifications=qualifications)
+    from .worker_prestart_review import compose
+    raw=compose(value,plan,worker_reviews)
+    retained=private_write(root/'worker-prestart-review.json',raw)
+    qualifications['workerQualificationSha256']={key:retained[key] for key in ('path','sha256')}
+    gates['workerQualificationSha256']=retained['sha256']
     plan['bindings']['deploymentSha256']=t.digest(value)
     deployment.validate_bundle(value,plan)
     return plan,value
 
 
-def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operation_id, cli_sha, *, rollback=False):
+def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operation_id, cli_sha, *, rollback=False,
+            worker_layout=None,worker_layout_sha256=None,worker_source_commit=None):
     """Run the production phase journal on NEW labeled resources only."""
     import importlib.util
     from . import enrolled_coordinator_transport as t
@@ -281,6 +288,11 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
     from .enrolled_coordinator_boundary import BoundaryProbe
     from .qualify_enrolled_docker_transport import QualificationDocker,cleanup_owned,initialize_fixture
     from .qualify_enrolled_holder_transport import owned_volume,verify_desktop_cli
+    from .qualify_enrolled_worker_preparation import load_layout
+    require(worker_layout is not None and worker_layout_sha256 is not None and worker_source_commit is not None,
+            'prepared_worker_layout_required')
+    layout=load_layout(worker_layout,operation_id,source_commit=worker_source_commit,candidate_image=candidate_image,
+                       expected_sha256=worker_layout_sha256)
     docker=QualificationDocker();volumes=[];events=[];result=None
     driver=plan=None;failed=False
     verify_desktop_cli(docker.binary,cli_sha)
@@ -310,7 +322,7 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
     material=configuration_material(operation_id,authority,worker_host)
     workers=None
     try:
-        workers=LocalWorkerReadinessFixtures(root/'workers',material,authority).__enter__()
+        workers=LocalWorkerReadinessFixtures(root/'workers',material,authority,layout=layout,controller_id=controller['Id']).__enter__()
         refresh_configuration_seed(material,operation_id)
         owned={}
         for role,value in names.items():
@@ -370,7 +382,7 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
                     candidate_image=candidate_image,candidate_source=candidate_source,state_volume=names['state'],
                     config_source=config_source,lease_source=external,spool_volume=names['spool'],physical=physical,
                     material=material,source_root=source_root,cli_sha=cli_sha,daemon_id=daemon_id,
-                    workers=workers.manifests())
+                    workers=workers.manifests(),worker_reviews=workers.review_entries())
                 # Preserve authoritative reviewed inputs before the journal can
                 # dispatch. A failed diagnostic never reconstructs them from
                 # candidate rows or replaces the original expected window.
@@ -474,6 +486,9 @@ def main(argv=None):
     parser.add_argument('--daemon',required=True);parser.add_argument('--artifact-root',required=True)
     parser.add_argument('--operation',required=True);parser.add_argument('--cli-sha256',required=True)
     parser.add_argument('--rollback',action='store_true')
+    parser.add_argument('--worker-layout',required=True,help='Private descriptor from the owned readonly layout seed; never an installed receipt.')
+    parser.add_argument('--worker-layout-sha256',required=True)
+    parser.add_argument('--worker-source-commit',required=True,help='Separately reviewed worker/controller source revision, distinct from packaged app image.')
     parser.add_argument('--outer-seconds',type=int,default=900,
         help='Qualification-only alarm,1..900 seconds; never changes application/command timeouts.')
     args=parser.parse_args(argv)
@@ -485,7 +500,8 @@ def main(argv=None):
     signal.signal(signal.SIGALRM,deadline);signal.alarm(args.outer_seconds)
     try:
         qualify(args.candidate_image,args.candidate_source,args.daemon,args.artifact_root,args.operation,args.cli_sha256,
-                rollback=args.rollback)
+                rollback=args.rollback,worker_layout=args.worker_layout,worker_layout_sha256=args.worker_layout_sha256,
+                worker_source_commit=args.worker_source_commit)
     finally:
         signal.alarm(0);signal.signal(signal.SIGALRM,previous)
 
@@ -502,23 +518,30 @@ def configuration_material(operation_id, authority_id, worker_host='127.0.0.1'):
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import rsa, ed25519
-    from cryptography.x509.oid import NameOID
+    from cryptography.x509.oid import NameOID,ExtendedKeyUsageOID
     for value in (operation_id, authority_id):
         require(str(uuid.UUID(value)) == value, 'canonical_fixture_identity_required')
     worker_ip=ipaddress.ip_address(worker_host)
     require(worker_ip.is_private and not worker_ip.is_unspecified, 'private_fixture_worker_address_required')
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'localhost')])
+    ca = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number()).not_valid_before(datetime.now(timezone.utc)-timedelta(minutes=1))
+        .not_valid_after(datetime.now(timezone.utc)+timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True,path_length=None),critical=True).sign(ca_key,hashes.SHA256()))
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
         .serial_number(x509.random_serial_number()).not_valid_before(datetime.now(timezone.utc)-timedelta(minutes=1))
         .not_valid_after(datetime.now(timezone.utc)+timedelta(days=1))
         .add_extension(x509.SubjectAlternativeName([x509.DNSName('localhost'),
             x509.IPAddress(ipaddress.ip_address('127.0.0.1')),x509.IPAddress(worker_ip)]), critical=False)
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .sign(key, hashes.SHA256()))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),critical=False)
+        .sign(ca_key, hashes.SHA256()))
     pem_key = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                serialization.NoEncryption())
     pem_cert = cert.public_bytes(serialization.Encoding.PEM)
+    pem_ca = ca.public_bytes(serialization.Encoding.PEM)
     public = ed25519.Ed25519PrivateKey.generate().public_key().public_bytes(
         serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode()
     credentials = {name:'synthetic-phase-'+name.lower()+'-'+secrets.token_hex(24) for name in
@@ -530,7 +553,7 @@ def configuration_material(operation_id, authority_id, worker_host='127.0.0.1'):
         for index,node in enumerate(('cluster','main'))}
     common = dict(schemaVersion=2,listener=dict(host='0.0.0.0',port=8443,
         certificate='/run/phase-tls/fixture-cert.pem',
-        privateKey='/run/phase-tls/fixture-key.pem',clientCA='/run/phase-tls/fixture-cert.pem'),
+        privateKey='/run/phase-tls/fixture-key.pem',clientCA='/run/phase-tls/fixture-ca.pem'),
         # Native compatibility credentials must be preserved, but the V2
         # runtime deliberately rejects reusing any legacy credential.
         viewerBearers={environment:'synthetic-v2-viewer-'+environment+'-'+secrets.token_hex(24)
@@ -550,7 +573,7 @@ def configuration_material(operation_id, authority_id, worker_host='127.0.0.1'):
     encode = lambda value: json.dumps(value,sort_keys=True,separators=(',',':')).encode()
     directory = 'first-cutover-'+operation_id
     files = {directory+'/bootstrap.json':encode(common),directory+'/final.json':encode(final),
-             'fixture-key.pem':pem_key,'fixture-cert.pem':pem_cert}
+             'fixture-key.pem':pem_key,'fixture-cert.pem':pem_cert,'fixture-ca.pem':pem_ca}
     packet = {name:base64.b64encode(raw).decode() for name,raw in files.items()}
     config_seed = ('import base64,json,os,pathlib\nroot=pathlib.Path("/prototype-state")\n'
         'assert os.getuid()==os.getgid()==10001 and next(root.iterdir(),None) is None\n'
@@ -590,146 +613,77 @@ def refresh_configuration_seed(material,operation_id):
 
 
 class LocalWorkerReadinessFixtures:
-    """Actual factory/TLS/pins/readers; synthetic engine and coordinator I/O.
+    """Real completed preparation + per-home factory children, not installation.
 
-    This replaces only the driver-to-systemd/SSH transport in the Desktop
-    qualification. It never claims connected SSH, physical host ownership,
-    NodeODM processing, or the installed worker configuration.
+    The required externally seeded readonly version layout is never synthesized
+    by patching installer policy. No thread worker or opaque review fallback.
     """
-    def __init__(self, root, material, authority_id):
-        self.root = Path(root); self.material = material; self.authority = authority_id
-        self.instances = []; self.previous_state_home = os.environ.get('XDG_STATE_HOME')
+    def __init__(self,root,material,authority_id,*,layout,controller_id):
+        self.root=Path(root);self.material=material;self.authority=authority_id
+        self.layout=layout;self.controller_id=controller_id;self.instances=[]
 
     def __enter__(self):
-        from . import reference_worker_daemon as daemon
-        from .native_node_fixture import NativeNodeFixture
-        from .node_ingress import save
-        from processing.node_gate import NodeGate
-        from processing.reference_worker_readiness import source_digest
+        from .native_node_fixture import NativeNodeFixture,OPTIONS
+        from .qualify_enrolled_worker_preparation import prepare_node,spawn_worker
         self.root.mkdir(mode=0o700)
-        os.environ['XDG_STATE_HOME'] = str(self.root/'node-gates')
         try:
             for node in ('cluster','main'):
-                root = self.root/node; root.mkdir(mode=0o700)
-                for name in ('fixture-key.pem','fixture-cert.pem'):
-                    target=root/name;target.write_bytes(self.material['configurationFiles'][name]);target.chmod(0o600)
+                root=self.root/node
+                native_root=self.root/(node+'-native');native_root.mkdir(mode=0o700)
                 class CatalogNativeFixture(NativeNodeFixture):
                     def _dispatch(self,method,path,headers,body):
                         if method=='GET' and path=='/options':return 200,self.fixture_options,False
                         status,value,extra=super()._dispatch(method,path,headers,body)
                         if method=='GET' and path=='/info':value=dict(value,maxImages=self.fixture_max)
                         return status,value,extra
-                backend=CatalogNativeFixture(root/'native.sqlite',engine_version='3.8.5',synthetic_enabled=True)
-                from .native_node_fixture import OPTIONS
+                backend=CatalogNativeFixture(native_root/'native.sqlite',engine_version='3.8.5',synthetic_enabled=True)
                 backend.fixture_options=[dict(value) for value in OPTIONS]+[dict(name=name,type='bool',value=False)
                     for name in ('pc-ept','gltf','3d-tiles')]
-                backend.fixture_max=1000 if node=='cluster' else None
-                backend.start()
-                instance=dict(node=node,root=root,backend=backend,thread=None,stop=None,server=None)
-                self.instances.append(instance)
-                with socket.socket() as probe:
-                    probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
-                source=Path(__file__).resolve().parents[1]
-                engine='fixture-engine-'+node
-                with NodeGate(engine) as gate:
-                    gate.provision(node,'http://127.0.0.1:8080',self.authority)
-                worker=self.material['bootstrap']['workers'][node]
-                config=dict(schemaVersion=1,stateRoot=str(root/'state'),scratchRoot=str(root/'scratch'),
-                    nodeId=node,workerId=worker['workerId'],workerInstanceId=worker['instanceId'],
-                    authorityId=self.authority,engineId=engine,gateGeneration=1,
-                    gateCoordinatorOrigin='http://127.0.0.1:8080',
-                    coordinatorOrigin='https://coordinator.invalid',brokerOrigin='https://broker.invalid',
-                    engineOrigin=backend.origin,engineToken='',workerBearer=worker['bearer'],
-                    resultReadBearer=worker['resultBearer'],caFile=str(root/'fixture-cert.pem'),
-                    serverCertFile=str(root/'fixture-cert.pem'),serverKeyFile=str(root/'fixture-key.pem'),
-                    listenHost='0.0.0.0',listenPort=port,outputBudget=1048576,safetyFloor=0,
-                    transferTtl=600,cleanupGrace=3600,pollSeconds=0.1,engineVersion='3.8.5',shareResults=True,
-                    maintenanceReadiness=dict(schemaVersion=1,bearer='synthetic-readiness-'+secrets.token_hex(24),
-                        sourceRoot=str(source),sourceSha256=source_digest(source),activation=None))
-                path=root/'worker.json';save(path,config)
-                worker['resultOrigin']='https://'+self.material['workerHost']+':'+str(port)
-                driver,server=daemon.build_worker(daemon.load_config(str(path)))
-                instance['server']=server
-                driver.worker.engine_probe=lambda deadline, engine=engine:engine
-                authority=self.authority
-                def request(method,route,payload=None,**kwargs):
-                    if route=='/authority':return 200,dict(authorityId=authority)
-                    if route=='/next':return 200,dict(job=None)
-                    raise RuntimeError('unexpected_fixture_worker_route')
-                driver._request=request
-                stop=threading.Event();service=daemon.WorkerService(driver,server,poll_seconds=0.1)
-                thread=threading.Thread(target=service.run,args=(stop,),name='phase-worker-'+node)
-                unit=root/'fixture-worker.service'
-                unit.write_bytes(b'# Explicit qualification thread process-control seam; never loaded by systemd.\n')
-                unit.chmod(0o600)
-                manifest=dict(nodeId=node,sshHost='127.0.0.1',sshUid=os.geteuid(),
-                    settings=dict(schemaVersion=1,unitName='fixture-'+node+'.service',unitFile=str(unit),
-                        unitSha256=hashlib.sha256(unit.read_bytes()).hexdigest(),pythonExecutable=sys.executable,
-                        configPath=str(path),sourceRoot=str(source),sourceSha256=config['maintenanceReadiness']['sourceSha256'],
-                        readinessOrigin=worker['resultOrigin'],readinessCAFile=config['caFile']),
-                    expected=dict(nodeId=node,workerId=config['workerId'],workerInstanceId=config['workerInstanceId'],
-                        authorityId=self.authority,engineId=engine,gateGeneration=1,engineVersion=config['engineVersion'],
-                        configSha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                        sourceSha256=config['maintenanceReadiness']['sourceSha256'],activation=None))
-                instance.update(stop=stop,thread=thread,service=service,path=path,config=config,port=port,manifest=manifest)
-                thread.start()
+                backend.fixture_max=1000 if node=='cluster' else None;backend.start()
+                instance=dict(node=node,backend=backend,process=None);self.instances.append(instance)
+                with socket.socket() as probe:probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
+                instance.update(root=root,port=port)
+                self.material['bootstrap']['workers'][node]['resultOrigin']='https://'+self.material['workerHost']+':'+str(port)
+            # All actual endpoints exist in the final runtime BEFORE either
+            # composer runs. Both preparations complete before any factory.
+            for instance in self.instances:
+                node=instance['node']
+                instance.update(prepare_node(instance['root'],self.material,node,self.authority,self.layout,
+                    port=instance['port'],backend=instance['backend'],controller_id=self.controller_id))
+            for instance in self.instances:
+                spawn_worker(instance,self.authority)
             return self
         except BaseException:
-            self.__exit__(None,None,None)
-            raise
+            self.__exit__(None,None,None);raise
 
     def manifests(self):
         from .enrolled_coordinator_transport import canonical,decode
         return decode(canonical([instance['manifest'] for instance in self.instances]))
 
-    def ready(self, planned_workers=None):
-        import time
-        from urllib.error import HTTPError
-        from .enrolled_worker_readiness_probe import probe
+    def review_entries(self):
+        from .enrolled_coordinator_transport import canonical,decode
+        return decode(canonical([instance['review'] for instance in self.instances]))
+
+    def ready(self,planned_workers=None):
+        from .qualify_enrolled_worker_preparation import readiness
         planned=self.manifests() if planned_workers is None else planned_workers
         require(type(planned) is list and len(planned)==2 and
-                [item['nodeId'] for item in planned]==['cluster','main'], 'complete_planned_worker_inventory_required')
+                [entry['nodeId'] for entry in planned]==['cluster','main'],'complete_planned_worker_inventory_required')
         result=[]
         for instance,manifest in zip(self.instances,planned):
-            # Pin the entire manifest before any TLS request. A valid but
-            # unplanned second worker may never substitute for this slot.
-            require(manifest==instance['manifest'],'planned_worker_fixture_changed')
-            class LocalControl:
-                def probe(self):
-                    active=instance['thread'].is_alive()
-                    return dict(pid=os.getpid() if active else 0,active='active' if active else 'inactive',
-                        substate='running' if active else 'dead',cgroup='/fixture-thread/'+instance['node'],
-                        invocationId=instance['node'],startTime=Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19])
-            deadline=time.monotonic()+10
-            while True:
-                try:
-                    packet=probe(manifest,str(uuid.uuid4()),control=LocalControl())
-                    break
-                except HTTPError as error:
-                    code=error.code;error.close()
-                    if code==503 and time.monotonic()<deadline:
-                        time.sleep(0.02);continue
-                    require(False,'actual_fixture_worker_unready')
-            value=packet['readiness'];stamp=packet['process']['startTime']
-            result.append(dict(nodeId=instance['node'],configSha256=value['configSha256'],
-                sourceSha256=value['sourceSha256'],engineVersion=value['engineVersion'],
-                instanceId=value['workerInstanceId'],bootId=value['bootId'],pid=value['pid'],startTime=stamp,
-                driverBindingSha256=value['driverBindingSha256'],loadedSourceSha256=value['loadedSourceSha256'],
+            packet=readiness(instance,manifest);value=packet['readiness'];stamp=packet['process']['startTime']
+            result.append(dict(nodeId=instance['node'],configSha256=value['configSha256'],sourceSha256=value['sourceSha256'],
+                engineVersion=value['engineVersion'],instanceId=value['workerInstanceId'],bootId=value['bootId'],pid=value['pid'],
+                startTime=stamp,driverBindingSha256=value['driverBindingSha256'],loadedSourceSha256=value['loadedSourceSha256'],
                 optionsSha256=value['optionsSha256'],safeOptionsSha256=value['safeOptionsSha256']))
-        require(len(result)==2,'complete_fixture_worker_inventory_required')
         return result
 
-    def __exit__(self, *_):
+    def __exit__(self,*_):
+        from .qualify_enrolled_worker_preparation import stop_worker
+        # A failed child closure prevents backend/resource retirement and is
+        # propagated to the outer capture path. No SIGKILL or fallback cleanup.
         for instance in reversed(self.instances):
-            if instance.get('stop') is not None:instance['stop'].set()
-            if instance.get('thread') is not None:
-                instance['thread'].join(10)
-                require(not instance['thread'].is_alive(),'task_worker_thread_drain_uncertain')
-            elif instance.get('server') is not None:
-                instance['server'].server_close()
-            instance['backend'].close()
-        if self.previous_state_home is None:os.environ.pop('XDG_STATE_HOME',None)
-        else:os.environ['XDG_STATE_HOME']=self.previous_state_home
+            stop_worker(instance);instance['backend'].close()
 
 
 @contextmanager

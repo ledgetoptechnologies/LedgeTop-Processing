@@ -21,7 +21,7 @@ class PhaseConfigurationValidationTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory(dir='/tmp');self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name);self.root.chmod(0o700)
         self.material=configuration_material(str(uuid.uuid4()),str(uuid.uuid4()))
-        for name in ('fixture-key.pem','fixture-cert.pem'):
+        for name in ('fixture-key.pem','fixture-cert.pem','fixture-ca.pem'):
             path=self.root/name;path.write_bytes(self.material['configurationFiles'][name]);path.chmod(0o600)
         marker_name='.phase-config-'+uuid.uuid4().hex
         self.marker=Path('/tmp')/marker_name;self.marker.write_bytes(b'a'*64);self.marker.chmod(0o600)
@@ -36,7 +36,7 @@ class PhaseConfigurationValidationTests(unittest.TestCase):
         self.values={role:copy.deepcopy(self.material[role]) for role in ('bootstrap','final')}
         for value in self.values.values():
             value['listener'].update(certificate=str(self.root/'fixture-cert.pem'),
-                privateKey=str(self.root/'fixture-key.pem'),clientCA=str(self.root/'fixture-cert.pem'))
+                privateKey=str(self.root/'fixture-key.pem'),clientCA=str(self.root/'fixture-ca.pem'))
         self.values['final']['sourceSpool'].update(root=str(self.spool),mountPath='/tmp',mountId='a'*64,markerName=marker_name)
 
     def validate(self,role,value=None):
