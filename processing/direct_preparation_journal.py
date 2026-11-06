@@ -53,7 +53,7 @@ def metadata_bytes(db):
         if 'direct_preparation_count' in columns:
             count=db.execute('SELECT direct_preparation_count FROM coordinator_identity WHERE singleton=1').fetchone()
             if count is None or type(count[0]) is not int or count[0]!=0:raise Conflict('preparation intent count changed')
-        if db.execute("SELECT 1 FROM jobs WHERE held_reason='direct_preparing' LIMIT 1").fetchone():
+        if db.execute("SELECT 1 FROM jobs WHERE held_reason IN ('direct_preparing','direct_v2_receiving') LIMIT 1").fetchone():
             raise Conflict('held preparation intent missing')
         return 0
     if type(version) is not int or version!=2 or not exists:raise Conflict('preparation intent marker changed')
@@ -74,7 +74,7 @@ def metadata_bytes(db):
         OR j.held_reason IS NULL OR j.held_reason NOT IN ('direct_preparing','direct_v2_receiving') OR j.node_id IS NOT d.node_id
         OR r.node_id IS NOT d.node_id OR s.request_digest IS NOT d.request_digest LIMIT 1''').fetchone():
         raise Conflict('preparation intent binding changed')
-    if db.execute("SELECT 1 FROM jobs j LEFT JOIN direct_preparation_intents d ON d.job_id=j.id WHERE j.held_reason='direct_preparing' AND d.job_id IS NULL LIMIT 1").fetchone():
+    if db.execute("SELECT 1 FROM jobs j LEFT JOIN direct_preparation_intents d ON d.job_id=j.id WHERE j.held_reason IN ('direct_preparing','direct_v2_receiving') AND d.job_id IS NULL LIMIT 1").fetchone():
         raise Conflict('held preparation intent missing')
     return count*32768
 
