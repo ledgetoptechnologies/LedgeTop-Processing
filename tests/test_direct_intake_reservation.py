@@ -13,6 +13,9 @@ from processing.maintenance import Conflict
 from processing.prototype import Queue
 from processing.reference_store import ReferenceStore
 from processing.coordinator_freeze import CoordinatorFrozen
+from processing.direct_worker_receiver import derived_digest
+from processing import direct_worker_scratch
+from processing.scratch_policy import ScratchLedger, PolicyConflict
 
 
 class DirectIntakeTests(unittest.TestCase):
@@ -40,14 +43,16 @@ class DirectIntakeTests(unittest.TestCase):
         checked = p.validate_submission(raw, environment=environment,
             capability_fingerprint=raw['capabilityFingerprint'])
         job = self.store.submit(checked)[0]
+        derived_sha=derived_digest(raw['manifest'],[])
         if direct:
             with self.queue._db() as db:
                 row = db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?', (job['jobId'],)).fetchone()
                 data = json.loads(row['input_json']); data['directIntakeVersion'] = 1
+                data['directDerivedManifestSha256'] = derived_sha
                 db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?',
                            (json.dumps(data), job['jobId']))
         return dict(job_id=job['jobId'], attempt_id=raw['submissionId'], generation=job['generation'],
-                    reservation_id=str(uuid.uuid4()), manifest_sha=raw['manifest']['sha256'])
+                    reservation_id=str(uuid.uuid4()), manifest_sha=raw['manifest']['sha256'],derived_manifest_sha=derived_sha)
 
     def test_small_first_large_uses_eligible_next_node(self):
         small = self.submit(count=1); first = self.direct.reserve(**small)
@@ -89,6 +94,7 @@ class DirectIntakeTests(unittest.TestCase):
     def test_replay_rejects_changed_attempt_and_v2_marker(self):
         request = self.submit(); self.direct.reserve(**request)
         with self.assertRaises(Conflict): self.direct.reserve(**dict(request, attempt_id=str(uuid.uuid4())))
+        with self.assertRaises(Conflict): self.direct.reserve(**dict(request, derived_manifest_sha='b'*64))
         ordinary = self.submit(direct=False)
         with self.assertRaises(Conflict): self.direct.reserve(**ordinary)
         marked = self.submit()
@@ -150,6 +156,25 @@ class DirectIntakeTests(unittest.TestCase):
             self.assertGreater(after, before)
             self.store.max_metadata_bytes = after - 1
             with self.assertRaisesRegex(Conflict, 'metadata quota'): self.store._quota(db)
+
+    def test_coordinator_derived_binding_cannot_change_at_worker_or_replay(self):
+        request=self.submit();held=self.direct.reserve(**request)
+        scratch_root=Path(self.temp.name)/'worker';scratch_root.mkdir(mode=0o700)
+        ledger=ScratchLedger(scratch_root/'ledger.sqlite',scratch_root,capacity_probe=lambda _:1000000,
+                             clock=lambda:100,safety_floor_bytes=100)
+        with self.queue._db() as db:
+            raw=db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?',(request['job_id'],)).fetchone()
+            total=json.loads(raw['input_json'])['manifest']['totalBytes']
+        fields=('reservationId','jobId','attemptId','generation','environment','authorityId','nodeId',
+                'workerId','workerInstanceId','manifestSha256','derivedManifestSha256')
+        binding={name:held[name] for name in fields};binding.update(inputBytes=total,outputBudget=100,ttlSeconds=10)
+        worker={name:held[name] for name in ('authorityId','nodeId','workerId','workerInstanceId')}
+        observed=direct_worker_scratch.prepare(ledger,binding,expected_worker=worker,worker_ready=True)
+        self.assertFalse(observed['sourceCustodyAccepted'])
+        with self.assertRaises(PolicyConflict):
+            direct_worker_scratch.prepare(ledger,dict(binding,derivedManifestSha256='b'*64),
+                                          expected_worker=worker,worker_ready=True)
+        with self.assertRaises(Conflict):self.direct.reserve(**dict(request,derived_manifest_sha='b'*64))
 
 
 if __name__ == '__main__': unittest.main()

@@ -342,7 +342,7 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         used += source_release_metadata_bytes(db)
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_intake_reservations'").fetchone():
             used += db.execute('''SELECT COALESCE(SUM(length(reservation_id)+length(job_id)+length(attempt_id)
-                +length(CAST(generation AS TEXT))+length(environment)+length(authority_id)+length(manifest_sha)
+                +length(CAST(generation AS TEXT))+length(environment)+length(authority_id)+length(manifest_sha)+length(derived_manifest_sha)
                 +length(node_id)+length(worker_id)+length(instance_id)+length(state)),0)
                 FROM direct_intake_reservations''').fetchone()[0]
         return used

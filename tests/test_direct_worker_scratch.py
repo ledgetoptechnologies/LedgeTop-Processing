@@ -6,6 +6,7 @@ import uuid
 from unittest.mock import patch
 
 from processing import direct_worker_scratch as d
+from processing.direct_worker_receiver import derived_digest
 from processing.scratch_policy import ScratchLedger, PolicyConflict
 
 
@@ -17,7 +18,7 @@ class DirectWorkerScratchTests(unittest.TestCase):
                            workerInstanceId='instance')
         self.item = dict(reservationId=str(uuid.uuid4()), jobId=str(uuid.uuid4()), attemptId=str(uuid.uuid4()),
             generation=1, environment='production', manifestSha256='a'*64, inputBytes=100,
-            outputBudget=200, ttlSeconds=10, **self.worker)
+            derivedManifestSha256=derived_digest({'objects':[]},[]),outputBudget=200, ttlSeconds=10, **self.worker)
         self.ledger = self.open()
 
     def open(self):

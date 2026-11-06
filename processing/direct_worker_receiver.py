@@ -5,12 +5,44 @@ manifest and a separately provisioned physical NodeGate. The caller must prove
 the upstream binding and provision the private mounted SourceSpool; neither a
 coordinator nor Viewer is authorized by constructing this object.
 """
+import hashlib
 from pathlib import Path
 
 from . import reference_protocol as p
 from .direct_worker_scratch import require_fenced, scratch_settings
 from .node_gate import NodeGate, _binding as gate_binding
 from .scratch_policy import PolicyConflict
+
+DERIVED_DOMAIN = b'LTDS-DIRECT-DERIVED-INVENTORY-V1\0'
+
+
+def derived_digest(manifest, derived_ids):
+    if (type(derived_ids) is not list or any(type(value) is not str for value in derived_ids)
+            or len(derived_ids) != len(set(derived_ids))):
+        raise PolicyConflict('direct derived inventory invalid')
+    selected=[obj for obj in manifest['objects'] if obj['id'] in derived_ids]
+    if [obj['id'] for obj in selected] != derived_ids:
+        raise PolicyConflict('direct derived inventory order changed')
+    records=[{key:obj[key] for key in ('id','byteSize','sha256')} for obj in selected]
+    return hashlib.sha256(DERIVED_DOMAIN+p.canonical_json(records)).hexdigest()
+
+
+def check_scope(ledger, spool, item, sha, scratch_id, gate, *, coordinator_origin, gate_generation):
+    expected_root = Path(ledger.root) / 'jobs' / scratch_id / 'direct-source'
+    if (spool.root != expected_root or not spool.require_mount
+            or spool.root.stat().st_dev != Path(ledger.root).stat().st_dev):
+        raise PolicyConflict('direct scratch mount binding changed')
+    expected_job = dict(id=item['jobId'], workerId=item['workerId'],
+                        nodeId=item['nodeId'], authorityId=item['authorityId'])
+    expected_gate = gate_binding(item['nodeId'], coordinator_origin, item['authorityId'])
+    if type(gate_generation) is not int or gate_generation < 1:
+        raise ValueError('positive gate generation required')
+    state=gate.snapshot();reservation=state['reservation']
+    if (state['generation'] != gate_generation
+            or any(state[key] != value for key, value in expected_gate.items())
+            or reservation is None or reservation['receiptId'] != sha[:32]
+            or reservation['job'] != expected_job or reservation['completionDigest'] is not None):
+        raise PolicyConflict('direct node gate binding changed')
 
 
 def _object(manifest, item, object_id):
@@ -41,31 +73,16 @@ def _object(manifest, item, object_id):
 
 
 def receive(ledger, spool, manifest, item, *, expected_worker, engine_id,
-            coordinator_origin, gate_generation, object_id, reader):
+            coordinator_origin, gate_generation, object_id, reader, derived_ids=None):
     """Durably publish one object; no complete-source or Viewer ACK is issued."""
     item, sha, scratch_id = require_fenced(ledger, item, expected_worker=expected_worker)
     obj = _object(manifest, item, object_id)
-    expected_root = Path(ledger.root) / 'jobs' / scratch_id / 'direct-source'
-    if (spool.root != expected_root or not spool.require_mount
-            or spool.root.stat().st_dev != Path(ledger.root).stat().st_dev):
-        raise PolicyConflict('direct scratch mount binding changed')
-    # The gate receipt derives from the full immutable scratch binding. A gate
-    # with an unbound/different job, generation or coordinator cannot write.
-    expected_receipt = sha[:32]
-    expected_job = dict(id=item['jobId'], workerId=item['workerId'],
-                        nodeId=item['nodeId'], authorityId=item['authorityId'])
-    expected_gate = gate_binding(item['nodeId'], coordinator_origin, item['authorityId'])
-    if type(gate_generation) is not int or gate_generation < 1:
-        raise ValueError('positive gate generation required')
+    if derived_digest(manifest, derived_ids if derived_ids is not None else []) != item['derivedManifestSha256']:
+        raise PolicyConflict('direct derived inventory changed')
     if not callable(getattr(reader, 'close', None)) or getattr(reader, 'closed', None) is not False:
         raise ValueError('owned open source reader required')
     with NodeGate(engine_id) as gate:
-        state = gate.snapshot(); reservation = state['reservation']
-        if (state['generation'] != gate_generation
-                or any(state[key] != value for key, value in expected_gate.items())
-                or reservation is None or reservation['receiptId'] != expected_receipt
-                or reservation['job'] != expected_job or reservation['completionDigest'] is not None):
-            raise PolicyConflict('direct node gate binding changed')
+        check_scope(ledger,spool,item,sha,scratch_id,gate,coordinator_origin=coordinator_origin,gate_generation=gate_generation)
         pin = ledger.begin_direct_writer(scratch_id, scratch_settings(item, scratch_id))
         # On any exception, including a close failure or process death, retain
         # the pin. Inspection/recovery must prove the reader has retired.

@@ -62,3 +62,16 @@ The first writer permanently latches a ledger version marker. The exact earlier
 `649b` scratch source was tested to reject the ledger after retirement; that
 does not qualify rollback across all old versions. Pin metadata size/space
 precharge and production upgrade/rollback handling remain open.
+
+An unwired closure prototype binds a domain-separated digest of the selected
+derived-object inventory into the coordinator reservation and worker scratch
+identity. It rehashes all objects in its combined V1-style manifest under the
+node gate and writer pin, checks the closed spool directory, syncs it, and
+persists an immutable local receipt. Exact replay revalidates the objects and
+receipt. A missing object before verification does not strand the upload;
+unknown files, changed bytes, receipt drift or uncertain publication hold the
+pin for inspection. This local receipt explicitly says source custody has not
+been accepted and processing is not authorized. It does not yet represent the
+full Viewer source snapshot, raw GCP provenance, V3 path mapping, or a signed
+and authenticated cross-service closure. No Viewer acknowledgement or source
+release may rely on it.

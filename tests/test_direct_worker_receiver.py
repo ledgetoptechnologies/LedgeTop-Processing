@@ -16,6 +16,8 @@ from processing import reference_protocol as p
 from processing.node_gate import NodeGate
 from processing.scratch_policy import ScratchLedger, PolicyConflict
 from processing.source_spool import SourceSpool, SourceSpoolError
+from processing.direct_worker_closure import verify_closure
+from processing import direct_worker_closure
 
 
 class DirectWorkerReceiverTests(unittest.TestCase):
@@ -26,12 +28,18 @@ class DirectWorkerReceiverTests(unittest.TestCase):
         self.data = b'synthetic source bytes'
         obj = dict(id='object-1', name='photo.jpg', byteSize=len(self.data),
                    sha256=hashlib.sha256(self.data).hexdigest(), kind='image', mediaType='image/jpeg')
-        self.manifest = dict(id='dataset-1', revision=1, totalBytes=len(self.data), objectCount=1,
-            inputCounts=dict(images=1,lidarObjects=0,points=0), objects=[obj])
+        objects=[obj];self.derived_ids=[];self.derived_data=b'synthetic gcp'
+        if getattr(self,'with_derived',False):
+            objects.append(dict(id='derived-1',name='gcp_list.txt',byteSize=len(self.derived_data),
+                sha256=hashlib.sha256(self.derived_data).hexdigest(),kind='auxiliary',mediaType='text/plain'))
+            self.derived_ids=['derived-1']
+        self.manifest = dict(id='dataset-1', revision=1, totalBytes=sum(x['byteSize'] for x in objects), objectCount=len(objects),
+            inputCounts=dict(images=1,lidarObjects=0,points=0), objects=objects)
         self.manifest['sha256'] = p.manifest_sha256(self.manifest)
         self.item = dict(reservationId=str(uuid.uuid4()), jobId=str(uuid.uuid4()), attemptId=str(uuid.uuid4()),
             generation=1, environment='production', manifestSha256=self.manifest['sha256'],
-            inputBytes=len(self.data), outputBudget=200, ttlSeconds=10, **self.worker)
+            derivedManifestSha256=receiver.derived_digest(self.manifest,self.derived_ids),
+            inputBytes=self.manifest['totalBytes'], outputBudget=200, ttlSeconds=10, **self.worker)
         self.ledger = self.open_ledger()
         self.observation = scratch.prepare(self.ledger,self.item,expected_worker=self.worker,worker_ready=True)
         directory = self.ledger.prepare_job_directory(self.observation['scratchReservationId'])/'direct-source'
@@ -60,10 +68,11 @@ class DirectWorkerReceiverTests(unittest.TestCase):
         return SourceSpool(self.directory,mount_path=self.mount,mount_id=self.marker_id,
             marker_name=self.marker_name,safety_floor_bytes=0,require_mount=True)
 
-    def receive(self, *, data=None, item=None, manifest=None, generation=1):
+    def receive(self, *, data=None, item=None, manifest=None, generation=1, object_id='object-1'):
         return receiver.receive(self.ledger,self.spool,manifest or self.manifest,item or self.item,
             expected_worker=self.worker,engine_id=self.engine,coordinator_origin=self.origin,
-            gate_generation=generation,object_id='object-1',reader=io.BytesIO(self.data if data is None else data))
+            gate_generation=generation,object_id=object_id,reader=io.BytesIO(self.data if data is None else data),
+            derived_ids=self.derived_ids)
 
     def test_durable_local_replay_after_restart_never_claims_custody(self):
         result=self.receive();self.assertTrue(result['localObjectDurable'])
@@ -189,6 +198,70 @@ class DirectWorkerReceiverTests(unittest.TestCase):
         with self.assertRaisesRegex(previous.PolicyConflict,'unknown accounting version'):
             previous.ScratchLedger(self.root/'private'/'ledger.sqlite',self.root,
                 capacity_probe=lambda _:1000000,clock=lambda:self.now,safety_floor_bytes=100)
+
+
+class DirectClosureTests(unittest.TestCase):
+    def setUp(self):
+        self.f=DirectWorkerReceiverTests();self.f.with_derived=True;self.f.setUp();self.addCleanup(self.f.doCleanups)
+
+    def close_source(self,derived_ids=None):
+        f=self.f
+        return verify_closure(f.ledger,f.spool,f.manifest,f.item,
+            derived_ids=f.derived_ids if derived_ids is None else derived_ids,
+            expected_worker=f.worker,engine_id=f.engine,coordinator_origin=f.origin,gate_generation=1)
+
+    def upload(self):
+        self.f.receive();self.f.receive(object_id='derived-1',data=self.f.derived_data)
+
+    def test_missing_then_complete_and_exact_replay_after_restart(self):
+        self.f.receive()
+        with self.assertRaisesRegex(PolicyConflict,'incomplete'):self.close_source()
+        self.f.receive(object_id='derived-1',data=self.f.derived_data)
+        value=self.close_source()
+        self.assertTrue(value['localClosureComplete']);self.assertFalse(value['sourceCustodyAccepted'])
+        self.assertFalse(value['processingAuthorized']);self.assertEqual((value['sourceObjectCount'],value['derivedObjectCount']),(1,1))
+        self.f.now=1000;self.f.ledger=self.f.open_ledger();self.f.spool=self.f.open_spool()
+        self.assertEqual(self.close_source(),value)
+
+    def test_changed_derived_inventory_fails_before_receipt(self):
+        self.upload()
+        with self.assertRaisesRegex(PolicyConflict,'derived inventory'):self.close_source([])
+        self.assertFalse((self.f.spool.root.parent/'direct-source-closure.json').exists())
+
+    def test_changed_object_after_receipt_is_never_acknowledged_again(self):
+        self.upload();self.close_source()
+        path=self.f.spool.root/self.f.spool.storage_key(self.f.item['jobId'],1,'object-1')
+        path.write_bytes(b'x'*len(self.f.data))
+        with self.assertRaises(SourceSpoolError):self.close_source()
+        self.f.ledger=self.f.open_ledger()
+        with self.assertRaisesRegex(PolicyConflict,'active or uncertain'):
+            self.f.ledger.settle_unstarted(self.f.observation['scratchReservationId'],transfer_ended=True)
+
+    def test_unknown_file_and_modified_receipt_hold_without_replacement(self):
+        self.upload();self.close_source()
+        receipt=self.f.spool.root.parent/'direct-source-closure.json'
+        receipt.write_bytes(b'changed')
+        with self.assertRaisesRegex(PolicyConflict,'receipt changed'):self.close_source()
+        self.assertEqual(receipt.read_bytes(),b'changed')
+
+    def test_unknown_source_entry_holds(self):
+        self.upload()
+        directory=self.f.spool.root/self.f.item['jobId']/'1';(directory/'unknown').write_bytes(b'x')
+        with self.assertRaisesRegex(PolicyConflict,'unexpected file'):self.close_source()
+        self.assertFalse((self.f.spool.root.parent/'direct-source-closure.json').exists())
+
+    def test_lost_response_after_receipt_publication_preserves_uncertain_pin(self):
+        self.upload();original=direct_worker_closure._persist_receipt
+        def interrupted(*args):
+            original(*args)
+            raise OSError('synthetic process loss after receipt publication')
+        with patch.object(direct_worker_closure,'_persist_receipt',side_effect=interrupted):
+            with self.assertRaises(OSError):self.close_source()
+        self.assertTrue((self.f.spool.root.parent/'direct-source-closure.json').is_file())
+        self.f.ledger=self.f.open_ledger();self.f.spool=self.f.open_spool()
+        with self.assertRaisesRegex(PolicyConflict,'active or uncertain'):self.close_source()
+        with self.assertRaisesRegex(PolicyConflict,'active or uncertain'):
+            self.f.ledger.settle_unstarted(self.f.observation['scratchReservationId'],transfer_ended=True)
 
 
 if __name__=='__main__':unittest.main()

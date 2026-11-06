@@ -31,12 +31,16 @@ class DirectIntakeReservations:
             db.execute('''CREATE TABLE IF NOT EXISTS direct_intake_reservations (
                 reservation_id TEXT PRIMARY KEY, job_id TEXT UNIQUE NOT NULL,
                 attempt_id TEXT NOT NULL, generation INTEGER NOT NULL,
-                environment TEXT NOT NULL, authority_id TEXT NOT NULL, manifest_sha TEXT NOT NULL,
+                environment TEXT NOT NULL, authority_id TEXT NOT NULL, manifest_sha TEXT NOT NULL, derived_manifest_sha TEXT NOT NULL,
                 node_id TEXT UNIQUE NOT NULL, worker_id TEXT NOT NULL,
                 instance_id TEXT NOT NULL, state TEXT NOT NULL CHECK(state='receiving'),
                 FOREIGN KEY(job_id) REFERENCES reference_jobs(job_id))''')
+            columns={row['name'] for row in db.execute('PRAGMA table_info(direct_intake_reservations)')}
+            if columns!={'reservation_id','job_id','attempt_id','generation','environment','authority_id',
+                         'manifest_sha','derived_manifest_sha','node_id','worker_id','instance_id','state'}:
+                raise Conflict('direct reservation schema requires inspection')
 
-    def reserve(self, *, job_id, attempt_id, generation, reservation_id, manifest_sha):
+    def reserve(self, *, job_id, attempt_id, generation, reservation_id, manifest_sha, derived_manifest_sha):
         """Reserve one eligible idle node, or return None without mutation.
 
         Exact retries return the persisted identity. A reservation holds the node
@@ -46,6 +50,7 @@ class DirectIntakeReservations:
                              (reservation_id, 'reservation')):
             protocol._uuid(value, label)
         protocol._hash(manifest_sha, 'manifest digest')
+        protocol._hash(derived_manifest_sha, 'derived manifest digest')
         if type(generation) is not int or generation < 1:
             raise ValueError('positive generation required')
         with self.queue._coordinator_freeze.operation('source-io-admission'), self.queue._db() as db:
@@ -58,8 +63,8 @@ class DirectIntakeReservations:
                 row = prior[0]
                 job = self.store._row(db, job_id)
                 saved_submission = json.loads(job['input_json'])
-                if ((row['reservation_id'], row['job_id'], row['attempt_id'], row['generation'], row['manifest_sha'], row['authority_id']) !=
-                        (reservation_id, job_id, attempt_id, generation, manifest_sha, self.queue.authority_id)
+                if ((row['reservation_id'], row['job_id'], row['attempt_id'], row['generation'], row['manifest_sha'], row['derived_manifest_sha'], row['authority_id']) !=
+                        (reservation_id, job_id, attempt_id, generation, manifest_sha, derived_manifest_sha, self.queue.authority_id)
                         or job is None or (job['status'], job['node_id'], job['held_reason']) !=
                         ('held', row['node_id'], 'direct_intake_receiving')
                         or job['generation'] != generation or job['environment'] != row['environment']
@@ -67,6 +72,7 @@ class DirectIntakeReservations:
                         or type(saved_submission) is not dict
                         or type(saved_submission.get('directIntakeVersion')) is not int
                         or saved_submission.get('directIntakeVersion') != 1
+                        or saved_submission.get('directDerivedManifestSha256') != derived_manifest_sha
                         or 'sourceIntakeVersion' in saved_submission
                         or saved_submission.get('submissionId') != attempt_id
                         or self.store._reference_input(db, dict(id=job_id, environment=job['environment'])) is None
@@ -76,6 +82,7 @@ class DirectIntakeReservations:
                     raise Conflict('direct reservation binding changed')
                 return dict(reservationId=reservation_id, jobId=job_id, attemptId=attempt_id,
                             generation=generation, environment=row['environment'], authorityId=row['authority_id'],
+                            manifestSha256=manifest_sha, derivedManifestSha256=derived_manifest_sha,
                             nodeId=row['node_id'], workerId=row['worker_id'],
                             workerInstanceId=row['instance_id'], state='receiving', replayed=True)
             row = self.store._row(db, job_id)
@@ -84,6 +91,7 @@ class DirectIntakeReservations:
                     or row['source_state'] is not None
                     or type(submission) is not dict or submission.get('directIntakeVersion') != 1
                     or type(submission.get('directIntakeVersion')) is not int
+                    or submission.get('directDerivedManifestSha256') != derived_manifest_sha
                     or submission.get('submissionId') != attempt_id or row['generation'] != generation
                     or row['manifest_sha'] != manifest_sha
                     or 'sourceIntakeVersion' in submission):
@@ -98,11 +106,11 @@ class DirectIntakeReservations:
                     continue
                 worker = self.workers[node]
                 self.store._quota(db, sum(len(x.encode()) for x in
-                    (reservation_id, job_id, attempt_id, str(generation), row['environment'], self.queue.authority_id, manifest_sha, node,
+                    (reservation_id, job_id, attempt_id, str(generation), row['environment'], self.queue.authority_id, manifest_sha, derived_manifest_sha, node,
                      worker['workerId'], worker['workerInstanceId'], 'receiving')))
                 db.execute('''INSERT INTO direct_intake_reservations
-                    VALUES(?,?,?,?,?,?,?,?,?,?,'receiving')''',
-                    (reservation_id, job_id, attempt_id, generation, row['environment'], self.queue.authority_id, manifest_sha, node,
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,'receiving')''',
+                    (reservation_id, job_id, attempt_id, generation, row['environment'], self.queue.authority_id, manifest_sha, derived_manifest_sha, node,
                      worker['workerId'], worker['workerInstanceId']))
                 changed = db.execute('''UPDATE jobs SET status='held',node_id=?,
                     held_reason='direct_intake_receiving',updated_at=CURRENT_TIMESTAMP
@@ -113,6 +121,7 @@ class DirectIntakeReservations:
                            (node, job_id))
                 return dict(reservationId=reservation_id, jobId=job_id, attemptId=attempt_id,
                             generation=generation, environment=row['environment'], authorityId=self.queue.authority_id,
+                            manifestSha256=manifest_sha, derivedManifestSha256=derived_manifest_sha,
                             nodeId=node, workerId=worker['workerId'],
                             workerInstanceId=worker['workerInstanceId'], state='receiving', replayed=False)
             return None

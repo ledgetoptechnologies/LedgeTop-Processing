@@ -14,7 +14,7 @@ from .scratch_policy import PolicyConflict
 
 
 FIELDS = frozenset(('reservationId', 'jobId', 'attemptId', 'generation', 'environment',
-                    'authorityId', 'nodeId', 'workerId', 'workerInstanceId', 'manifestSha256',
+                    'authorityId', 'nodeId', 'workerId', 'workerInstanceId', 'manifestSha256', 'derivedManifestSha256',
                     'inputBytes', 'outputBudget', 'ttlSeconds'))
 DOMAIN = b'LTDS-DIRECT-WORKER-SCRATCH-BINDING-V1\0'
 
@@ -27,6 +27,7 @@ def binding(value, *, expected_worker):
     for name in ('nodeId', 'workerId', 'workerInstanceId'):
         p._slug(value[name], name)
     p._hash(value['manifestSha256'], 'manifest digest')
+    p._hash(value['derivedManifestSha256'], 'derived manifest digest')
     p._environment(value['environment'])
     for name in ('generation', 'ttlSeconds'):
         p._integer(value[name], name)
