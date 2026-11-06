@@ -88,7 +88,6 @@ class DirectWorkerSenderV2(DirectWorkerSender):
         finally:
             if guard is not None:guard.finish()
             if connection is not None:connection.close()
-
     def authorize_reservation(self,operation_id):
         """Replay the exact reservation grant; this never acknowledges custody."""
         p._uuid(operation_id,'operation')
@@ -182,3 +181,9 @@ class DirectWorkerSenderV2(DirectWorkerSender):
         finally:
             if guard is not None:guard.finish()
             if connection is not None:connection.close()
+
+class DisabledDirectWorkerSender(DirectWorkerSenderV2):
+    """Offline preparation cannot create any outgoing connection."""
+    def _connect(self,deadline):
+        raise RuntimeError('disabled sender cannot connect')
+

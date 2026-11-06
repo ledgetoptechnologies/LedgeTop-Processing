@@ -39,7 +39,7 @@ def _read(path, *, private, maximum=LIMIT):
             os.close(fd);fd=child
         info=os.fstat(fd)
         if info.st_uid not in owners or info.st_mode & 0o022:raise ValueError('unprotected ancestor')
-        f=os.open(parts[-1],os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=fd)
+        f=os.open(parts[-1],os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK,dir_fd=fd)
         try:
             before=os.fstat(f)
             if (not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_uid not in owners
@@ -138,7 +138,7 @@ def prepare_disabled_sender(config_path,node,*,expected_config_sha256,reservatio
     this function does not establish those authorities itself.
     """
     from .direct_v2_reservation import DirectV2Reservations
-    from .direct_worker_sender_v2 import DirectWorkerSenderV2
+    from .direct_worker_sender_v2 import DisabledDirectWorkerSender
     from cryptography.hazmat.primitives import serialization
     if not isinstance(reservations,DirectV2Reservations):raise ValueError('enrolled worker registry required')
     settings=load_disabled_transport(config_path,node,expected_config_sha256=expected_config_sha256)
@@ -147,10 +147,7 @@ def prepare_disabled_sender(config_path,node,*,expected_config_sha256,reservatio
             or settings.worker_public_key.public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)
             !=pin[3].public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)):
         raise ValueError('worker registry differs')
-    class DisabledSender(DirectWorkerSenderV2):
-        def _connect(self,deadline):
-            raise RuntimeError('disabled sender cannot connect')
-    sender=DisabledSender(origin=settings.origin,connect_ip=settings.connect_ip,ca_file=None,
+    sender=DisabledDirectWorkerSender(origin=settings.origin,connect_ip=settings.connect_ip,ca_file=None,
         bearer=settings._bearer,inventory=inventory,item=item,reservation_binding=reservation_binding,
         expected_worker=pin[0],issuer_id=settings.issuer_id,key_id=settings.key_id,
         worker_public_key=settings.worker_public_key,enrolled_transport=settings)

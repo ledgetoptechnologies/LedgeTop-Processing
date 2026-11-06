@@ -111,7 +111,9 @@ class DirectWorkerSender:
             raise ValueError('bounded sender limits required')
         if enrolled_transport is not None:
             from .direct_protected_transport import DisabledProtectedTransport
+            from .direct_worker_sender_v2 import DisabledDirectWorkerSender
             if (type(enrolled_transport) is not DisabledProtectedTransport
+                    or type(self) is not DisabledDirectWorkerSender
                     or (origin,str(address),bearer)!=(enrolled_transport.origin,enrolled_transport.connect_ip,enrolled_transport._bearer)):
                 raise ValueError('protected transport binding changed')
             context=enrolled_transport._context

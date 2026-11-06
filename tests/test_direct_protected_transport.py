@@ -45,6 +45,11 @@ class ProtectedTransportTests(unittest.TestCase):
     def test_refuses_enabled_and_public_secret(self):
         self.bearer.chmod(0o644)
         with self.assertRaises(ValueError):self.load()
+
+    def test_fifo_secret_is_rejected_without_waiting_for_writer(self):
+        fifo=self.root/'pipe';os.mkfifo(fifo,0o600)
+        self.node['bearerFile']=str(fifo);self.write()
+        with self.assertRaises(ValueError):self.load()
         with self.assertRaises(ValueError):
             load_disabled_transport(str(self.config),'cluster',expected_config_sha256='0'*64)
         self.bearer.chmod(0o600)
@@ -68,6 +73,13 @@ class ProtectedTransportTests(unittest.TestCase):
         self.assertEqual(result._sender._host,'worker.example')
         with self.assertRaisesRegex(RuntimeError,'disabled sender'):
             result._sender._connect(999999999)
+        from processing.direct_worker_sender_v2 import DirectWorkerSenderV2
+        transport=self.load()
+        with self.assertRaisesRegex(ValueError,'protected transport'):
+            DirectWorkerSenderV2(origin=transport.origin,connect_ip=transport.connect_ip,ca_file=None,
+                bearer=transport._bearer,inventory=f.index,item=f.item,reservation_binding=f.reservation,
+                expected_worker=f.worker,issuer_id='worker-issuer',key_id='worker-key',
+                worker_public_key=f.proof_key.public_key(),enrolled_transport=transport)
         self.assertNotIn('synthetic-private-bearer',repr(result))
         registry._workers['cluster']=(f.worker,'wrong','worker-key',f.proof_key.public_key())
         with self.assertRaises(ValueError):prepare_disabled_sender(str(self.config),'cluster',**kwargs)
