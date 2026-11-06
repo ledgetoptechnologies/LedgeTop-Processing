@@ -372,13 +372,16 @@ class CoordinatorService:
     def health(self):
         reference = self.handler.reference_listener
         with self._lock:
+            delivery = getattr(reference, '_viewer_transfer_worker', None)
+            delivery_thread = getattr(reference, '_viewer_transfer_thread', None)
             return dict(state=self._state, reason=self._reason,
                 nativeAlive=self._native_thread is not None and self._native_thread.is_alive(),
-                referenceAlive=reference is not None and self._reference_thread is not None and self._reference_thread.is_alive())
+                referenceAlive=reference is not None and self._reference_thread is not None and self._reference_thread.is_alive(),
+                viewerTransferAlive=(delivery is None or (delivery_thread is not None and delivery_thread.is_alive())))
 
     def healthy(self):
         health = self.health()
-        return (health['state'] == 'ready' and health['nativeAlive']
+        return (health['state'] == 'ready' and health['nativeAlive'] and health['viewerTransferAlive']
                 and (self.handler.reference_listener is None or health['referenceAlive']))
 
     def _start_reference(self, stop):
@@ -459,6 +462,11 @@ class CoordinatorService:
                 if self.handler.reference_listener is not None and (
                         self._reference_thread is None or not self._reference_thread.is_alive()):
                     self._failed('reference_listener_exited', stop)
+                runtime = self.handler.reference_listener
+                if (runtime is not None and runtime._viewer_transfer_worker is not None
+                        and (runtime._viewer_transfer_thread is None
+                             or not runtime._viewer_transfer_thread.is_alive())):
+                    self._failed('viewer_transfer_worker_exited', stop)
         except BaseException:
             self._failed('coordinator_start_failed', stop)
         finally:
