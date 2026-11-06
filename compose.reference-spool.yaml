@@ -1,0 +1,11 @@
+# Optional local queued-input storage for the existing coordinator authority.
+# Provision and qualify the host directory and marker before using this overlay.
+# This overlay does not enable reference intake or create a second coordinator.
+services:
+  coordinator:
+    volumes:
+      - type: bind
+        source: ${PROCESSING_SOURCE_SPOOL_HOST_PATH:?set the existing private spool directory}
+        target: /processing-source-spool
+        bind:
+          create_host_path: false
