@@ -41,6 +41,68 @@ class RuntimePreparationTests(unittest.TestCase):
             sourceSpool=dict(root='/spool/objects',mountPath='/spool',mountId='a'*64,markerName='.spool-id',
                 safetyFloorBytes=100,maxObjectBytes=1000000,chunkBytes=1024),outputDirectory=str(self.out))
 
+    def use_binding(self, change=None):
+        f=self.fixture
+        binding=dict(schemaVersion=1,protocol=prep.BINDING_PROTOCOL,host=copy.deepcopy(f.m['host']),
+                     service=copy.deepcopy(f.m['service']),gate=copy.deepcopy(f.m['gate']))
+        if change: change(binding)
+        self.spec['nodes'][0].pop('manifest',None)
+        self.spec['nodes'][0]['binding']=f.file('node-binding.json',prep.canonical(binding))
+        return binding
+
+    def test_real_runtime_then_worker_composition_without_prerequisite_worker_config(self):
+        from ops import prepare_reference_worker_config as worker
+        f=self.fixture; self.use_binding()
+        original_config=Path(f.m['config']['path'])
+        self.assertFalse(original_config.exists())
+        prep.prepare(self.spec)
+        spec=copy.deepcopy(f.spec)
+        spec['runtime']=f.file('prepared-runtime.json',(self.out/'final.json').read_bytes())
+        # This is the existing documented pre-install intent, not installed evidence.
+        self.assertEqual(spec['manifest']['config']['sha256'],'0'*64)
+        self.assertEqual(spec['manifest']['config']['bytes'],1)
+        manifest,raw=worker.compose(spec,f.now)
+        self.assertEqual(manifest['config']['sha256'],hashlib.sha256(raw).hexdigest())
+        self.assertEqual(manifest['config']['bytes'],len(raw))
+        self.assertEqual(manifest['unitSha256'],hashlib.sha256(worker.install.render_unit(manifest).encode()).hexdigest())
+        worker.install.validate_manifest(manifest)
+        config=json.loads(raw)
+        self.assertEqual(config['engineId'],f.engine);self.assertEqual(config['gateGeneration'],7)
+        self.assertEqual(config['viewerReceiptKeys'],json.loads((self.out/'final.json').read_bytes())['viewerReceiptKeys'])
+        self.assertFalse(original_config.exists());self.assertFalse(Path(config['stateRoot']).exists())
+
+    def test_binding_and_manifest_modes_produce_identical_runtime_and_viewer_bytes(self):
+        old=prep.compose(self.spec);self.use_binding();new=prep.compose(self.spec)
+        for name in old:
+            if name!='public-trust.json':self.assertEqual(old[name],new[name])
+        trust=json.loads(new['public-trust.json'])
+        self.assertEqual(set(trust['inputBindings'][0]),{'bindingSha256','gateSha256'})
+
+    def test_binding_identity_and_profile_changes_refuse_before_output(self):
+        mutations=(lambda b:b.update(schemaVersion=2),lambda b:b.update(installed=True),
+            lambda b:b['gate'].update(path='/tmp/foreign-gate.json'),
+            lambda b:b['host'].update(dockerEngineId='wrong-daemon'),
+            lambda b:b['gate'].update(authorityId=str(uuid.uuid4())),
+            lambda b:b['gate'].update(nodeId='other-node'),lambda b:b['gate'].update(generation=8),
+            lambda b:b['gate'].update(coordinatorOrigin='http://127.0.0.1:19090'),
+            lambda b:b['gate'].update(sha256='0'*64))
+        for change in mutations:
+            with self.subTest(change=change):
+                self.use_binding(change)
+                with self.assertRaises(Exception):prep.prepare(self.spec)
+                self.assertFalse(self.out.exists())
+
+    def test_binding_and_manifest_together_refuse(self):
+        manifest=self.spec['nodes'][0]['manifest'];self.use_binding();self.spec['nodes'][0]['manifest']=manifest
+        with self.assertRaisesRegex(Exception,'one_node_binding_source'):prep.prepare(self.spec)
+        self.assertFalse(self.out.exists())
+
+    def test_binding_artifact_and_copied_gate_are_independently_pinned(self):
+        self.use_binding()
+        Path(self.spec['nodes'][0]['gate']['path']).write_bytes(b'changed gate')
+        with self.assertRaises(Exception):prep.prepare(self.spec)
+        self.assertFalse(self.out.exists())
+
     def test_private_outputs_preserve_bindings_and_separate_signing_roles(self):
         before=(self.fixture.root/'runtime.json').read_bytes()
         receipt=prep.prepare(self.spec)

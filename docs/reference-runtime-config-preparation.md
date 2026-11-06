@@ -24,6 +24,28 @@ artifacts containing exact printable bytes without a trailing newline.
 `forbiddenCredentials` enumerates existing native/control/legacy credentials for
 collision exclusion; callers must supply the complete reviewed inventory.
 
+For a first installation without an enrollment manifest, supply `binding`
+instead of `manifest` (exactly one is permitted). It pins a closed private JSON
+artifact with `schemaVersion:1`,
+`protocol:ltds-reference-node-preparation-binding-v1`, and the actual `host`,
+`service`, `gate` objects. Host is `{hostname,bootId,dockerEngineId}`, service is
+`{name,uid,gid,home}`, and gate is
+`{path,sha256,nodeId,authorityId,generation,coordinatorOrigin}`. These follow the
+installer's existing identity/path grammars and canonical original Gate path.
+The separately pinned copied Gate must match all binding fields and hash.
+No config descriptor, unit hash, source archive or installed receipt is required
+for this input. Both input modes are **preparation evidence**, never proof of
+installation or current physical custody.
+
+The noncircular first-install sequence is: capture real host/daemon/Gate binding
+metadata; prepare runtime and Viewer packages; use those exact runtime bytes in
+the existing worker composer with its documented pre-install manifest intent;
+obtain the real worker config and unit hashes; then install separately and run
+the existing fresh physical/readiness gates. The worker composer, not this
+runtime tool, replaces its intent's zero config hash/one-byte placeholder after
+producing actual config bytes. A runtime input never needs that placeholder or
+an invented prerequisite worker config file.
+
 Each selected production/staging environment supplies `providerId` (the actual
 dedicated Viewer nodeodm provider UUID), `principalId`, `bearer`, `viewerCaPath`,
 and three distinct signers named `source`, `snapshot`, `copy`. Each signer is

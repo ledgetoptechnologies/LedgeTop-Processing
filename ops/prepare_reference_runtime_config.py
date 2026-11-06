@@ -18,6 +18,32 @@ from ops.prepare_reference_worker_config import pinned
 from ops.enrolled_coordinator_transport import canonical, decode, require
 
 PROTOCOL = 'ltds-reference-runtime-preparation-v1'
+BINDING_PROTOCOL = 'ltds-reference-node-preparation-binding-v1'
+
+
+def node_binding(value):
+    """Validate captured host/Gate preparation evidence, never installed proof."""
+    install.closed(value, ('schemaVersion', 'protocol', 'host', 'service', 'gate'))
+    require(type(value['schemaVersion']) is int and value['schemaVersion'] == 1 and
+            value['protocol'] == BINDING_PROTOCOL, 'node_preparation_binding_profile_required')
+    host = value['host']; install.closed(host, ('hostname', 'bootId', 'dockerEngineId'))
+    require(type(host['hostname']) is str and re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]{0,252}', host['hostname']) and
+            type(host['dockerEngineId']) is str and re.fullmatch('[A-Za-z0-9][A-Za-z0-9:._-]{0,255}', host['dockerEngineId']) and
+            type(host['bootId']) is str and str(uuid.UUID(host['bootId'])) == host['bootId'],
+            'original_worker_host_required')
+    service = value['service']; install.closed(service, ('name', 'uid', 'gid', 'home'))
+    require(type(service['name']) is str and re.fullmatch('[a-z_][a-z0-9_-]{0,31}', service['name']),
+            'fixed_service_account_required')
+    install.integer(service['uid'], 1); install.integer(service['gid'], 1)
+    home = install.absolute(service['home'])
+    gate = value['gate']; install.closed(gate, ('path', 'sha256', 'nodeId', 'authorityId', 'generation', 'coordinatorOrigin'))
+    install.sha(gate['sha256']); install.integer(gate['generation'], 1)
+    from processing.node_gate import _binding
+    require(_binding(gate['nodeId'], gate['coordinatorOrigin'], gate['authorityId'])['coordinatorOrigin'] ==
+            gate['coordinatorOrigin'], 'original_gate_origin_required')
+    expected = home/'.local/state/LedgeTop-Processing/node-gates'/hashlib.sha256(host['dockerEngineId'].encode()).hexdigest()/'gate.json'
+    require(install.absolute(gate['path']) == expected, 'original_canonical_gate_required')
+    return value
 
 
 def token(artifact):
@@ -84,9 +110,12 @@ def compose(spec):
     from processing.reference_result_proxy import _origin
     from processing.reference_recovery import RecoveryNodeBinding
     for node in nodes:
-        install.closed(node, ('manifest', 'gate', 'endpoint', 'workerId', 'instanceId', 'resultOrigin',
+        require(type(node) is dict and ('manifest' in node) != ('binding' in node), 'one_node_binding_source_required')
+        source = 'manifest' if 'manifest' in node else 'binding'
+        install.closed(node, (source, 'gate', 'endpoint', 'workerId', 'instanceId', 'resultOrigin',
                               'bearer', 'resultBearer', 'outputBudget'))
-        manifest = install.validate_manifest(decode(pinned(node['manifest'])))
+        evidence_value = decode(pinned(node[source]))
+        manifest = install.validate_manifest(evidence_value) if source == 'manifest' else node_binding(evidence_value)
         gate_raw = pinned(node['gate']); gate = decode(gate_raw); binding = manifest['gate']; ident = binding['nodeId']
         require(ident not in workers and hashlib.sha256(gate_raw).hexdigest() == binding['sha256'],
                 'original_gate_artifact_required')
@@ -109,7 +138,8 @@ def compose(spec):
         RecoveryNodeBinding(ident, **{dict(engineId='engine_id', authorityId='authority_id', coordinatorOrigin='coordinator_origin',
             gateGeneration='gate_generation', outputBudget='output_budget')[k]: v for k,v in physical.items()})
         recovery[ident] = physical; endpoints.append(dict(id=ident, url=node['endpoint']))
-        evidence.append(dict(manifestSha256=node['manifest']['sha256'], gateSha256=node['gate']['sha256']))
+        # Preserve the preexisting manifest-mode output bytes/receipt semantics.
+        evidence.append({source+'Sha256': node[source]['sha256'], 'gateSha256': node['gate']['sha256']})
     require(len({p['engineId'] for p in recovery.values()}) == len(recovery), 'distinct_physical_daemons_required')
     envs = spec['environments']
     require(type(envs) is dict and envs and set(envs) <= {'production', 'staging'}, 'explicit_environment_inventory_required')
