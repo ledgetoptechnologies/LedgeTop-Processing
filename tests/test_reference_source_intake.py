@@ -441,6 +441,20 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                 self.assertEqual(response.body["phase"], "source_receiving")
                 self.assertEqual(response.body["sourceState"], "receiving")
                 self.assertEqual(normalized["sourceManifest"]["objectCount"], 10_000)
+                # The 10k-object stored input must not be decoded for every
+                # authenticated object request: only the small signed owner
+                # proof is loaded from the indexed intake row.
+                import time
+                lengths=[];real_loads=json.loads
+                def track_owner_json(value,*args,**kwargs):
+                    lengths.append(len(value));return real_loads(value,*args,**kwargs)
+                started=time.monotonic()
+                with patch('processing.reference_api.json.loads',side_effect=track_owner_json):
+                    for _ in range(1000):
+                        self.assertTrue(api._owned_source_job(response.body['jobId'],'staging','viewer-staging'))
+                elapsed=time.monotonic()-started
+                self.assertEqual(len(lengths),1000);self.assertLess(max(lengths),16384)
+                print(f'owner_checks_10k_manifest=1000 elapsed_seconds={elapsed:.3f}',flush=True)
                 self.assertEqual(len(store.list()), 1)
                 capabilities = api.handle("GET", "/ltds/v2/capabilities",
                     {"Authorization": "Bearer synthetic-staging-token"}, protected_transport=True)
@@ -614,6 +628,12 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                     self.assertEqual(post(b).status,403)
                     self.assertEqual(post(unknown).status,403)
                     created=post(a);self.assertEqual(created.status,201,created.body)
+                    v1={key:copy.deepcopy(request[key]) for key in ('submissionId','manifest','pipeline','capabilityFingerprint')}
+                    v1['schemaVersion']=1
+                    other_v1=api.handle('POST','/ltds/v1/jobs',{'Authorization':'Bearer '+b},p.canonical_json(v1),protected_transport=True)
+                    self.assertEqual((other_v1.status,other_v1.body),(404,{'error':'not_found'}))
+                    owned_v1=api.handle('POST','/ltds/v1/jobs',{'Authorization':'Bearer '+a},p.canonical_json(v1),protected_transport=True)
+                    self.assertEqual((owned_v1.status,owned_v1.body['jobId']),(200,created.body['jobId']))
                     self.assertEqual(post(b).status,403)
                     self.assertEqual(post(unknown).status,403)
                     replay=post(a);self.assertEqual((replay.status,replay.body['jobId']),(200,created.body['jobId']))
@@ -640,6 +660,29 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                     self.assertEqual((denied.status,denied.body),(404,{'error':'not_found'}))
                     self.assertEqual(api.handle('GET',f'/ltds/v2/jobs/{job_id}',
                         {'Authorization':'Bearer '+a},protected_transport=True).status,200)
+                    # Even an attacker who rewrites the stored proof digest cannot
+                    # transfer ownership without the pinned signer's signature.
+                    from processing.viewer_source_attestation import proof_digest
+                    with queue._db() as db:
+                        original=db.execute('SELECT source_attestation_json,source_attestation_sha FROM reference_source_intakes WHERE job_id=?',(job_id,)).fetchone()
+                        altered=json.loads(original['source_attestation_json']);altered['proof']['principalId']='other-viewer'
+                        altered['attestationSha256']=proof_digest(altered['proof'])
+                        db.execute('UPDATE reference_source_intakes SET source_attestation_json=?,source_attestation_sha=? WHERE job_id=?',
+                            (json.dumps(altered),altered['attestationSha256'],job_id))
+                    self.assertFalse(api._owned_source_job(job_id,'staging','other-viewer'))
+                    with queue._db() as db:
+                        db.execute('UPDATE reference_source_intakes SET source_attestation_json=?,source_attestation_sha=? WHERE job_id=?',
+                            (original['source_attestation_json'],original['source_attestation_sha'],job_id))
+                        original_input=db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?',(job_id,)).fetchone()[0]
+                        db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?',(original_input+' '*1000000,job_id))
+                    lengths=[];real_loads=json.loads
+                    def tracked_loads(value,*args,**kwargs):
+                        lengths.append(len(value));return real_loads(value,*args,**kwargs)
+                    with patch('processing.reference_api.json.loads',side_effect=tracked_loads):
+                        self.assertTrue(api._owned_source_job(job_id,'staging','viewer-staging'))
+                    self.assertTrue(lengths);self.assertLess(max(lengths),16384)
+                    with queue._db() as db:
+                        db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?',(original_input,job_id))
                 finally:queue.close()
 
     def test_authenticated_post_streamed_objects_completion_and_exact_replay(self):

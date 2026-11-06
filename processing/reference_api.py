@@ -131,26 +131,32 @@ class ReferenceAPI:
         """Check V2 ownership before reading metadata or acting on any route."""
         try:
             with self.store.queue._db() as db:
-                row = db.execute('''SELECT r.environment,r.input_json,s.source_attestation_json,s.source_attestation_sha
+                row = db.execute('''SELECT r.environment,r.submission_id,r.manifest_sha,r.pipeline_digest,
+                    s.job_id AS source_job_id,s.viewer_task_id,s.provider_task_id,s.source_manifest_sha,s.derived_manifest_sha,
+                    s.source_attestation_json,s.source_attestation_sha
                     FROM reference_jobs r LEFT JOIN reference_source_intakes s ON s.job_id=r.job_id
                     WHERE r.job_id=?''', (job_id,)).fetchone()
+                if row is not None and row['source_job_id'] is None:
+                    legacy = db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?', (job_id,)).fetchone()
+                    submission = json.loads(legacy['input_json'])
+                    return (row['environment'] == environment and type(submission) is dict
+                            and 'sourceIntakeVersion' not in submission)
             if row is None or row['environment'] != environment:
                 return False
-            submission = json.loads(row['input_json'])
-            if type(submission) is not dict:
-                return False
             source_record = row['source_attestation_json']
-            if 'sourceIntakeVersion' not in submission and source_record is None:
-                return True  # Existing V1 jobs keep environment-scoped behavior.
-            if type(submission.get('sourceIntakeVersion')) is not int or submission['sourceIntakeVersion'] != 2 or type(principal) is not str or not source_record:
+            if type(principal) is not str or not source_record or len(source_record.encode('utf-8')) > 16384:
                 return False
-            from .viewer_source_attestation import proof_digest
+            from .viewer_source_attestation import validate_and_verify
             attestation = json.loads(source_record)
             proof = attestation['proof']
-            return (type(proof) is dict and proof.get('principalId') == principal
-                    and proof.get('environment') == environment and proof.get('authorityId') == self.authority_id
-                    and attestation.get('attestationSha256') == row['source_attestation_sha']
-                    and proof_digest(proof) == row['source_attestation_sha'])
+            if type(proof) is not dict or proof.get('principalId') != principal or attestation.get('attestationSha256') != row['source_attestation_sha']:
+                return False
+            validate_and_verify(attestation, trusted_keys=self.source_attestation_keys, authority_id=self.authority_id,
+                environment=environment, submission_id=row['submission_id'], provider_task_id=row['provider_task_id'],
+                attempt_id=row['submission_id'], viewer_task_id=row['viewer_task_id'],
+                source_manifest_sha256=row['source_manifest_sha'], derived_manifest_sha256=row['derived_manifest_sha'],
+                pipeline_manifest_sha256=row['manifest_sha'], pipeline_digest=row['pipeline_digest'])
+            return True
         except (ValueError, TypeError, KeyError, AttributeError, Conflict):
             return False
 
@@ -328,6 +334,8 @@ class ReferenceAPI:
                     allowed_odm_options=self.allowed_odm_options,
                     available_engines=("odm", "treedar") if self.treedar_available else ("odm",))
                 job, created = self.store.submit(validated)
+                if not self._owned_source_job(job['jobId'],environment,principal):
+                    return self._error(404, 'not_found')
                 return Response(201 if created else 200, job)
             match = re.fullmatch(re.escape(protocol.PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(/results|/acceptance|/transfer-grants|/terminal-outcome|/terminal-acceptance)?", path)
             if not match:
