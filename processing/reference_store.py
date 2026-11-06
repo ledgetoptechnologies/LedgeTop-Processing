@@ -774,6 +774,11 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._row(db, job_id)
+            # Replays also confer the prior claim token. Never return that
+            # authority to an ordinary worker for direct-mode or damaged V2
+            # metadata, even if an old claim row is present.
+            if not self._ordinary_source_execution_allowed(db, row):
+                return None
             old = db.execute("SELECT * FROM reference_claims WHERE request_id=?", (claim_request_id,)).fetchone()
             if old:
                 if (old["job_id"], old["node_id"], old["worker_id"], old["instance_id"]) != (
@@ -792,8 +797,6 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             # Future direct-intake records must not enter ordinary execution
             # before a separately qualified worker-custody transition exists.
             # V1/V2 do not carry this reserved marker and retain their behavior.
-            if not self._ordinary_source_execution_allowed(db, row):
-                return None
             candidate = self._candidate_row(db, node_id)
             if candidate is None or candidate["job_id"] != job_id:
                 return None

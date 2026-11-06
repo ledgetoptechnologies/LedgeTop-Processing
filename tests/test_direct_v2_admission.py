@@ -58,6 +58,29 @@ class DirectV2AdmissionTests(unittest.TestCase):
         self.assertIsNone(self.store.claim(job['jobId'], node_id='cluster', worker_id='worker',
             worker_instance_id='instance', claim_request_id='direct-claim'))
 
+    def test_claim_replay_requires_intact_spool_mode(self):
+        from processing.source_intake_mode import TRIGGERS
+        job,_ = self.store.submit_source_intake(self.validated,**self.options)
+        request = dict(node_id='cluster', worker_id='worker', worker_instance_id='instance',
+                       claim_request_id='existing-claim')
+        with self.queue._db() as db:
+            db.execute("INSERT INTO reference_claims(request_id,job_id,node_id,worker_id,instance_id,token) VALUES(?,?,?,?,?,?)",
+                       ('existing-claim',job['jobId'],'cluster','worker','instance','synthetic-token'))
+        self.assertIsNone(self.store.claim(job['jobId'],**request))
+        with self.queue._db() as db:
+            db.execute('DROP TRIGGER source_intake_mode_no_delete')
+            db.execute('DELETE FROM reference_source_intake_modes WHERE job_id=?',(job['jobId'],))
+            db.execute(TRIGGERS['source_intake_mode_no_delete'])
+        self.assertIsNone(self.store.claim(job['jobId'],**request))
+        with self.queue._db() as db:
+            db.execute("INSERT INTO reference_source_intake_modes(job_id,mode) VALUES(?,'spool-v1')",(job['jobId'],))
+        # An existing migrated spool claim retains its ordinary replay behavior.
+        self.assertIsNotNone(self.store.claim(job['jobId'],**request))
+        with self.queue._db() as db:
+            db.execute('DROP TRIGGER source_intake_mode_no_update')
+        with self.assertRaisesRegex(Conflict,'mode guards changed'):
+            self.store.claim(job['jobId'],**request)
+
     def test_persisted_source_attestation_consumes_metadata_quota(self):
         self.store.submit_source_intake(self.validated,**self.options)
         with self.queue._db() as db:
