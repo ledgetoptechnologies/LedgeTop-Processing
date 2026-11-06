@@ -88,10 +88,19 @@ class DirectV2AdmissionTests(unittest.TestCase):
             self.assertEqual(self.store._candidate_any_row(db,'main')['id'],large['jobId'])
         # Missing authoritative trust remains a barrier, rather than letting
         # attacker-controlled sizes decide routing.
+        trusted=self.store._source_routing_keys
         self.store._source_routing_keys=None
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             self.assertEqual(self.store._candidate_any_row(db,'cluster')['id'],large['jobId'])
+        self.store._source_routing_keys=trusted
+        raw['submissionId']=str(uuid.uuid4())
+        production,_=self.store.submit(p.validate_submission(raw,environment='production',
+            capability_fingerprint=raw['capabilityFingerprint']))
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.assertEqual(self.store._candidate_any_row(db,'cluster')['id'],production['jobId'])
+            self.assertFalse(self.queue._staging_open(db,'cluster'))
 
     def test_rehashed_tampered_source_remains_queue_barrier(self):
         from processing import reference_protocol as p
