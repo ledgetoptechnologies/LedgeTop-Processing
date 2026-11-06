@@ -51,7 +51,8 @@ def verify_selected(intent, frames, *, source_records, pipeline_manifest):
         source=sources.get(identifier)
         if (source is None or source['processingRole'] in ('gcp_source','administrative')
                 or identifier!=obj['id'] or source['relativePath'].rsplit('/',1)[-1]!=obj['name']
-                or source['byteSize']!=obj['byteSize'] or source['sha256']!=obj['sha256']):
+                or source['byteSize']!=obj['byteSize'] or source['sha256']!=obj['sha256']
+                or source['kind']!=obj['kind'] or source['mediaType']!=obj['mediaType']):
             raise ValueError('selected object mismatch')
     return {'state':'selected_pages_verified_not_custody','selectedCount':len(selected),
             'sourceCustodyAccepted':False,'processingAuthorized':False}
