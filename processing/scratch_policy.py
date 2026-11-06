@@ -44,6 +44,11 @@ MAX_DIRECT_WRITER_PINS = 64
 # This is admission accounting, not a filesystem quota or a claim about the
 # maximum physical SQLite growth on an arbitrary filesystem.
 DIRECT_WRITER_PIN_ALLOWANCE = 64 * 1024
+V2_READY_TRIGGERS = (
+    "CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_replace BEFORE INSERT ON direct_v2_readiness_uses WHEN EXISTS (SELECT 1 FROM direct_v2_readiness_uses WHERE challenge=NEW.challenge) BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END",
+    "CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_update BEFORE UPDATE ON direct_v2_readiness_uses BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END",
+    "CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_delete BEFORE DELETE ON direct_v2_readiness_uses BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END",
+)
 FENCED_LEASE = float(MAX_INTEGER)
 CONTROL_SCHEMA='''CREATE TABLE IF NOT EXISTS control_charges (
  reservation TEXT PRIMARY KEY,charge_id TEXT NOT NULL UNIQUE,scope TEXT NOT NULL,
@@ -133,6 +138,19 @@ class ScratchLedger:
         self.floor = _integer(safety_floor_bytes, "safety floor")
         self.grace = _integer(cleanup_grace_seconds, "cleanup grace")
         with self._transaction(bootstrap=True) as db:
+            # Do not silently recreate missing durable replay guards on an
+            # already-enrolled ledger: their absence requires inspection.
+            has_metadata=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'").fetchone()
+            if has_metadata:
+                saved=db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
+                try: prior=json.loads(saved[0]) if saved else {}
+                except (ValueError,TypeError):raise PolicyConflict('unknown accounting version or ledger policy') from None
+                if 'directV2ReadinessVersion' in prior:
+                    for sql in V2_READY_TRIGGERS:
+                        name=sql.split()[5]
+                        row=db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(name,)).fetchone()
+                        if row is None or ' '.join(row['sql'].split())!=' '.join(sql.replace(' IF NOT EXISTS','').split()):
+                            raise PolicyConflict('V2 readiness journal guards changed')
             schema = """
                 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS job_environments (job TEXT PRIMARY KEY, environment TEXT NOT NULL);
@@ -173,11 +191,7 @@ class ScratchLedger:
             for statement in schema.split(";"):
                 if statement.strip():
                     db.execute(statement)
-            for trigger in (
-                "CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_replace BEFORE INSERT ON direct_v2_readiness_uses WHEN EXISTS (SELECT 1 FROM direct_v2_readiness_uses WHERE challenge=NEW.challenge) BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END",
-                "CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_update BEFORE UPDATE ON direct_v2_readiness_uses BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END",
-                "CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_delete BEFORE DELETE ON direct_v2_readiness_uses BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END",
-            ):
+            for trigger in V2_READY_TRIGGERS:
                 db.execute(trigger)
             for table, name, declaration in (
                 ("objects", "accepted_copy_verified", "INTEGER NOT NULL DEFAULT 0"),
@@ -251,11 +265,23 @@ class ScratchLedger:
                         (MAX_DIRECT_WRITER_PINS+1,)).fetchall()
         used_readiness=db.execute('SELECT challenge,reservation,proof_sha256 FROM direct_v2_readiness_uses LIMIT 4097').fetchall()
         if len(used_readiness)>4096:raise PolicyConflict('V2 readiness journal capacity exceeded')
+        columns=[(row['name'],row['type'].upper(),row['notnull'],row['pk'])
+                 for row in db.execute('PRAGMA table_info(direct_v2_readiness_uses)')]
+        if columns != [('challenge','TEXT',0,1),('reservation','TEXT',1,0),('proof_sha256','TEXT',1,0)]:
+            raise PolicyConflict('V2 readiness journal schema changed')
+        for sql in V2_READY_TRIGGERS:
+            name=sql.split()[5]
+            trigger=db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(name,)).fetchone()
+            if trigger is None or ' '.join(trigger['sql'].split()) != ' '.join(sql.replace(' IF NOT EXISTS','').split()):
+                raise PolicyConflict('V2 readiness journal guards changed')
         if used_readiness:
-            if type(observed_config.get('directV2ReadinessVersion')) is not int or observed_config['directV2ReadinessVersion']!=1:
+            if (type(observed_config.get('directV2ReadinessVersion')) is not int or observed_config['directV2ReadinessVersion']!=1
+                    or type(observed_config.get('directV2ReadinessCount')) is not int
+                    or observed_config['directV2ReadinessCount']!=len(used_readiness)):
                 raise PolicyConflict('V2 readiness journal marker missing')
             base['directV2ReadinessVersion']=1
-        elif 'directV2ReadinessVersion' in observed_config:
+            base['directV2ReadinessCount']=len(used_readiness)
+        elif 'directV2ReadinessVersion' in observed_config or 'directV2ReadinessCount' in observed_config:
             raise PolicyConflict('V2 readiness journal records missing')
         for used in used_readiness:
             try: valid = str(uuid.UUID(used['challenge']))==used['challenge']
@@ -498,7 +524,8 @@ class ScratchLedger:
             changed=db.execute('UPDATE direct_writer_pins SET id=? WHERE reservation=? AND id=?',
                                (replacement,reservation_id,readiness_pin)).rowcount
             if changed!=1:raise PolicyConflict('V2 readiness pin changed')
-            self._latch(db,directV2ReadinessVersion=1)
+            self._latch(db,directV2ReadinessVersion=1,
+                        directV2ReadinessCount=db.execute('SELECT count(*) FROM direct_v2_readiness_uses').fetchone()[0]+1)
             db.execute('INSERT INTO direct_v2_readiness_uses VALUES(?,?,?)',
                        (challenge_id,reservation_id,proof_sha256))
             return replacement

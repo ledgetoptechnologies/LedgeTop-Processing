@@ -173,6 +173,22 @@ class WorkerV2Tests(unittest.TestCase):
         with self.assertRaisesRegex(DirectBoundaryDenied,'proof expired'):self.put_zero()
         self.assertIsNotNone(self.boundary._readiness_pin)
 
+    def test_initial_sampling_gap_cannot_extend_monotonic_deadline(self):
+        with patch('processing.direct_worker_receiver_v2.time.monotonic',return_value=100) as mono:
+            def wall():
+                mono.return_value=115
+                return 110
+            self.clock.side_effect=wall
+            boundary=DirectWorkerBoundaryV2(ledger=self.ledger,spool=self.spool,inventory=self.boundary.inventory,
+                item=self.item,reservation_binding=self.reservation,expected_worker=self.worker,
+                engine_id='fixture-v2',coordinator_origin='https://127.0.0.1:8443',gate_generation=1,
+                bearer=self.bearer,readiness_proof=self.readiness,challenge_id=self.challenge,
+                issuer_id='worker-issuer',key_id='worker-key',public_key=self.proof_key.public_key())
+            self.assertEqual(boundary._proof_deadline,110)
+            with self.assertRaisesRegex(DirectBoundaryDenied,'proof expired'):
+                boundary.put(self.headers,protected_transport=True,object_id=fixtures.GCP_ID,
+                    content_length=0,content_sha256=hashlib.sha256(b'').hexdigest(),reader=io.BytesIO(b''))
+
     def test_challenge_is_consumed_once_across_boundary_reconstruction(self):
         self.put_zero()
         replay=DirectWorkerBoundaryV2(ledger=self.ledger,spool=self.spool,inventory=self.boundary.inventory,
@@ -183,6 +199,22 @@ class WorkerV2Tests(unittest.TestCase):
         with self.assertRaisesRegex(PolicyConflict,'challenge already consumed'):
             replay.put(self.headers,protected_transport=True,object_id=fixtures.GCP_ID,
                 content_length=0,content_sha256=hashlib.sha256(b'').hexdigest(),reader=io.BytesIO(b''))
+
+    def test_missing_readiness_guard_and_record_fail_closed(self):
+        self.put_zero()
+        with sqlite3.connect(self.ledger.path) as db:
+            db.execute('DROP TRIGGER direct_v2_readiness_no_delete')
+        with self.assertRaisesRegex(PolicyConflict,'guards changed'):
+            self.ledger.begin_direct_writer(self.observation['scratchReservationId'],
+                scratch.settings(self.item,self.observation['scratchReservationId']))
+        with self.assertRaisesRegex(PolicyConflict,'guards changed'):
+            ScratchLedger(self.ledger.path,self.root,capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
+        from processing.scratch_policy import V2_READY_TRIGGERS
+        with sqlite3.connect(self.ledger.path) as db:
+            db.execute('DELETE FROM direct_v2_readiness_uses')
+            db.execute(V2_READY_TRIGGERS[2])
+        with self.assertRaisesRegex(PolicyConflict,'records missing'):
+            ScratchLedger(self.ledger.path,self.root,capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
 
     @unittest.skipUnless(os.environ.get('LTDS_OLD_PROCESSING_SOURCE'),'old processing source not supplied')
     def test_previous_scratch_refuses_consumed_v2_readiness(self):

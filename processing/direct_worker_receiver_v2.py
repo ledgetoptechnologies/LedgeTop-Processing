@@ -31,8 +31,8 @@ class DirectWorkerBoundaryV2:
         item, _, _ = identity(item, expected_worker=expected_worker)
         from .direct_worker_fence_proof_v2 import verify as verify_readiness, FenceProofRejected
         try:
-            checked_at = time.time()
             checked_mono = time.monotonic()
+            checked_at = time.time()
             verified = verify_readiness(readiness_proof, expected_item=item, expected_worker=expected_worker,
                 challenge_id=challenge_id, gate_generation=gate_generation, issuer_id=issuer_id,
                 key_id=key_id, public_key=public_key, now=int(checked_at))
