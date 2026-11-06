@@ -60,6 +60,17 @@ activation receipt. See
 The full-phase fixture is being adapted to the real installer-derived layout;
 the earlier649b component runs do not qualify this later ops-only change.
 
+The reviewed engine-ID grammar, final-runtime selection and forbidden-token
+inventory fixes are selected through `da2844bf`. On that exact combined source,
+73/73 Linux cases passed with no skips across the typed pre-start review,
+deployment bundle and both runtime/worker preparation modules. The canonical
+archive SHA-256 is `57b097909f5fa0a7d0a2e5cecb4d0ac47c3b450cb8d587862713de909dc2182c`;
+the test log SHA-256 is `081f8c1989a5bc3b8a3ab7ecd63191d73796b4004fc39169e2b929e378d8d29c`.
+The bounded non-root runner was removed. Claude's separate installer and
+serialized-probe runs, including their earlier setup failures, are documented in
+[the original qualification](evidence/first-install-preparation-fixes-20261106.md).
+The combined source still needs full-phase qualification and installed checks.
+
 The bounded Engineering Hub review is saved in
 `engineering-hub/reviews/hub-update-20261106-processing.md` v1. Authenticated SDK
 reads work; this chat's subscribed listener PID108768 is live and identity
