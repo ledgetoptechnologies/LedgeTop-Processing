@@ -119,62 +119,75 @@ try {
  const db=openDatabase(path.join(dir,'viewer.sqlite')),processing=new ProcessingRepository(db),gcp=new GcpRepository(db);
  const project=processing.createProject({displayName:'Synthetic verifier fixture'});
  const dataset=processing.createDataset({projectId:project.id,displayName:'Synthetic flight',storageMode:'managed',rootKey:'datasets',relativePath:crypto.randomUUID()});
- const image=Buffer.from('synthetic image bytes'),csv='point_id,label,latitude,longitude,elevation_m\nA,Target,44.5,-88.1,244\n',csvBytes=Buffer.from(csv);
+ const image=Buffer.from('synthetic image bytes'),adminImage=Buffer.from('synthetic administrative image bytes'),csv='Name,Easting,Northing,Elevation,Description,Longitude,Latitude,Ellipsoidal height,CS name\nA,903241.652,549596.746,833.164,Hub,-88.100000005,44.500000005,720.437000005,NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)\n',csvBytes=Buffer.from(csv);
  const files=[{id:'photo-1',relativePath:'photo.jpg',byteSize:image.length,sha256:crypto.createHash('sha256').update(image).digest('hex'),contentType:'image/jpeg',processingRole:'image',metadata:{width:100,height:100}},
+   {id:'admin-photo',relativePath:'admin-photo.jpg',byteSize:adminImage.length,sha256:crypto.createHash('sha256').update(adminImage).digest('hex'),contentType:'image/jpeg',processingRole:'administrative',metadata:{width:100,height:100}},
    {id:'gcp-file',relativePath:'control.csv',byteSize:csvBytes.length,sha256:crypto.createHash('sha256').update(csvBytes).digest('hex'),contentType:'text/csv',processingRole:'gcp_source'}];
  const canonical=files.map(({relativePath,byteSize,sha256})=>({relativePath,byteSize,sha256}));
  processing.finalizeDataset(dataset.id,files,crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex'));
- const parsed=parseGcpInterchange({format:'generic-csv-v1',content:csv});
- const set=gcp.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceFileId:'gcp-file',sourceFilename:'control.csv',sourceSha256:files[1].sha256,sourceContent:csv,crs:parsed.crs,elevationUnits:parsed.elevationUnits,provenance:parsed.provenance,points:parsed.points});
- const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Synthetic model'});
- gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'photo-1',pixelX:25,pixelY:75,createdBy:'ops:synthetic'});
+ const parsed=parseGcpInterchange({format:'emlid-all-columns-v1',content:csv});
+ const set=gcp.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'emlid-all-columns-v1',sourceFileId:'gcp-file',sourceFilename:'control.csv',sourceSha256:files[2].sha256,sourceContent:csv,crs:parsed.crs,elevationUnits:parsed.elevationUnits,provenance:parsed.provenance,points:parsed.points});
  const provider=processing.upsertProvider({type:'nodeodm',displayName:'Synthetic ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
- const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}});
  const {privateKey,publicKey}=crypto.generateKeyPairSync('ed25519');
  const signer={issuerId:'synthetic-issuer',keyId:'synthetic-key',sign:bytes=>crypto.sign(null,bytes,privateKey)};
- const snapshot=createHeldSourceSnapshot(processing,{datasetId:dataset.id,taskId:task.id,attemptId:attempt.id,signer,now:()=> '2026-11-06T12:00:00.000Z'});
+ function capture(targetId,displayName) {
+   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName});
+   gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:targetId,pixelX:25.123456785,pixelY:75.000000005,createdBy:'ops:synthetic'});
+   const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{},gcpHeightSource:'ellipsoidal'});
+   const snapshot=createHeldSourceSnapshot(processing,{datasetId:dataset.id,taskId:task.id,attemptId:attempt.id,signer,now:()=> '2026-11-06T12:00:00.000Z'});
+   return {taskId:task.id,attemptId:attempt.id,snapshot};
+ }
+ const cases=[capture('photo-1','Synthetic selected image'),capture('admin-photo','Synthetic administrative image')];
  const datasetFiles=processing.getDataset(dataset.id,true).files;
  const sourceManifest={schemaVersion:1,id:dataset.id,datasetManifestSha256:processing.getDataset(dataset.id,true).manifestSha256,
    totalBytes:datasetFiles.reduce((n,file)=>n+file.byteSize,0),objectCount:datasetFiles.length,objects:datasetFiles.map(file=>({id:file.id,name:path.posix.basename(file.relativePath),byteSize:file.byteSize,sha256:file.sha256,
      sourceType:file.processingRole==='gcp_source'?'gcp_source_csv':'raw_input',retentionClass:file.processingRole==='gcp_source'?'permanent_viewer_hold':'release_after_acceptance',retentionHoldId:file.processingRole==='gcp_source'?file.id:null}))};
- const generated=snapshot.intent.gcp.generatedGcp;
- const derivedManifest={schemaVersion:1,attemptId:attempt.id,objects:[{id:`gcp_${attempt.id}`,name:'gcp_list.txt',byteSize:generated.byteSize,sha256:generated.sha256,snapshotAttemptId:attempt.id,
-   snapshotContentSha256:generated.sha256,snapshotEvidenceSha256:snapshot.intent.gcp.evidenceSha256,sourceType:'attempt_derived_gcp_list',retentionClass:'release_after_acceptance',retentionHoldId:null}]};
- process.stdout.write(JSON.stringify({intentBytes:canonicalBytes(snapshot.intent).toString('base64'),signature:snapshot.signature.toString('base64'),publicKeyPem:publicKey.export({type:'spki',format:'pem'}),snapshotSha:snapshot.intentSha256,
-   sourceFrames:snapshot.sourceFrames.toString('base64'),selectedFrames:snapshot.selectedFrames.toString('base64'),gcpEvidenceFrames:snapshot.gcpEvidenceFrames.toString('base64'),gcpFileFrames:snapshot.gcpFileFrames.toString('base64'),
-   sourceManifest,derivedManifest,taskId:task.id,attemptId:attempt.id}));
+ const serialized=cases.map(({taskId,attemptId,snapshot})=>{
+   const generated=snapshot.intent.gcp.generatedGcp;
+   const derivedManifest={schemaVersion:1,attemptId,objects:[{id:`gcp_${attemptId}`,name:'gcp_list.txt',byteSize:generated.byteSize,sha256:generated.sha256,snapshotAttemptId:attemptId,
+     snapshotContentSha256:generated.sha256,snapshotEvidenceSha256:snapshot.intent.gcp.evidenceSha256,sourceType:'attempt_derived_gcp_list',retentionClass:'release_after_acceptance',retentionHoldId:null}]};
+   return {intentBytes:canonicalBytes(snapshot.intent).toString('base64'),signature:snapshot.signature.toString('base64'),snapshotSha:snapshot.intentSha256,
+     sourceFrames:snapshot.sourceFrames.toString('base64'),selectedFrames:snapshot.selectedFrames.toString('base64'),gcpEvidenceFrames:snapshot.gcpEvidenceFrames.toString('base64'),gcpFileFrames:snapshot.gcpFileFrames.toString('base64'),
+     derivedManifest,taskId,attemptId};
+ });
+ process.stdout.write(JSON.stringify({cases:serialized,publicKeyPem:publicKey.export({type:'spki',format:'pem'}),sourceManifest}));
  db.close();
 } finally {fs.rmSync(dir,{recursive:true,force:true});}
 """
         result=subprocess.run(['node','-e',script],input=json.dumps({'root':root}),capture_output=True,text=True,check=True,timeout=25)
         import base64
         vector=json.loads(result.stdout)
-        raw=base64.b64decode(vector['intentBytes']);signature=base64.b64decode(vector['signature'])
-        intent=_decode(raw,1024*1024);source_frames=base64.b64decode(vector['sourceFrames']);selected_frames=base64.b64decode(vector['selectedFrames'])
-        # Build the independently typed input manifest from Viewer-exported pages.
-        source_lines=source_frames[:-1].split(b'\n');source_records=[]
-        for line in source_lines:source_records.extend(_decode(line,256*1024)['records'])
-        selected_lines=selected_frames[:-1].split(b'\n');selected_records=[]
-        for line in selected_lines:selected_records.extend(_decode(line,256*1024)['records'])
-        by_id={r['datasetFileId']:r for r in source_records if r.get('type')=='dataset_file'}
-        pipeline_objects=[]
-        for selected in selected_records:
-            if selected['type']=='dataset_file':
-                source=by_id[selected['datasetFileId']]
-                pipeline_objects.append({'id':source['datasetFileId'],'name':source['relativePath'].rsplit('/',1)[-1],
-                    'byteSize':source['byteSize'],'sha256':source['sha256'],'kind':source['kind'],'mediaType':source['mediaType']})
-            else:
-                generated=intent['gcp']['generatedGcp']
-                pipeline_objects.append({'id':selected['pageObjectId'],'name':'gcp_list.txt','byteSize':generated['byteSize'],
-                    'sha256':generated['sha256'],'kind':'auxiliary','mediaType':'text/plain'})
-        manifest_payload={'schemaVersion':1,'id':'synthetic-input','revision':1,'totalBytes':sum(x['byteSize'] for x in pipeline_objects),
-            'objectCount':len(pipeline_objects),'inputCounts':{},'objects':pipeline_objects}
-        manifest={**manifest_payload,'sha256':p.digest(manifest_payload)}
-        observed=verify_snapshot(intent_bytes=raw,signature=signature,source_frames=source_frames,selected_frames=selected_frames,
-            gcp_evidence_frames=base64.b64decode(vector['gcpEvidenceFrames']),gcp_file_frames=base64.b64decode(vector['gcpFileFrames']),
-            pipeline_manifest=manifest,public_key=serialization.load_pem_public_key(vector['publicKeyPem'].encode()),issuer_id=intent['issuerId'],key_id=intent['keyId'],
-            snapshot_sha=vector['snapshotSha'],source_manifest=vector['sourceManifest'],derived_manifest=vector['derivedManifest'],
-            task_id=vector['taskId'],pipeline_sha=manifest['sha256'])
+        def verify_case(case, *, should_pass):
+            raw=base64.b64decode(case['intentBytes']);intent=_decode(raw,1024*1024)
+            source_frames=base64.b64decode(case['sourceFrames']);selected_frames=base64.b64decode(case['selectedFrames'])
+            source_records=[]
+            for line in source_frames[:-1].split(b'\n'):source_records.extend(_decode(line,256*1024)['records'])
+            selected_records=[]
+            for line in selected_frames[:-1].split(b'\n'):selected_records.extend(_decode(line,256*1024)['records'])
+            by_id={r['datasetFileId']:r for r in source_records if r.get('type')=='dataset_file'}
+            pipeline_objects=[]
+            for selected in selected_records:
+                if selected['type']=='dataset_file':
+                    source=by_id[selected['datasetFileId']]
+                    pipeline_objects.append({'id':source['datasetFileId'],'name':source['relativePath'].rsplit('/',1)[-1],
+                        'byteSize':source['byteSize'],'sha256':source['sha256'],'kind':source['kind'],'mediaType':source['mediaType']})
+                else:
+                    generated=intent['gcp']['generatedGcp']
+                    pipeline_objects.append({'id':selected['pageObjectId'],'name':'gcp_list.txt','byteSize':generated['byteSize'],
+                        'sha256':generated['sha256'],'kind':'auxiliary','mediaType':'text/plain'})
+            manifest_payload={'schemaVersion':1,'id':'synthetic-input','revision':1,'totalBytes':sum(x['byteSize'] for x in pipeline_objects),
+                'objectCount':len(pipeline_objects),'inputCounts':{},'objects':pipeline_objects}
+            manifest={**manifest_payload,'sha256':p.digest(manifest_payload)}
+            args=dict(intent_bytes=raw,signature=base64.b64decode(case['signature']),source_frames=source_frames,selected_frames=selected_frames,
+                gcp_evidence_frames=base64.b64decode(case['gcpEvidenceFrames']),gcp_file_frames=base64.b64decode(case['gcpFileFrames']),
+                pipeline_manifest=manifest,public_key=serialization.load_pem_public_key(vector['publicKeyPem'].encode()),issuer_id=intent['issuerId'],key_id=intent['keyId'],
+                snapshot_sha=case['snapshotSha'],source_manifest=vector['sourceManifest'],derived_manifest=case['derivedManifest'],
+                task_id=case['taskId'],pipeline_sha=manifest['sha256'])
+            if should_pass:return verify_snapshot(**args)
+            with self.assertRaisesRegex(ValueError,'selected image binding'):verify_snapshot(**args)
+            return None
+        observed=verify_case(vector['cases'][0],should_pass=True)
+        verify_case(vector['cases'][1],should_pass=False)
         self.assertEqual(observed['gcpState'],'gcp_evidence_and_generated_file_verified_not_source_csv_reparsed')
         self.assertEqual(observed['gcpCorrespondenceCount'],1)
         self.assertTrue(observed['gcpSourceRetentionDeclarationsVerified'])

@@ -68,16 +68,35 @@ class FrameTests(unittest.TestCase):
             dict(type='dataset_file',datasetFileId='photo-1',relativePath='flight/photo.jpg',processingRole='image',
                 byteSize=12,sha256='b'*64,kind='image',mediaType='image/jpeg')]
         result=verify_gcp_semantics(evidence_bytes=evidence_bytes,file_bytes=file_bytes,generated_gcp=generated,
-            source_records=sources,attempt_id='attempt-1')
+            source_records=sources,attempt_id='attempt-1',selected_image_ids=['photo-1'])
         self.assertEqual(result['state'],'gcp_evidence_and_generated_file_verified_not_source_csv_reparsed')
         self.assertFalse(result['rawSourceCsvBytesReparsed'])
         self.assertFalse(result['sourceCustodyAccepted']);self.assertFalse(result['processingAuthorized'])
         changed=copy.deepcopy(evidence);changed['correspondences'][0]['longitude']=-88.2
         changed_bytes=json.dumps(changed,ensure_ascii=False,separators=(',',':')).encode()
         with self.assertRaises(ValueError):verify_gcp_semantics(evidence_bytes=changed_bytes,file_bytes=file_bytes,generated_gcp=generated,
-            source_records=sources,attempt_id='attempt-1')
+            source_records=sources,attempt_id='attempt-1',selected_image_ids=['photo-1'])
         with self.assertRaises(ValueError):verify_gcp_semantics(evidence_bytes=evidence_bytes,file_bytes=file_bytes+b' ',generated_gcp=generated,
-            source_records=sources,attempt_id='attempt-1')
+            source_records=sources,attempt_id='attempt-1',selected_image_ids=['photo-1'])
+        with self.assertRaisesRegex(ValueError,'selected image binding'):
+            verify_gcp_semantics(evidence_bytes=evidence_bytes,file_bytes=file_bytes,generated_gcp=generated,
+                source_records=sources,attempt_id='attempt-1',selected_image_ids=[])
+        for changed in (dict(evidence,schemaVersion=True),
+                        {**evidence,'coordinateContract':dict(evidence['coordinateContract'],schemaVersion=True)}):
+            with self.subTest(schema=changed.get('schemaVersion'),contract=changed.get('coordinateContract',{}).get('schemaVersion')):
+                with self.assertRaises(ValueError):verify_gcp_semantics(evidence_bytes=json.dumps(changed,separators=(',',':')).encode(),
+                    file_bytes=file_bytes,generated_gcp=generated,source_records=sources,attempt_id='attempt-1',selected_image_ids=['photo-1'])
+
+        navd_file=b'EPSG:6349\n-88.1 44.5 244 12 20 photo.jpg\n'
+        navd=dict(schemaVersion=2,coordinateContract=dict(schemaVersion=1,horizontalCrs='EPSG:6318',verticalSystem='NAVD88(GEOID18) height',
+            zSource='Elevation',sourceUnits='ftUS',outputZUnit='m',sourceCoordinateSystem='NAD83(2011) / WISCRS',parser='emlid-all-columns-v1'),
+            snapshot=dict(snapshotId='attempt-1',byteSize=len(navd_file),sha256=hashlib.sha256(navd_file).hexdigest(),
+                sourceGcpDatasetFileIds=['gcp-file'],imageDatasetFileIds=['photo-1'],correspondenceCount=1),correspondences=marks)
+        navd_bytes=json.dumps(navd,ensure_ascii=False,separators=(',',':')).encode()
+        navd_meta=dict(generated,byteSize=len(navd_file),sha256=hashlib.sha256(navd_file).hexdigest())
+        with self.assertRaisesRegex(ValueError,'NAVD88 source height transform unavailable'):
+            verify_gcp_semantics(evidence_bytes=navd_bytes,file_bytes=navd_file,generated_gcp=navd_meta,
+                source_records=sources,attempt_id='attempt-1',selected_image_ids=['photo-1'])
 
     def test_selected_pages_bind_generated_gcp_object_and_viewer_input_digest(self):
         attempt='attempt-2';file_bytes=b'EPSG:4326\n-88.1 44.5 244 12 20 photo.jpg\n'
@@ -88,13 +107,13 @@ class FrameTests(unittest.TestCase):
         page={'version':'ltds-viewer-selected-frames-v1','index':0,'records':records}
         raw,sha=frame(page,SELECTED_DOMAIN);wire=raw+b'\n'
         intent={'attemptId':attempt,'selectedPageHashes':[sha],'selectedFrameBytes':len(wire),'selectedCount':2,
-            'inputManifestSha256':hashlib.sha256(b'[{"relativePath":"flight/photo.jpg","byteSize":12,"sha256":"b"},{"relativePath":"gcp_list.txt","byteSize":'+str(len(file_bytes)).encode()+b',"sha256":"'+generated['sha256'].encode()+b'"}]').hexdigest(),
-            'gcp':{'generatedGcp':generated}}
+            'inputManifestSha256':'0'*64,'gcp':{'generatedGcp':generated}}
         # Match the Viewer SHA-256 over JSON.stringify(inputFiles), including exact source ordering.
         from processing.direct_selected_gcp_frames import _js_stringify
         input_files=[dict(relativePath='flight/photo.jpg',byteSize=12,sha256='b'*64),dict(relativePath='gcp_list.txt',byteSize=len(file_bytes),sha256=generated['sha256'])]
         intent['inputManifestSha256']=hashlib.sha256(_js_stringify(input_files).encode()).hexdigest()
         sources=[dict(type='dataset_file',datasetFileId='gcp-file',relativePath='control.csv',processingRole='gcp_source',byteSize=10,sha256='a'*64,kind='auxiliary',mediaType='text/csv'),
+            dict(type='dataset_file',datasetFileId='old-gcp-list',relativePath='gcp_list.txt',processingRole='provider_input',byteSize=3,sha256='d'*64,kind='auxiliary',mediaType='text/plain'),
             dict(type='dataset_file',datasetFileId='photo-1',relativePath='flight/photo.jpg',processingRole='image',byteSize=12,sha256='b'*64,kind='image',mediaType='image/jpeg')]
         manifest={'objects':[dict(id='photo-1',name='photo.jpg',byteSize=12,sha256='b'*64,kind='image',mediaType='image/jpeg'),
             dict(id=f'gcp_{attempt}',name='gcp_list.txt',byteSize=len(file_bytes),sha256=generated['sha256'],kind='auxiliary',mediaType='text/plain')]}

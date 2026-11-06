@@ -69,6 +69,7 @@ def verify_selected(intent, frames, *, source_records, pipeline_manifest):
     for source in source_records:
         if source.get('type')!='dataset_file':continue
         role=source['processingRole'];name=source['relativePath'];photo=bool(PHOTO.search(name))
+        if generated is not None and PurePosixPath(name).name.lower()=='gcp_list.txt':continue
         if role in ('gcp_source','administrative') or (role=='auto' and not photo):continue
         if role=='image' and not photo:raise ValueError('unsupported selected image')
         if role=='provider_input' and not AUXILIARY.search(name):raise ValueError('unsupported provider input')
@@ -94,7 +95,8 @@ def verify_selected(intent, frames, *, source_records, pipeline_manifest):
         input_files.append({'relativePath':source['relativePath'],'byteSize':source['byteSize'],'sha256':source['sha256']})
     if 'inputManifestSha256' in intent and hashlib.sha256(_js_stringify(input_files).encode('utf-8')).hexdigest()!=intent['inputManifestSha256']:
         raise ValueError('Viewer input manifest digest changed')
-    return {'state':'selected_pages_verified_not_custody','selectedCount':len(selected),
+    selected_image_ids=[identifier for kind,identifier in selected if kind=='dataset_file' and sources[identifier]['kind']=='image']
+    return {'state':'selected_pages_verified_not_custody','selectedCount':len(selected),'selectedImageIds':selected_image_ids,
             'sourceCustodyAccepted':False,'processingAuthorized':False}
 
 
@@ -220,11 +222,11 @@ def _scalar(value):
     return format(rounded,'f').rstrip('0').rstrip('.')
 
 
-def _coordinate_header(horizontal,vertical,height_source,*,require_supported_transform=False):
+def _coordinate_header(horizontal,vertical,height_source):
     normalized=re.sub(r'[\s_()-]','',vertical or '').lower()
     if re.fullmatch(r'navd88(?:geoid\d+[a-z]*)?height',normalized):
         if horizontal!='EPSG:6318':raise ValueError('unsupported NAVD88 horizontal CRS')
-        if height_source=='source' and require_supported_transform:raise ValueError('NAVD88 source height transform unavailable')
+        if height_source=='source':raise ValueError('NAVD88 source height transform unavailable')
         return 'EPSG:6349'
     if re.fullmatch(r'(?:ellipsoidal?|ellipsoid)height',normalized):
         return 'EPSG:6319' if horizontal=='EPSG:6318' else 'EPSG:4979'
@@ -233,10 +235,10 @@ def _coordinate_header(horizontal,vertical,height_source,*,require_supported_tra
     return horizontal
 
 
-def verify_gcp_semantics(*, evidence_bytes, file_bytes, generated_gcp, source_records, attempt_id):
+def verify_gcp_semantics(*, evidence_bytes, file_bytes, generated_gcp, source_records, attempt_id, selected_image_ids):
     """Bind retained evidence and exact NodeODM coordinates to held source records."""
     evidence=_strict_json(evidence_bytes)
-    if type(evidence) is not dict or evidence.get('schemaVersion') not in (1,2,3):
+    if type(evidence) is not dict or type(evidence.get('schemaVersion')) is not int or evidence.get('schemaVersion') not in (1,2,3):
         raise ValueError('GCP evidence shape invalid')
     schema=evidence['schemaVersion']
     expected_evidence={'schemaVersion','snapshot','correspondences'}|({'coordinateContract'} if schema>=2 else set())
@@ -256,7 +258,8 @@ def verify_gcp_semantics(*, evidence_bytes, file_bytes, generated_gcp, source_re
     else:
         if 'coordinateContract' not in evidence:raise ValueError('GCP coordinate contract unavailable')
         contract=evidence['coordinateContract']
-        if type(contract) is not dict or contract.get('schemaVersion') not in (1,2):raise ValueError('GCP coordinate contract invalid')
+        if (type(contract) is not dict or type(contract.get('schemaVersion')) is not int
+                or contract.get('schemaVersion') not in (1,2)):raise ValueError('GCP coordinate contract invalid')
         keys={'schemaVersion','horizontalCrs','verticalSystem','zSource','sourceUnits','outputZUnit','sourceCoordinateSystem','parser'}
         if contract['schemaVersion']==2:keys|={'heightSource','outputVerticalSystem'}
         if (set(contract)!=keys or contract['horizontalCrs'] not in ('EPSG:4326','EPSG:6318') or contract['outputZUnit']!='m'
@@ -289,7 +292,8 @@ def verify_gcp_semantics(*, evidence_bytes, file_bytes, generated_gcp, source_re
         source=by_id.get(mark['sourceGcpDatasetFileId']);image=by_id.get(mark['imageDatasetFileId'])
         if (not source or source['processingRole']!='gcp_source' or source['sha256']!=mark['sourceGcpSha256']
                 or source['relativePath']!=mark['sourceGcpRelativePath'] or not image or image['kind']!='image'
-                or image['relativePath']!=mark['imageRelativePath']):raise ValueError('GCP source or image binding changed')
+                or image['relativePath']!=mark['imageRelativePath'] or mark['imageDatasetFileId'] not in selected_image_ids):
+            raise ValueError('GCP source or selected image binding changed')
         if mark['correspondenceId'] in correspondence_ids:raise ValueError('duplicate GCP correspondence')
         pair=(mark['gcpPointId'],mark['imageDatasetFileId'])
         if pair in point_image_pairs:raise ValueError('duplicate GCP point image pair')
@@ -311,7 +315,7 @@ def verify_gcp_semantics(*, evidence_bytes, file_bytes, generated_gcp, source_re
             or generated_gcp['sha256']!=hashlib.sha256(file_bytes).hexdigest() or generated_gcp['correspondenceSha256']!=correspondence_hash
             or generated_gcp['sourceFiles']!=source_files):raise ValueError('generated GCP metadata mismatch')
     vertical=contract.get('outputVerticalSystem') if height_source=='ellipsoidal' else contract.get('verticalSystem')
-    expected=(_coordinate_header(contract['horizontalCrs'],vertical or '',height_source,require_supported_transform=schema==3)+'\n'+'\n'.join(rows)+'\n').encode('utf-8')
+    expected=(_coordinate_header(contract['horizontalCrs'],vertical or '',height_source)+'\n'+'\n'.join(rows)+'\n').encode('utf-8')
     if file_bytes!=expected:raise ValueError('generated NodeODM GCP file does not match evidence')
     return {'state':'gcp_evidence_and_generated_file_verified_not_source_csv_reparsed','correspondenceCount':len(marks),
             'rawSourceCsvBytesReparsed':False,'sourceCustodyAccepted':False,'processingAuthorized':False}

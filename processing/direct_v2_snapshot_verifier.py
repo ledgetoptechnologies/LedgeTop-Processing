@@ -134,8 +134,17 @@ def verify_snapshot(*, intent_bytes, signature, source_frames, public_key, issue
         raise ValueError('source closure incomplete')
     result={'state':'source_pages_verified_not_custody','sourceSnapshotSha256':snapshot_sha,
             'datasetFileCount':len(seen),'sourceCustodyAccepted':False,'processingAuthorized':False}
+    selected=None
+    if selected_frames is not None:
+        if type(pipeline_manifest) is not dict or pipeline_manifest.get('sha256')!=pipeline_sha or p.manifest_sha256(pipeline_manifest)!=pipeline_sha:
+            raise ValueError('pipeline manifest changed')
+        from .direct_selected_gcp_frames import verify_selected
+        selected=verify_selected(intent,selected_frames,source_records=source_records,pipeline_manifest=pipeline_manifest)
+        result['state']='source_and_selected_pages_verified_not_custody'
+        result['selectedCount']=selected['selectedCount']
+    elif pipeline_manifest is not None:raise ValueError('selected pages unavailable')
     if intent['gcp'] is not None:
-        if selected_frames is None or pipeline_manifest is None:raise ValueError('GCP selected pages unavailable')
+        if selected is None:raise ValueError('GCP selected pages unavailable')
         from .direct_selected_gcp_frames import _verify_gcp_chunks_payload,verify_gcp_semantics
         gcp=intent['gcp'];required_gcp={'evidenceVersion','evidencePageHashes','evidencePageBytes','evidencePageCount',
             'evidenceByteCount','evidenceSha256','fileVersion','filePageHashes','filePageBytes','filePageCount',
@@ -154,18 +163,11 @@ def verify_snapshot(*, intent_bytes, signature, source_frames, public_key, issue
             stream_bytes=len(gcp_file_frames) if type(gcp_file_frames) is bytes else -1,byte_count=gcp['fileByteCount'],
             sha256=gcp['fileSha256'],attempt_id=attempt_id,kind='file',evidence_sha256=gcp['evidenceSha256'],version=gcp['fileVersion'])
         semantic=verify_gcp_semantics(evidence_bytes=evidence_bytes,file_bytes=file_bytes,
-            generated_gcp=gcp['generatedGcp'],source_records=source_records,attempt_id=attempt_id)
+            generated_gcp=gcp['generatedGcp'],source_records=source_records,attempt_id=attempt_id,
+            selected_image_ids=selected['selectedImageIds'])
         result['gcpState']=semantic['state'];result['gcpCorrespondenceCount']=semantic['correspondenceCount']
         result['gcpSourceRetentionDeclarationsVerified']=True
+        result['state']='source_selected_gcp_evidence_and_file_verified_not_custody'
     elif gcp_evidence_frames is not None or gcp_file_frames is not None:
         raise ValueError('unbound GCP streams')
-    if selected_frames is not None:
-        if type(pipeline_manifest) is not dict or pipeline_manifest.get('sha256')!=pipeline_sha or p.manifest_sha256(pipeline_manifest)!=pipeline_sha:
-            raise ValueError('pipeline manifest changed')
-        from .direct_selected_gcp_frames import verify_selected
-        selected=verify_selected(intent,selected_frames,source_records=source_records,pipeline_manifest=pipeline_manifest)
-        result['state']=('source_selected_gcp_evidence_and_file_verified_not_custody' if intent['gcp'] is not None
-                         else 'source_and_selected_pages_verified_not_custody')
-        result['selectedCount']=selected['selectedCount']
-    elif pipeline_manifest is not None:raise ValueError('selected pages unavailable')
     return result
