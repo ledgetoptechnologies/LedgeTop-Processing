@@ -14,6 +14,7 @@ from processing.node_gate import NodeGate
 from processing.reference_execution import ExecutionRouter
 from processing.prototype import Queue, REFERENCE_PROFILE
 from processing.reference_runtime import ReferenceRuntime
+from processing.config import ProcessingNode
 from tests import test_reference_runtime as runtime_fixture
 from tests.test_reference_source_grant_renewal import WORKER_TOKEN
 from tests.test_reference_source_processing_recovery import ProcessingHarness, GATE_ORIGIN
@@ -283,7 +284,11 @@ class RuntimePreReservationDiscoveryTests(ProcessingHarness):
         fixture=runtime_fixture.ReferenceRuntimeTests('runTest')
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
+        fixture.config=replace(fixture.config,prototype_state_dir=self.directory.name,
+            prototype_node_ids=self.queue.node_ids,treedar_node_ids=self.queue.treedar_node_ids,
+            processing_nodes=(ProcessingNode('cluster',fixture.config.local_node_url),))
         fixture.value=fixture.recovery_config(self.queue.authority_id)
+        fixture.value['workers']={node:fixture.value['workers'][node] for node in self.queue.node_ids}
         fixture.write_config()
         settings=fixture.settings()
         workers=copy.deepcopy(settings.workers)
@@ -293,9 +298,9 @@ class RuntimePreReservationDiscoveryTests(ProcessingHarness):
         definitions=[dict(name='numeric-probe',type='float',value=1,help='Numeric setting.')]
         self.catalog=dict(ready=True,commonOptions=definitions,nodes=[dict(role=node,available=True,
             capabilitiesSha256='a'*64,engine='odm',engineVersion='pinned-engine-1',options=definitions)
-            for node in ('cluster','main')])
+            for node in self.queue.node_ids])
         self.capacities={node:dict(ready=True,maxImages=None,maxInputBytes=None,taskQueueCount=0)
-            for node in ('cluster','main')}
+            for node in self.queue.node_ids}
         self.discovery_calls=[]
         def discover():
             self.discovery_calls.append('catalog')
@@ -306,7 +311,7 @@ class RuntimePreReservationDiscoveryTests(ProcessingHarness):
             return copy.deepcopy(self.capacities)
         first,second=fixture.tls_patches()
         with first,second:
-            runtime=ReferenceRuntime(self.queue,replace(fixture.config,prototype_state_dir=self.directory.name),settings,
+            runtime=ReferenceRuntime(self.queue,fixture.config,settings,
                 discover=discover,discover_capacities=capacities)
         self.addCleanup(runtime.close)
         self.runtime=runtime
@@ -329,7 +334,7 @@ class RuntimePreReservationDiscoveryTests(ProcessingHarness):
         self.assertEqual(self.request().status,503)
         self.assertEqual(self.status(),('held','coordinator_restart'))
         self.catalog=dict(ready=True,commonOptions=[],nodes=[dict(role=node,available=False,options=[])
-            for node in ('cluster','main')])
+            for node in self.queue.node_ids])
         self.assertFalse(self.request().body['eligible'])
         self.assertTrue(self.discovery_calls)
         self.assertIsNone(self.store.get(self.job_id,private=True)['transferRequest'])
