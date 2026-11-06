@@ -20,7 +20,7 @@ from .reference_result_proxy import _origin
 
 LIMIT=1024*1024
 
-def _read(path, *, private, maximum=LIMIT):
+def _read(path, *, private, maximum=LIMIT, trusted_uids=None):
     if os.name!='posix' or not hasattr(os,'memfd_create'):
         raise ValueError('Linux protected transport required')
     if type(path) is not str or not path.startswith('/') or '\0' in path:
@@ -28,7 +28,9 @@ def _read(path, *, private, maximum=LIMIT):
     parts=PurePosixPath(path).parts
     if str(PurePosixPath(path))!=path or any(x in ('.','..') for x in parts):
         raise ValueError('literal protected path required')
-    owners={0,os.geteuid()}
+    owners={0,os.geteuid()} if trusted_uids is None else set(trusted_uids)
+    if not owners or any(type(uid) is not int or uid<0 for uid in owners):
+        raise ValueError('protected owners required')
     fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC)
     try:
         for component in parts[1:-1]:

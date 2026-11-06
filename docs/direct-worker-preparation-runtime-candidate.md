@@ -7,8 +7,16 @@ environments and uses separately pinned Viewer source keys and a worker signer.
 The worker service owns its startup, health observation and drain.
 Enabled direct configuration also requires an independently enrolled config
 SHA-256 supplied to the loader and a protected descriptor reread of those exact
-bytes. The installed daemon entrypoint does not yet obtain that digest from an
-immutable enrollment record, so it refuses enabled direct configuration.
+bytes. The candidate daemon can obtain that digest through an explicit
+`--direct-enrollment` record whose file and every ancestor are root-owned and
+not writable by group or other users. It validates the enrolled worker identity
+and exact certificate, private-key, client-CA and signer bytes before
+constructing the service. The v2 record refuses v1 without migration.
+Enrollment creation, unit installation, mandatory
+service-unit enrollment, old-process/old-binary rollback fencing and host ownership
+verification are not implemented. Removing the enrollment flag or running an old
+binary is not fenced by this candidate. Without
+the explicit record the daemon still refuses enabled direct configuration.
 
 The current coordinator policy always returns `directPreparationEnabled: false`;
 the endpoint therefore returns unavailable before touching the node gate or
