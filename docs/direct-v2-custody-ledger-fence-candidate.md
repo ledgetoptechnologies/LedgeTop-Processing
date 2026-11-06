@@ -25,9 +25,21 @@ coordinator verifies its pinned worker key, stores the observation within its
 bounded handoff session allowance, and replays verified evidence without the
 worker online. A lost response can be re-observed. This is a historical local
 observation, not proof the worker remains online or that non-ledger writers are
-excluded; custody and execution flags remain false. The journal schema and
+excluded. The wire field is `retentionFenceObserved`, never an active-state
+claim. Custody and execution flags remain false; immutable journal guards and
+a bounded count latch detect deletion. The journal schema and
 marker lack a qualified online migration and older-writer fence and are not
 wired into runtime startup.
+
+The renamed observation uses the distinct protocol
+`ltds-direct-worker-retention-observation-v2`, schema version 2, and the
+`LTDS-DIRECT-WORKER-RETENTION-OBSERVATION-V2` signature domain. Version 1
+observations and version 1 coordinator retention journals are refused, never
+silently converted or discarded. A separately reviewed migration would need
+to verify and preserve old signatures and exact history before activation.
+The candidate currently retains at most 4096 observations indefinitely. On
+reaching that cap, a new observation receives backpressure and the job stays
+held; no row is evicted. There is no qualified retirement or compaction yet.
 
 The scratch ledger fences only its own cooperative APIs. It does not exclude
 an older already-running binary, external filesystem writers or deletion

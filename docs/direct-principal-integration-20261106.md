@@ -46,3 +46,13 @@ failures and drains active uploads before bounded shutdown. The merged focused
 run covered 42 tests with three old-code fixture skips, including a real TLS V2
 upload and drain. It is not connected to a host service or scheduler, and its
 status is not proof of worker readiness.
+
+Retention observations use the distinct V2 protocol and signature domain;
+prior experimental V1 journals are held for explicit migration. The journal
+detects missing or modified observation history. It has a 4,096-record lifetime
+ceiling and refuses new observations at capacity until a safe archival scheme
+is qualified. The merged check ran 79 tests with four old-code fixture skips.
+
+The current direct TLS listener does not authenticate a client certificate.
+The per-boundary bearer is not an installed coordinator identity; do not use
+this candidate as a runtime coordinator-to-worker authorization grant.
