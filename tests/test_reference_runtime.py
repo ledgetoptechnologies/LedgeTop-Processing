@@ -296,18 +296,34 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.value['directWorkers']=dict(enabled=False,nodes=nodes);self.write_config()
         with patch('processing.source_spool.os.path.ismount',return_value=True):loaded=self.settings()
         self.assertEqual(set(loaded.direct_workers),{'cluster','main'})
-        for mutation in ('enabled','missing','ip','key','token'):
+        with patch('processing.source_spool.os.path.ismount',return_value=True):
+            self.assertIsNotNone(load_reference_settings(str(self.path),self.config,validate_disabled_direct_files=True).direct_workers)
+        self.value['directWorkers']['nodes']['main']['bearerFile']=nodes['cluster']['bearerFile']
+        self.write_config()
+        with patch('processing.source_spool.os.path.ismount',return_value=True):
+            with self.assertRaises(RuntimeConfigurationError):
+                load_reference_settings(str(self.path),self.config,validate_disabled_direct_files=True)
+        self.value['directWorkers']['nodes']['main']['bearerFile']=str(self.root/'main.secret')
+        for mutation in ('enabled','missing','ip','key'):
             original=copy.deepcopy(self.value)
             if mutation=='enabled':self.value['directWorkers']['enabled']=True
             if mutation=='missing':del self.value['directWorkers']['nodes']['main']
             if mutation=='ip':self.value['directWorkers']['nodes']['main']['connectIp']='example.com'
             if mutation=='key':self.value['directWorkers']['nodes']['main']['workerPublicKeyPem']='invalid'
-            if mutation=='token':self.value['directWorkers']['nodes']['main']['bearerFile']=nodes['cluster']['bearerFile']
             self.write_config()
             with patch('processing.source_spool.os.path.ismount',return_value=True):
                 with self.subTest(mutation=mutation),self.assertRaises(RuntimeConfigurationError):self.settings()
             self.value=original
         self.write_config()
+        # Disabled runtime must not inspect absent or rotated direct credentials.
+        for entry in self.value['directWorkers']['nodes'].values():
+            for field in ('caFile','clientCertFile','clientKeyFile','bearerFile'):
+                entry[field]=str(self.root/'not-provisioned'/field)
+        self.write_config()
+        with patch('processing.source_spool.os.path.ismount',return_value=True):
+            self.assertIsNotNone(self.settings().direct_workers)
+            with self.assertRaises(RuntimeConfigurationError):
+                load_reference_settings(str(self.path),self.config,validate_disabled_direct_files=True)
 
     def test_schema6_source_bearer_principal_requires_matching_trusted_key(self):
         self.source_intake_config()
