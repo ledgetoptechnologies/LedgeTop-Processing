@@ -67,22 +67,27 @@ establish installed or real-data acceptance.
 
 ### Source retention and release integration
 
-The live intake stores source/derived custody receipts with
-`until_explicit_source_release_v1`, but has no release Store/API operation or
-completed-object deletion executor. The older V1 retention validator and
-unmounted V2 proposals use different guarantees and must not be substituted.
-Viewer creates held source snapshots, but its accept/release helpers currently
-have no production caller. Keep source deletion disabled for the pilot.
+The review candidate now implements authenticated source release through the
+existing intake, Store and API perimeter, with durable per-object intents,
+reader fencing and quarantine/unlink/fsync recovery. Viewer publication and
+accepted-copy proof, plus the agreed conservative 24-hour delay, bind cleanup
+authorization. Actual local Processing/Viewer pairings exercised result
+acceptance, signed release and preserved originals/raw GCPs; see the current
+[integration readiness checkpoint](coordinated-integration-readiness.md) and
+[release-backend evidence](evidence/authenticated-source-release-backend-20261105.md).
+This supersedes the earlier statement that the release operation/executor was
+unimplemented. It does not establish installed NAS durability or activate
+cleanup. Keep deletion disabled for the first installed pilot.
 
-Complete this through the existing intake, Store and API perimeter after the
-provider-admission/pilot gate; do not add another processing controller:
+Retain these invariants when integrating recovery changes and qualifying the
+installed path; do not add another processing controller:
 
 1. Agree the explicit release operation with the Viewer owner, binding exact
    job/generation/environment, authenticated owner, source/derived receipts,
    accepted result-copy identity, release set and retention policy. A copy ACK
    is a prerequisite, not source-delete authorization. Proposed initial policy
-   also waits for successful Viewer publication; this still needs the coupled
-   worker decision and is not an active policy.
+   waits for successful Viewer publication and at least 24 hours afterward;
+   installed activation remains a separate decision.
 2. Persist authorization, deletion intent, per-object outcomes and a replayable
    release receipt/tombstone. Fence new grants and drain existing source readers
    before effects. Recheck the configured mount/root/marker and each exact

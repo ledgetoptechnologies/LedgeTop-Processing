@@ -90,8 +90,12 @@ small no-follow read. The original private Docker PID namespace must be stopped.
 The failed e8 producer's terminal exit1 proves local lifecycle termination, not
 successful data processing. No arbitrary `pilotClosed` boolean is accepted.
 
-This patch is **not installed or connected-host qualified**. Portable synthetic
-boundary tests and static source checks do not prove real SSH, user systemd,
-native ingress or first-worker startup. Linux durable-journal/helper tests and a
-bounded actual activation qualification remain required before live use. On any
-uncertain outcome the coordinator remains frozen and all data/receipts remain.
+This patch is **not installed or connected-host qualified**. The integrated
+Linux journal/helper/installer/cutover selection passed 98/98 tests, including
+real serialized nonroot helper children; external systemd, Docker and native
+transports were faked. See
+[the exact qualification scope](evidence/integrated-first-worker-activation-20261105.md).
+These checks do not prove real SSH, user systemd, native ingress or first-worker
+startup. Bounded actual activation qualification remains required before live
+use. On any uncertain outcome the coordinator remains frozen and all
+data/receipts remain.
