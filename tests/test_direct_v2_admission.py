@@ -69,6 +69,20 @@ class DirectV2AdmissionTests(unittest.TestCase):
             self.assertIsNone(self.store._candidate_any_row(db,'cluster'))
             self.assertEqual(self.store._candidate_any_row(db,'main')['id'],job['jobId'])
 
+    def test_rehashed_tampered_source_remains_queue_barrier(self):
+        from processing import reference_protocol as p
+        job,_=self.store.submit_source_intake(self.validated,**self.options)
+        with self.queue._db() as db:
+            row=db.execute('SELECT source_manifest_json FROM reference_source_intakes WHERE job_id=?',(job['jobId'],)).fetchone()
+            source=json.loads(row[0]);source['objects'][0]['byteSize']=0
+            source['totalBytes']=sum(obj['byteSize'] for obj in source['objects'])
+            source['sha256']=p.digest({key:value for key,value in source.items() if key!='sha256'})
+            db.execute('UPDATE reference_source_intakes SET source_manifest_json=? WHERE job_id=?',
+                       (p.canonical_json(source).decode(),job['jobId']))
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.assertEqual(self.store._candidate_any_row(db,'cluster')['id'],job['jobId'])
+
     def test_pending_job_reopens_unassigned_without_cluster_node(self):
         with tempfile.TemporaryDirectory() as directory:
             queue=Queue(directory,node_ids=('main',),reference_enabled=True)

@@ -4,6 +4,9 @@ import uuid
 import os
 import subprocess
 import sys
+import sqlite3
+from contextlib import closing
+from pathlib import Path
 from processing import direct_v2_reservation_schema as schema
 from processing.maintenance import Conflict
 from processing.coordinator_freeze import CoordinatorFrozen
@@ -81,6 +84,15 @@ class ReservationSchemaTests(unittest.TestCase):
             with self.assertRaisesRegex(Conflict,'fence mismatch'):schema.metadata_bytes(db)
             db.execute('BEGIN IMMEDIATE')
             with self.assertRaisesRegex(Conflict,'fence mismatch'):schema.ensure_schema(db)
+
+    def test_queue_reopen_refuses_when_table_and_fence_both_disappear(self):
+        from processing.prototype import Queue
+        with self.f.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');schema.ensure_schema(db)
+        path=self.f.temp.name;self.f.queue.close()
+        with closing(sqlite3.connect(Path(path)/'jobs.sqlite3')) as db,db:
+            db.execute('DROP TABLE direct_v2_reservations');db.execute('DROP TABLE legacy_fence_requirement')
+        with self.assertRaises(Conflict):Queue(path,node_ids=('cluster','main'),reference_enabled=True)
 
     @unittest.skipUnless(os.environ.get('LTDS_PRE_FENCE_SOURCE'),'pre-fence source not supplied')
     def test_actual_prior_queue_rejects_v2_reservation_fence(self):

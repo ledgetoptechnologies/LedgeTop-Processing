@@ -592,11 +592,21 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                         try:
                             source=json.loads(row['source_manifest_json'])
                             derived=json.loads(row['derived_manifest_json'])
+                            attestation=json.loads(row['source_attestation_json'])
                             total=sum(obj['byteSize'] for manifest in (source,derived) for obj in manifest['objects'])
                             protocol._integer(total,'direct retained bytes',allow_zero=True)
+                            original=dict(schemaVersion=2,submissionId=submission['submissionId'],
+                                providerTaskId=row['provider_task_id'],viewerTaskId=row['viewer_task_id'],
+                                sourceManifest=source,derivedManifest=derived,manifest=submission['manifest'],
+                                pipeline=submission['pipeline'],capabilityFingerprint=submission['capabilityFingerprint'],
+                                sourceAttestation=attestation)
                             if (sum(obj['byteSize'] for obj in source['objects'])!=source['totalBytes']
                                     or source['sha256']!=protocol.digest({k:v for k,v in source.items() if k!='sha256'})
-                                    or derived['sha256']!=protocol.digest({k:v for k,v in derived.items() if k!='sha256'})):
+                                    or derived['sha256']!=protocol.digest({k:v for k,v in derived.items() if k!='sha256'})
+                                    or source['sha256']!=row['source_manifest_sha']
+                                    or derived['sha256']!=row['derived_manifest_sha']
+                                    or attestation['attestationSha256']!=row['source_attestation_sha']
+                                    or protocol.digest(original)!=row['source_request_digest']):
                                 raise ValueError('direct retained inventory changed')
                             submission['manifest']['totalBytes']=total
                         except (ValueError,TypeError,KeyError,AttributeError):
