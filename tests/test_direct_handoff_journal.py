@@ -1,6 +1,7 @@
 """Synthetic coordinator journal tests; sender I/O is deliberately mocked."""
 import io
 import json
+from contextlib import closing
 from pathlib import Path
 import ssl
 import threading
@@ -180,10 +181,11 @@ class HandoffTests(unittest.TestCase):
         self.sender.put=Mock(return_value=self.observation());self.send()
         # A raw, out-of-band writer models the explicitly untrusted DB-control
         # boundary, bypassing the Queue connection authorizer.
-        with sqlite3.connect(self.fixture.queue.path) as db:
+        with closing(sqlite3.connect(self.fixture.queue.path)) as db:
             db.execute('DROP TRIGGER direct_handoff_session_count')
             db.execute('UPDATE direct_handoff_sessions SET object_count=0')
             db.execute(TRIGGERS['direct_handoff_session_count'])
+            db.commit()
         self.handoff=DirectHandoff(self.fixture.store,self.sender,principal='viewer',bearer=self.token)
         with self.assertRaisesRegex(Conflict,'object budget exceeded'):self.send()
 
