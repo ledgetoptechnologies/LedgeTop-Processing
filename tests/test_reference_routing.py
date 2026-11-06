@@ -82,6 +82,34 @@ class ReferenceRoutingTests(unittest.TestCase):
         self.assertEqual(claimed['environment'], 'production')
         self.assertEqual(self.queue.get(staging['jobId'])['status'], 'queued')
 
+    def test_two_small_jobs_fill_distinct_nodes_while_large_job_waits(self):
+        # A one-photo cap keeps this fixture small while testing the same
+        # eligibility rule as the cluster's configured 1,000-photo cap.
+        self.store = ReferenceStore(self.queue, local_max_photos=1, local_max_input_bytes=100)
+        first = self.submit()
+        self.payload['submissionId'] = str(uuid.uuid4())
+        second = self.submit()
+        self.payload['submissionId'] = str(uuid.uuid4())
+        manifest = self.payload['manifest']
+        second_photo = dict(manifest['objects'][0], id='image-2', name='Survey_002.JPG')
+        manifest['objects'].append(second_photo)
+        manifest['objectCount'] = 2
+        manifest['inputCounts']['images'] = 2
+        manifest['totalBytes'] = 6
+        manifest['sha256'] = manifest_sha256(manifest)
+        large = self.submit()
+
+        def attempt(job, node, request):
+            return self.store.claim(job['jobId'], node_id=node, worker_id='worker-' + node,
+                worker_instance_id='instance-' + node, claim_request_id=request)
+
+        self.assertIsNone(attempt(first, 'main', 'first-main'))
+        self.assertEqual(attempt(first, 'cluster', 'first-cluster')['nodeId'], 'cluster')
+        self.assertEqual(attempt(second, 'main', 'second-main')['nodeId'], 'main')
+        self.assertIsNone(attempt(large, 'cluster', 'large-cluster'))
+        self.assertIsNone(attempt(large, 'main', 'large-main'))
+        self.assertEqual(self.queue.get(large['jobId'])['status'], 'queued')
+
 
 if __name__ == '__main__':
     unittest.main()
