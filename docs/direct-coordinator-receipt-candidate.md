@@ -1,0 +1,74 @@
+# Candidate direct coordinator source receipt
+
+**Review draft, not active API or proof of custody.** The standalone schema,
+signature functions and SQLite replay experiment are not wired to Viewer,
+coordinator, worker, freeze/backup, quotas, cleanup or any network listener.
+Never sign or return this retention guarantee merely because the candidate
+validator passes. Real issuance first requires authenticated principal and
+authority, verified durable worker and source closure, trustworthy storage and
+an independently verified Viewer destination. It does not authorize source
+release or result acceptance; those have separate protocols.
+
+`contracts/direct-coordinator-source-receipt-v1.schema.json` defines the closed
+envelope and body. The signature input is the ASCII domain
+`ltds.viewer.source-acceptance/v1` followed by one NUL byte and RFC 8785/JCS of
+the envelope without `signature`. The Ed25519 signature is unpadded base64url.
+Receiver pins issuer, key and coordinator authority independently and compares
+the exact canonical expected body. Object IDs must be sorted in ASCII order
+within each list and unique across source and derived lists; each size is a
+positive safe integer and each hash is lowercase SHA-256. The JSON Schema is
+structural: implementations must also enforce these semantic rules, the total
+count, canonical input bytes, real calendar timestamp and detached signature.
+In particular JavaScript must reject noncanonical raw input such as `1.0`
+before parsing erases its lexical distinction from `1`.
+
+The receipt commits to the retained, retrievable and independently verifiable
+signed snapshot/original-path inventory and engine mapping via digests; it
+does not contain the original paths. A digest without retained authorized
+evidence cannot reconstruct or verify path provenance. A separate, agreed
+path-inventory protocol must preserve exact UTF-8 path bytes and IDs without
+normalization or aliasing, reject unsafe paths, and define GCP CSV/image/CRS and
+attempt-derived mapping. Do not infer that the existing V1 basename-only
+manifest or this receipt implements that protocol.
+
+## Sizing for 10,000 photos
+
+This candidate uses one `sourceObjects` array and one `derivedObjects` array,
+up to 20,000 objects **combined** and an 8 MiB JCS body. It does not embed or
+duplicate the path inventory. The synthetic test builds 10,000 photo entries
+plus one derived entry within this budget; it does not establish installed
+upload speed, memory usage, database capacity or support for a 10,000-photo
+job. Oversized inputs must be held explicitly; never truncate an inventory.
+
+For design review, propose a maximum exact relative path length of 1,024 UTF-8
+bytes and 255 bytes per component, subject to the actual participating
+filesystems and the Viewer's existing upload rules. A future path inventory
+should use independently hashed pages (proposed maximum 256 KiB per page,
+128 pages, and 32 MiB total), commit ordered page hashes in
+the signed root and retain the complete pages for authorized replay. Page
+boundaries, byte/node/page totals, max path rules and cross-language vectors
+must be agreed and tested; a proposed maximum is not an assertion that the
+present Viewer or Processing supports it. Do not lower an existing user-facing
+limit silently.
+
+## Exact replay and remaining gates
+
+The isolated SQLite experiment uses `(viewerPrincipalId, operationId)` and the
+signed `submissionIntentSha256` as an idempotency binding. It requires FULL
+synchronous transactions, persists exact canonical signed bytes before return,
+returns those exact bytes for identical replay and refuses changed body,
+identity, key or receipt. The full signed request, authority, mode revision,
+worker receipt, object inventory and destination must be compared by the real
+authenticated adapter; a hash supplied by the caller without reconstructing
+the committed request is insufficient. An authenticated GET must recover lost
+responses. The experiment does not establish request authorization, custody,
+physical filesystem guarantees, freeze/migration compatibility, key lifecycle
+or Viewer acknowledgements. Pin-accounting recovery and the path/GCP closure
+are still unimplemented. Old V2 payloads and receipts remain unchanged.
+
+The checked-in interoperability vector contains a **public synthetic** RFC
+8032 test key, synthetic IDs and hashes only. The Node test verifies a fixed
+ASCII/safe-integer vector; its small canonicalizer is deliberately not a
+general-purpose JCS implementation. Production clients need independently
+qualified RFC 8785 implementations and vectors including Unicode path pages,
+failure/restart boundaries, invalid types, duplicates and trust changes.
