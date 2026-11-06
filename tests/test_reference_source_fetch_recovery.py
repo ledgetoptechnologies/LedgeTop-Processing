@@ -164,6 +164,23 @@ class RetainedCustodyTests(RecoveryHarness):
         manifest['objects'][0]['byteSize'] += 1
         return json.dumps(manifest)
 
+    def test_manifest_content_no_receipt_records_still_fails_its_digest(self):
+        # A field outside every receipt, so only the recomputed digest can see it.
+        for column in ('source_manifest_json', 'derived_manifest_json'):
+            original = self.intake(column)
+            self.execute(f'UPDATE reference_source_intakes SET {column}=? WHERE job_id=?',
+                json.dumps(dict(json.loads(original), tampered=True)), self.job_id)
+            with self.assertRaisesRegex(Conflict, 'differs from accepted custody'):
+                self.custody()
+            self.execute(f'UPDATE reference_source_intakes SET {column}=? WHERE job_id=?', original, self.job_id)
+
+    def test_a_mount_moved_in_both_column_and_body_splits_the_storage_identity(self):
+        moved = dict(json.loads(self.receipt()), mountId='b' * 64)
+        self.execute('UPDATE reference_source_object_receipts SET mount_id=?,receipt_json=? WHERE object_id=?',
+            'b' * 64, protocol.canonical_json(moved).decode(), self.raw)
+        with self.assertRaisesRegex(Conflict, 'storage identity changed'):
+            self.custody()
+
     def test_source_manifest_content_with_the_accepted_sha_unchanged(self):
         self.assert_closed('UPDATE reference_source_intakes SET source_manifest_json=? WHERE job_id=?',
             self.changed_manifest('source_manifest_json'), self.job_id)
