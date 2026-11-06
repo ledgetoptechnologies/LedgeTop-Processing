@@ -16,7 +16,7 @@ class V2ReservationUncertain(RuntimeError):
 
 
 class DirectV2Reservations:
-    def __init__(self, store, *, trusted_workers):
+    def __init__(self, store, *, trusted_workers, trusted_snapshot_signers=None):
         self.store,self.queue=store,store.queue
         if type(trusted_workers) is not dict or set(trusted_workers)!=set(self.queue.node_ids):
             raise ValueError('complete pinned V2 worker inventory required')
@@ -31,10 +31,72 @@ class DirectV2Reservations:
             if not isinstance(value['publicKey'],Ed25519PublicKey):raise ValueError('pinned V2 worker key required')
             pinned[node]=(dict(identity),value['issuerId'],value['keyId'],value['publicKey'])
         self._workers=MappingProxyType(pinned)
+        snapshot_pins={}; snapshot_key_owners={}; snapshot_issuer_owners={}
+        if trusted_snapshot_signers is not None:
+            if type(trusted_snapshot_signers) is not list or len(trusted_snapshot_signers)>128:
+                raise ValueError('bounded snapshot signer inventory required')
+            for entry in trusted_snapshot_signers:
+                p._closed(entry,('principal','environment','issuerId','keyId','publicKey'),'snapshot signer')
+                for name in ('principal','issuerId','keyId'):p._slug(entry[name],name)
+                p._environment(entry['environment'])
+                scope=tuple(entry[name] for name in ('principal','environment','issuerId','keyId'))
+                if scope in snapshot_pins or not isinstance(entry['publicKey'],Ed25519PublicKey):
+                    raise ValueError('invalid snapshot signer')
+                identity=scope[:2]
+                raw=entry['publicKey'].public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)
+                if ((raw in snapshot_key_owners and snapshot_key_owners[raw]!=identity)
+                        or (entry['issuerId'] in snapshot_issuer_owners and snapshot_issuer_owners[entry['issuerId']]!=identity)):
+                    raise ValueError('snapshot signer shared across identities')
+                snapshot_key_owners[raw]=identity;snapshot_issuer_owners[entry['issuerId']]=identity
+                snapshot_pins[scope]=entry['publicKey']
+        self._snapshot_pins=MappingProxyType(snapshot_pins)
         with self.queue.coordinator_operation('source-io-admission'),self.queue._db() as db:
             from .direct_v2_reservation_schema import ensure_schema
             db.execute('BEGIN IMMEDIATE')
             ensure_schema(db)
+
+    def inspect_held_snapshot(self, reservation_id, *, authenticated_principal, issuer_id, key_id,
+                              intent_bytes, signature, source_frames):
+        """Read-only proof against stored owner/reservation, never an ACK.
+
+        Caller authentication and protected transport remain the responsibility
+        of a future adapter. No paths, authorization or custody leave this call.
+        """
+        from .direct_v2_reservation_schema import validate_receiving
+        from .direct_v2_snapshot_verifier import verify_snapshot
+        p._uuid(reservation_id,'reservation');p._slug(authenticated_principal,'principal')
+        p._slug(issuer_id,'issuer');p._slug(key_id,'key')
+        with self.queue.coordinator_operation('source-io-admission'), self.queue._db() as db:
+            db.execute('BEGIN')
+            row=validate_receiving(db,reservation_id)
+            if row['principal']!=authenticated_principal:raise Conflict('snapshot unavailable')
+            key=self._snapshot_pins.get((authenticated_principal,row['environment'],issuer_id,key_id))
+            if key is None:raise Conflict('snapshot unavailable')
+            stored=db.execute('SELECT source_manifest_json,derived_manifest_json,viewer_task_id,source_attestation_json FROM reference_source_intakes WHERE job_id=?',(row['job_id'],)).fetchone()
+            if stored is None:raise Conflict('snapshot unavailable')
+            try:
+                source=json.loads(stored['source_manifest_json']); derived=json.loads(stored['derived_manifest_json'])
+                attestation=json.loads(stored['source_attestation_json'])
+                from .reference_source_intake import _validate_source_manifest, _validate_derived_manifest
+                _validate_source_manifest(source);_validate_derived_manifest(derived,derived['attemptId'])
+                if (source['sha256']!=row['source_manifest_sha'] or derived['sha256']!=row['derived_manifest_sha']
+                        or attestation['proof']['sourceManifestSha256']!=source['sha256']
+                        or attestation['proof']['derivedManifestSha256']!=derived['sha256']):
+                    raise ValueError('stored source binding changed')
+                from .viewer_source_attestation import validate_and_verify
+                item=json.loads(row['item_json'])
+                job=db.execute('SELECT pipeline_digest FROM reference_jobs WHERE job_id=?',(row['job_id'],)).fetchone()
+                if job is None or self.store._source_routing_keys is None:raise ValueError('source trust unavailable')
+                validate_and_verify(attestation,trusted_keys=self.store._source_routing_keys,
+                    authority_id=self.queue.authority_id,environment=row['environment'],submission_id=item['attemptId'],
+                    provider_task_id=item['jobId'],attempt_id=item['attemptId'],viewer_task_id=stored['viewer_task_id'],
+                    source_manifest_sha256=source['sha256'],derived_manifest_sha256=derived['sha256'],
+                    pipeline_manifest_sha256=row['pipeline_manifest_sha'],pipeline_digest=job['pipeline_digest'])
+                if attestation['proof']['principalId']!=authenticated_principal:raise ValueError('source principal changed')
+                return verify_snapshot(intent_bytes=intent_bytes,signature=signature,source_frames=source_frames,
+                    public_key=key,issuer_id=issuer_id,key_id=key_id,snapshot_sha=attestation['proof']['sourceSnapshotSha256'],
+                    source_manifest=source,derived_manifest=derived,task_id=stored['viewer_task_id'],pipeline_sha=row['pipeline_manifest_sha'])
+            except (ValueError,TypeError,KeyError):raise Conflict('snapshot unavailable') from None
 
     def reserve(self, **request):
         """Classify any possibly committed failure as uncertain, never release."""
