@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from ops.qualify_enrolled_phase_transport import configuration_material
 from processing.direct_worker_boundary import DirectWorkerBoundary
-from processing.direct_worker_http import _BoundedReader, create_direct_worker_server
+from processing.direct_worker_http import _BoundedReader, _HeaderDeadline, create_direct_worker_server
 from processing.direct_worker_receipt import WorkerClosureSigner
 from processing.reference_tls import verified_client_context
 from tests import test_direct_worker_receiver as fixture
@@ -160,6 +160,48 @@ class DirectWorkerHTTPTests(unittest.TestCase):
                 pass
         self.assertLess(time.monotonic()-started, 3)
         self.assertFalse((self.f.spool.root/self.f.item['jobId']).exists())
+
+    def test_delayed_watchdog_cannot_accept_already_expired_headers(self):
+        connection = Mock()
+        with patch('processing.direct_worker_http.threading.Timer'), \
+             patch('processing.direct_worker_http.time.monotonic', side_effect=[10, 11.1]):
+            guard = _HeaderDeadline(connection, 1)
+            self.assertFalse(guard.finish())
+            self.assertFalse(guard.finish())
+        connection.shutdown.assert_called_once_with(socket.SHUT_RDWR)
+        connection.close.assert_called_once()
+
+    def test_timer_winner_cannot_be_reversed_and_stale_timer_cannot_close_body(self):
+        with patch('processing.direct_worker_http.threading.Timer'), \
+             patch('processing.direct_worker_http.time.monotonic', side_effect=[10, 11.1]):
+            connection = Mock(); guard = _HeaderDeadline(connection, 1)
+            guard._expire()
+            self.assertFalse(guard.finish())
+            connection.close.assert_called_once()
+        with patch('processing.direct_worker_http.threading.Timer'), \
+             patch('processing.direct_worker_http.time.monotonic', side_effect=[10, 10.5]):
+            connection = Mock(); guard = _HeaderDeadline(connection, 1)
+            self.assertTrue(guard.finish())
+            guard._expire()
+            self.assertTrue(guard.finish())
+            connection.close.assert_not_called()
+
+    def test_racing_expiry_and_finish_never_dispatch_expired_headers(self):
+        barrier = threading.Barrier(3); result = []; connection = Mock()
+        with patch('processing.direct_worker_http.threading.Timer'), \
+             patch('processing.direct_worker_http.time.monotonic', side_effect=[10, 11.1, 11.1]):
+            guard = _HeaderDeadline(connection, 1)
+            def finish():
+                barrier.wait(); result.append(guard.finish())
+            def expire():
+                barrier.wait(); guard._expire()
+            threads = [threading.Thread(target=finish), threading.Thread(target=expire)]
+            for thread in threads: thread.start()
+            barrier.wait()
+            for thread in threads: thread.join(3)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(result, [False])
+        connection.close.assert_called_once()
 
 
 if __name__ == '__main__': unittest.main()

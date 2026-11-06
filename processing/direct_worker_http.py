@@ -49,23 +49,43 @@ class _HeaderDeadline:
         self._connection = connection
         self._lock = threading.Lock()
         self._active = True
+        self._accepted = False
+        self._expires_at = time.monotonic() + seconds
         self._timer = threading.Timer(seconds, self._expire)
         self._timer.daemon = True
         self._timer.start()
 
+    def _close_locked(self):
+        self._active = False
+        try: self._connection.shutdown(socket.SHUT_RDWR)
+        except OSError: pass
+        try: self._connection.close()
+        except OSError: pass
+
     def _expire(self):
         with self._lock:
             if self._active:
-                self._active = False
-                try: self._connection.shutdown(socket.SHUT_RDWR)
-                except OSError: pass
-                try: self._connection.close()
-                except OSError: pass
+                remaining = self._expires_at - time.monotonic()
+                if remaining > 0:
+                    # Defend against an unexpectedly early timer callback.
+                    self._timer = threading.Timer(remaining, self._expire)
+                    self._timer.daemon = True
+                    self._timer.start()
+                else:
+                    self._close_locked()
 
     def finish(self):
         with self._lock:
+            if not self._active:
+                return self._accepted
+            if time.monotonic() >= self._expires_at:
+                self._timer.cancel()
+                self._close_locked()
+                return False
             self._active = False
+            self._accepted = True
             self._timer.cancel()
+            return True
 
 
 def create_direct_worker_server(boundary, host, port, *, ssl_context,
@@ -100,10 +120,15 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
 
         def parse_request(self):
             try:
-                return super().parse_request()
-            finally:
-                # No body is read before headers have been completely parsed.
+                parsed = super().parse_request()
+            except BaseException:
                 self.server._local.header_deadline.finish()
+                raise
+            # A delayed watchdog must not let already-expired buffered headers
+            # reach dispatch, and a watchdog which won must stay authoritative.
+            if not self.server._local.header_deadline.finish():
+                return False
+            return parsed
 
         def handle_expect_100(self):
             self._reply(417, {'error': 'expectation_not_supported'})
