@@ -184,8 +184,18 @@ before effects and cleanup-complete only after the original directory is gone.
 
 Explicit unit cases cover confirmed-success cleanup, uncertain-shutdown
 retention, unconfirmed/live child refusal, symlink and root-swap refusal. These
-are controlled child-handle tests, not actual worker readiness proof; only static
-AST/diff checks have run for this follow-up.
+are controlled child-handle tests, not actual worker readiness proof. Frozen
+controller `4903c0c29e8deb671e0ad790b93098b1ef60da9b`, canonical archive
+`335cf430aaefa4a0591432f9c35ba87d2c0225324e0dd453d0763e11652f1ec6`,
+passed **4/4 Linux tests, ZERO skips, 0.138 seconds**. One CPU/512MiB, UID10001,
+network none, readonly source/root, private32MiB tmpfs, no socket or ports.
+Log890 bytes SHA256 `dca41cccbbb73d5490e049d4cbb04fb2a1430320b6316956514b96aec916f04f`;
+stdout/stderr/receipt retained privately. Exact test container253316c1 exited0/
+PID0/no OOM, was removed after identity/image/owner checks and its task inventory
+was empty. No workers/factory/fullphase/volume were created. The nonblocking
+current os.listdir-before-limit allocation bound remains a noted later issue;
+these controlled small artifact-tree cases do not qualify that large-directory
+edge. No unreviewed cleanup change was made to obtain these results.
 
 The seed producer, all ops/Processing source and the actual factory child shim
 remain byte-identical to e83. To reuse the retained seed safely, a future test
