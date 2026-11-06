@@ -52,6 +52,19 @@ physical mount, quota, freeze and retention rules remain required. Prototype
 measurement, even if it shows fast lookup, does not test disks, 10,001 durable
 transfers, concurrent nodes, real network backpressure or recovery.
 
+`processing/direct_negotiation_candidate.py` is a separate, unwired selection
+experiment: it strictly bounds and canonicalizes small request/capability
+records, takes already-authenticated identities from a trusted adapter, and
+persists exact request, capability and response bytes for idempotent replay in
+FULL synchronous SQLite transactions. It returns `selected_not_reserved` with
+transfer and custody false. It does not authenticate a socket or capabilities,
+enforce a manifest wire limit, create a real coordinator reservation, bind a
+Viewer receipt, or prove power-loss safety of the installed database. It must
+not be called with identities accepted from untrusted request headers. The
+selection and real reservation must eventually become one crash-consistent
+transaction, or have an independently reviewed recovery protocol; this
+experiment alone is not that transaction.
+
 ## One bounded local measurement
 
 On the current isolated worktree with the snapshot implementation at
