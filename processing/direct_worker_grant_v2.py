@@ -55,6 +55,8 @@ class DirectWorkerGrant:
                     if (existing['operation'],existing['principal'],existing['binding_sha'])!=(payload['operationId'],principal,digest):
                         raise PolicyConflict('reservation grant replay differs')
                 else:
+                    if self.boundary._observation_only:
+                        raise PolicyConflict('resumed observation requires existing grant')
                     count=db.execute('SELECT COUNT(*) FROM direct_worker_grants').fetchone()[0]
                     if count>=4096:raise PolicyConflict('direct grant budget exceeded')
                     outstanding=db.execute('SELECT COALESCE(SUM(remaining),0) FROM reservations').fetchone()[0]

@@ -10,10 +10,11 @@ from .direct_worker_prepare_v2 import prepare_signed_job
 
 class DirectPreparationAPI:
     def __init__(self, *, driver, ledger, worker, mount_path, mount_id, marker_name,
-                 source_keys, signer, issuer_id, key_id):
+                 source_keys, signer, issuer_id, key_id, observation_owner=None):
         self.driver,self.ledger,self.worker=driver,ledger,dict(worker)
         self.mount_path,self.mount_id,self.marker_name=mount_path,mount_id,marker_name
         self.source_keys,self.signer,self.issuer_id,self.key_id=source_keys,signer,issuer_id,key_id
+        self.observation_owner=observation_owner
 
     def _prepare_from_listener(self, scope, raw):
         try:
@@ -43,3 +44,23 @@ class DirectPreparationAPI:
         except Exception:
             # The gate or readiness pin may already exist after any retry.
             return Response(503,{'error':'worker_preparation_uncertain'})
+
+    def _resume_from_listener(self, scope, raw):
+        """Authenticated exact retry; observation only and never custody ACK."""
+        try:
+            if self.observation_owner is None or type(scope) is not tuple or len(scope)!=2:raise ValueError()
+            principal,environment=scope;p._slug(principal,'principal');p._environment(environment)
+            payload=p.decode_submission(raw,max_bytes=16384)
+            p._closed(payload,('item','challengeId','viewerPrincipal'),'resume observation request')
+            p._uuid(payload['challengeId'],'challenge');p._slug(payload['viewerPrincipal'],'Viewer principal')
+            policy=self.driver.direct_source_policy()
+            if policy['directPreparationEnabled'] is not True:return Response(503,{'error':'direct_preparation_disabled'})
+            options=dict(authenticated_principal=payload['viewerPrincipal'],environment=environment,
+                capability_fingerprint=policy['capabilityFingerprint'],options_fingerprint=policy['optionsFingerprint'],
+                allowed_odm_options=set(policy['allowedOdmOptions']),trusted_source_keys=self.source_keys,
+                authority_id=self.worker['authorityId'],available_engines=('odm',))
+            self.observation_owner.resume(item=payload['item'],challenge=payload['challengeId'],principal=principal,
+                                          environment=environment,verification=options)
+            return Response(200,{'state':'observation_only','sourceCustodyAccepted':False,'processingAuthorized':False})
+        except Exception:
+            return Response(503,{'error':'worker_reconciliation_uncertain'})

@@ -189,6 +189,17 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
             with self.assertRaises(ValueError):daemon.load_config(str(path),expected_direct_config_sha256='0'*64)
             self.assertTrue(daemon.load_config(str(path),expected_direct_config_sha256=digest,
                                               expected_direct_credential_sha256=pins)['directPreparation']['enabled'])
+            upload=copy.deepcopy(self.config)
+            upload['directPreparation']['observationUpload']=dict(port=20001,bearer='u'*40)
+            path.write_text(json.dumps(upload));upload_digest=hashlib.sha256(path.read_bytes()).hexdigest()
+            loaded=daemon.load_config(str(path),expected_direct_config_sha256=upload_digest,expected_direct_credential_sha256=pins)
+            self.assertEqual(loaded['directPreparation']['observationUpload']['port'],20001)
+            for bad in (dict(port=19999,bearer='u'*40),dict(port=20001,bearer='short'),
+                        dict(port=20001,bearer=self.config['workerBearer'])):
+                upload['directPreparation']['observationUpload']=bad
+                path.write_text(json.dumps(upload));bad_digest=hashlib.sha256(path.read_bytes()).hexdigest()
+                with self.assertRaises(ValueError):daemon.load_config(str(path),expected_direct_config_sha256=bad_digest,expected_direct_credential_sha256=pins)
+            path.write_text(json.dumps(self.config))
             for name in pins:
                 altered=dict(pins);altered[name]='0'*64
                 with self.subTest(credential=name),self.assertRaises(ValueError):
@@ -445,6 +456,42 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
             with self.assertRaises(ValueError):self.build()
         finally:release.set();thread.join(3)
         self.assertEqual(result,[0])
+
+    def test_worker_service_keeps_owner_until_both_listeners_drain(self):
+        from processing.direct_worker_observation_owner import CombinedOwner
+        serving,shutdown=threading.Event(),threading.Event()
+        def listener(api,*args,**kwargs):
+            self.listeners.append(api)
+            return SimpleNamespace(server_close=lambda:None,serve_forever=lambda **kw:(serving.set(),shutdown.wait(3)),shutdown=shutdown.set)
+        with patch.object(self,'listener',side_effect=listener):driver,server=self.build(provision=True)
+        release=threading.Event();draining=threading.Event();stop=threading.Event()
+        class Control:
+            def start(self):pass
+            def status(self):return 'running'
+            def close(self,timeout):return True
+        class Observation:
+            def status(self):return 'running'
+            def close(self,timeout):draining.set();return release.wait(.02)
+        server.worker_direct_owner=CombinedOwner(Control(),Observation())
+        driver.step=lambda:{'state':'idle'}
+        service=daemon.WorkerService(driver,server,poll_seconds=.1)
+        result=[];thread=threading.Thread(target=lambda:result.append(service.run(stop)));thread.start()
+        self.assertTrue(serving.wait(2));stop.set();self.assertTrue(draining.wait(2))
+        try:
+            thread.join(.05);self.assertTrue(thread.is_alive())
+            with self.assertRaises(ValueError):self.build()
+        finally:release.set();thread.join(3)
+        self.assertEqual(result,[0])
+
+    def test_observation_listener_unexpected_close_marks_service_unhealthy(self):
+        from processing.direct_worker_observation_owner import CombinedOwner
+        control=SimpleNamespace(status=lambda:'running')
+        for state in ('closed','draining','failed'):
+            with self.subTest(state=state):
+                owner=CombinedOwner(control,SimpleNamespace(status=lambda:state))
+                service=daemon.WorkerService(SimpleNamespace(),SimpleNamespace(worker_direct_owner=owner),poll_seconds=.1)
+                service._state='ready'
+                self.assertEqual(service.health()['state'],'failed')
 
     def test_direct_listener_failure_immediately_marks_service_unhealthy(self):
         server=SimpleNamespace(worker_direct_owner=SimpleNamespace(status=lambda:'failed'))

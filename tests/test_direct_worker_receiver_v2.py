@@ -535,7 +535,8 @@ class WorkerV2Tests(unittest.TestCase):
             issuer_id='worker-issuer',key_id='worker-key',public_key=self.proof_key.public_key(),
             closure_expected_binding=self.expected,closure_verification=self.options,worker_signer=self.signer,
             resume_observation_only=True)
-        self.assertTrue(resumed.observe(self.headers,protected_transport=True,object_id=fixtures.GCP_ID)['localObjectDurable'])
+        observed=resumed.observe(self.headers,protected_transport=True,object_id=fixtures.GCP_ID)
+        self.assertTrue(observed['localObjectPresent']);self.assertFalse(observed['localObjectDurable'])
         with self.assertRaisesRegex(DirectBoundaryDenied,'does not authorize writes'):
             resumed.put(self.headers,protected_transport=True,object_id=fixtures.GCP_ID,
                 content_length=0,content_sha256=hashlib.sha256(b'').hexdigest(),reader=io.BytesIO(b''))
@@ -633,7 +634,7 @@ class WorkerV2Tests(unittest.TestCase):
             process.kill();process.communicate(timeout=3);self.assertIsNotNone(process.returncode);process=None
             self.clock.return_value=1000
             process,port=start(True);sender=make_sender(port)
-            self.assertTrue(sender.observe(fixtures.GCP_ID)['localObjectDurable'])
+            with self.assertRaises(DirectDeliveryUncertain):sender.observe(fixtures.GCP_ID)
             with self.assertRaises(DirectDeliveryUncertain):sender.put(fixtures.IMAGE_ID,io.BytesIO(b'abc'))
         finally:
             if process is not None:

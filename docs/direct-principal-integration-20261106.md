@@ -108,6 +108,12 @@ installed recovery; it must not be used to activate a node.
 An optional worker-service preparation listener is implemented but its
 coordinator policy refuses all preparation. Protected credentials and a pinned
 config are checked when explicitly configured; the daemon entrypoint does not
-yet obtain an enrolled config digest. A combined synthetic service run passed
+yet have an installed enrollment record. A combined synthetic service run passed
 39 tests. Actual enabled preparation, worker enrollment, installation,
 process restart and per-job upload listener lifecycle remain unqualified.
+
+A policy-disabled worker can reconstruct a read-only observation listener
+after a synthetic process restart. It rejects upload and closure mutations;
+the coordinator treats the presence observation as uncertain instead of a
+durable receipt. A merged run passed 62 tests with four optional skips.
+Automatic transfer recovery and installed host restart remain open.
