@@ -6,7 +6,6 @@ No Viewer custody, direct upload, or engine execution is authorized here.
 from . import reference_protocol as p
 from .reference_api import Response
 from .direct_worker_prepare_v2 import prepare_signed_job
-from .direct_worker_inventory_retention import retain as retain_inventory
 
 
 class DirectPreparationAPI:
@@ -40,11 +39,6 @@ class DirectPreparationAPI:
                 gate_generation=self.driver.worker.gate_generation,source_verification=options,
                 mount_path=self.mount_path,mount_id=self.mount_id,marker_name=self.marker_name,
                 challenge_id=payload['challengeId'],issuer_id=self.issuer_id,key_id=self.key_id,private_key=self.signer)
-            # A readiness proof is never returned until the independently
-            # verified source payload is durably retained and charged.
-            # A failure leaves the worker held for reconciliation.
-            retain_inventory(self.ledger,payload=source,item=item,worker=self.worker,
-                verification=options,coordinator_principal=principal)
             return Response(200,proof)
         except Exception:
             # The gate or readiness pin may already exist after any retry.

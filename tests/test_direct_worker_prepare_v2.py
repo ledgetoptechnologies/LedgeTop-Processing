@@ -37,6 +37,20 @@ class WorkerPrepareTests(unittest.TestCase):
         with f.ledger._transaction() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
 
+    def test_inventory_failure_holds_without_readiness_and_retries_after_reopen(self):
+        f,kwargs=self.fixture()
+        with patch('processing.direct_worker_inventory_retention.retain',side_effect=OSError('synthetic storage failure')):
+            with self.assertRaises(WorkerPreparationUncertain):prepare_signed_job(f.ledger,**kwargs)
+        with f.ledger._transaction() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_readiness_issues').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],0)
+        reopened=ScratchLedger(f.ledger.path,f.root,capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
+        with patch('processing.direct_worker_fence_proof_v2.time.time',return_value=200):
+            _,_,proof=prepare_signed_job(reopened,**kwargs)
+        self.assertEqual(proof['body']['issuedAt'],200)
+        with reopened._transaction() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_inventory_blobs').fetchone()[0],1)
+
     def test_changed_source_or_worker_never_acquires_new_pin(self):
         f,kwargs=self.fixture();payload=copy.deepcopy(f.payload)
         payload['sourceManifest']['objects'][0]['sha256']='0'*64
