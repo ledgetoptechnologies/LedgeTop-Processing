@@ -7,8 +7,11 @@ import io
 import json
 import os
 import socket
+import select
 import ssl
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -440,3 +443,80 @@ class WorkerV2Tests(unittest.TestCase):
         finally:
             server.shutdown();server.server_close();thread.join(3)
             self.assertFalse(thread.is_alive())
+
+    def test_historical_consumed_proof_resumes_observation_only(self):
+        self.put_zero();self.clock.return_value=1000
+        resumed=DirectWorkerBoundaryV2(ledger=self.ledger,spool=self.spool,inventory=self.index,
+            item=self.item,reservation_binding=self.reservation,expected_worker=self.worker,
+            engine_id='fixture-v2',coordinator_origin='https://127.0.0.1:8443',gate_generation=1,
+            bearer=self.bearer,readiness_proof=self.readiness,challenge_id=self.challenge,
+            issuer_id='worker-issuer',key_id='worker-key',public_key=self.proof_key.public_key(),
+            closure_expected_binding=self.expected,closure_verification=self.options,worker_signer=self.signer,
+            resume_observation_only=True)
+        self.assertTrue(resumed.observe(self.headers,protected_transport=True,object_id=fixtures.GCP_ID)['localObjectDurable'])
+        with self.assertRaisesRegex(DirectBoundaryDenied,'does not authorize writes'):
+            resumed.put(self.headers,protected_transport=True,object_id=fixtures.GCP_ID,
+                content_length=0,content_sha256=hashlib.sha256(b'').hexdigest(),reader=io.BytesIO(b''))
+
+    def test_historical_resume_refuses_uncertain_writer_pin(self):
+        original=self.ledger._handover_v2_writer
+        def late(*args,**kwargs):
+            pin=original(*args,**kwargs);self.clock.return_value=120;return pin
+        with patch.object(self.ledger,'_handover_v2_writer',side_effect=late):
+            with self.assertRaises(ValueError):self.put_zero()
+        with self.assertRaisesRegex(DirectBoundaryDenied,'handover requires reconciliation'):
+            DirectWorkerBoundaryV2(ledger=self.ledger,spool=self.spool,inventory=self.index,
+                item=self.item,reservation_binding=self.reservation,expected_worker=self.worker,
+                engine_id='fixture-v2',coordinator_origin='https://127.0.0.1:8443',gate_generation=1,
+                bearer=self.bearer,readiness_proof=self.readiness,challenge_id=self.challenge,
+                issuer_id='worker-issuer',key_id='worker-key',public_key=self.proof_key.public_key(),
+                resume_observation_only=True)
+
+    @unittest.skipUnless(os.name=='posix','separate Linux worker process required')
+    def test_worker_process_kill_restart_observes_without_new_write(self):
+        from cryptography.hazmat.primitives import serialization
+        from ops.qualify_enrolled_phase_transport import configuration_material
+        from processing.direct_worker_sender_v2 import DirectWorkerSenderV2
+        from processing.direct_worker_sender import DirectDeliveryUncertain
+        material=configuration_material(str(uuid.uuid4()),str(uuid.uuid4()))['configurationFiles']
+        for name in ('fixture-ca.pem','fixture-cert.pem','fixture-key.pem'):(self.root/name).write_bytes(material[name])
+        private_key=self.proof_key.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,
+                                                serialization.NoEncryption()).decode()
+        options=dict(self.options,allowed_odm_options=list(self.options['allowed_odm_options']))
+        config=dict(root=str(self.root),gate=str(self.root/'gate'),spool=str(self.spool.root),
+            marker=self.spool.marker.name,payload=self.payload,verification=options,expected=self.expected,
+            reservation=self.reservation,item=self.item,worker=self.worker,key=private_key,bearer=self.bearer,
+            proof=self.readiness,challenge=self.challenge,resume=False)
+        config_path=self.root/'worker-fixture.json'
+        script=Path(__file__).parent/'fixtures'/'direct_v2_resume_worker.py'
+        process=None
+        def start(resume):
+            config['resume']=resume;config_path.write_text(json.dumps(config));config_path.chmod(0o600)
+            child=subprocess.Popen([sys.executable,str(script),str(config_path)],stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE,text=True,
+                                   env=dict(os.environ,PYTHONPATH=str(Path(__file__).resolve().parents[1])))
+            ready,_,_=select.select([child.stdout],[],[],5)
+            if not ready:
+                child.kill();_,error=child.communicate(timeout=3)
+                self.fail('synthetic worker failed to start: '+error[-1000:])
+            line=child.stdout.readline().strip()
+            if not line.isdigit():
+                child.kill();_,error=child.communicate(timeout=3)
+                self.fail('synthetic worker startup failed: '+error[-1000:])
+            return child,int(line)
+        def make_sender(port):
+            return DirectWorkerSenderV2(origin='https://127.0.0.1:'+str(port),connect_ip='127.0.0.1',
+                ca_file=str(self.root/'fixture-ca.pem'),bearer=self.bearer,inventory=self.index,item=self.item,
+                reservation_binding=self.reservation,expected_worker=self.worker,issuer_id='worker-issuer',
+                key_id='worker-key',worker_public_key=self.proof_key.public_key(),idle_timeout=2,total_timeout=5)
+        try:
+            process,port=start(False)
+            self.assertTrue(make_sender(port).put(fixtures.GCP_ID,io.BytesIO(b''))['localObjectDurable'])
+            process.kill();process.communicate(timeout=3);self.assertIsNotNone(process.returncode);process=None
+            self.clock.return_value=1000
+            process,port=start(True);sender=make_sender(port)
+            self.assertTrue(sender.observe(fixtures.GCP_ID)['localObjectDurable'])
+            with self.assertRaises(DirectDeliveryUncertain):sender.put(fixtures.IMAGE_ID,io.BytesIO(b'abc'))
+        finally:
+            if process is not None:
+                process.kill();process.communicate(timeout=3)

@@ -20,7 +20,8 @@ class DirectWorkerBoundaryV2:
     def __init__(self, *, ledger, spool, inventory, item, reservation_binding,
                  expected_worker, engine_id, coordinator_origin, gate_generation, bearer,
                  readiness_proof=None, challenge_id=None, issuer_id=None, key_id=None,
-                 public_key=None, closure_expected_binding=None, closure_verification=None, worker_signer=None):
+                 public_key=None, closure_expected_binding=None, closure_verification=None, worker_signer=None,
+                 resume_observation_only=False):
         if (not isinstance(inventory, VerifiedWorkerInventory) or type(bearer) is not str
                 or not 32 <= len(bearer) <= 4096 or not bearer.isascii()
                 or not all(33 <= ord(c) <= 126 for c in bearer)):
@@ -28,15 +29,19 @@ class DirectWorkerBoundaryV2:
         # Construction is internal and remains unwired. Every fresh boundary
         # requires the exact durable readiness pin; restart without a qualified
         # handover record fails closed rather than inferring continuation.
-        item, _, _ = identity(item, expected_worker=expected_worker)
+        if type(resume_observation_only) is not bool:raise DirectBoundaryDenied('explicit V2 resume mode required')
+        item, scratch_sha, scratch_id = identity(item, expected_worker=expected_worker)
         from .direct_worker_fence_proof_v2 import verify as verify_readiness, FenceProofRejected
         try:
             checked_mono = time.monotonic()
             checked_at = time.time()
+            # Historical proof is evidence of the already-consumed handover,
+            # never fresh write authorization for a resumed worker.
+            proof_now = readiness_proof['body']['issuedAt'] if resume_observation_only else int(checked_at)
             verified = verify_readiness(readiness_proof, expected_item=item, expected_worker=expected_worker,
                 challenge_id=challenge_id, gate_generation=gate_generation, issuer_id=issuer_id,
-                key_id=key_id, public_key=public_key, now=int(checked_at))
-        except (ValueError, TypeError, FenceProofRejected):
+                key_id=key_id, public_key=public_key, now=proof_now)
+        except (ValueError, TypeError, KeyError, FenceProofRejected):
             raise DirectBoundaryDenied('verified V2 readiness proof required') from None
         saved = json.loads(inventory._wire)
         if (p.canonical_json(reservation_binding) != inventory._reservation_wire
@@ -48,10 +53,28 @@ class DirectWorkerBoundaryV2:
                 or item['objectCount'] != sum(len(saved[key]['objects'])
                     for key in ('sourceManifest', 'derivedManifest'))):
             raise DirectBoundaryDenied('V2 inventory and scratch binding differ')
+        if resume_observation_only:
+            require_fenced(ledger,item,expected_worker=expected_worker)
+            with NodeGate(engine_id) as gate:
+                check_scope(ledger,spool,item,scratch_sha,scratch_id,gate,
+                            coordinator_origin=coordinator_origin,gate_generation=gate_generation)
+                state=gate.snapshot()
+                expected_hold=dict(receiptId=scratch_sha[:32],generation=gate_generation,
+                                   scratchBindingSha256=scratch_sha)
+                if state.get('schema')!=2 or state.get('directHold')!=expected_hold:
+                    raise DirectBoundaryDenied('V2 retained node hold required')
+                with ledger._transaction() as db:
+                    used=db.execute('SELECT reservation,proof_sha256 FROM direct_v2_readiness_uses WHERE challenge=?',
+                                    (challenge_id,)).fetchone()
+                    expected_sha=hashlib.sha256(p.canonical_json(readiness_proof)).hexdigest()
+                    if (used is None or used['reservation']!=scratch_id or used['proof_sha256']!=expected_sha
+                            or db.execute('SELECT 1 FROM direct_writer_pins WHERE reservation=?',(scratch_id,)).fetchone()):
+                        raise DirectBoundaryDenied('V2 retained handover requires reconciliation')
         self.ledger, self.spool, self.inventory = ledger, spool, inventory
         self.item, self.reservation, self.worker = item, dict(reservation_binding), dict(expected_worker)
         self.engine_id, self.origin, self.generation, self._bearer = engine_id, coordinator_origin, gate_generation, bearer
-        self._readiness_pin = verified['pinId']
+        self._readiness_pin = None if resume_observation_only else verified['pinId']
+        self._observation_only=resume_observation_only
         self._readiness_proof = copy.deepcopy(readiness_proof)
         self._proof_deadline = checked_mono + max(0, verified['expiresAt'] - checked_at)
         self._proof_binding = dict(challenge_id=challenge_id, issuer_id=issuer_id,
@@ -69,6 +92,7 @@ class DirectWorkerBoundaryV2:
                 or not supplied[7:].isascii() or not hmac.compare_digest(supplied[7:], self._bearer)
                 or authority != self.item['authorityId']):
             raise DirectBoundaryDenied('private coordinator authorization required')
+        if self._observation_only:raise DirectBoundaryDenied('V2 resumed boundary does not authorize writes')
         obj = self.inventory.object(object_id, reservation_binding=self.reservation)
         if (type(content_length) is not int or content_length != obj['byteSize']
                 or content_sha256 != obj['sha256']):
