@@ -286,8 +286,11 @@ class RuntimePreReservationDiscoveryTests(ProcessingHarness):
         self.addCleanup(fixture.doCleanups)
         fixture.config=replace(fixture.config,prototype_state_dir=self.directory.name,
             prototype_node_ids=self.queue.node_ids,treedar_node_ids=self.queue.treedar_node_ids,
-            processing_nodes=(ProcessingNode('cluster',fixture.config.local_node_url),))
+            processing_nodes=(ProcessingNode('cluster',self.driver.worker.engine.origin),))
         fixture.value=fixture.recovery_config(self.queue.authority_id)
+        fixture.value['recoveryBindings']['cluster']=dict(engineId=self.driver.worker.engine_id,
+            authorityId=self.driver.worker.authority_id,coordinatorOrigin=self.driver.worker.origin,
+            gateGeneration=self.driver.worker.gate_generation,outputBudget=self.driver.output_budget)
         fixture.value['workers']={node:fixture.value['workers'][node] for node in self.queue.node_ids}
         fixture.write_config()
         settings=fixture.settings()
@@ -295,7 +298,7 @@ class RuntimePreReservationDiscoveryTests(ProcessingHarness):
         workers['cluster'].update(bearer=WORKER_TOKEN,workerId='worker',instanceId='instance')
         settings=replace(settings,workers=workers,source_spool=self.spool,
             source_attestation_keys=self.case.trusted_keys,viewer_receipt_keys=self.viewer_receipt_keys)
-        definitions=[dict(name='numeric-probe',type='float',value=1,help='Numeric setting.')]
+        definitions=copy.deepcopy(self.transport.options)
         self.catalog=dict(ready=True,commonOptions=definitions,nodes=[dict(role=node,available=True,
             capabilitiesSha256='a'*64,engine='odm',engineVersion='pinned-engine-1',options=definitions)
             for node in self.queue.node_ids])
