@@ -15,7 +15,7 @@ from processing import direct_v2_inventory as inventory
 from processing import direct_worker_scratch_v2 as scratch
 from processing.direct_worker_receiver_v2 import DirectWorkerBoundaryV2
 from processing.direct_worker_boundary import DirectBoundaryDenied
-from processing.node_gate import NodeGate
+from processing.node_gate import NodeGate, GateError
 from processing.scratch_policy import ScratchLedger, PolicyConflict
 from processing.source_spool import SourceSpool, SourceSpoolError
 from processing.reference_source_intake import INTAKE_FIELDS
@@ -82,6 +82,11 @@ class WorkerV2Tests(unittest.TestCase):
             self.put_zero({'Authorization':'Bearer wrong','X-Coordinator-Authority':self.worker['authorityId']})
         result=self.put_zero(); self.assertTrue(result['localObjectDurable'])
         self.assertFalse(result['sourceCustodyAccepted']); self.assertFalse(result['transferComplete'])
+        with NodeGate('fixture-v2') as gate:
+            self.assertEqual(gate.snapshot()['schema'],2)
+            with self.assertRaisesRegex(GateError,'direct transfer hold'):
+                gate.resolve(self.observation['bindingSha256'][:32],1,old_worker_stopped=True,
+                             coordinator_resolved=True,note='synthetic')
         self.assertTrue(self.put_zero()['replayed'])
         path=self.spool.root/self.spool.storage_key(self.item['jobId'],1,fixtures.GCP_ID)
         self.assertEqual(path.read_bytes(),b'')

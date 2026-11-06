@@ -50,6 +50,9 @@ class DirectWorkerBoundaryV2:
         with NodeGate(self.engine_id) as gate:
             check_scope(self.ledger, self.spool, item, digest, scratch_id, gate,
                         coordinator_origin=self.origin, gate_generation=self.generation)
+            # Persist a schema-2 node hold before opening a writer pin. A
+            # completed object must not free this node between source objects.
+            gate._arm_direct_hold(digest[:32], digest)
             pin = self.ledger.begin_direct_writer(scratch_id, settings(item, scratch_id))
             receipt, replay = self.spool.receive_object(job_id=item['jobId'], generation=item['generation'],
                 object_id=object_id, byte_size=obj['byteSize'], sha256=obj['sha256'], reader=reader)
