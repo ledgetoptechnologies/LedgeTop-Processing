@@ -106,11 +106,27 @@ class SnapshotRealPair(unittest.TestCase):
         self.assertEqual(post('selected-pages/0',selected)[0],200)
         self.assertEqual(post('selected-pages/0',selected)[0],200)
         self.assertEqual(post('selected-pages/0',selected+b'x')[0],409)
+        # A pipeline write between real verifier and journal commit must hold.
+        original_inspect=reservations.inspect_held_snapshot
+        def inspect_then_change(*args,**kwargs):
+            result=original_inspect(*args,**kwargs)
+            with queue._db() as db:
+                db.execute("UPDATE reference_jobs SET input_json=input_json||' ' WHERE job_id=?",(payload['providerTaskId'],))
+            return result
+        with patch.object(reservations,'inspect_held_snapshot',side_effect=inspect_then_change):
+            self.assertEqual(post('complete-selected',b'')[0],409)
+        with queue._db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='direct_snapshot_observations'").fetchone()[0],0)
+            db.execute("UPDATE reference_jobs SET input_json=substr(input_json,1,length(input_json)-1) WHERE job_id=?",(payload['providerTaskId'],))
         selected_status,selected_response=post('complete-selected',b'')
         self.assertEqual(selected_status,200,selected_response)
         self.assertEqual(selected_response['state'],'source_and_selected_pages_verified_not_custody')
         self.assertFalse(selected_response['sourceCustodyAccepted'])
         self.assertFalse(selected_response['processingAuthorized'])
+        with queue._db() as db:
+            saved=db.execute('SELECT source_sha,selected_sha,pipeline_sha,observation FROM direct_snapshot_observations').fetchone()
+            self.assertEqual((saved['source_sha'],saved['selected_sha'],saved['pipeline_sha']),(hashlib.sha256(raw).hexdigest(),hashlib.sha256(selected+b'\n').hexdigest(),payload['manifest']['sha256']))
+            self.assertFalse(json.loads(saved['observation'])['sourceCustodyAccepted'])
         status,response=post('complete',b'');self.assertEqual(status,200,response)
         self.assertEqual(response['state'],'source_pages_verified_not_custody')
         self.assertFalse(response['sourceCustodyAccepted']);self.assertFalse(response['processingAuthorized'])

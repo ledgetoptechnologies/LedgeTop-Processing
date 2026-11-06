@@ -386,6 +386,8 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         used += direct_snapshot_metadata(db)
         from .direct_snapshot_page_journal import selected_metadata_bytes
         used += selected_metadata_bytes(db)
+        from .direct_snapshot_page_journal import observation_metadata_bytes
+        used += observation_metadata_bytes(db)
         return used
 
     def _quota(self, db, extra_bytes=0):

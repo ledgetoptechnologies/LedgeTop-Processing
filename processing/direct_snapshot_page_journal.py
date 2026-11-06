@@ -86,6 +86,53 @@ def ensure_selected(db):
         db.execute('UPDATE coordinator_identity SET direct_selected_version=1 WHERE singleton=1')
     selected_metadata_bytes(db)
 
+OBS_SCHEMA="CREATE TABLE direct_snapshot_observations (reservation TEXT PRIMARY KEY,snapshot TEXT NOT NULL,principal TEXT NOT NULL,environment TEXT NOT NULL,source_sha TEXT NOT NULL,selected_sha TEXT NOT NULL,pipeline_sha TEXT NOT NULL,observation BLOB NOT NULL)"
+OBS_TRIGGERS=(
+ "CREATE TRIGGER direct_snapshot_observations_no_replace BEFORE INSERT ON direct_snapshot_observations WHEN EXISTS (SELECT 1 FROM direct_snapshot_observations WHERE reservation=NEW.reservation) BEGIN SELECT RAISE(ABORT,'snapshot observation immutable'); END",
+ "CREATE TRIGGER direct_snapshot_observations_no_update BEFORE UPDATE ON direct_snapshot_observations BEGIN SELECT RAISE(ABORT,'snapshot observation immutable'); END",
+ "CREATE TRIGGER direct_snapshot_observations_no_delete BEFORE DELETE ON direct_snapshot_observations BEGIN SELECT RAISE(ABORT,'snapshot observation immutable'); END")
+OBS_ALLOWANCE=8192
+
+def observation_metadata_bytes(db):
+    cols={r['name'] for r in db.execute('PRAGMA table_info(coordinator_identity)')}
+    exists=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='direct_snapshot_observations'").fetchone()
+    if not exists and not ({'direct_snapshot_observation_version','direct_snapshot_observation_count'}&cols):return 0
+    if not exists or not {'direct_snapshot_observation_version','direct_snapshot_observation_count'}<=cols or ' '.join(exists['sql'].split())!=' '.join(OBS_SCHEMA.split()):raise Conflict('snapshot observation schema changed')
+    for sql in OBS_TRIGGERS:
+        row=db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(sql.split()[2],)).fetchone()
+        if row is None or ' '.join(row['sql'].split())!=' '.join(sql.split()):raise Conflict('snapshot observation guards changed')
+    version,count=db.execute('SELECT direct_snapshot_observation_version,direct_snapshot_observation_count FROM coordinator_identity WHERE singleton=1').fetchone()
+    rows=db.execute('SELECT * FROM direct_snapshot_observations').fetchall()
+    if type(version) is not int or version!=1 or type(count) is not int or count!=len(rows) or count>MAX_SESSIONS:raise Conflict('snapshot observation count changed')
+    for row in rows:
+        if (any(type(row[k]) is not str or not re.fullmatch('[a-f0-9]{64}',row[k]) for k in ('source_sha','selected_sha','pipeline_sha'))
+                or type(row['observation']) is not bytes or not 1<=len(row['observation'])<=4096):raise Conflict('snapshot observation invalid')
+        parent=db.execute('SELECT snapshot,principal,environment,intent FROM direct_snapshot_sessions WHERE reservation=?',(row['reservation'],)).fetchone()
+        if (parent is None or tuple(parent)[:3]!=(row['snapshot'],row['principal'],row['environment'])
+                or hashlib.sha256(parent['intent']).hexdigest()!=row['source_sha']):raise Conflict('snapshot observation parent changed')
+        try:
+            intent=_decode(parent['intent'],MAX_INTENT_BYTES);observation=_decode(row['observation'],4096)
+            if (type(observation) is not dict or set(observation)!={'state','sourceSnapshotSha256','datasetFileCount','selectedCount','sourceCustodyAccepted','processingAuthorized'}
+                    or observation['state']!='source_and_selected_pages_verified_not_custody'
+                    or observation['sourceSnapshotSha256']!=row['source_sha']
+                    or type(observation['datasetFileCount']) is not int or observation['datasetFileCount']!=intent['datasetFileCount']
+                    or type(observation['selectedCount']) is not int or observation['selectedCount']!=intent['selectedCount']
+                    or observation['sourceCustodyAccepted'] is not False or observation['processingAuthorized'] is not False):raise ValueError()
+        except (TypeError,ValueError,KeyError):raise Conflict('snapshot observation invalid') from None
+    return count*OBS_ALLOWANCE
+
+def ensure_observations(db):
+    if not db.in_transaction:raise Conflict('snapshot observation transaction required')
+    observation_metadata_bytes(db)
+    cols={r['name'] for r in db.execute('PRAGMA table_info(coordinator_identity)')}
+    if 'direct_snapshot_observation_version' not in cols:
+        db.execute('ALTER TABLE coordinator_identity ADD COLUMN direct_snapshot_observation_version INTEGER NOT NULL DEFAULT 0')
+        db.execute('ALTER TABLE coordinator_identity ADD COLUMN direct_snapshot_observation_count INTEGER NOT NULL DEFAULT 0')
+        db.execute(OBS_SCHEMA)
+        for sql in OBS_TRIGGERS:db.execute(sql)
+        db.execute('UPDATE coordinator_identity SET direct_snapshot_observation_version=1 WHERE singleton=1')
+    observation_metadata_bytes(db)
+
 def metadata_bytes(db):
     cols={r['name'] for r in db.execute('PRAGMA table_info(coordinator_identity)')}
     marker=0 if 'direct_snapshot_version' not in cols else db.execute('SELECT direct_snapshot_version FROM coordinator_identity WHERE singleton=1').fetchone()[0]
@@ -264,10 +311,23 @@ class SnapshotPageJournal:
                 db.execute('UPDATE coordinator_identity SET direct_selected_page_count=direct_selected_page_count+1 WHERE singleton=1')
             return {'state':'selected_pages_receiving','sourceCustodyAccepted':False,'processingAuthorized':False}
 
+    @staticmethod
+    def _inspection_binding(db, reservation, job_id):
+        """Capture exact durable verifier inputs; no claim of current custody."""
+        values=[]
+        for table,key,value in (('direct_v2_reservations','reservation_id',reservation),
+                                ('jobs','id',job_id),('reference_jobs','job_id',job_id),
+                                ('reference_source_intakes','job_id',job_id)):
+            row=db.execute('SELECT * FROM '+table+' WHERE '+key+'=?',(value,)).fetchone()
+            if row is None:raise Conflict('snapshot verifier binding unavailable')
+            values.append(tuple(row))
+        return tuple(values)
+
     def _complete(self,reservation,snapshot,principal,environment,*,include_selected=False):
         with self.queue.coordinator_operation('source-io-admission'):
             with self.queue._db() as db:
-                db.execute('BEGIN');self._scope(db,reservation,principal,environment);metadata_bytes(db)
+                db.execute('BEGIN');scope=self._scope(db,reservation,principal,environment);metadata_bytes(db)
+                binding=self._inspection_binding(db,reservation,scope['job_id']) if include_selected else None
                 if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_snapshot_sessions'").fetchone():
                     raise Conflict('snapshot session unavailable')
                 session=db.execute('SELECT * FROM direct_snapshot_sessions WHERE reservation=?',(reservation,)).fetchone()
@@ -290,5 +350,36 @@ class SnapshotPageJournal:
                     if len(selected_rows)!=len(intent['selectedPageHashes']) or any(row['page_index']!=i for i,row in enumerate(selected_rows)):raise Conflict('selected pages incomplete')
                     selected_frames=b''.join(row['page']+b'\n' for row in selected_rows)
                     if len(selected_frames)!=selected['frame_bytes']:raise Conflict('selected frames incomplete')
-            return self.reservations.inspect_held_snapshot(reservation,authenticated_principal=principal,
+            result=self.reservations.inspect_held_snapshot(reservation,authenticated_principal=principal,
                 issuer_id=intent['issuerId'],key_id=intent['keyId'],intent_bytes=raw,signature=signature,source_frames=frames,selected_frames=selected_frames)
+            if include_selected:
+                # Historical inspection only. Neither this journal nor the
+                # returned observation attests current custody or permits release.
+                if (type(result) is not dict or result.get('state')!='source_and_selected_pages_verified_not_custody'
+                        or result.get('sourceCustodyAccepted') is not False or result.get('processingAuthorized') is not False
+                        or result.get('sourceSnapshotSha256')!=hashlib.sha256(raw).hexdigest()
+                        or type(result.get('selectedCount')) is not int or result['selectedCount']!=intent['selectedCount']):raise Conflict('snapshot inspection unavailable')
+                source_sha=hashlib.sha256(raw).hexdigest();selected_sha=hashlib.sha256(selected_frames).hexdigest()
+                wire=p.canonical_json(result)
+                if len(wire)>4096:raise Conflict('snapshot inspection exceeds allowance')
+                with self.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE');row=self._scope(db,reservation,principal,environment)
+                    if self._inspection_binding(db,reservation,row['job_id'])!=binding:raise Conflict('snapshot verifier binding changed')
+                    metadata_bytes(db);selected_metadata_bytes(db);ensure_observations(db)
+                    parent=db.execute('SELECT snapshot,principal,environment,intent,signature FROM direct_snapshot_sessions WHERE reservation=?',(reservation,)).fetchone()
+                    if parent is None or tuple(parent)!=(snapshot,principal,environment,raw,signature):raise Conflict('snapshot identity changed')
+                    saved_source=db.execute('SELECT page FROM direct_snapshot_pages WHERE reservation=? ORDER BY page_index',(reservation,)).fetchall()
+                    if b''.join(x['page']+b'\n' for x in saved_source)!=frames:raise Conflict('source pages changed')
+                    saved_frames=db.execute('SELECT page FROM direct_selected_pages WHERE reservation=? ORDER BY page_index',(reservation,)).fetchall()
+                    if hashlib.sha256(b''.join(x['page']+b'\n' for x in saved_frames)).hexdigest()!=selected_sha:raise Conflict('selected pages changed')
+                    pipeline_sha=row['pipeline_manifest_sha']
+                    if type(pipeline_sha) is not str or not re.fullmatch('[a-f0-9]{64}',pipeline_sha):raise Conflict('pipeline binding unavailable')
+                    old=db.execute('SELECT * FROM direct_snapshot_observations WHERE reservation=?',(reservation,)).fetchone()
+                    values=(snapshot,principal,environment,source_sha,selected_sha,pipeline_sha,wire)
+                    if old:
+                        if tuple(old)[1:]!=values:raise Conflict('snapshot observation replay changed')
+                    else:
+                        self.store._quota(db,OBS_ALLOWANCE)
+                        db.execute('INSERT INTO direct_snapshot_observations VALUES(?,?,?,?,?,?,?,?)',(reservation,*values))
+                        db.execute('UPDATE coordinator_identity SET direct_snapshot_observation_count=direct_snapshot_observation_count+1 WHERE singleton=1')
+            return result

@@ -83,6 +83,12 @@ class SnapshotJournalTests(unittest.TestCase):
         self.snapshot.intent['selectedPageHashes']=[hashlib.sha256(b'ltds-viewer-selected-frame-v1\0'+selected).hexdigest()]
         self.snapshot.intent['selectedFrameBytes']=len(selected)+1
         self.snapshot.prepare()
+        self.row['pipeline_manifest_sha']='c'*64
+        self.row['job_id']='synthetic-job'
+        binding_patch=patch.object(self.api,'_inspection_binding',return_value=('synthetic-binding',))
+        binding_patch.start();self.addCleanup(binding_patch.stop)
+        self.reservations.inspect_held_snapshot.return_value={'state':'source_and_selected_pages_verified_not_custody',
+            'sourceSnapshotSha256':self.snapshot.sha,'datasetFileCount':1,'selectedCount':1,'sourceCustodyAccepted':False,'processingAuthorized':False}
         self.row['source_attestation_json']=json.dumps({'proof':{'sourceSnapshotSha256':self.snapshot.sha}})
         self.begin=p.canonical_json({'intentBase64url':b64(self.snapshot.raw),'signatureBase64url':b64(self.snapshot.signature)})
         self.assertEqual(self.call('begin',self.begin).status,200)
@@ -92,10 +98,33 @@ class SnapshotJournalTests(unittest.TestCase):
         self.queue.close();self.queue=Queue(self.root,reference_enabled=True);self.addCleanup(self.queue.close)
         self.store=ReferenceStore(self.queue);self.reservations.store=self.store;self.reservations.queue=self.queue
         self.api=SnapshotPageJournal(self.store,self.reservations)
+        binding_patch=patch.object(self.api,'_inspection_binding',return_value=('synthetic-binding',))
+        binding_patch.start();self.addCleanup(binding_patch.stop)
         self.assertEqual(self.call('selected-pages/0',selected).status,200)
         self.assertEqual(self.call('complete-selected').status,200)
         self.assertEqual(self.reservations.inspect_held_snapshot.call_args.kwargs['selected_frames'],selected+b'\n')
-        with self.queue._db() as db:db.execute('DROP TRIGGER direct_selected_pages_no_delete')
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_snapshot_observations').fetchone()[0],1)
+            with self.assertRaises(sqlite3.IntegrityError):db.execute('DELETE FROM direct_snapshot_observations')
+        self.queue.close();self.queue=Queue(self.root,reference_enabled=True);self.addCleanup(self.queue.close)
+        self.store=ReferenceStore(self.queue);self.reservations.store=self.store;self.reservations.queue=self.queue
+        self.api=SnapshotPageJournal(self.store,self.reservations)
+        binding_patch=patch.object(self.api,'_inspection_binding',return_value=('synthetic-binding',))
+        binding_patch.start();self.addCleanup(binding_patch.stop)
+        self.assertEqual(self.call('complete-selected').status,200)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_snapshot_observations').fetchone()[0],1)
+            original=db.execute('SELECT observation FROM direct_snapshot_observations').fetchone()[0]
+            from processing.direct_snapshot_page_journal import OBS_TRIGGERS
+            db.execute('DROP TRIGGER direct_snapshot_observations_no_update')
+            db.execute("UPDATE direct_snapshot_observations SET observation=?",(b'{}',))
+            db.execute(OBS_TRIGGERS[1])
+        self.assertEqual(self.call('complete-selected').status,409)
+        with self.queue._db() as db:
+            db.execute('DROP TRIGGER direct_snapshot_observations_no_update')
+            db.execute('UPDATE direct_snapshot_observations SET observation=?',(original,))
+            db.execute(OBS_TRIGGERS[1])
+            db.execute('DROP TRIGGER direct_selected_pages_no_delete')
         self.assertEqual(self.call('complete-selected').status,409)
 
     def test_noncanonical_encoding_wrong_key_and_quota_hold(self):
