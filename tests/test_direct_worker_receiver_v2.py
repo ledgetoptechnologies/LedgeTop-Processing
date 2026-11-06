@@ -1,5 +1,6 @@
 """Synthetic V2 local worker boundary; no runtime listener or custody ACK."""
 import hashlib
+from contextlib import closing
 import http.client
 import importlib.util
 import io
@@ -202,7 +203,7 @@ class WorkerV2Tests(unittest.TestCase):
 
     def test_missing_readiness_guard_and_record_fail_closed(self):
         self.put_zero()
-        with sqlite3.connect(self.ledger.path) as db:
+        with closing(sqlite3.connect(self.ledger.path)) as db, db:
             db.execute('DROP TRIGGER direct_v2_readiness_no_delete')
         with self.assertRaisesRegex(PolicyConflict,'guards changed'):
             self.ledger.begin_direct_writer(self.observation['scratchReservationId'],
@@ -210,7 +211,7 @@ class WorkerV2Tests(unittest.TestCase):
         with self.assertRaisesRegex(PolicyConflict,'guards changed'):
             ScratchLedger(self.ledger.path,self.root,capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
         from processing.scratch_policy import V2_READY_TRIGGERS
-        with sqlite3.connect(self.ledger.path) as db:
+        with closing(sqlite3.connect(self.ledger.path)) as db, db:
             db.execute('DELETE FROM direct_v2_readiness_uses')
             db.execute(V2_READY_TRIGGERS[2])
         with self.assertRaisesRegex(PolicyConflict,'records missing'):
@@ -260,6 +261,7 @@ class WorkerV2Tests(unittest.TestCase):
             finally:
                 proceed.set();lock.rollback();lock.close();thread.join(3)
         self.assertFalse(thread.is_alive());self.assertEqual(len(errors),1)
+        self.assertIsInstance(errors[0],ValueError)
         self.assertFalse(reader.closed)
         with self.ledger._transaction() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0],0)
