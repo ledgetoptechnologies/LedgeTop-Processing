@@ -14,11 +14,12 @@ import stat
 import uuid
 
 from ops import enroll_reference_worker as install
-from ops.prepare_reference_worker_config import pinned
+from ops.prepare_reference_worker_config import descriptor, pinned
 from ops.enrolled_coordinator_transport import canonical, decode, require
 
 PROTOCOL = 'ltds-reference-runtime-preparation-v1'
 BINDING_PROTOCOL = 'ltds-reference-node-preparation-binding-v1'
+MAX_TOKEN_BYTES = 4096
 
 
 def node_binding(value):
@@ -48,9 +49,23 @@ def node_binding(value):
 
 def token(artifact):
     value = pinned(artifact).decode('ascii')
-    require(32 <= len(value) <= 4096 and all(33 <= ord(c) <= 126 for c in value),
+    require(32 <= len(value) <= MAX_TOKEN_BYTES and all(33 <= ord(c) <= 126 for c in value),
             'literal_private_token_required')
     return value
+
+
+def forbidden_token(artifact):
+    """Read an existing credential for collision exclusion only, never for use.
+
+    Native tokens can be shorter than generated roles, so this has its own
+    1 to 4096 byte bound; token() keeps the minimum for every role this tool
+    writes. Bytes are checked before decoding so no failure can carry the value.
+    """
+    require(descriptor(artifact)['bytes'] <= MAX_TOKEN_BYTES, 'literal_forbidden_credential_required')
+    raw = pinned(artifact)
+    require(1 <= len(raw) <= MAX_TOKEN_BYTES and all(33 <= byte <= 126 for byte in raw),
+            'literal_forbidden_credential_required')
+    return raw.decode('ascii')
 
 
 def signer(value):
@@ -100,7 +115,7 @@ def compose(spec):
     require(spool['chunkBytes'] <= 16*1024**2, 'bounded_spool_chunk_required')
     require(type(spec['forbiddenCredentials']) is list and len(spec['forbiddenCredentials']) <= 64,
             'bounded_legacy_credential_inventory_required')
-    forbidden = {token(a) for a in spec['forbiddenCredentials']}
+    forbidden = {forbidden_token(a) for a in spec['forbiddenCredentials']}
     credentials = []
     workers = {}; recovery = {}; endpoints = []; evidence = []
     nodes = spec['nodes']

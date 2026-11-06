@@ -21,8 +21,12 @@ Each node supplies a pinned original enrollment `manifest`, copied original
 authority, origin, node and generation bindings; this tool does not guess them
 from hostnames or replace them with current discovery. Tokens are private
 artifacts containing exact printable bytes without a trailing newline.
+Generated role tokens are 32 to 4096 bytes and must all differ.
 `forbiddenCredentials` enumerates existing native/control/legacy credentials for
-collision exclusion; callers must supply the complete reviewed inventory.
+collision exclusion; callers must supply the complete reviewed inventory. Each
+entry has its own bound of 1 to 4096 printable bytes, because a native token can
+be shorter than a generated role. An entry is only compared, never written or
+reported, and being listed does not make a value usable as a role credential.
 
 For a first installation without an enrollment manifest, supply `binding`
 instead of `manifest` (exactly one is permitted). It pins a closed private JSON
