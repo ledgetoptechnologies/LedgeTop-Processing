@@ -23,6 +23,7 @@ from .reference_result_proxy import ResultProxy
 from .reference_store import ReferenceStore
 from .reference_tls import verified_client_context
 from .reference_recovery import RecoveryNodeBinding
+from .maintenance import Conflict
 from .config import normalized_node_origin, node_image_limit
 from .reference_source_intake import SOURCE_PREFIX
 from .reference_limits import V2_SOURCE_INTAKE_BYTES
@@ -368,10 +369,14 @@ class _DynamicAPI:
                             unreserved=unreserved and payload['schemaVersion']==4
                         elif body:
                             unreserved=False
+                    except Conflict:
+                        return Response(409,{'error':'recovery_state_unavailable'})
+                    except (ValueError,TypeError,KeyError):
+                        return Response(400,{'error':'invalid_request'})
                     except Exception:
-                        # Preserve existing closed/auth/error handling; failed
-                        # authentication/validation grants no recovery authority.
-                        return self.control.handle(method,path,headers,body,protected_transport=protected_transport)
+                        # Never fall through optimistic Store defaults when a
+                        # pre-discovery read or its outcome is unknown.
+                        return Response(503,{'error':'engine_capacity_unavailable'})
                     if unreserved:
                         try:
                             options=self.discover()
