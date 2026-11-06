@@ -66,22 +66,33 @@ class DirectV2AdmissionTests(unittest.TestCase):
         self.store._configured_node_limits['cluster']['maxInputBytes']=pipeline_bytes
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            self.assertIsNone(self.store._candidate_any_row(db,'cluster'))
-            self.assertEqual(self.store._candidate_any_row(db,'main')['id'],job['jobId'])
+            opts=dict(trusted_source_keys=self.fixture.trusted_keys,authority_id=self.queue.authority_id)
+            self.assertIsNone(self.store._candidate_any_row(db,'cluster',**opts))
+            self.assertEqual(self.store._candidate_any_row(db,'main',**opts)['id'],job['jobId'])
 
     def test_rehashed_tampered_source_remains_queue_barrier(self):
         from processing import reference_protocol as p
+        from processing.viewer_source_attestation import proof_digest
         job,_=self.store.submit_source_intake(self.validated,**self.options)
         with self.queue._db() as db:
             row=db.execute('SELECT source_manifest_json FROM reference_source_intakes WHERE job_id=?',(job['jobId'],)).fetchone()
             source=json.loads(row[0]);source['objects'][0]['byteSize']=0
             source['totalBytes']=sum(obj['byteSize'] for obj in source['objects'])
             source['sha256']=p.digest({key:value for key,value in source.items() if key!='sha256'})
-            db.execute('UPDATE reference_source_intakes SET source_manifest_json=? WHERE job_id=?',
-                       (p.canonical_json(source).decode(),job['jobId']))
+            attestation=json.loads(db.execute('SELECT source_attestation_json FROM reference_source_intakes WHERE job_id=?',(job['jobId'],)).fetchone()[0])
+            attestation['proof']['sourceManifestSha256']=source['sha256']
+            attestation['attestationSha256']=proof_digest(attestation['proof'])
+            altered=dict(self.validated,sourceManifest=source,sourceAttestation=attestation)
+            from processing.reference_source_intake import INTAKE_FIELDS
+            request={key:altered[key] for key in INTAKE_FIELDS}
+            db.execute('''UPDATE reference_source_intakes SET source_manifest_json=?,source_manifest_sha=?,
+                source_attestation_json=?,source_attestation_sha=?,request_digest=? WHERE job_id=?''',
+                (p.canonical_json(source).decode(),source['sha256'],p.canonical_json(attestation).decode(),
+                 attestation['attestationSha256'],p.digest(request),job['jobId']))
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            self.assertEqual(self.store._candidate_any_row(db,'cluster')['id'],job['jobId'])
+            self.assertEqual(self.store._candidate_any_row(db,'main',trusted_source_keys=self.fixture.trusted_keys,
+                                                          authority_id=self.queue.authority_id)['id'],job['jobId'])
 
     def test_pending_job_reopens_unassigned_without_cluster_node(self):
         with tempfile.TemporaryDirectory() as directory:

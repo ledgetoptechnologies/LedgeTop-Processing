@@ -556,7 +556,7 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                 "pipeline": {"odm": {"options": options},
                              "treedar": {"requested": False}}}
 
-    def _candidate_any_row(self, db, node_id):
+    def _candidate_any_row(self, db, node_id, *, trusted_source_keys=None, authority_id=None):
         """First globally ordered, profile-eligible job this free node can run.
 
         Reference and native Viewer schedulers share this selector inside their
@@ -590,9 +590,13 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                     submission = json.loads(row["input_json"])
                     if row['status']=='held' and row['held_reason']=='direct_admission_pending':
                         try:
+                            if trusted_source_keys is None or authority_id != self.queue.authority_id:
+                                raise ValueError('trusted direct source keys unavailable')
                             source=json.loads(row['source_manifest_json'])
                             derived=json.loads(row['derived_manifest_json'])
                             attestation=json.loads(row['source_attestation_json'])
+                            from .viewer_source_attestation import proof_digest
+                            proof=attestation['proof']
                             total=sum(obj['byteSize'] for manifest in (source,derived) for obj in manifest['objects'])
                             protocol._integer(total,'direct retained bytes',allow_zero=True)
                             original=dict(schemaVersion=2,submissionId=submission['submissionId'],
@@ -606,8 +610,20 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                                     or source['sha256']!=row['source_manifest_sha']
                                     or derived['sha256']!=row['derived_manifest_sha']
                                     or attestation['attestationSha256']!=row['source_attestation_sha']
+                                    or attestation['attestationSha256']!=proof_digest(proof)
+                                    or proof['sourceManifestSha256']!=source['sha256']
+                                    or proof['derivedManifestSha256']!=derived['sha256']
+                                    or proof['pipelineManifestSha256']!=row['manifest_sha']
+                                    or proof['pipelineDigest']!=row['pipeline_digest']
                                     or protocol.digest(original)!=row['source_request_digest']):
                                 raise ValueError('direct retained inventory changed')
+                            from .viewer_source_attestation import validate_and_verify
+                            validate_and_verify(attestation,trusted_keys=trusted_source_keys,
+                                authority_id=authority_id,environment=row['environment'],
+                                submission_id=submission['submissionId'],provider_task_id=row['provider_task_id'],
+                                attempt_id=submission['submissionId'],viewer_task_id=row['viewer_task_id'],
+                                source_manifest_sha256=source['sha256'],derived_manifest_sha256=derived['sha256'],
+                                pipeline_manifest_sha256=row['manifest_sha'],pipeline_digest=row['pipeline_digest'])
                             submission['manifest']['totalBytes']=total
                         except (ValueError,TypeError,KeyError,AttributeError):
                             # Unknown size remains an ordering barrier; it is

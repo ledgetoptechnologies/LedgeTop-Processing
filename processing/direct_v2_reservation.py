@@ -144,7 +144,8 @@ class DirectV2Reservations:
             else:
                 if row['status']!='held' or row['held_reason']!='direct_admission_pending':
                     raise Conflict('V2 direct job not pending')
-                candidate=self.store._candidate_any_row(db,item['nodeId'])
+                candidate=self.store._candidate_any_row(db,item['nodeId'],trusted_source_keys=trusted_source_keys,
+                                                        authority_id=self.queue.authority_id)
                 if candidate is None or candidate['id']!=item['jobId']:
                     raise Conflict('V2 node not eligible or earlier job takes priority')
                 self.store._quota(db,sum(len(value) for value in (item_bytes,proof_bytes))+
