@@ -60,10 +60,17 @@ class ObservationRuntimeTests(unittest.TestCase):
         upload=owner.owner._server
         status,reply=tls.request(upload,cert=tls.good,key=tls.goodkey,method='GET',path='/direct/v2/objects/'+GCP_ID,
                                  body=b'',headers=f.headers)
-        self.assertEqual(status,200);self.assertTrue(reply['localObjectDurable'])
+        self.assertEqual(status,200);self.assertTrue(reply['localObjectPresent']);self.assertFalse(reply['localObjectDurable'])
+        with f.ledger._transaction() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_custody_fences').fetchone()[0],0)
         status,_=tls.request(upload,cert=tls.good,key=tls.goodkey,method='PUT',path='/direct/v2/objects/'+GCP_ID,
                              body=b'',headers=dict(f.headers,**{'Content-SHA256':__import__('hashlib').sha256(b'').hexdigest()}))
         self.assertEqual(status,403)
+        for method,path,body in (('POST','/direct/v2/complete',b''),('GET','/direct/v2/retention',b''),
+                                 ('POST','/direct/v2/retention-challenge',b'a'*64)):
+            status,_=tls.request(upload,cert=tls.good,key=tls.goodkey,method=method,path=path,body=body,headers=f.headers)
+            self.assertEqual(status,403)
         # Terminate the task-owned listener and rebuild it in a fresh process.
         self.assertTrue(owner.close(3))
         from cryptography.hazmat.primitives import serialization
@@ -98,10 +105,23 @@ print(o.owner._server.server_port,flush=True);sys.stdin.readline();assert o.clos
             if not portline:raise AssertionError(child.stderr.read())
             resumed=SimpleNamespace(server_port=int(portline))
             status,observed=tls.request(resumed,cert=tls.good,key=tls.goodkey,method='GET',path='/direct/v2/objects/'+GCP_ID,body=b'',headers=f.headers)
-            self.assertEqual(status,200);self.assertTrue(observed['localObjectDurable'])
+            self.assertEqual(status,200);self.assertTrue(observed['localObjectPresent']);self.assertFalse(observed['localObjectDurable'])
         finally:
             if child.poll() is None:
                 try:child.stdin.write('stop\n');child.stdin.flush();child.wait(timeout=5)
                 except Exception:child.kill();child.wait(timeout=5)
             child.stdin.close();child.stdout.close();child.stderr.close()
         self.assertEqual(child.returncode,0)
+        # Damaged/lost grant must not be recreated by observation mode.
+        import sqlite3
+        from processing.scratch_policy import DIRECT_GRANT_TRIGGERS,PolicyConflict
+        db=sqlite3.connect(f.ledger.path)
+        db.execute('DROP TRIGGER direct_grant_no_delete')
+        db.execute('DELETE FROM direct_worker_grants')
+        saved=json.loads(db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()[0])
+        saved['directGrantCount']=0
+        db.execute("UPDATE metadata SET value=? WHERE key='config'",(json.dumps(saved,sort_keys=True,separators=(',',':')),))
+        db.execute(DIRECT_GRANT_TRIGGERS[2]);db.commit();db.close()
+        boundary._observation_only=True
+        with self.assertRaises(PolicyConflict):
+            grant.authorize('coord-a',f.headers,dict(operationId=str(uuid.uuid4()),item=f.item))

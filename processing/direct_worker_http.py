@@ -206,6 +206,9 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
                         result=reservation_grant.authorize(principal,headers,payload)
                         self._reply(200,result);return
                     reservation_grant.require(principal,headers)
+                if (version=='v2' and boundary._observation_only and self.path in
+                        ('/direct/v2/complete','/direct/v2/retention','/direct/v2/retention-challenge')):
+                    self._reply(403,{'error':'observation_only'});return
                 match = re.fullmatch(r'/direct/' + version + r'/objects/([A-Za-z0-9][A-Za-z0-9_-]{0,127})', self.path)
                 if self.command == 'PUT' and match:
                     body = _BoundedReader(self, length, time.monotonic() + self.server.body_deadline)

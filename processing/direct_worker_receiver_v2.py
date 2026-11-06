@@ -144,6 +144,7 @@ class DirectWorkerBoundaryV2:
             localObjectDurable=True, sourceCustodyAccepted=False, transferComplete=False, replayed=replay)
 
     def complete(self, headers, *, protected_transport):
+        if self._observation_only:raise DirectBoundaryDenied('observation cannot close source')
         from .direct_worker_boundary import DirectWorkerBoundary
         supplied=DirectWorkerBoundary._header(headers,'Authorization')
         if (protected_transport is not True or type(supplied) is not str or not supplied.startswith('Bearer ')
@@ -186,6 +187,23 @@ class DirectWorkerBoundaryV2:
                 or DirectWorkerBoundary._header(headers,'X-Coordinator-Authority')!=self.item['authorityId']):
             raise DirectBoundaryDenied('private coordinator authorization required')
         obj=self.inventory.object(object_id,reservation_binding=self.reservation)
+        if self._observation_only:
+            # Historical contents only: never create a pin, mkdir, fsync or
+            # assert that prior publication survived a power loss.
+            item,digest,scratch_id=require_fenced(self.ledger,self.item,expected_worker=self.worker)
+            with self._writer_lock, NodeGate(self.engine_id) as gate:
+                check_scope(self.ledger,self.spool,item,digest,scratch_id,gate,
+                            coordinator_origin=self.origin,gate_generation=self.generation)
+                self.spool._assert_mount()
+                path=self.spool.root/self.spool.storage_key(item['jobId'],item['generation'],object_id)
+                for directory in (path.parent.parent,path.parent):
+                    info=self.spool._identity(directory,directory=True)
+                    if info.st_dev!=self.spool._mount_identity[0]:raise PolicyConflict('spool mount changed')
+                if not self.spool._hash_file(path,obj['byteSize'],obj['sha256']):raise PolicyConflict('object unavailable')
+                self.spool._assert_mount()
+                return dict(protocol='ltds-direct-local-object-observation-v1',reservationId=item['reservationId'],
+                    scratchBindingSha256=digest,objectId=object_id,byteSize=obj['byteSize'],sha256=obj['sha256'],
+                    localObjectPresent=True,localObjectDurable=False,sourceCustodyAccepted=False,transferComplete=False)
         with self._writer_lock, NodeGate(self.engine_id) as gate:
             if self._readiness_pin is not None:raise PolicyConflict('V2 handover not established')
             item,digest,scratch_id=require_fenced(self.ledger,self.item,expected_worker=self.worker)
