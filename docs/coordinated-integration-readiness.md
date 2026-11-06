@@ -17,7 +17,7 @@ not be added together or described as a complete suite.
 | Production/staging queue and ordered per-node routing | Actual Viewer/Python synthetic pairings; 332-test integrated selection | Installed source intake and concurrent two-node jobs; correct user-facing queued/preparing/running witness (see status audit) |
 | Private per-node engine boundary and dynamic flags | Authenticated worker relay and coordinator discovery integrated; 96/96 frozen-source Linux catalog/runtime/factory checks passed at `18750d4` | Install workers and qualify relay on both PCs; verify native engine submission cannot bypass the worker boundary |
 | Durable result return and selective cleanup | Signed ready proof, real Viewer process death/recovery, synthetic 24-hour timer and preserved raw GCP/originals | Installed credentials, NAS durability and actual return to Viewer |
-| Coordinator/worker maintenance | Concrete driver/bundle/transport and guarded first activation integrated; distinct 118-test transport and 98-test activation/installer/cutover selections pass, including real nonroot serialized helper with fake external transports | Full actual Docker forward/declared rollback, real first worker enrollment/activation and installed update/drain/resume |
+| Coordinator/worker maintenance | Concrete driver/bundle/transport and guarded first activation integrated; distinct 118-test transport and 98-test activation selections pass; all22 actual local Docker forward phases now pass with connected factory workers/TLS/catalog | Separate declared rollback, final rebuilt combined image, real first worker enrollment/activation and installed update/drain/resume |
 | Long transfer after coordinator outage | Renewal/mint plus scratch and per-receipt delivery fences integrated; 442/442 frozen Linux checks passed at `b467c3b` | Actual coordinator-restart fetching/processing recovery, worker enrollment and connected delivery remain open |
 | Viewer GCP workflow | Corrected curated Viewer `7598858b` passed 158/158 Linux checks and 3/3 actual local Processing/Viewer pairings, including licensed conversion, result acceptance and signed 24-hour cleanup | Installed deployment/return acceptance, NAVD88 geoid qualification and rendered UI acceptance remain open |
 | TreeDar and Gaussian splats | Genuine-LiDAR validation/scaffolding | Typed usable TreeDar output registration and real processing; Gaussian remains disabled |
@@ -36,9 +36,13 @@ has a related replay gap. The negative processing-recovery test deliberately
 expects that hold. Preserving this hold is safe, but does not satisfy unattended
 same-claim recovery. Claude yielded the follow-on to the Processing agent; the
 isolated design checkpoint is `e439115`, and implementation beginning at
-`8824e53` is selected for review after the passing checkpoint. It is not yet
-qualified; fresh runtime capacity discovery remains under correction. Never
-requeue or invent a replacement claim to bypass it.
+`8824e53` is selected after that checkpoint. Its broad371-test selection had
+366 passes and5 fixture-construction errors; after test-only inventory/physical
+binding corrections, all five targeted runtime-discovery cases pass. Production
+files are unchanged between the runs; see
+[the exact partial-run/rerun evidence](evidence/pre-reservation-recovery-integration-20261106.md).
+Final rebuilt and installed qualification remains open. Never requeue or invent
+a replacement claim to bypass it.
 
 The same review distinguishes delivery to a signed synthetic Viewer receipt
 from actual Viewer import, and uncertain native init/upload holds from automatic
