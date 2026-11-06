@@ -9,7 +9,7 @@ import threading
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock,patch
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes,serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -137,5 +137,16 @@ class SnapshotListenerTests(unittest.TestCase):
             release.set();thread.join(3)
         self.assertFalse(thread.is_alive());self.assertEqual(outcomes,[200])
         self.assertTrue(owner.close(3));self.assertEqual(owner.status(),'closed')
+
+    def test_close_exception_still_retires_activity_and_slot(self):
+        server=self.start();original=server.shutdown_request
+        def closed_then_error(request):
+            original(request)
+            raise OSError('synthetic close error after real socket closed')
+        with patch.object(server,'shutdown_request',side_effect=closed_then_error):
+            self.assertEqual(self.request(server,cert=self.good,key=self.goodkey)[0],200)
+            self.assertTrue(server.drain(3))
+            with server._activity:self.assertEqual(server._active_connections,0)
+            self.assertTrue(server._slots.acquire(blocking=False));server._slots.release()
 
 if __name__=='__main__':unittest.main()

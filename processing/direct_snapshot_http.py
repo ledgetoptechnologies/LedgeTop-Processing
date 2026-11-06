@@ -156,8 +156,12 @@ def create_snapshot_server(host,port,*,enabled=False,ssl_context=None,client_sco
                 if deadline is not None:deadline.finish()
                 if hasattr(self._local,'scope'):del self._local.scope
                 if hasattr(self._local,'header_deadline'):del self._local.header_deadline
-                self.shutdown_request(wrapped if wrapped is not None else request)
-                with self._activity:
-                    self._active_connections-=1;self._slots.release();self._activity.notify_all()
+                try:
+                    self.shutdown_request(wrapped if wrapped is not None else request)
+                except Exception:
+                    self.handle_error(request,address)
+                finally:
+                    with self._activity:
+                        self._active_connections-=1;self._slots.release();self._activity.notify_all()
         def handle_error(self,*_args):pass
     return Server()
