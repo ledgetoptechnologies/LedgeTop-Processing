@@ -50,12 +50,24 @@ returns200, and new actual local forward22 and rollback30/post-restart custody
 audit pass. Root independently rehashed the complete retained evidence and
 reviewed exact resource retirement. Installed NAS/Viewer/worker acceptance stays
 open; see [the immutable build/staging receipt](evidence/combined-image-649b-20261106.md).
-An ops-only follow-up is defining a typed worker pre-start configuration-review
-artifact: the present `workerQualificationSha256` hash pin does not itself prove
-worker activation or fresh installed readiness. Those post-bootstrap checks stay
-with the existing activation receipt and must not be moved before their own
-prerequisite frozen plan. The follow-up is not selected or qualified by the649b
-component runs yet.
+The ops-only typed worker pre-start configuration review is now selected at
+`ce14dfe8`, independently reviewed and passing20/20 focused Linux checks. It binds
+completed preparation metadata before operation/journal locks, without reading
+worker private config or credentials. It does not prove worker activation or
+fresh installed readiness. Those post-bootstrap checks stay with the existing
+activation receipt. See
+[its exact qualification](evidence/worker-prestart-review-qualification-20261106.md).
+The full-phase fixture is being adapted to the real installer-derived layout;
+the earlier649b component runs do not qualify this later ops-only change.
+
+The bounded Engineering Hub review is saved in
+`engineering-hub/reviews/hub-update-20261106-processing.md` v1. Authenticated SDK
+reads work; this chat's subscribed listener PID108768 is live and identity
+verified, with actual addressed active-chat delivery. Runtime health reports
+build2ed3351e/v0.6.0/schema4, newer than the last indexed release note6fcd2d2c.
+That is self-reported runtime build, not independent NAS OCI inspection. No
+listener/credential restart or scheduled inbox polling was introduced. The old
+November2 first-client draft remains historical guidance, not go-live approval.
 
 This section and the remaining-delivery list at the end describe current gates.
 Intermediate checkpoints below are historical; their statements that source
