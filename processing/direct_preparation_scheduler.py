@@ -216,5 +216,14 @@ class _ReservedDirectTransfer:
         self._revalidate()
         return self._handoff.authorize_worker(self._secret,protected_transport=True)
     def send(self,object_id,reader):
+        """Take ownership of one closeable reader, including on refusal."""
+        close=getattr(reader,'close',None)
+        if not callable(close):raise ValueError('closeable source reader required')
+        try:
+            self._revalidate()
+            return self._handoff.send_object(self._secret,protected_transport=True,object_id=object_id,reader=reader)
+        finally:
+            close()
+    def complete(self):
         self._revalidate()
-        return self._handoff.send_object(self._secret,protected_transport=True,object_id=object_id,reader=reader)
+        return self._handoff.complete(self._secret,protected_transport=True)

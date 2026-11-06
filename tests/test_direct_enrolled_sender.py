@@ -51,7 +51,7 @@ class EnrolledSenderTests(unittest.TestCase):
                 reservation_binding=f.reservation)
             grant=sender.authorize_reservation(f.challenge)
             self.assertFalse(grant['sourceCustodyAccepted'])
-            from tests.test_reference_source_intake import GCP_ID
+            from tests.test_reference_source_intake import GCP_ID,IMAGE_ID,ATTEMPT
             observed=sender.put(GCP_ID,io.BytesIO(b''))
             self.assertTrue(observed['localObjectDurable']);self.assertFalse(observed['sourceCustodyAccepted'])
             with self.assertRaises(ValueError):
@@ -104,8 +104,22 @@ class EnrolledSenderTests(unittest.TestCase):
                         self.assertFalse(handoff.authorize()['sourceCustodyAccepted'])
                         sent=handoff.send(GCP_ID,io.BytesIO(b''))
                         self.assertTrue(sent['localObjectDurable']);self.assertFalse(sent['sourceCustodyAccepted'])
+                        from processing.maintenance import Conflict
+                        with self.assertRaises(Conflict):handoff.complete()
+                        wrong=io.BytesIO(b'abc')
+                        with self.assertRaises(ValueError):handoff.send('unknown-object',wrong)
+                        self.assertTrue(wrong.closed)
+                        for object_id,data in ((IMAGE_ID,b'abc'),('gcp_'+ATTEMPT,b'1,2,3\n')):
+                            reader=io.BytesIO(data);observed=handoff.send(object_id,reader)
+                            self.assertTrue(reader.closed)
+                            self.assertTrue(observed['localObjectDurable']);self.assertFalse(observed['sourceCustodyAccepted'])
+                        closure=handoff.complete()
+                        self.assertFalse(closure['closure']['sourceCustodyAccepted'])
                         secure.config.write_text(secure.config.read_text()+' ')
                         with self.assertRaises(ValueError):handoff.authorize()
+                        denied=io.BytesIO(b'abc')
+                        with self.assertRaises(ValueError):handoff.send(IMAGE_ID,denied)
+                        self.assertTrue(denied.closed)
                 finally:queue.close()
         finally:
             server.shutdown();server.server_close();thread.join(5)
