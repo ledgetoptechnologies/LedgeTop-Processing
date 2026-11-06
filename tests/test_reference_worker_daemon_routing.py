@@ -117,6 +117,38 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
         self.assertEqual(self.docker_calls,[])
         self.assertFalse(any(self.backend.counts().values()))
 
+    def test_disabled_direct_preparation_does_not_read_unprovisioned_files(self):
+        self.config['directPreparation']=dict(enabled=False,host='127.0.0.1',port=19999,
+            certificate='/absent/cert',privateKey='/absent/key',clientCA='/absent/ca',clients={},
+            sourceAttestationKeys=[],signingKey='/absent/signer',issuerId='worker',keyId='worker-key',
+            mountPath='/absent/mount',mountId='a'*32,markerName='.marker')
+        loaded=self.load()
+        self.assertFalse(loaded['directPreparation']['enabled'])
+        _,server=self.build(loaded,provision=True)
+        self.assertFalse(hasattr(server,'worker_direct_owner'))
+
+    def test_enabled_direct_listener_is_composed_but_closed_before_start(self):
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        signer=Ed25519PrivateKey.generate();signer_path=self.root/'direct-signer.pem'
+        signer_path.write_bytes(signer.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption()))
+        signer_path.chmod(0o600)
+        public=signer.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+        marker_name='.synthetic-direct-'+uuid.uuid4().hex;marker=Path('/tmp')/marker_name
+        marker.write_text('a'*32);marker.chmod(0o600);self.addCleanup(lambda:marker.unlink(missing_ok=True))
+        sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
+        self.config['directPreparation']=dict(enabled=True,host='127.0.0.1',port=port,
+            certificate=str(self.ca),privateKey=str(self.key),clientCA=str(self.ca),
+            clients={'b'*64:{'principal':'coord-a','environment':'staging'}},
+            sourceAttestationKeys=[dict(environment='staging',issuerId='viewer',keyId='viewer-key',principalId='viewer-a',publicKeyPem=public)],
+            signingKey=str(signer_path),issuerId='worker',keyId='worker-key',mountPath='/tmp',mountId='a'*32,markerName=marker_name)
+        loaded=self.load();_,server=self.build(loaded,provision=True)
+        self.assertEqual(server.worker_direct_owner.status(),'not_started')
+        server.server_close()
+        self.assertEqual(server.worker_direct_owner.status(),'closed')
+        self.config['directPreparation']['clients']={'not-a-fingerprint':{'principal':'coord-a','environment':'staging'}}
+        with self.assertRaises(ValueError):self.load()
+
     def test_cluster_odm_only_opt_in_uses_router_without_treedar_or_issuer(self):
         self.config['nodeId']='cluster';self.config['workerId']='worker-cluster'
         self.route(tree=False)
@@ -329,6 +361,28 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
         self.assertEqual(result,[0])
         replacement,_=self.build()
         self.assertIsNotNone(replacement)
+
+    def test_worker_service_keeps_ownership_until_direct_listener_drains(self):
+        serving,shutdown=threading.Event(),threading.Event()
+        def listener(api,*args,**kwargs):
+            self.listeners.append(api)
+            return SimpleNamespace(server_close=lambda:None,serve_forever=lambda **kw:(serving.set(),shutdown.wait(3)),shutdown=shutdown.set)
+        with patch.object(self,'listener',side_effect=listener):driver,server=self.build(provision=True)
+        release=threading.Event();draining=threading.Event();stop=threading.Event()
+        class DirectOwner:
+            def start(self):pass
+            def status(self):return 'running'
+            def close(self,timeout):draining.set();return release.wait(.02)
+        server.worker_direct_owner=DirectOwner()
+        driver.step=lambda:{'state':'idle'}
+        service=daemon.WorkerService(driver,server,poll_seconds=.1)
+        result=[];thread=threading.Thread(target=lambda:result.append(service.run(stop)));thread.start()
+        self.assertTrue(serving.wait(2));stop.set();self.assertTrue(draining.wait(2))
+        try:
+            thread.join(.05);self.assertTrue(thread.is_alive())
+            with self.assertRaises(ValueError):self.build()
+        finally:release.set();thread.join(3)
+        self.assertEqual(result,[0])
 
     def test_state_owner_check_rejects_replaced_lock_path_and_wrong_root(self):
         root=self.root/'owner'

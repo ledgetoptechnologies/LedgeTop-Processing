@@ -23,7 +23,8 @@ _PATH=re.compile(r'/internal/v2/reservations/([0-9a-f-]{36})/source-snapshots/([
 
 
 def create_snapshot_server(host,port,*,enabled=False,ssl_context=None,client_scopes=None,backend=None,
-                           idle_timeout=10,total_body_timeout=30,header_deadline=15,max_connections=MAX_CONNECTIONS):
+                           idle_timeout=10,total_body_timeout=30,header_deadline=15,max_connections=MAX_CONNECTIONS,
+                           prepare_backend=None):
     if enabled is not True:raise ValueError('private snapshot listener disabled')
     if (not isinstance(ssl_context,ssl.SSLContext) or ssl_context.protocol!=ssl.PROTOCOL_TLS_SERVER
             or ssl_context.minimum_version<ssl.TLSVersion.TLSv1_2 or ssl_context.verify_mode!=ssl.CERT_REQUIRED):
@@ -45,6 +46,8 @@ def create_snapshot_server(host,port,*,enabled=False,ssl_context=None,client_sco
         raise ValueError('invalid snapshot listener limits')
     if backend is not None and not callable(getattr(backend,'_dispatch_from_listener',None)):
         raise ValueError('snapshot backend unavailable')
+    if prepare_backend is not None and not callable(getattr(prepare_backend,'_prepare_from_listener',None)):
+        raise ValueError('worker preparation backend unavailable')
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version='HTTP/1.1';server_version='PrivateSnapshot';sys_version=''
@@ -76,20 +79,22 @@ def create_snapshot_server(host,port,*,enabled=False,ssl_context=None,client_sco
             with self.server._activity:
                 draining=self.server._draining
             if draining:self._reply(503,{'error':'snapshot_draining'});return
+            is_prepare=self.path=='/internal/v2/worker/prepare' and prepare_backend is not None
             match=_PATH.fullmatch(self.path)
-            if match is None:self._reply(404,{'error':'not_found'});return
-            try:p._uuid(match[1],'reservation');p._uuid(match[2],'snapshot')
-            except ValueError:self._reply(400,{'error':'invalid_request'});return
+            if match is None and not is_prepare:self._reply(404,{'error':'not_found'});return
+            if not is_prepare:
+                try:p._uuid(match[1],'reservation');p._uuid(match[2],'snapshot')
+                except ValueError:self._reply(400,{'error':'invalid_request'});return
             if (self.headers.get_all('Transfer-Encoding') or self.headers.get_all('Expect')
                     or self.headers.get_all('X-Client-Principal') or self.headers.get_all('X-Forwarded-Client-Cert')
                     or len(self.headers.get_all('Content-Length',[]))!=1):
                 self._reply(400,{'error':'invalid_request'});return
             lengths=self.headers.get_all('Content-Length');length=lengths[0]
             if not re.fullmatch(r'0|[1-9][0-9]{0,7}',length):self._reply(400,{'error':'invalid_request'});return
-            length=int(length);operation=match[3]
+            length=int(length);operation='prepare' if is_prepare else match[3]
             if operation.startswith('pages/') and int(operation[6:])>=64:
                 self._reply(400,{'error':'invalid_request'});return
-            maximum=0 if operation=='complete' else PAGE_LIMIT if operation.startswith('pages/') else BEGIN_LIMIT
+            maximum=16*1024*1024 if is_prepare else 0 if operation=='complete' else PAGE_LIMIT if operation.startswith('pages/') else BEGIN_LIMIT
             if length>maximum:self._reply(413,{'error':'request_too_large'});return
             deadline=time.monotonic()+total_body_timeout;chunks=[];remaining=length
             while remaining:
@@ -102,8 +107,11 @@ def create_snapshot_server(host,port,*,enabled=False,ssl_context=None,client_sco
                 chunks.append(chunk);remaining-=len(chunk)
             scope=getattr(self.server._local,'scope',None)
             if scope is None:self._reply(403,{'error':'client_unavailable'});return
-            if backend is None:self._reply(503,{'error':'snapshot_backend_unavailable'});return
-            result=backend._dispatch_from_listener(scope,match[1],match[2],operation,b''.join(chunks))
+            if is_prepare:
+                result=prepare_backend._prepare_from_listener(scope,b''.join(chunks))
+            else:
+                if backend is None:self._reply(503,{'error':'snapshot_backend_unavailable'});return
+                result=backend._dispatch_from_listener(scope,match[1],match[2],operation,b''.join(chunks))
             self._reply(result.status,result.body)
         def _unsupported(self):self._reply(405,{'error':'method_not_allowed'})
         do_GET=_unsupported;do_PUT=_unsupported;do_DELETE=_unsupported;do_PATCH=_unsupported
