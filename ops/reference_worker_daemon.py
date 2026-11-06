@@ -309,7 +309,7 @@ def _file(path, *, private=False):
     return candidate, info
 
 
-def load_config(path):
+def load_config(path, *, expected_direct_config_sha256=None):
     """Return private settings; never include their values in an exception."""
     try:
         candidate, initial = _file(path, private=True)
@@ -395,6 +395,12 @@ def load_config(path):
             if type(direct['enabled']) is not bool:raise ValueError('invalid direct preparation flag')
             if direct['enabled']:
                 from processing.direct_protected_transport import _read, _sealed
+                # The digest must come from a separately authenticated, immutable
+                # enrollment record, never from this config or an HTTP request.
+                p._hash(expected_direct_config_sha256,'enrolled worker config digest')
+                protected_raw=_read(path,private=True,maximum=MAX_CONFIG_BYTES)
+                if (protected_raw!=raw or hashlib.sha256(protected_raw).hexdigest()!=expected_direct_config_sha256):
+                    raise ValueError('enrolled direct worker configuration changed')
                 address=ipaddress.ip_address(direct['host'])
                 if not address.is_loopback or type(direct['port']) is not int or not 1<=direct['port']<=65535:
                     raise ValueError('private loopback listener required')

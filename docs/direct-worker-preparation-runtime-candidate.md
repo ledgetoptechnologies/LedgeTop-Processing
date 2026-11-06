@@ -5,6 +5,10 @@ listener from a closed, owner-private `directPreparation` configuration. It
 maps pinned client certificate fingerprints to coordinator principals and
 environments and uses separately pinned Viewer source keys and a worker signer.
 The worker service owns its startup, health observation and drain.
+Enabled direct configuration also requires an independently enrolled config
+SHA-256 supplied to the loader and a protected descriptor reread of those exact
+bytes. The installed daemon entrypoint does not yet obtain that digest from an
+immutable enrollment record, so it refuses enabled direct configuration.
 
 The current coordinator policy always returns `directPreparationEnabled: false`;
 the endpoint therefore returns unavailable before touching the node gate or
