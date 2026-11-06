@@ -10,6 +10,14 @@ from .direct_worker_sender import DirectWorkerSender, DirectDeliveryRejected, Di
 
 
 class DirectWorkerSenderV2(DirectWorkerSender):
+    def _response(self,connection,deadline):
+        # A V2 worker may reject after durably consuming readiness and swapping
+        # its pin. No HTTP error proves that this operation had no effect.
+        try:
+            return super()._response(connection,deadline)
+        except DirectDeliveryRejected:
+            raise DirectDeliveryUncertain('V2 worker denial outcome uncertain') from None
+
     def __init__(self, *, origin, connect_ip, ca_file, bearer, inventory, item, reservation_binding,
                  expected_worker, issuer_id, key_id, worker_public_key,
                  max_object_bytes=20*1024**3, response_limit=65536,

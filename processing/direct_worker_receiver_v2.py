@@ -102,7 +102,10 @@ class DirectWorkerBoundaryV2:
                     readiness_guard=check_readiness)
                 # A blocked transaction can finish too late. Never read or
                 # release its replacement pin when outcome freshness is lost.
-                check_readiness()
+                try:
+                    check_readiness()
+                except Exception as error:
+                    raise PolicyConflict('V2 readiness outcome after handover uncertain') from error
                 # If the subsequent operation fails, the new pin remains held.
                 self._readiness_pin = None
             receipt, replay = self.spool.receive_object(job_id=item['jobId'], generation=item['generation'],
