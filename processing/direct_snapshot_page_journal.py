@@ -91,7 +91,7 @@ class SnapshotPageJournal:
 
     def _scope(self,db,reservation,principal,environment):
         row=validate_receiving(db,reservation)
-        if row['principal']!=principal or row['environment']!=environment:raise Conflict('snapshot unavailable')
+        if row['principal']!=principal or row['current_environment']!=environment:raise Conflict('snapshot unavailable')
         return row
 
     def _dispatch_from_listener(self,scope,reservation,snapshot,operation,body):

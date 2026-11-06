@@ -70,7 +70,7 @@ class DirectV2Reservations:
             db.execute('BEGIN')
             row=validate_receiving(db,reservation_id)
             if row['principal']!=authenticated_principal:raise Conflict('snapshot unavailable')
-            key=self._snapshot_pins.get((authenticated_principal,row['environment'],issuer_id,key_id))
+            key=self._snapshot_pins.get((authenticated_principal,row['current_environment'],issuer_id,key_id))
             if key is None:raise Conflict('snapshot unavailable')
             stored=db.execute('SELECT source_manifest_json,derived_manifest_json,viewer_task_id,source_attestation_json FROM reference_source_intakes WHERE job_id=?',(row['job_id'],)).fetchone()
             if stored is None:raise Conflict('snapshot unavailable')
@@ -88,7 +88,7 @@ class DirectV2Reservations:
                 job=db.execute('SELECT pipeline_digest FROM reference_jobs WHERE job_id=?',(row['job_id'],)).fetchone()
                 if job is None or self.store._source_routing_keys is None:raise ValueError('source trust unavailable')
                 validate_and_verify(attestation,trusted_keys=self.store._source_routing_keys,
-                    authority_id=self.queue.authority_id,environment=row['environment'],submission_id=item['attemptId'],
+                    authority_id=self.queue.authority_id,environment=row['current_environment'],submission_id=item['attemptId'],
                     provider_task_id=item['jobId'],attempt_id=item['attemptId'],viewer_task_id=stored['viewer_task_id'],
                     source_manifest_sha256=source['sha256'],derived_manifest_sha256=derived['sha256'],
                     pipeline_manifest_sha256=row['pipeline_manifest_sha'],pipeline_digest=job['pipeline_digest'])

@@ -30,7 +30,7 @@ class SnapshotJournalTests(unittest.TestCase):
             'sourceCustodyAccepted':False,'processingAuthorized':False})
         self.api=SnapshotPageJournal(self.store,self.reservations)
         self.scope=('viewer','staging');self.snapshot_id=s.intent['snapshotId']
-        self.row={'principal':'viewer','environment':'staging',
+        self.row={'principal':'viewer','current_environment':'staging',
                   'source_attestation_json':json.dumps({'proof':{'sourceSnapshotSha256':s.sha}})}
         self.scope_patch=patch('processing.direct_snapshot_page_journal.validate_receiving',return_value=self.row)
         self.scope_patch.start();self.addCleanup(self.scope_patch.stop)
