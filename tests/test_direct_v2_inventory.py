@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import unittest
 
 from processing import direct_v2_inventory as inventory
@@ -61,6 +62,28 @@ class DirectV2InventoryTests(unittest.TestCase):
         binding['sourceSnapshotSha256'] = 'f' * 64
         with self.assertRaises(ValueError):
             inventory.verify(prepared, expected_binding=binding, **self.options)
+
+    def test_zero_byte_raw_gcp_has_exact_v2_transfer_spec(self):
+        self.fixture.payload['sourceManifest']['objects'][1]['byteSize'] = 0
+        self.fixture.payload['sourceManifest']['objects'][1]['sha256'] = hashlib.sha256(b'').hexdigest()
+        self.fixture.payload['sourceManifest']['totalBytes'] = self.fixture.payload['sourceManifest']['objects'][0]['byteSize']
+        self.fixture.rehash()
+        signed = self.fixture.validate()
+        payload = {key:signed[key] for key in INTAKE_FIELDS}
+        prepared = inventory.prepare(payload, **self.options)
+        fields = ('authorityId', 'principalId', 'environment', 'submissionId', 'viewerTaskId',
+            'providerTaskId', 'sourceManifestSha256', 'derivedManifestSha256',
+            'pipelineManifestSha256', 'pipelineDigest', 'attestationSha256',
+            'sourceSnapshotSha256', 'preparedEnvelopeSha256', 'activationId')
+        binding = {key:prepared[key] for key in fields}
+        obj = inventory.worker_object(prepared, fixtures.GCP_ID, expected_binding=binding, **self.options)
+        self.assertEqual((obj['protocol'],obj['byteSize'],obj['sha256']),
+            ('ltds-direct-worker-object-v2',0,hashlib.sha256(b'').hexdigest()))
+        self.assertEqual((obj['objectKind'],obj['retentionClass'],obj['retentionHoldId']),
+            ('source','permanent_viewer_hold',fixtures.GCP_ID))
+        self.assertFalse(obj['sourceCustodyAccepted'])
+        with self.assertRaises(ValueError):
+            inventory.worker_object(prepared, 'unknown-id', expected_binding=binding, **self.options)
 
 
 if __name__ == '__main__':

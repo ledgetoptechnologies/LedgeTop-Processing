@@ -77,3 +77,22 @@ def verify(value, *, expected_binding, **verification):
     protocol._require(protocol.canonical_json(checked) == protocol.canonical_json(value),
                       'worker inventory changed')
     return checked
+
+
+def worker_object(value, object_id, *, expected_binding, **verification):
+    """Return an exact V2 transfer spec, after revalidating independent pins.
+
+    V2 retained objects may be zero bytes. Their SHA-256 is still mandatory;
+    this function neither receives bytes nor establishes storage custody.
+    """
+    checked = verify(value, expected_binding=expected_binding, **verification)
+    protocol._slug(object_id, 'source object id')
+    found = [(kind, obj) for kind, manifest in (
+        ('source', checked['sourceManifest']), ('derived', checked['derivedManifest']))
+        for obj in manifest['objects'] if obj['id'] == object_id]
+    protocol._require(len(found) == 1, 'worker inventory object not found')
+    kind, obj = found[0]
+    return dict(protocol='ltds-direct-worker-object-v2', objectKind=kind,
+        objectId=obj['id'], byteSize=obj['byteSize'], sha256=obj['sha256'],
+        retentionClass=obj['retentionClass'], retentionHoldId=obj['retentionHoldId'],
+        sourceCustodyAccepted=False, transferAuthorized=False, processingAuthorized=False)
