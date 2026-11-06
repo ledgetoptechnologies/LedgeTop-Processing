@@ -77,6 +77,8 @@ class DirectV2Reservations:
                 raise Conflict('V2 node not eligible or earlier job takes priority')
             self.store._quota(db,sum(len(value) for value in (item_bytes,proof_bytes))+
                               sum(len(value.encode()) for value in values[:5]+values[7:]))
+            if time.monotonic()>=deadline:raise Conflict('V2 worker readiness expired')
+            direct_worker_fence_proof_v2.verify(readiness_proof,now=int(time.time()),**proof_args)
             try:db.execute('INSERT INTO direct_v2_reservations VALUES(?,?,?,?,?,?,?,?,?)',values)
             except Exception as error:
                 import sqlite3

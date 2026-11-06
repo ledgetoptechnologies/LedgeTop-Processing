@@ -29,6 +29,7 @@ class DirectV2AdmissionTests(unittest.TestCase):
     def test_direct_mode_persists_full_signed_input_without_spool_or_claim(self):
         job,created=self.store.submit_source_intake(self.validated,**self.options)
         self.assertTrue(created);self.assertEqual(job['status'],'held')
+        self.assertIsNone(self.store.next_for_node('cluster'))
         with self.queue._db() as db:
             row=db.execute('''SELECT s.reserved_bytes,s.source_state,s.derived_state,m.mode,j.held_reason
                 FROM reference_source_intakes s JOIN reference_source_intake_modes m ON m.job_id=s.job_id
