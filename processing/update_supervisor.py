@@ -192,6 +192,9 @@ class UpdateSupervisor:
                     schedule_request TEXT,plan TEXT,run_request TEXT,completion TEXT)''',
                 "CREATE UNIQUE INDEX IF NOT EXISTS one_open_update ON supervisor_operations(node) WHERE state!='completed'"):
                 db.execute(sql)
+            columns={row['name'] for row in db.execute('PRAGMA table_info(supervisor_operations)')}
+            for name in ('drain_request','drain_receipt'):
+                if name not in columns:db.execute('ALTER TABLE supervisor_operations ADD COLUMN '+name+' TEXT')
             binding=_json(dict(policySha256=self.policy_sha256,lockPath=str(self.lock_path),lockIdentity=self._lease_identity,
                 rootPath=str(self.path.parent),rootIdentity=self._root_identity))
             old=db.execute('SELECT value FROM supervisor_binding WHERE id=1').fetchone()
@@ -227,7 +230,7 @@ class UpdateSupervisor:
         try:
             states=('discovered','staging_intent','staged','qualification_intent','qualified',
                     'schedule_intent','scheduled','run_intent','completed')
-            rank=states.index(row['state']);candidate=_load(row['candidate'])
+            rank=0 if row['state'] in ('drain_intent','draining') else states.index(row['state']);candidate=_load(row['candidate'])
             self.registry._candidate(candidate)
             target=_sha(dict(nodeId=self.policy.node_id,engineId=self.engine_id,repository=candidate['repository'],
                 manifestDigest=candidate['manifestDigest'],configDigest=candidate['configDigest'],
@@ -235,6 +238,11 @@ class UpdateSupervisor:
             _digest(row['base_image']);_integer(row['generation'])
             if (row['target']!=target or row['node']!=self.policy.node_id
                     or row['id']!=_sha(dict(target=target,policySha256=self.policy_sha256))):raise ValueError()
+            if row['drain_request'] is not None:
+                request=_load(row['drain_request'])
+                self._validate_request(row,candidate,request,'drain',row['base_image'])
+                if row['state']!='drain_intent':self._receipt(_load(row['drain_receipt']),request,'drain')
+            elif row['state'] in ('drain_intent','draining'):raise ValueError()
             if rank>=2:
                 staged=_load(row['staged'])
                 expected=dict(candidateId=candidate['candidateId'],repository=candidate['repository'],manifestDigest=candidate['manifestDigest'],
@@ -242,6 +250,7 @@ class UpdateSupervisor:
                 if set(staged)!=set(expected)|{'localSize','imageId','imageIdKind'} or any(staged[key]!=value for key,value in expected.items()):raise ValueError()
                 if _integer(staged['localSize'])>self.policy.capacity_bytes:raise ValueError()
                 _digest(staged['imageId'])
+                if row['drain_request'] is not None and staged['imageId']!=candidate['configDigest']:raise ValueError()
                 if (staged['imageIdKind'] not in ('config','manifest')
                         or staged['imageId']!=candidate[{'config':'configDigest','manifest':'manifestDigest'}[staged['imageIdKind']]]):raise ValueError()
             previous=row['base_image']
@@ -258,14 +267,14 @@ class UpdateSupervisor:
     def _validate_request(self,row,candidate,request,kind,previous):
         expected=dict(schemaVersion=1,operationId=row['id'],nodeId=self.policy.node_id,engineId=self.engine_id,
             authorityId=self.policy.authority_id,candidateId=candidate['candidateId'],repository=candidate['repository'],
-            manifestDigest=candidate['manifestDigest'],configDigest=candidate['configDigest'],localImageId=_load(row['staged'])['imageId'],platform='linux/amd64',
+            manifestDigest=candidate['manifestDigest'],configDigest=candidate['configDigest'],localImageId=candidate['configDigest'] if kind=='drain' else _load(row['staged'])['imageId'],platform='linux/amd64',
             previousImageId=request.get('previousImageId'),supervisorPolicySha256=self.policy_sha256,
             hostGeneration=row['generation'],
             qualifierId=self.policy.qualifier_id,qualificationPolicySha256=self.policy.qualification_policy_sha256,
             receiptDirectory=str(self.path.parent/'receipts'/row['id']/kind))
         _digest(expected['previousImageId'])
         if previous is not None and previous!=expected['previousImageId']:raise ValueError()
-        if kind!='qualification':
+        if kind not in ('qualification','drain'):
             qualification=_load(row['qualification_receipt'])
             expected['qualificationSha256']=qualification['qualificationSha256']
             # Exact old records remain readable. They cannot advance/reconcile
@@ -277,7 +286,7 @@ class UpdateSupervisor:
         if request!=expected or type(request['schemaVersion']) is not int:raise ValueError()
 
     def _checkpoint(self,identifier,expected,state,**values):
-        allowed={'staged','qualification_request','qualification_receipt','schedule_request','plan','run_request','completion'}
+        allowed={'staged','qualification_request','qualification_receipt','schedule_request','plan','run_request','completion','drain_request','drain_receipt'}
         if set(values)-allowed:raise SupervisorError('invalid_checkpoint')
         with self._db() as db:
             row=db.execute('SELECT state FROM supervisor_operations WHERE id=?',(identifier,)).fetchone()
@@ -319,8 +328,18 @@ class UpdateSupervisor:
         self.check()
         with self._mutex:
             row=self._row(identifier)
-            return dict(operationId=identifier,nodeId=row['node'],state=row['state'],candidate=_load(row['candidate']),
+            result=dict(operationId=identifier,nodeId=row['node'],state=row['state'],candidate=_load(row['candidate']),
                 plan=_load(row['plan']) if row['plan'] else None,completion=_load(row['completion']) if row['completion'] else None)
+            if row['drain_receipt'] is not None:result['drain']=_load(row['drain_receipt'])
+            return result
+
+    @property
+    def early_drain_enabled(self):
+        value=getattr(self.maintenance,'early_drain_enabled',False)
+        if type(value) is not bool:raise SupervisorHeld('explicit_drain_policy_required')
+        if value and any(not callable(getattr(self.maintenance,name,None)) for name in ('prepare_drain','lookup_drain')):
+            raise SupervisorHeld('owned_drain_adapter_required')
+        return value
 
     def pending(self):
         """Read one validated unresolved operation under the existing owner lease."""
@@ -358,11 +377,11 @@ class UpdateSupervisor:
         candidate=_load(row['candidate'])
         request=dict(schemaVersion=1,operationId=row['id'],nodeId=self.policy.node_id,engineId=self.engine_id,
             authorityId=self.policy.authority_id,candidateId=candidate['candidateId'],repository=candidate['repository'],
-            manifestDigest=candidate['manifestDigest'],configDigest=candidate['configDigest'],localImageId=_load(row['staged'])['imageId'],platform=candidate['platform'],
+            manifestDigest=candidate['manifestDigest'],configDigest=candidate['configDigest'],localImageId=candidate['configDigest'] if kind=='drain' else _load(row['staged'])['imageId'],platform=candidate['platform'],
             previousImageId=row['base_image'],hostGeneration=row['generation'],supervisorPolicySha256=self.policy_sha256,
             qualifierId=self.policy.qualifier_id,qualificationPolicySha256=self.policy.qualification_policy_sha256,
             receiptDirectory=self._directory(row['id'],kind))
-        if kind!='qualification':
+        if kind not in ('qualification','drain'):
             qualification=_load(row['qualification_receipt'])
             request['qualificationSha256']=qualification['qualificationSha256']
             request['targetEngineVersion']=qualification['engineVersion']
@@ -374,13 +393,14 @@ class UpdateSupervisor:
     def _receipt(value,request,kind):
         common=('operationId','nodeId','engineId','authorityId','candidateId','manifestDigest','configDigest','localImageId','supervisorPolicySha256','hostGeneration')
         base={'schemaVersion','requestSha256',*common}
-        extra={'qualification':{'qualifierId','qualificationPolicySha256','passed','engineVersion','evidenceSha256','qualificationSha256'},
+        extra={'drain':{'planId','previousImageId','targetImageId','drainRequestId','drainRequestSha256','drainAt','notBefore','afterJobId','drainSha256'},
+            'qualification':{'qualifierId','qualificationPolicySha256','passed','engineVersion','evidenceSha256','qualificationSha256'},
             'schedule':{'planId','previousImageId','targetImageId','qualificationSha256','planSha256'},
             'run':{'planId','planSha256','previousImageId','targetImageId','qualificationSha256','imageId','healthy',
                    'hostPinDurable','ingressOpen','coordinatorFinished','completionSha256'}}[kind]
         if kind!='qualification' and 'targetEngineVersion' in request:
             extra=extra|({'targetEngineVersion'} if kind=='schedule' else {'engineVersion'})
-        field={'qualification':'qualificationSha256','schedule':'planSha256','run':'completionSha256'}[kind]
+        field={'drain':'drainSha256','qualification':'qualificationSha256','schedule':'planSha256','run':'completionSha256'}[kind]
         try:
             if type(value) is not dict or set(value)!=base|extra:raise ValueError()
             _digest(request['localImageId'])
@@ -393,6 +413,13 @@ class UpdateSupervisor:
                 if (value['passed'] is not True or value['qualifierId']!=request['qualifierId']
                         or value['qualificationPolicySha256']!=request['qualificationPolicySha256']):raise ValueError()
                 _slug(value['engineVersion']);_hash(value['evidenceSha256'])
+            elif kind=='drain':
+                _uuid(value['planId']);_uuid(value['drainRequestId']);_hash(value['drainRequestSha256'])
+                if value['afterJobId'] is not None:_uuid(value['afterJobId'])
+                from .maintenance import utc_stamp
+                if utc_stamp(value['notBefore'])[0]<utc_stamp(value['drainAt'])[0]:raise ValueError()
+                if value['previousImageId']!=request['previousImageId'] or value['targetImageId']!=request['localImageId']:
+                    raise ValueError()
             else:
                 _uuid(value['planId'])
                 if (value['previousImageId']!=request['previousImageId'] or value['targetImageId']!=request['localImageId']
@@ -426,12 +453,12 @@ class UpdateSupervisor:
         with self._operation():
             row=self._row(identifier);state=row['state']
             if state=='completed':return self.status(identifier)
-            if state not in ('discovered','staged','qualified','scheduled'):raise SupervisorHeld('update_requires_read_only_reconciliation')
+            if state not in ('discovered','draining','staged','qualified','scheduled'):raise SupervisorHeld('update_requires_read_only_reconciliation')
             if state=='scheduled' and 'targetEngineVersion' not in _load(row['plan']):
                 raise SupervisorHeld('target_engine_version_unbound')
             if self._current_state()!=(row['base_image'],row['generation']):raise SupervisorHeld('supervisor_current_image_changed')
             self._host(row['base_image'])
-            kind={'discovered':'staging','staged':'qualification','qualified':'schedule','scheduled':'run'}[state]
+            kind='drain' if state=='discovered' and self.early_drain_enabled else {'discovered':'staging','draining':'staging','staged':'qualification','qualified':'schedule','scheduled':'run'}[state]
             if kind=='staging':
                 self._checkpoint(identifier,state,'staging_intent')
                 try:
@@ -450,16 +477,17 @@ class UpdateSupervisor:
                     if type(ready) is not bool:raise SupervisorHeld('explicit_run_readiness_required')
                     if not ready:return self.status(identifier)
                     self._host(row['base_image'])
-                column={'qualification':'qualification_request','schedule':'schedule_request','run':'run_request'}[kind]
+                column={'drain':'drain_request','qualification':'qualification_request','schedule':'schedule_request','run':'run_request'}[kind]
                 self._checkpoint(identifier,state,kind+'_intent',**{column:request})
                 try:
                     self.check()
-                    call={'qualification':self.qualifier.qualify,'schedule':self.maintenance.schedule,'run':self.maintenance.run}[kind]
+                    call={'qualification':self.qualifier.qualify,'schedule':self.maintenance.schedule,'run':self.maintenance.run,
+                        **({'drain':self.maintenance.prepare_drain} if kind=='drain' else {})}[kind]
                     receipt=self._receipt(call(_load(_json(request))),request,kind)
                     self.check()
                     if kind=='run':self._complete(self._row(identifier),receipt)
-                    else:self._checkpoint(identifier,kind+'_intent',{'qualification':'qualified','schedule':'scheduled'}[kind],
-                        **{{'qualification':'qualification_receipt','schedule':'plan'}[kind]:receipt})
+                    else:self._checkpoint(identifier,kind+'_intent',{'drain':'draining','qualification':'qualified','schedule':'scheduled'}[kind],
+                        **{{'drain':'drain_receipt','qualification':'qualification_receipt','schedule':'plan'}[kind]:receipt})
                 except Exception:
                     # The original intent itself is the durable hold. Never
                     # overwrite a possibly committed success after a lost ACK.
@@ -475,22 +503,23 @@ class UpdateSupervisor:
                 try:metadata=self.registry.reconcile(_load(row['candidate']))
                 except Exception:raise SupervisorHeld('staging_outcome_requires_reconciliation') from None
                 self._checkpoint(identifier,state,'staged',staged=metadata)
-            elif state in ('qualification_intent','schedule_intent','run_intent'):
+            elif state in ('drain_intent','qualification_intent','schedule_intent','run_intent'):
                 kind=state.removesuffix('_intent')
-                column={'qualification':'qualification_request','schedule':'schedule_request','run':'run_request'}[kind]
+                column={'drain':'drain_request','qualification':'qualification_request','schedule':'schedule_request','run':'run_request'}[kind]
                 request=_load(row[column])
-                if kind!='qualification' and 'targetEngineVersion' not in request:
+                if kind not in ('qualification','drain') and 'targetEngineVersion' not in request:
                     raise SupervisorHeld('target_engine_version_unbound')
                 try:
                     lookup={'qualification':self.qualifier.lookup,'schedule':self.maintenance.lookup_schedule,
-                            'run':self.maintenance.lookup_completion}[kind]
+                            'run':self.maintenance.lookup_completion,
+                            **({'drain':self.maintenance.lookup_drain} if kind=='drain' else {})}[kind]
                     receipt=self._receipt(lookup(_load(_json(request))),request,kind)
                     self.check()
                     if kind=='run':self._complete(row,receipt)
                     else:
                         self._host(self._current())
-                        self._checkpoint(identifier,state,{'qualification':'qualified','schedule':'scheduled'}[kind],
-                            **{{'qualification':'qualification_receipt','schedule':'plan'}[kind]:receipt})
+                        self._checkpoint(identifier,state,{'drain':'draining','qualification':'qualified','schedule':'scheduled'}[kind],
+                            **{{'drain':'drain_receipt','qualification':'qualification_receipt','schedule':'plan'}[kind]:receipt})
                 except Exception:raise SupervisorHeld(kind+'_outcome_requires_reconciliation') from None
             else:raise SupervisorHeld('no_uncertain_intent_to_reconcile')
             return self.status(identifier)

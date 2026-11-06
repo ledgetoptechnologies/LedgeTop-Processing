@@ -131,7 +131,12 @@ def parse_configuration(raw):
     cp=policy_map(raw['capacity']['policy'],CapacityPolicy)
     if type(cp.get('legacy_capacity_journals')) is not list:raise ServiceConfigurationError('explicit_legacy_inventory_required')
     cp['legacy_capacity_journals']=tuple(cp['legacy_capacity_journals'])
-    capacity=CapacityPolicy(**cp);window=ScheduleWindow(**policy_map(raw['maintenance']['window'],ScheduleWindow))
+    capacity=CapacityPolicy(**cp)
+    window_raw=raw['maintenance']['window']
+    required={'drain_after_seconds','not_before_after_seconds','wait_seconds','drain_seconds'}
+    if type(window_raw) is not dict or not required<=set(window_raw)<=set(field.name for field in fields(ScheduleWindow)):
+        raise ServiceConfigurationError('closed_schedule_window_required')
+    window=ScheduleWindow(**window_raw)
     if (startup.engine_id!=registry.engine_id or supervisor.node_id!=startup.node_id
             or supervisor.authority_id!=startup.authority_id or supervisor.qualifier_id!=startup.qualifier_id
             or supervisor.capacity_bytes!=registry.staging_reservation_bytes
@@ -227,7 +232,9 @@ def readiness_probes(configuration,adapter,api):
         if authority!={'authorityId':c.supervisor_policy.authority_id}:raise ServiceConfigurationError('coordinator_authority_changed')
         current=api.json('GET','/v1/prototype/nodes/'+c.supervisor_policy.node_id)['node']
         if type(current) is not dict or current.get('id')!=c.supervisor_policy.node_id:raise ServiceConfigurationError('coordinator_node_changed')
-        if current.get('state')!='active':return False
+        if status.get('drain') is not None:
+            if current.get('state')!='draining' or not adapter.verify_pending_drain(status):return False
+        elif current.get('state')!='active':return False
         jobs=api.json('GET','/v1/prototype/jobs')['jobs']
         if any(j.get('nodeId')==c.supervisor_policy.node_id and j['status'] in ('running','held') for j in jobs):return False
         candidate=NodeGate(c.registry_policy.engine_id)
@@ -248,7 +255,8 @@ def readiness_probes(configuration,adapter,api):
     def can_schedule(status):
         node=api.json('GET','/v1/prototype/nodes/'+c.supervisor_policy.node_id)['node']
         if type(node) is not dict or node.get('id')!=c.supervisor_policy.node_id:raise ServiceConfigurationError('coordinator_node_changed')
-        return node['state']=='active' and idle(status)
+        return ((node['state']=='draining' and adapter.verify_pending_drain(status))
+            if status.get('drain') is not None else node['state']=='active') and idle(status)
     return idle,can_schedule
 
 

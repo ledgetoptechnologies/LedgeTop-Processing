@@ -154,12 +154,19 @@ class Maintenance:
 
     def schedule_node_owned(self,identifier,payload):
         self._known_node(identifier)
+        if type(payload) is dict and payload.get('schemaVersion')==3:
+            return self._bind_owned_qualification(identifier,payload)
+        pending=type(payload) is dict and type(payload.get('schemaVersion')) is int and payload['schemaVersion']==2
         expected = ('schemaVersion','requestId','authorityId',*SCHEDULE_FIELDS)
+        if pending:expected=(*expected,'qualificationPending')
         if isinstance(payload, dict) and 'targetEngineVersion' in payload:
             expected = (*expected, 'targetEngineVersion')
         self.fields(payload,expected)
-        if type(payload['schemaVersion']) is not int or payload['schemaVersion']!=1:
-            raise ValueError('owned schedule schemaVersion must be 1')
+        if type(payload['schemaVersion']) is not int or payload['schemaVersion'] not in (1,2):
+            raise ValueError('owned schedule schemaVersion must be 1 or 2')
+        if pending and (payload['qualificationPending'] is not True or 'targetEngineVersion' not in payload
+                or payload['targetEngineVersion'] is not None):
+            raise ValueError('explicit pending qualification plan required')
         canonical_uuid(payload['requestId']);canonical_uuid(payload['authorityId'])
         if payload['authorityId']!=self.authority_id:raise Conflict('coordinator authority changed')
         if type(payload['expectedRevision']) is not int or not 0<=payload['expectedRevision']<=2**53-1:
@@ -177,15 +184,86 @@ class Maintenance:
                     raise Conflict('owned schedule requestId is already bound')
                 return json.loads(old['receipt_json'])
             node=self._schedule_node(db,identifier,payload,validated)
-            receipt=dict(schemaVersion=1,requestId=payload['requestId'],authorityId=self.authority_id,nodeId=identifier,
+            receipt=dict(schemaVersion=payload['schemaVersion'],requestId=payload['requestId'],authorityId=self.authority_id,nodeId=identifier,
                 requestSha256=request_sha,expectedRevision=payload['expectedRevision'],revision=node['revision'],
                 planId=node['planId'],state=node['state'],drainAt=node['drainAt'],notBefore=node['notBefore'],
                 afterJobId=node['afterJobId'],targetImage=node['targetImage'])
             if 'targetEngineVersion' in payload:
                 receipt['targetEngineVersion'] = node['targetEngineVersion']
+            if pending:receipt['qualificationPending']=True
             receipt['receiptSha256']=hashlib.sha256(canonical(receipt).encode()).hexdigest()
             db.execute('INSERT INTO owned_maintenance_schedules VALUES(?,?,?,?,?,?)',
                 (payload['requestId'],identifier,self.authority_id,request_sha,request_json,canonical(receipt)))
+            return receipt
+
+    def _prepared_owned_drain(self,db,identifier,request_id):
+        old=db.execute('SELECT * FROM owned_maintenance_schedules WHERE request_id=?',(request_id,)).fetchone()
+        if old is None or old['node_id']!=identifier or old['authority_id']!=self.authority_id:
+            raise Conflict('exact pending qualification drain required')
+        request=json.loads(old['request_json']);receipt=json.loads(old['receipt_json'])
+        self.fields(receipt,('schemaVersion','requestId','authorityId','nodeId','requestSha256','expectedRevision',
+            'revision','planId','state','drainAt','notBefore','afterJobId','targetImage','targetEngineVersion',
+            'qualificationPending','receiptSha256'))
+        self.fields(request,('schemaVersion','requestId','authorityId',*SCHEDULE_FIELDS,
+                             'targetEngineVersion','qualificationPending'))
+        if (type(request['schemaVersion']) is not int or request['schemaVersion']!=2
+                or request['qualificationPending'] is not True or request['targetEngineVersion'] is not None
+                or request['requestId']!=request_id or request['authorityId']!=self.authority_id
+                or old['request_json']!=canonical(request)
+                or old['request_sha256']!=hashlib.sha256(canonical(dict(nodeId=identifier,request=request)).encode()).hexdigest()
+                or type(receipt['schemaVersion']) is not int or receipt['schemaVersion']!=2 or receipt['qualificationPending'] is not True
+                or receipt['targetEngineVersion'] is not None or receipt['targetImage']!=request['targetImage']
+                or receipt['afterJobId']!=request['afterJobId']
+                or any(receipt[key]!=utc_stamp(request[key])[1] for key in ('drainAt','notBefore'))
+                or type(receipt['revision']) is not int or receipt['revision']!=request['expectedRevision']+1
+                or receipt['expectedRevision']!=request['expectedRevision']
+                or receipt.get('requestSha256')!=old['request_sha256'] or receipt.get('nodeId')!=identifier
+                or receipt.get('authorityId')!=self.authority_id or receipt.get('requestId')!=request_id
+                or receipt.get('receiptSha256')!=hashlib.sha256(canonical({k:v for k,v in receipt.items() if k!='receiptSha256'}).encode()).hexdigest()):
+            raise Conflict('pending qualification drain binding changed')
+        return old,request,receipt
+
+    def _bind_owned_qualification(self,identifier,payload):
+        self.fields(payload,('schemaVersion','requestId','authorityId','expectedRevision','planId',
+            'drainRequestId','drainRequestSha256','targetImage','targetEngineVersion','qualificationSha256'))
+        if type(payload['schemaVersion']) is not int or payload['schemaVersion']!=3:
+            raise ValueError('qualification binding version required')
+        for name in ('requestId','authorityId','planId','drainRequestId'):canonical_uuid(payload[name])
+        for name in ('drainRequestSha256','qualificationSha256'):
+            if type(payload[name]) is not str or not re.fullmatch(r'[a-f0-9]{64}',payload[name]):
+                raise ValueError('exact qualification digest required')
+        if (type(payload['targetImage']) is not str or not IMAGE.fullmatch(payload['targetImage'])
+                or type(payload['targetEngineVersion']) is not str or not ENGINE_VERSION.fullmatch(payload['targetEngineVersion'])):
+            raise ValueError('exact qualified image and engine version required')
+        if payload['authorityId']!=self.authority_id:raise Conflict('coordinator authority changed')
+        if type(payload['expectedRevision']) is not int or not 0<=payload['expectedRevision']<=2**53-1:
+            raise ValueError('expectedRevision must be a nonnegative safe integer')
+        wire=canonical(payload);sha=hashlib.sha256(canonical(dict(nodeId=identifier,request=payload)).encode()).hexdigest()
+        with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            replay=db.execute('SELECT * FROM owned_maintenance_schedules WHERE request_id=?',(payload['requestId'],)).fetchone()
+            if replay:
+                if (replay['node_id'],replay['authority_id'],replay['request_sha256'],replay['request_json'])!=(identifier,self.authority_id,sha,wire):
+                    raise Conflict('owned qualification requestId is already bound')
+                return json.loads(replay['receipt_json'])
+            self._refresh_nodes(db);node=self._node(db,identifier);self._cas(node,payload,plan=True)
+            old,request,drain=self._prepared_owned_drain(db,identifier,payload['drainRequestId'])
+            if (old['request_sha256']!=payload['drainRequestSha256'] or node['state'] not in ('scheduled','draining')
+                    or node['target_engine_version'] is not None or node['plan_id']!=drain['planId']
+                    or node['target_image']!=payload['targetImage'] or request['targetImage']!=payload['targetImage']
+                    or any(self._node_public(node)[key]!=drain[key] for key in ('drainAt','notBefore','afterJobId'))):
+                raise Conflict('original qualification drain changed')
+            db.execute('UPDATE nodes SET target_engine_version=?,revision=revision+1 WHERE id=?',
+                (payload['targetEngineVersion'],identifier))
+            current=self._node_public(self._node(db,identifier))
+            receipt=dict(schemaVersion=3,requestId=payload['requestId'],authorityId=self.authority_id,nodeId=identifier,
+                requestSha256=sha,expectedRevision=payload['expectedRevision'],revision=current['revision'],
+                **{key:current[key] for key in ('planId','state','drainAt','notBefore','afterJobId','targetImage','targetEngineVersion')},
+                qualificationPending=False,drainRequestId=payload['drainRequestId'],
+                drainRequestSha256=payload['drainRequestSha256'],qualificationSha256=payload['qualificationSha256'])
+            receipt['receiptSha256']=hashlib.sha256(canonical(receipt).encode()).hexdigest()
+            db.execute('INSERT INTO owned_maintenance_schedules VALUES(?,?,?,?,?,?)',
+                (payload['requestId'],identifier,self.authority_id,sha,wire,canonical(receipt)))
             return receipt
 
     def owned_schedule_receipt(self,identifier,request_id):
@@ -219,6 +297,16 @@ class Maintenance:
             self._cas(row, payload, plan=True)
             if row["state"] != "draining" or self._now() < utc_stamp(row["not_before"])[0]:
                 raise Conflict("node is not ready for its update")
+            if row['target_engine_version'] is None:
+                prepared=db.execute("""SELECT request_id FROM owned_maintenance_schedules WHERE node_id=?
+                    AND json_extract(receipt_json,'$.planId')=?
+                    AND json_extract(request_json,'$.schemaVersion')=2
+                    AND json_extract(request_json,'$.qualificationPending')=1 LIMIT 2""",
+                    (identifier,row['plan_id'])).fetchall()
+                if prepared:
+                    if len(prepared)!=1:raise Conflict('ambiguous pending qualification plan')
+                    self._prepared_owned_drain(db,identifier,prepared[0]['request_id'])
+                    raise Conflict('owned drain still awaits qualified version')
             if db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held')", (identifier,)).fetchone():
                 raise Conflict("node still owns running or held work")
             token = secrets.token_urlsafe(32)

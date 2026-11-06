@@ -193,13 +193,14 @@ class UpdateService:
 
         while transitions<self.maximum:
             if pending['state']=='completed':return self._result('completed',pending,transitions)
-            if pending['state'] not in ('discovered','staged','qualified','scheduled'):
+            if pending['state'] not in ('discovered','draining','staged','qualified','scheduled'):
                 return self._result('held',pending,transitions)
             try:self._release_capacity(pending)
             except Exception:return self._result('capacity_release_held',pending,transitions)
-            if pending['state'] in ('discovered','staged'):
-                if not self._permission(self.idle_probe,pending):return self._result('waiting_idle',pending,transitions)
-                if pending['state']=='discovered':
+            if pending['state'] in ('discovered','draining','staged'):
+                preparing=pending['state']=='discovered' and self.supervisor.early_drain_enabled
+                if not preparing and not self._permission(self.idle_probe,pending):return self._result('waiting_idle',pending,transitions)
+                if not preparing and pending['state'] in ('discovered','draining'):
                     try:admitted=self.admit(pending['candidate'],self.supervisor.registry)
                     except Exception:raise ServiceHeld('capacity_admission_unavailable') from None
                     self._check()
