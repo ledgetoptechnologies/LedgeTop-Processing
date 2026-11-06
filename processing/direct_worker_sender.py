@@ -110,10 +110,11 @@ class DirectWorkerSender:
                 or any(type(v) not in (int,float) or not math.isfinite(v) or v<=0 for v in (idle_timeout,total_timeout))):
             raise ValueError('bounded sender limits required')
         if enrolled_transport is not None:
-            from .direct_protected_transport import DisabledProtectedTransport
-            from .direct_worker_sender_v2 import DisabledDirectWorkerSender
-            if (type(enrolled_transport) is not DisabledProtectedTransport
-                    or type(self) is not DisabledDirectWorkerSender
+            from .direct_protected_transport import DisabledProtectedTransport, EnrolledProtectedTransport
+            from .direct_worker_sender_v2 import DisabledDirectWorkerSender, DirectWorkerSenderV2
+            permitted=((type(enrolled_transport) is DisabledProtectedTransport and type(self) is DisabledDirectWorkerSender)
+                       or (type(enrolled_transport) is EnrolledProtectedTransport and type(self) is DirectWorkerSenderV2))
+            if (not permitted
                     or (origin,str(address),bearer)!=(enrolled_transport.origin,enrolled_transport.connect_ip,enrolled_transport._bearer)):
                 raise ValueError('protected transport binding changed')
             context=enrolled_transport._context

@@ -184,3 +184,22 @@ def prepare_disabled_sender(config_path,node,*,expected_config_sha256,reservatio
         expected_worker=pin[0],issuer_id=settings.issuer_id,key_id=settings.key_id,
         worker_public_key=settings.worker_public_key,enrolled_transport=settings)
     return DisabledSenderPreparation(node,sender)
+
+def prepare_enrolled_sender(config_path,node,*,expected_config_sha256,expected_credential_sha256,
+                            reservations,inventory,item,reservation_binding):
+    """Build a pinned sender from explicit enrolled bytes, never a request URL."""
+    from .direct_v2_reservation import DirectV2Reservations
+    from .direct_worker_sender_v2 import DirectWorkerSenderV2
+    from cryptography.hazmat.primitives import serialization
+    if not isinstance(reservations,DirectV2Reservations):raise ValueError('enrolled worker registry required')
+    settings=load_enrolled_transport(config_path,node,expected_config_sha256=expected_config_sha256,
+                                     expected_credential_sha256=expected_credential_sha256)
+    pin=reservations._workers.get(node)
+    if (pin is None or (settings.issuer_id,settings.key_id)!=(pin[1],pin[2])
+            or settings.worker_public_key.public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)
+            !=pin[3].public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)):
+        raise ValueError('worker registry differs')
+    return DirectWorkerSenderV2(origin=settings.origin,connect_ip=settings.connect_ip,ca_file=None,
+        bearer=settings._bearer,inventory=inventory,item=item,reservation_binding=reservation_binding,
+        expected_worker=pin[0],issuer_id=settings.issuer_id,key_id=settings.key_id,
+        worker_public_key=settings.worker_public_key,enrolled_transport=settings)
