@@ -190,6 +190,10 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             transfer_columns = {row[1] for row in db.execute('PRAGMA table_info(reference_viewer_transfers)')}
             if 'viewer_manifest_json' not in transfer_columns:
                 db.execute('ALTER TABLE reference_viewer_transfers ADD COLUMN viewer_manifest_json TEXT')
+            from .source_intake_mode import initialize as initialize_source_mode
+            if not db.in_transaction:
+                db.execute('BEGIN IMMEDIATE')
+            initialize_source_mode(db)
             # Preserve execution phase across restart. Queue's held status is an
             # overlay; it neither authorizes replay nor erases worker progress.
         # The coordinator lease permits one runtime owner per Queue process;

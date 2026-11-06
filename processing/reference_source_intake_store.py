@@ -114,6 +114,8 @@ class ReferenceSourceIntakeMethods:
             raise ValueError('invalid source operation')
         def authorize(db):
             row = self._row(db, job_id)
+            from .source_intake_mode import require as require_source_mode
+            require_source_mode(db, job_id, 'spool-v1')
             allowed = ('receiving',) if receiving_only else ('receiving', 'accepted')
             if (row['generation'] != generation or row['source_state'] not in allowed
                     or row['derived_state'] not in allowed):
@@ -1158,6 +1160,8 @@ class ReferenceSourceIntakeMethods:
                  source_encoded, derived_encoded,
                  validated['sourceManifestSha256'], validated['derivedManifestSha256'],
                  validated['manifestSha256'], reserved_bytes))
+            from .source_intake_mode import claim as claim_source_mode
+            claim_source_mode(db, job_id, 'spool-v1')
             return self._public(self._row(db, job_id)), True
 
     def source_capacity(self, source_spool):
