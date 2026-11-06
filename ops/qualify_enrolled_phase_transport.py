@@ -391,7 +391,14 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
                 for role in ('bootstrap','final'):
                     private_write(operation/('reviewed-'+role+'-config.json'),t.canonical(material[role]))
                 class PhaseDriver(ConcreteCutoverDriver):
-                    def _workers(self):return workers.ready(self.bundle['workers'])
+                    def _workers(self):
+                        from .first_worker_activation import activation_readiness_binding
+                        from .qualify_enrolled_worker_preparation import readiness
+                        result=workers.ready(self.bundle['workers'])
+                        for entry,instance,worker in zip(result,workers.instances,self.bundle['workers']):
+                            packet=readiness(instance,worker)
+                            entry['firstActivation']=activation_readiness_binding(self,worker,packet['readiness'],packet['process'])
+                        return result
                 driver=PhaseDriver(plan,bundle,operation,docker=docker)
                 driver.boundary=DesktopBoundary(plan,bundle,docker,driver.tracked)
                 controller=journal.FirstEnrolledCutover(operation,plan,driver);controller.prepare()
@@ -399,6 +406,10 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
                     state=controller.journal.read()
                     if rollback and state['phase']=='final-ready':controller.begin_rollback()
                     if state['phase'] in ('complete','rolled-back-rebaseline-required'):break
+                    if state['phase']=='bootstrap-frozen':
+                        from .qualify_fixture_activation import activate_fixture_workers
+                        start=driver._prior(state,'start-bootstrap')['gate']['snapshot']['startupId']
+                        activate_fixture_workers(controller,driver,workers,start,driver._preflight()['ownerSha256'])
                     state=controller.advance();events.append(state['phase'])
                     print(json.dumps({'checkpoint':state['phase']}),flush=True)
                 expected='rolled-back-rebaseline-required' if rollback else 'complete'
