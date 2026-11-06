@@ -178,6 +178,47 @@ class ReferenceEngineWorker:
                 lines = candidate
             return logs.validate(logs.page(job, lines, after, has_more or len(output) > len(lines)), job, after, limit)
 
+    def _started_status(self, job_id):
+        info = self.engine.read('/task/' + job_id + '/info', limit=64 * 1024)
+        status = info.get('status') if type(info) is dict else None
+        code = status.get('code') if type(status) is dict else None
+        return type(info) is dict and info.get('uuid') == job_id and type(code) is int and code == 20
+
+    def start_witness(self, job_id):
+        """One bracketed sighting of this exact task started, else None. Read-only.
+
+        Status 20 can precede the child and output can be restored history, so both
+        are required, and status is read on either side of the output. Output is
+        hashed and never leaves here. processingTime and engine_started are not read.
+        A failure to observe proves nothing, and the caller treats it as no sighting.
+        """
+        from . import reference_logs as logs
+        p._slug(job_id, 'job ID')
+        with NodeGate(self.engine_id) as gate:
+            state = gate.snapshot()
+            row = self._row(job_id)
+            bound = state['reservation']
+            if ((state['nodeId'], state['coordinatorOrigin'], state['authorityId'], state['generation']) != (
+                    self.node_id, self.origin, self.authority_id, self.gate_generation)
+                    or bound is None or bound['receiptId'] != row['receipt'] or bound['completionDigest'] is not None
+                    or (bound['job'] or {}).get('id') != job_id
+                    or row['phase'] not in ('commit_pending', 'processing')):
+                return None
+            self._verify_local_engine()
+            if not self._started_status(job_id):
+                return None
+            output, _more = self.engine.output_page(job_id, line=0, limit=8)
+            if (type(output) is not list or not 1 <= len(output) <= 8
+                    or any(type(line) is not str for line in output)
+                    or len(p.canonical_json(output)) > logs.MAX_LOG_BYTES):
+                return None
+            first = next((line for line in output if line.strip()), None)
+            if first is None or not self._started_status(job_id):
+                return None
+            self._verify_local_engine()
+            return dict(gateGeneration=state['generation'], gateReceiptId=row['receipt'], nativeStatusCode=20,
+                outputLineCount=len(output), outputPrefixSha256=hashlib.sha256(first.encode('utf-8')).hexdigest())
+
     def _verify_local_engine(self):
         try:
             observed = self.engine_probe(time.monotonic() + 2)

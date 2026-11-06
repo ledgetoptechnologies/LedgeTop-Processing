@@ -391,6 +391,19 @@ class ReferenceWorkerAPI:
                 from .reference_worker_hold import report
                 return Response(200, report(self.store, hold[1], protocol.decode_submission(body),
                     identity=identity, claim_token=claim_token))
+            witness = re.fullmatch(re.escape(PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/start-witness", path) if type(path) is str else None
+            if method == 'POST' and witness:
+                claim_token = self._header(headers, 'X-Claim-Token')
+                if claim_token is None or not 1 <= len(claim_token) <= 128:
+                    return self._error(401, 'claim_authentication_required')
+                from .coordinator_freeze import CoordinatorFrozen
+                from .reference_presentation import MAX_REQUEST_BYTES, report as report_start
+                try:
+                    return Response(200, report_start(self.store, witness[1],
+                        protocol.decode_submission(body, max_bytes=MAX_REQUEST_BYTES),
+                        identity=identity, claim_token=claim_token))
+                except CoordinatorFrozen:
+                    return self._error(503, 'coordinator_maintenance')
             match = re.fullmatch(re.escape(PREFIX) + r"/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(transfer-grant|acceptance|terminal-acceptance|claim-state)", path) if type(path) is str else None
             if method == "GET" and match:
                 claim_token = self._header(headers, "X-Claim-Token")
