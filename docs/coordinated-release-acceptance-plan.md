@@ -115,15 +115,21 @@ authority/database; the historical October 28 updater receipts do not do so for
 this new release.
 
 Before enabling its timer, bind the exact source/config/state and use a qualified
-dependency interpreter. The current updater renderer uses system Python, unlike
-the reference worker's prepared venv. Preserve the maintenance loopback/tunnel
+dependency interpreter. Schema-2 updater configuration and its renderer now bind
+an explicit host, configured node, interpreter and tunnel requirement; legacy
+profiles retain their prior defaults. This path binding still needs installed
+dependency qualification. Preserve the maintenance loopback/tunnel
 transport separately from reference worker TLS. Exercise scheduled drain,
 running-job completion, failed health/rollback and successful reopen with the
-installed reference worker and durable outboxes. The adapter currently chooses
-time-based plans, not an `afterJobId`; qualify that job-specific path before
-offering it. Updater/release inventories still hardcode main/cluster and must be
-made config-driven before claiming automatic maintenance for a future third
-node. Container updates remain in scope; OS updates stay deferred.
+installed reference worker and durable outboxes. The early-drain candidate binds
+the exact `afterJobId` or absolute time before idle-only staging/qualification,
+then qualifies the version on that same owned plan; see
+[the contract and evidence limits](owned-early-maintenance-drain.md). Its state,
+replay and installed behavior must be qualified before offering unattended use.
+Updater node identities now follow configured slugs and the actual coordinator
+inventory; future host profiles require explicit configuration. Container updates
+remain in scope; OS updates stay deferred. Keep timers disabled for the first
+photo-processing milestone.
 
 The worker also pins its configured engine version. `ReferenceDriver._ready`
 refuses claims when `/info.engineVersion` differs from that pin; it refreshes
