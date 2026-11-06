@@ -311,4 +311,54 @@ class PrivateJournalTests(unittest.TestCase):
         with self.assertRaisesRegex(TransportHeld,'missing_or_changed'):a.read_activation(self.root,self.expected)
 
 
+@unittest.skipUnless(os.name=='posix','actual private pinned ingress files and kernel flock')
+class PinnedIngressTests(unittest.TestCase):
+    def setUp(self):
+        from ops import node_ingress
+        self.nginx=node_ingress;self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name);self.root.chmod(0o700);(self.root/'public-config').mkdir(mode=0o700)
+        self.config=dict(proxyName='proxy',backendName='native',proxyImage='sha256:'+'a'*64,listenPort=3005,
+            backendPort=13004,engineId='engine',backendEngine='odx',backendToken='synthetic-token-1',allowedClients=[])
+        state=dict(state='closed',containerId='b'*64,oldWorkers=[11],expectedBackendImage='sha256:'+'c'*64)
+        blobs={'gateway.json':(canonical(self.config),0o600),'state.json':(canonical(state),0o600),
+               'public-config/nginx.conf':(node_ingress.configuration(3005,13004,True,[]).encode(),0o644),
+               'ingress.lock':(b'',0o600)}
+        for name,(raw,mode) in blobs.items():path=self.root/name;path.write_bytes(raw);path.chmod(mode)
+        self.manifest=dict(service={'uid':os.geteuid()},engine=dict(loopbackPort=13004,imageId='sha256:'+'c'*64,containerId='d'*64))
+        self.policy=dict(root=str(self.root),configSha256=digest(self.config),stateSha256=digest(state),
+            closedConfigSha256=__import__('hashlib').sha256(blobs['public-config/nginx.conf'][0]).hexdigest(),containerId='b'*64)
+        self.boundary=SimpleNamespace(run=lambda *args,**kwargs:canonical('d'*64))
+        self.proxy={'Id':'b'*64,'State':{'Pid':21}};self.swap=False;test=self
+        def inspect(ingress):
+            test.assertEqual(ingress.config['backendToken'],'synthetic-token-1')
+            if test.swap:
+                changed=dict(test.config,backendToken='synthetic-token-2',unused='changed')
+                (test.root/'gateway.json').write_bytes(canonical(changed))
+            return test.proxy
+        for name,method in (('inspect',inspect),('workers',lambda *_:{22}),('http',lambda *_:(503,None))):
+            patcher=patch.object(node_ingress.Ingress,name,method);patcher.start();self.addCleanup(patcher.stop)
+
+    def test_verified_config_used_without_unbounded_constructor_read(self):
+        with patch.object(Path,'read_text',side_effect=AssertionError('unbounded reread')):
+            result=service.clean_ingress(self.manifest,self.policy,self.boundary)
+        self.assertEqual(result['configSha256'],self.policy['configSha256'])
+
+    def test_swap_after_verified_pin_is_held_before_effect(self):
+        self.swap=True
+        with self.assertRaisesRegex(TransportHeld,'pinned_activation_ingress_changed'):
+            service.clean_ingress(self.manifest,self.policy,self.boundary)
+
+    def test_original_lock_is_exclusive_and_no_missing_lock_is_created(self):
+        import fcntl
+        with service.existing_ingress_lock(self.manifest,self.policy):
+            fd=os.open(self.root/'ingress.lock',os.O_RDWR)
+            try:
+                with self.assertRaises(BlockingIOError):fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            finally:os.close(fd)
+        (self.root/'ingress.lock').unlink()
+        with self.assertRaises(FileNotFoundError):
+            with service.existing_ingress_lock(self.manifest,self.policy):self.fail('must not create a new lock')
+        self.assertFalse((self.root/'ingress.lock').exists())
+
+
 if __name__=='__main__':unittest.main()

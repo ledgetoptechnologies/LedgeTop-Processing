@@ -4,6 +4,7 @@ No root privileges, service enablement, stop, configuration write or engine task
 effect. The enclosing controller journal owns reload/start dispatch authority.
 """
 import hashlib
+from contextlib import contextmanager
 import inspect
 import json
 import os
@@ -66,27 +67,75 @@ def retained_native_census(client,manifest,inventory):
                 observedSha256=hashlib.sha256(canonical(first)).hexdigest())
 
 
-def clean_ingress(manifest,policy,boundary):
-    from ops.enroll_reference_worker import read_file,absolute
-    from ops.node_ingress import Ingress,configuration
+def verify_ingress_pins(pins):
+    from ops.enroll_reference_worker import read_file,identity
+    for path,owner,mode,before,raw in pins:
+        require(identity(path.lstat())==before and read_file(path,owner=owner,maximum=65536,mode=mode)==raw
+                and identity(path.lstat())==before,'pinned_activation_ingress_changed')
+
+
+@contextmanager
+def existing_ingress_lock(manifest,policy):
+    from ops.enroll_reference_worker import absolute,original,identity
+    import fcntl,errno
+    root=absolute(policy['root']);original(root);directory=root.lstat()
+    require(directory.st_uid==manifest['service']['uid'] and not directory.st_mode&0o022,
+            'owned_activation_ingress_root_required')
+    path=root/'ingress.lock';before=path.lstat()
+    require(stat.S_ISREG(before.st_mode) and before.st_nlink==1 and before.st_uid==manifest['service']['uid']
+            and not before.st_mode&0o022,'original_ingress_lock_required')
+    fd=os.open(path,os.O_RDWR|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:
+        require(identity(os.fstat(fd))==identity(before)==identity(path.lstat()),'original_ingress_lock_changed')
+        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        yield
+        require(identity(os.fstat(fd))==identity(before)==identity(path.lstat())
+                and (directory.st_dev,directory.st_ino)==(root.lstat().st_dev,root.lstat().st_ino),'original_ingress_lock_changed')
+    finally:
+        os.close(fd)
+        try:os.fstat(fd)
+        except OSError as error:require(error.errno==errno.EBADF,'activation_ingress_close_unknown')
+        else:require(False,'activation_ingress_close_unknown')
+
+
+def clean_ingress(manifest,policy,boundary,*,pinned=None):
+    from ops.enroll_reference_worker import read_file,absolute,identity
+    from ops.node_ingress import Ingress,configuration,NoRedirect
+    from urllib.request import build_opener,ProxyHandler
     require(type(policy) is dict and set(policy)=={'root','configSha256','stateSha256','closedConfigSha256','containerId'},
             'closed_activation_ingress_binding_required')
     root=absolute(policy['root']);owner=manifest['service']['uid']
-    values={}
+    values={};pins=[] if pinned is None else pinned
     for label,path,mode,pin in (
         ('config',root/'gateway.json',0o600,policy['configSha256']),
         ('state',root/'state.json',0o600,policy['stateSha256']),
         ('closed',root/'public-config/nginx.conf',0o644,policy['closedConfigSha256'])):
-        raw=read_file(path,owner=owner,maximum=65536,mode=mode)
+        before=identity(path.lstat());raw=read_file(path,owner=owner,maximum=65536,mode=mode)
+        require(before==identity(path.lstat()),'pinned_activation_ingress_changed')
         require(hashlib.sha256(raw).hexdigest()==pin,'activation_ingress_files_changed')
         values[label]=raw
+        pins.append((path,owner,mode,before,raw))
     class ReadOnlyIngress(Ingress):
         def docker(self,args):
             if args[:2]==['context','inspect']:return json.dumps('unix:///run/docker.sock')
             require(args and args[0] in ('info','inspect','top'),'activation_ingress_is_read_only')
             return boundary.run(['/usr/bin/docker','--host','unix:///run/docker.sock',*args],
                                 output_limit=65536,timeout=20).decode()
-    ingress=ReadOnlyIngress(root);state=decode(values['state'],65536)
+    # Never re-enter Ingress.__init__, which reads gateway.json again. Validate
+    # its same fixed schema/semantics over the already verified bounded bytes.
+    import re
+    config=decode(values['config'],65536)
+    require(type(config) is dict and all(type(config.get(k)) is str and
+                re.fullmatch('[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}',config[k]) for k in ('proxyName','backendName'))
+            and type(config.get('proxyImage')) is str and re.fullmatch('sha256:[a-f0-9]{64}',config['proxyImage'])
+            and config.get('backendEngine','odx') in ('odm','odx'),'reviewed_ingress_configuration_required')
+    token=config.get('backendToken','')
+    require(type(token) is str and len(token)<=4096 and not any(ord(c)<33 or ord(c)>126 for c in token),
+            'reviewed_ingress_credential_shape_required')
+    configuration(config['listenPort'],config['backendPort'],True,config.get('allowedClients',()))
+    ingress=ReadOnlyIngress.__new__(ReadOnlyIngress);ingress.root=root;ingress.config=config
+    ingress.opener=build_opener(ProxyHandler({}),NoRedirect())
+    state=decode(values['state'],65536)
     require(set(state)=={'state','containerId','oldWorkers','expectedBackendImage'} and state['state']=='closed'
             and state['containerId']==policy['containerId'] and type(state['oldWorkers']) is list
             and all(type(pid) is int and pid>0 for pid in state['oldWorkers'])
@@ -101,11 +150,20 @@ def clean_ingress(manifest,policy,boundary):
     native=decode(boundary.run(['/usr/bin/docker','--host','unix:///run/docker.sock','inspect',
                                '--format','{{json .Id}}',ingress.config['backendName']],output_limit=4096))
     require(native==manifest['engine']['containerId'],'closed_ingress_native_identity_changed')
+    verify_ingress_pins(pins)
     return dict(containerId=proxy['Id'],pid=proxy['State']['Pid'],stateSha256=policy['stateSha256'],
                 configSha256=policy['configSha256'],closedConfigSha256=policy['closedConfigSha256'])
 
 
 def observe_service(worker,manifest,ingress_policy,native_inventory,installed_tree_sha256,action,challenge):
+    from ops.enroll_reference_worker import validate_manifest
+    manifest=validate_manifest(manifest)
+    require(os.geteuid()==manifest['service']['uid'],'activation_service_user_changed')
+    with existing_ingress_lock(manifest,ingress_policy):
+        return _observe_service_locked(worker,manifest,ingress_policy,native_inventory,installed_tree_sha256,action,challenge)
+
+
+def _observe_service_locked(worker,manifest,ingress_policy,native_inventory,installed_tree_sha256,action,challenge):
     from ops.enroll_reference_worker import validate_manifest,ActualBoundary,Installer,read_file,absolute
     from ops.reference_worker_handover import SystemdWorkerControl,ReferenceWorkerHandover
     from ops.enrolled_coordinator_transport import BoundedSubprocess,digest
@@ -194,7 +252,7 @@ def observe_service(worker,manifest,ingress_policy,native_inventory,installed_tr
         node.docker=readonly_docker
         require(node.uploads_idle(manifest['engine']['containerId']) and node.processing_idle(manifest['engine']['containerId']),
                 'native_upload_or_processing_child_active')
-        ingress=clean_ingress(manifest,ingress_policy,boundary)
+        ingress_pins=[];ingress=clean_ingress(manifest,ingress_policy,boundary,pinned=ingress_pins)
     finally:
         # Existing lock only; never NodeGate.__enter__, which can create/chmod.
         # A failed close holds the command before systemctl start, without retry.
@@ -204,7 +262,8 @@ def observe_service(worker,manifest,ingress_policy,native_inventory,installed_tr
             try:os.fstat(closing)
             except OSError as error:require(error.errno==errno.EBADF,'activation_gate_close_unknown')
             else:require(False,'activation_gate_close_unknown')
-    if action=='reload':control._run(['daemon-reload'])
+    if action=='reload':
+        verify_ingress_pins(ingress_pins);control._run(['daemon-reload'])
     if action=='preflight':
         raw=boundary.run(['/usr/bin/systemctl','--user','show','--no-pager',
             '--property=LoadState,ActiveState,MainPID,UnitFileState',settings['unitName']],output_limit=4096).decode()
@@ -229,7 +288,8 @@ def observe_service(worker,manifest,ingress_policy,native_inventory,installed_tr
     if action!='preflight':
         raw=boundary.run(['/usr/bin/systemctl','--user','show','--no-pager','--property=UnitFileState',settings['unitName']],output_limit=4096)
         require(raw.decode().strip()=='UnitFileState=disabled','first_activation_must_not_enable_unit')
-    if action=='start':control.command('start')
+    if action=='start':
+        verify_ingress_pins(ingress_pins);control.command('start')
     return dict(schemaVersion=1,protocol=PROTOCOL,challenge=challenge,action=action,workerSha256=digest(worker),
                 manifestSha256=digest(manifest),managerEnvironmentSha256=manager['managerEnvironmentSha256'],
                 ingress=ingress,native=native,process=process)
