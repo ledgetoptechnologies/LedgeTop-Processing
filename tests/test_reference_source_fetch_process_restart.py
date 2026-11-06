@@ -137,7 +137,7 @@ class ProcessRestartTests(unittest.TestCase):
 
     def assert_started_once(self, worker):
         """Stops at the first polls: FileEngine reports status 20 and never finishes."""
-        for _ in range(8):
+        for _ in range(12):
             if self.journal()[0] == 'executing':
                 break
             result = self.step(worker)
@@ -290,6 +290,47 @@ class ProcessRestartTests(unittest.TestCase):
         worker = self.spawn('worker')
         self.advance(worker, 'fetching')
         self.assert_recovered(worker)
+
+    def test_sigkill_after_claim_commit_before_reply_recovers_original_claim(self):
+        coordinator = self.spawn('coordinator')
+        dying = self.spawn('worker', SOURCE_NORMAL_CLAIM='1', SOURCE_FETCH_DIE='after_claim')
+        self.assertIsNone(self.step(dying))
+        self.assertEqual(dying.wait(), -9)
+        self.assertEqual(self.journal()[0], 'claim_pending')
+        claims = self.read(self.database,'SELECT request_id,token FROM reference_claims')
+        self.assertEqual(len(claims),1)
+        self.restart_both(dying,coordinator)
+        worker = self.spawn('worker')
+        self.advance(worker,'claimed')
+        self.assert_started_once(worker)
+        self.assertEqual(self.read(self.database,'SELECT request_id,token FROM reference_claims'),claims)
+        self.assertEqual(self.receipts()[0]['schemaVersion'],4)
+
+    def test_sigkill_before_reservation_post_recovers_original_reservation(self):
+        coordinator = self.spawn('coordinator')
+        dying = self.spawn('worker', SOURCE_FETCH_DIE='before_reservation')
+        self.assertIsNone(self.step(dying))
+        self.assertEqual(dying.wait(),-9)
+        reservation = self.journal()[1]['reservation']
+        self.assertEqual(self.read(self.database,'SELECT transfer_json FROM reference_jobs'),[(None,)])
+        self.restart_both(dying,coordinator)
+        worker = self.spawn('worker')
+        self.assert_started_once(worker)
+        self.assertEqual(self.journal()[1]['reservation'],reservation)
+        self.assertEqual(self.receipts()[0]['schemaVersion'],4)
+
+    def test_sigkill_after_reservation_commit_uses_existing_recovery(self):
+        coordinator = self.spawn('coordinator')
+        dying = self.spawn('worker', SOURCE_FETCH_DIE='after_reservation')
+        self.assertIsNone(self.step(dying))
+        self.assertEqual(dying.wait(),-9)
+        reservation = self.journal()[1]['reservation']
+        self.assertEqual(json.loads(self.read(self.database,'SELECT transfer_json FROM reference_jobs')[0][0]),reservation)
+        self.restart_both(dying,coordinator)
+        worker = self.spawn('worker')
+        self.assert_started_once(worker)
+        self.assertEqual(self.journal()[1]['reservation'],reservation)
+        self.assertEqual(self.receipts()[0]['schemaVersion'],3)
 
 
 if __name__ == '__main__':

@@ -133,12 +133,18 @@ def build_worker(config):
         db.execute('''CREATE TABLE IF NOT EXISTS driver_jobs (
           created INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT UNIQUE NOT NULL,
           claim_request TEXT UNIQUE NOT NULL, stage TEXT NOT NULL, data TEXT NOT NULL)''')
+        db.execute('CREATE TABLE IF NOT EXISTS readiness_tasks(uuid TEXT PRIMARY KEY)')
         fresh = db.execute('SELECT 1 FROM driver_jobs').fetchone() is None
+    driver._refresh_options()
     if fresh:
-        _, claim = driver._request('POST', '/claim', {'jobId': config['jobId'], 'claimRequestId': CLAIM_REQUEST})
+        normal_claim = os.environ.get('SOURCE_NORMAL_CLAIM') == '1'
+        claim = None
+        if not normal_claim:
+            _, claim = driver._request('POST', '/claim', {'jobId': config['jobId'], 'claimRequestId': CLAIM_REQUEST})
         with driver._db() as db:
-            db.execute("INSERT INTO driver_jobs(job,claim_request,stage,data) VALUES(?,?,'claimed',?)",
-                (config['jobId'], CLAIM_REQUEST, json.dumps({'claim': claim})))
+            db.execute('INSERT INTO driver_jobs(job,claim_request,stage,data) VALUES(?,?,?,?)',
+                (config['jobId'], CLAIM_REQUEST, 'claim_pending' if normal_claim else 'claimed',
+                 json.dumps({} if normal_claim else {'claim': claim})))
     return driver
 
 
@@ -148,9 +154,15 @@ def die_around_recovery(driver, moment):
 
     def request(method, suffix, payload=None, **kwargs):
         recovering = method == 'POST' and suffix.endswith('/recover')
+        reserving = method == 'POST' and suffix.endswith('/reservation')
+        if reserving and moment == 'before_reservation':
+            os.kill(os.getpid(), signal.SIGKILL)
         if recovering and moment == 'before_post':
             os.kill(os.getpid(), signal.SIGKILL)
         reply = real(method, suffix, payload, **kwargs)
+        if method == 'POST' and ((reserving and moment == 'after_reservation')
+                or (suffix == '/claim' and moment == 'after_claim')):
+            os.kill(os.getpid(), signal.SIGKILL)
         if recovering and moment == 'after_post':
             os.kill(os.getpid(), signal.SIGKILL)
         if moment == 'after_processing_phase' and suffix.endswith('/phase') and payload['phase'] == 'processing':
