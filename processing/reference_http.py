@@ -254,8 +254,12 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
                     return
                 try:
                     protected = _protected(self.connection)
-                    response = api.handle(self.command, self.path, dict(self.headers.items()), body,
-                                          protected_transport=protected)
+                    if self.path == '/ltds/v2/direct/jobs' and callable(getattr(api, 'handle_direct_source_tls', None)):
+                        response = api.handle_direct_source_tls(self.connection, self.command, self.path,
+                                                                dict(self.headers.items()), body)
+                    else:
+                        response = api.handle(self.command, self.path, dict(self.headers.items()), body,
+                                              protected_transport=protected)
                 except Exception:
                     self._error(500, "internal_error")
                     return
