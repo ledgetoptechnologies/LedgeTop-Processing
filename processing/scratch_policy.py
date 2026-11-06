@@ -39,6 +39,13 @@ MAX_INTEGER = 2**53 - 1
 ACCOUNTING_VERSION = 1
 TRANSFER_FENCE_VERSION = 1
 DIRECT_WRITER_VERSION = 2
+DIRECT_CUSTODY_VERSION = 1
+MAX_DIRECT_CUSTODY_FENCES = 4096
+CUSTODY_TRIGGERS = (
+    "CREATE TRIGGER IF NOT EXISTS direct_custody_no_replace BEFORE INSERT ON direct_custody_fences WHEN EXISTS (SELECT 1 FROM direct_custody_fences WHERE reservation=NEW.reservation) BEGIN SELECT RAISE(ABORT,'direct custody is retained'); END",
+    "CREATE TRIGGER IF NOT EXISTS direct_custody_no_update BEFORE UPDATE ON direct_custody_fences BEGIN SELECT RAISE(ABORT,'direct custody is retained'); END",
+    "CREATE TRIGGER IF NOT EXISTS direct_custody_no_delete BEFORE DELETE ON direct_custody_fences BEGIN SELECT RAISE(ABORT,'direct custody is retained'); END",
+)
 MAX_DIRECT_WRITER_PINS = 64
 # A conservative logical allowance for each persisted pin's SQLite/WAL work.
 # This is admission accounting, not a filesystem quota or a claim about the
@@ -145,6 +152,14 @@ class ScratchLedger:
                 saved=db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
                 try: prior=json.loads(saved[0]) if saved else {}
                 except (ValueError,TypeError):raise PolicyConflict('unknown accounting version or ledger policy') from None
+                if 'directCustodyVersion' in prior:
+                    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_custody_fences'").fetchone():
+                        raise PolicyConflict('direct custody fence journal missing')
+                    for sql in CUSTODY_TRIGGERS:
+                        name=sql.split()[5]
+                        row=db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(name,)).fetchone()
+                        if row is None or ' '.join(row['sql'].split())!=' '.join(sql.replace(' IF NOT EXISTS','').split()):
+                            raise PolicyConflict('direct custody fence guards changed')
                 if 'directV2ReadinessVersion' in prior:
                     for sql in V2_READY_TRIGGERS:
                         name=sql.split()[5]
@@ -158,6 +173,8 @@ class ScratchLedger:
                 CREATE TABLE IF NOT EXISTS unstarted_settlements (reservation TEXT PRIMARY KEY, settled_at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS direct_writer_pins (
                   id TEXT PRIMARY KEY, reservation TEXT UNIQUE NOT NULL);
+                CREATE TABLE IF NOT EXISTS direct_custody_fences (
+                  reservation TEXT PRIMARY KEY, binding_sha TEXT NOT NULL, closure_sha TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS direct_v2_readiness_uses (
                   challenge TEXT PRIMARY KEY, reservation TEXT NOT NULL, proof_sha256 TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS reservations (
@@ -193,6 +210,8 @@ class ScratchLedger:
                     db.execute(statement)
             for trigger in V2_READY_TRIGGERS:
                 db.execute(trigger)
+            for trigger in CUSTODY_TRIGGERS:
+                db.execute(trigger)
             for table, name, declaration in (
                 ("objects", "accepted_copy_verified", "INTEGER NOT NULL DEFAULT 0"),
                 ("receipts", "viewer_receipt", "TEXT"),
@@ -215,7 +234,7 @@ class ScratchLedger:
             config = _json(dict(root=str(self.root), floor=self.floor, grace=self.grace))
             previous = db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
             if previous is None and any(db.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone() is not None for table in
-                    ('metadata','job_environments','reservations','results','objects','receipts','pins','cleanup_intents','control_charges','transfer_fences','unstarted_settlements')):
+                    ('metadata','job_environments','reservations','results','objects','receipts','pins','cleanup_intents','control_charges','transfer_fences','unstarted_settlements','direct_custody_fences')):
                 raise PolicyConflict('existing accounting configuration missing')
             db.execute("INSERT OR IGNORE INTO metadata VALUES('config',?)", (config,))
             self.validate_accounting(db)
@@ -261,6 +280,30 @@ class ScratchLedger:
         if config is None:raise PolicyConflict('accounting configuration missing')
         try: observed_config=json.loads(config[0])
         except (TypeError,ValueError):raise PolicyConflict('unknown accounting version or ledger policy') from None
+        custody=db.execute('SELECT reservation,binding_sha,closure_sha FROM direct_custody_fences LIMIT ?',
+                           (MAX_DIRECT_CUSTODY_FENCES+1,)).fetchall()
+        for sql in CUSTODY_TRIGGERS:
+            name=sql.split()[5]
+            trigger=db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(name,)).fetchone()
+            if trigger is None or ' '.join(trigger['sql'].split())!=' '.join(sql.replace(' IF NOT EXISTS','').split()):
+                raise PolicyConflict('direct custody fence guards changed')
+        if len(custody)>MAX_DIRECT_CUSTODY_FENCES:raise PolicyConflict('direct custody fence budget exceeded')
+        if custody or 'directCustodyVersion' in observed_config:
+            if (type(observed_config.get('directCustodyVersion')) is not int
+                    or observed_config['directCustodyVersion']!=DIRECT_CUSTODY_VERSION
+                    or type(observed_config.get('directCustodyCount')) is not int
+                    or observed_config['directCustodyCount']!=len(custody)):
+                raise PolicyConflict('direct custody fence marker changed')
+            base['directCustodyVersion']=DIRECT_CUSTODY_VERSION
+            base['directCustodyCount']=len(custody)
+        for item in custody:
+            if (not re.fullmatch(r'direct-[a-f0-9]{64}',item['reservation'])
+                    or not re.fullmatch(r'[a-f0-9]{64}',item['binding_sha'])
+                    or not re.fullmatch(r'[a-f0-9]{64}',item['closure_sha'])
+                    or item['reservation']!='direct-'+item['binding_sha']
+                    or db.execute('SELECT 1 FROM transfer_fences WHERE reservation=?',(item['reservation'],)).fetchone() is None
+                    or db.execute('SELECT 1 FROM reservations WHERE id=?',(item['reservation'],)).fetchone() is None):
+                raise PolicyConflict('direct custody fence changed')
         pins=db.execute('SELECT id,reservation FROM direct_writer_pins LIMIT ?',
                         (MAX_DIRECT_WRITER_PINS+1,)).fetchall()
         used_readiness=db.execute('SELECT challenge,reservation,proof_sha256 FROM direct_v2_readiness_uses LIMIT 4097').fetchall()
@@ -414,6 +457,7 @@ class ScratchLedger:
             outstanding += db.execute("SELECT COALESCE(SUM(bytes),0) FROM control_charges").fetchone()[0]
             outstanding += db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             outstanding += db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
+            outstanding += db.execute('SELECT COUNT(*) FROM direct_custody_fences').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             free = _integer(self.probe(self.root), "free bytes")
             if free - outstanding - self.floor < total:
                 raise PolicyConflict("insufficient unreserved scratch")
@@ -460,6 +504,7 @@ class ScratchLedger:
             outstanding += db.execute('SELECT COALESCE(SUM(bytes),0) FROM control_charges').fetchone()[0]
             outstanding += db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             outstanding += db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
+            outstanding += db.execute('SELECT COUNT(*) FROM direct_custody_fences').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             free = _integer(self.probe(self.root), 'free bytes')
             if free - outstanding - self.floor < DIRECT_WRITER_PIN_ALLOWANCE:
                 raise PolicyConflict('insufficient unreserved scratch for direct writer pin')
@@ -467,6 +512,42 @@ class ScratchLedger:
             self._latch(db,directWriterVersion=DIRECT_WRITER_VERSION)
             db.execute('INSERT INTO direct_writer_pins VALUES(?,?)',(pin,reservation_id))
             return pin
+
+    def _establish_direct_custody_fence(self, reservation_id, pin, *, binding_sha, closure_sha, expected_settings):
+        """Retain verified closure; caller must hold and verify the active writer.
+
+        This only fences cooperative scratch-ledger operations. It is not a
+        Viewer acknowledgement or proof that external filesystem writers are
+        confined, and has deliberately no release path.
+        """
+        _id(reservation_id); _sha(binding_sha); _sha(closure_sha)
+        if reservation_id!='direct-'+binding_sha or type(pin) is not str or not re.fullmatch(r'[a-f0-9]{32}',pin):
+            raise PolicyConflict('direct custody identity changed')
+        with self._transaction() as db:
+            row=self._reservation(db,reservation_id)
+            if (row['state']!='reserved' or row['expires']!=FENCED_LEASE
+                    or json.loads(row['settings'])!=expected_settings
+                    or not db.execute('SELECT 1 FROM transfer_fences WHERE reservation=?',(reservation_id,)).fetchone()
+                    or not db.execute('SELECT 1 FROM direct_writer_pins WHERE id=? AND reservation=?',(pin,reservation_id)).fetchone()
+                    or db.execute('SELECT 1 FROM cleanup_intents WHERE reservation=?',(reservation_id,)).fetchone()):
+                raise PolicyConflict('direct custody writer or reservation changed')
+            existing=db.execute('SELECT binding_sha,closure_sha FROM direct_custody_fences WHERE reservation=?',(reservation_id,)).fetchone()
+            if existing is not None:
+                if (existing['binding_sha'],existing['closure_sha'])!=(binding_sha,closure_sha):
+                    raise PolicyConflict('direct custody closure changed')
+                return False
+            count=db.execute('SELECT COUNT(*) FROM direct_custody_fences').fetchone()[0]
+            if count>=MAX_DIRECT_CUSTODY_FENCES:raise PolicyConflict('direct custody fence budget exceeded')
+            outstanding=db.execute('SELECT COALESCE(SUM(remaining),0) FROM reservations').fetchone()[0]
+            outstanding+=db.execute('SELECT COALESCE(SUM(bytes),0) FROM control_charges').fetchone()[0]
+            outstanding+=(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0]
+                          +db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0]
+                          +count)*DIRECT_WRITER_PIN_ALLOWANCE
+            if _integer(self.probe(self.root),'free bytes')-outstanding-self.floor < DIRECT_WRITER_PIN_ALLOWANCE:
+                raise PolicyConflict('direct custody metadata budget unavailable')
+            db.execute('INSERT INTO direct_custody_fences VALUES(?,?,?)',(reservation_id,binding_sha,closure_sha))
+            self._latch(db,directCustodyVersion=DIRECT_CUSTODY_VERSION,directCustodyCount=count+1)
+            return True
 
     def _retire_direct_writer(self, reservation_id, pin):
         """Internal seam after the exact source reader is verified closed."""
@@ -516,7 +597,8 @@ class ScratchLedger:
             outstanding=db.execute('SELECT COALESCE(SUM(remaining),0) FROM reservations').fetchone()[0]
             outstanding+=db.execute('SELECT COALESCE(SUM(bytes),0) FROM control_charges').fetchone()[0]
             outstanding+=(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0]
-                          +db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0])*DIRECT_WRITER_PIN_ALLOWANCE
+                          +db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0]
+                          +db.execute('SELECT COUNT(*) FROM direct_custody_fences').fetchone()[0])*DIRECT_WRITER_PIN_ALLOWANCE
             if _integer(self.probe(self.root),'free bytes')-outstanding-self.floor < DIRECT_WRITER_PIN_ALLOWANCE:
                 raise PolicyConflict('insufficient scratch for V2 readiness journal')
             if readiness_guard() is not True:raise PolicyConflict('V2 readiness expired')
@@ -565,6 +647,8 @@ class ScratchLedger:
                 return None
             if db.execute('SELECT 1 FROM direct_writer_pins WHERE reservation=?',(reservation_id,)).fetchone():
                 raise PolicyConflict('direct writer is active or uncertain')
+            if db.execute('SELECT 1 FROM direct_custody_fences WHERE reservation=?',(reservation_id,)).fetchone():
+                raise PolicyConflict('direct source custody is retained')
             if row["state"] == "reserved":
                 db.execute("UPDATE reservations SET state='terminal',terminal_at=?,remaining=0 WHERE id=?", (now, reservation_id))
                 db.execute("INSERT INTO unstarted_settlements VALUES(?,?)", (reservation_id, now))
@@ -728,7 +812,7 @@ class ScratchLedger:
                 raise PolicyConflict("invalid engine transition")
             db.execute("UPDATE reservations SET state=?,terminal_at=CASE WHEN ?='terminal' "
                        "THEN COALESCE(terminal_at,?) ELSE terminal_at END, "
-                       "remaining=CASE WHEN ?='terminal' THEN 0 ELSE remaining END WHERE id=?",
+                       "remaining=CASE WHEN ?='terminal' AND id NOT IN (SELECT reservation FROM direct_custody_fences) THEN 0 ELSE remaining END WHERE id=?",
                        (state, state, now, state, reservation_id))
 
     def prepare_job_directory(self, reservation_id):
@@ -919,6 +1003,7 @@ class ScratchLedger:
             ON r.id=o.reservation WHERE r.state='terminal' AND o.accepted IS NOT NULL
             AND o.accepted_copy_verified=1
             AND o.cleaned IS NULL AND MAX(o.accepted,r.terminal_at)<=?
+            AND NOT EXISTS(SELECT 1 FROM direct_custody_fences f WHERE f.reservation=o.reservation)
             AND NOT EXISTS(SELECT 1 FROM cleanup_intents c WHERE c.reservation=o.reservation AND c.object=o.id)
             AND NOT EXISTS(SELECT 1 FROM pins p WHERE p.reservation=o.reservation
               AND p.object=o.id AND p.state!='released') ORDER BY o.reservation,o.id""", (now-self.grace,))
@@ -961,6 +1046,8 @@ class ScratchLedger:
     def cleanup_intent(self, reservation_id, object_id):
         """Recover a persisted fence; expired leases report uncertainty and retain it."""
         with self._transaction() as db:
+            if db.execute('SELECT 1 FROM direct_custody_fences WHERE reservation=?',(reservation_id,)).fetchone():
+                raise PolicyConflict('direct source custody is retained')
             now = self._now(db)
             row = db.execute("""SELECT c.*,c.token AS intent_token,c.expires AS lease_expires,
                              o.path,o.sha,o.bytes,r.generation FROM cleanup_intents c
@@ -987,6 +1074,8 @@ class ScratchLedger:
         if executor_attested is not True:
             raise PolicyConflict("cleanup executor attestation required")
         with self._transaction() as db:
+            if db.execute('SELECT 1 FROM direct_custody_fences WHERE reservation=?',(reservation_id,)).fetchone():
+                raise PolicyConflict('direct source custody is retained')
             row = db.execute("SELECT o.*,r.generation FROM objects o JOIN reservations r "
                 "ON r.id=o.reservation WHERE o.reservation=? AND o.id=?", (reservation_id, object_id)).fetchone()
             if row is None or row["generation"] != generation or row["sha"] != sha256:
