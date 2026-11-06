@@ -91,6 +91,8 @@ def verify_snapshot(*, intent_bytes, signature, source_frames, public_key, issue
                     or re.match(r'^[A-Za-z]:',name) or name in paths
                     or identifier in seen or identifier not in objects):raise ValueError('source path invalid')
             obj=objects[identifier]
+            if record['processingRole']=='gcp_source' or obj['sourceType']=='gcp_source_csv':
+                raise ValueError('GCP snapshot inspection unsupported')
             basename=name.rsplit('/',1)[-1].lower()
             if basename in basenames:raise ValueError('source basename duplicated')
             extension=name.rsplit('.',1)[-1].lower() if '.' in name.rsplit('/',1)[-1] else ''

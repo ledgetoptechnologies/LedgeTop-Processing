@@ -95,6 +95,13 @@ class SnapshotTests(unittest.TestCase):
         self.prepare()
         with self.assertRaisesRegex(ValueError,'GCP snapshot inspection unsupported'):self.verify()
 
+    def test_raw_gcp_source_without_generated_snapshot_is_explicitly_held(self):
+        self.record.update(relativePath='flight/source.csv',kind='auxiliary',mediaType='text/csv',processingRole='gcp_source')
+        self.source['objects'][0].update(name='source.csv',sourceType='gcp_source_csv',
+            retentionClass='permanent_viewer_hold',retentionHoldId=FILE)
+        self.prepare()
+        with self.assertRaisesRegex(ValueError,'GCP snapshot inspection unsupported'):self.verify()
+
     @unittest.skipUnless(os.environ.get('LTDS_VIEWER_SOURCE_ROOT'),'actual Viewer source not supplied')
     def test_actual_viewer_node_frame_encoder_and_signer(self):
         script=r"""
