@@ -10,8 +10,8 @@ key pair and secret separation; it does not start direct work.
 
 `ops/prepare_reference_runtime_config.py` can include these references in its
 final candidate, but it does not create, copy or enroll credentials or prove
-they exist at their eventual mounted paths. The normal runtime loader performs
-offline option performs file and TLS checks. These checks do not prove safe CA
+they exist at their eventual mounted paths. The offline loader option performs
+file and TLS checks. These checks do not prove safe CA
 ownership or rule out path substitution between checking and TLS loading; an
 immutable, protected trust-root and key loading strategy remains required before
 activation. `enabled: true` is rejected until authenticated worker

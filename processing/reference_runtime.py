@@ -7,7 +7,7 @@ bounded free text. Path/file options remain closed until a registered file
 workflow exists.
 """
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 import re
 from pathlib import Path
@@ -61,6 +61,16 @@ def _validate_node_configuration(config, queue_node_ids=None):
 
 
 @dataclass(frozen=True, repr=False)
+class DisabledDirectWorkerPreparation:
+    """References for offline preparation; never an active capability."""
+    nodes: dict
+    enabled: bool = field(default=False, init=False)
+
+    def __bool__(self):
+        return False
+
+
+@dataclass(frozen=True, repr=False)
 class ReferenceSettings:
     listener: dict
     viewer_bearers: dict
@@ -73,7 +83,7 @@ class ReferenceSettings:
     source_attestation_keys: object | None = None
     source_release: object | None = None
     source_bearer_principals: dict | None = None
-    direct_workers: dict | None = None
+    direct_worker_preparation: DisabledDirectWorkerPreparation | None = None
 
 
 def _file(path, *, private):
@@ -332,7 +342,8 @@ def load_reference_settings(path, config, *, validate_disabled_direct_files=Fals
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
                                  {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery,
                                  viewer_keys, viewer_targets or None, source_spool, source_attestation_keys,release_settings,
-                                 source_principals,direct_workers)
+                                 source_principals,DisabledDirectWorkerPreparation(direct_workers)
+                                 if direct_workers is not None else None)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 

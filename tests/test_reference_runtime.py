@@ -295,9 +295,11 @@ class ReferenceRuntimeTests(unittest.TestCase):
                 issuerId='worker-'+node,keyId='key-'+node,workerPublicKeyPem=key)
         self.value['directWorkers']=dict(enabled=False,nodes=nodes);self.write_config()
         with patch('processing.source_spool.os.path.ismount',return_value=True):loaded=self.settings()
-        self.assertEqual(set(loaded.direct_workers),{'cluster','main'})
+        self.assertEqual(set(loaded.direct_worker_preparation.nodes),{'cluster','main'})
+        self.assertIs(loaded.direct_worker_preparation.enabled,False)
+        self.assertFalse(loaded.direct_worker_preparation)
         with patch('processing.source_spool.os.path.ismount',return_value=True):
-            self.assertIsNotNone(load_reference_settings(str(self.path),self.config,validate_disabled_direct_files=True).direct_workers)
+            self.assertIsNotNone(load_reference_settings(str(self.path),self.config,validate_disabled_direct_files=True).direct_worker_preparation)
         self.value['directWorkers']['nodes']['main']['bearerFile']=nodes['cluster']['bearerFile']
         self.write_config()
         with patch('processing.source_spool.os.path.ismount',return_value=True):
@@ -321,7 +323,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
                 entry[field]=str(self.root/'not-provisioned'/field)
         self.write_config()
         with patch('processing.source_spool.os.path.ismount',return_value=True):
-            self.assertIsNotNone(self.settings().direct_workers)
+            self.assertIsNotNone(self.settings().direct_worker_preparation)
             with self.assertRaises(RuntimeConfigurationError):
                 load_reference_settings(str(self.path),self.config,validate_disabled_direct_files=True)
 
