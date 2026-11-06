@@ -37,8 +37,45 @@ supervisor child-death tests are real.
 The four skipped cases are `test_update_qualifier.ActualProbeTests`: actual Node.js
 GET success, watchdog, permitted launcher banner and refused launcher prefixes.
 The cached Python image has no `node` executable. Nothing was downloaded or
-installed to hide that limitation; those JavaScript execution cases remain
-unqualified by this run.
+installed to hide that limitation. The four JavaScript cases were subsequently
+qualified in the narrowly scoped follow-up below; the first run's skip count is
+preserved as observed.
+
+## Four-case Node follow-up
+
+Only `tests.test_update_qualifier.ActualProbeTests` ran on exact evidence head
+`72762637b5d7d0deef13adb8934e2f04dc19ecc6`: **4/4 passed, no skips, 0.346 seconds**.
+Production and test files are identical to `29c87a5e`; the intervening change is
+this evidence document only. The four previously skipped cases therefore close
+the affected 228-case selection across two separate runs (224 plus four), not an
+invented single no-skip execution. The 224 passing cases were not rerun.
+
+The existing Linux Node cache was mounted read-only at `/usr/local/bin/node`.
+Before importing the test class, the runner independently verified version
+`v24.22.2` and full binary SHA-256
+`904a6d3484241d466989f9df9ba3aab822b1496191bdb28230eb491a55c32a52`.
+The host cache file is
+`C:/Users/fstor/AppData/Local/Temp/ltds-node-runtime-ac201afbae3c4df6878dd044bd53a59a/node-linux`
+(126,881,248 bytes). No cache file, dependency or production source was changed.
+
+The exact follow-up source archive SHA-256 was
+`d8154796a23a41d13513c4b9256d35f01fd118757af5e05ec1bace0d1f72b34e`.
+Archive/source/full log are under
+`C:/Users/fstor/AppData/Local/Temp/ltds-maintenance-node727-837a31232ad04004b0f8bf4171d2ca29`;
+the `test.log` SHA-256 is
+`34e15b87bf8a258d5fdf6b35b60d6e20d4ec1cfee1a59c60ac60392f09d1e0b4`.
+Execution returned synchronously with exit 0 (tool output `a372a7`, no live
+handle). The owned container `ltds-maintenance-node727-probes`, labelled
+`ltds.task=maintenance-node727-probes`, used the same cached Python image,
+registered UID/GID 0 and `/work` working directory, one CPU, 768 MiB ceiling,
+network none, read-only source/root, private bounded `/tmp`, no capabilities,
+no-new-privileges and no Docker socket. Exact-name and exact-label `docker ps -a`
+checks were empty afterward; no volumes were created or shared containers stopped.
+
+These execute the unchanged fixed JavaScript probe against real loopback HTTP,
+with its fixture's explicitly scaled watchdog/port. They prove GET wire handling,
+watchdog termination and launcher-output acceptance/refusal. They do not contact
+an installed NodeODM engine or qualify reconstruction/GPU behavior.
 
 ## Frozen runner and cleanup
 
