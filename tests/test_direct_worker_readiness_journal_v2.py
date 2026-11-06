@@ -38,7 +38,7 @@ class ReadinessJournalTests(unittest.TestCase):
         ledger=ScratchLedger(f.root/'private'/'ledger.sqlite',f.root,
             capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
         self.assertEqual(journal.issue(ledger,f.spool,f.item,**kwargs),proof)
-        with self.assertRaises(PolicyConflict):journal.issue(ledger,f.spool,f.item,**dict(kwargs,principal='coordinator-b'))
+        with self.assertRaises(journal.ReadinessIssueUncertain):journal.issue(ledger,f.spool,f.item,**dict(kwargs,principal='coordinator-b'))
         with ledger._transaction() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
 
@@ -78,3 +78,19 @@ class ReadinessJournalTests(unittest.TestCase):
         with self.assertRaises(journal.ReadinessIssueUncertain):journal.issue(f.ledger,f.spool,f.item,**kwargs)
         with f.ledger._transaction() as db:
             self.assertEqual(db.execute('SELECT state FROM direct_readiness_issues').fetchone()[0],'issuing')
+
+    def test_replay_faults_keep_pin_and_report_uncertain(self):
+        f,kwargs=self.setup_fixture();journal.issue(f.ledger,f.spool,f.item,**kwargs)
+        original=f.ledger._transaction;calls=[]
+        @contextmanager
+        def lose_replay_read(*args,**options):
+            with original(*args,**options) as db:
+                yield db
+            calls.append(True)
+            if len(calls)==2:raise RuntimeError('synthetic replay teardown failure')
+        with patch.object(f.ledger,'_transaction',side_effect=lose_replay_read):
+            with self.assertRaises(journal.ReadinessIssueUncertain):journal.issue(f.ledger,f.spool,f.item,**kwargs)
+        with patch.object(journal,'check_scope',side_effect=RuntimeError('synthetic scope failure')):
+            with self.assertRaises(journal.ReadinessIssueUncertain):journal.issue(f.ledger,f.spool,f.item,**kwargs)
+        with f.ledger._transaction() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
