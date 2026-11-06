@@ -226,6 +226,8 @@ finally:db.close()
     def guard(self,action,intent,state,*,inspection):
         require(intent['operationId']==self.plan['operationId'] and intent['planSha256']==self.plan_sha
                 and action==intent['action'],'exact_driver_intent_required')
+        from .first_worker_activation import guard_coordinator_progress
+        guard_coordinator_progress(self,action)
         self.boundary.host();self._private();old=self._original()
         if action=='disable-predecessor-restart':
             require(old['State']['Running'] is True and old['Name']=='/'+journal.NAME,'running_original_required')
@@ -283,6 +285,11 @@ finally:db.close()
             for role in ('bootstrap','final'):
                 item=self._find(role)
                 if item is not None:require(item['State']['Running'] is False and item['State']['Pid']==0,'candidate_not_stopped')
+        return True
+
+    def guard_activation_rollback(self):
+        from .first_worker_activation import guard_coordinator_progress
+        guard_coordinator_progress(self,'begin-rollback')
         return True
 
     def _create(self,role,intent):
@@ -354,6 +361,7 @@ finally:db.close()
 
     def _workers(self):
         from .enrolled_worker_readiness_probe import serialize_probe
+        from .first_worker_activation import activation_readiness_binding
         result=[]
         for worker in self.bundle['workers']:
             challenge=str(uuid.uuid4());source=serialize_probe(worker,challenge)
@@ -371,11 +379,14 @@ finally:db.close()
                     'actual_worker_identity_or_idle_changed')
             # Stable proof fields only; transient nonce is validated above but
             # does not turn a retry into a different immutable effect receipt.
-            result.append(dict(nodeId=worker['nodeId'],configSha256=ready['configSha256'],sourceSha256=ready['sourceSha256'],
+            entry=dict(nodeId=worker['nodeId'],configSha256=ready['configSha256'],sourceSha256=ready['sourceSha256'],
                 engineVersion=ready['engineVersion'],engineId=ready['engineId'],workerInstanceId=ready['workerInstanceId'],
                 bootId=ready['bootId'],pid=process['pid'],startTime=process['startTime'],
                 driverBindingSha256=ready['driverBindingSha256'],loadedSourceSha256=ready['loadedSourceSha256'],
-                optionsSha256=ready['optionsSha256'],safeOptionsSha256=ready['safeOptionsSha256']))
+                optionsSha256=ready['optionsSha256'],safeOptionsSha256=ready['safeOptionsSha256'])
+            activated=activation_readiness_binding(self,worker,ready,process)
+            if activated is not None:entry['firstActivation']=activated
+            result.append(entry)
         return result
 
     def _observe(self,action,intent,state):

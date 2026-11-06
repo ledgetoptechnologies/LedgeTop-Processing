@@ -111,7 +111,8 @@ at its bootstrap-frozen boundary, then perform a separately journaled activation
    the coordinator frozen and installed bytes/results retained; never reset
    worker state, resolve a gate or force-stop a service as a shortcut.
 
-This activation sequence is a reviewable integration handoff, **not implemented
-activation authority in the installer**. No live installation or activation has
+The separate controller-owned implementation is documented in
+[guarded activation](first-worker-activation.md); it is not activation authority
+inside the installer. Connected-host qualification remains outstanding. No live installation or activation has
 been performed by this work. Current installed facts and actual missing inputs
 are recorded in [the dated inventory](evidence/installed-worker-inventory-20261105.md).

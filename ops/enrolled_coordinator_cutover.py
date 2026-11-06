@@ -421,6 +421,9 @@ class FirstEnrolledCutover:
             state=self._load()
             require(state['direction']=='forward' and not state['admissionOpened'] and state['pending'] is None,
                     'rollback_requires_closed_known_cutover')
+            activation_guard=getattr(self.driver,'guard_activation_rollback',None)
+            if activation_guard is not None:
+                require(activation_guard() is True,'activation_rollback_exclusion_required')
             scope=('restart-only' if 'stop-predecessor' not in state['proofs'] else
                    'declared-v2' if 'start-bootstrap' in state['proofs'] else 'original-only')
             state.update(direction='rollback',rollbackScope=scope,index=0,phase='rollback-prepared',pending=None)

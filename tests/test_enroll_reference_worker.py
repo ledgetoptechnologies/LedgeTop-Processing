@@ -60,6 +60,10 @@ class FirstWorkerEnrollmentTests(unittest.TestCase):
             maintenanceReadiness=dict(sourceRoot=str(self.root/'source'),sourceSha256=footprint,activation=None),
             stateRoot=str(self.home/'.local/share/ledgetop-processing-reference/worker-state'/self.operation),
             scratchRoot=str(self.home/'.local/share/ledgetop-processing-reference/worker-scratch'/self.operation))
+        tls=self.home/'synthetic-tls';tls.mkdir(mode=0o700);os.chown(tls,10001,10001)
+        for name in ('caFile','serverCertFile','serverKeyFile'):
+            value=tls/name;value.write_bytes(('synthetic-'+name).encode());value.chmod(0o600);os.chown(value,10001,10001)
+            config[name]=str(value)
         self.config_data=json.dumps(config).encode();path=self.input/'worker-config.json';path.write_bytes(self.config_data);path.chmod(0o600)
         self.manifest['config']=dict(path=str(path),sha256=hashed(self.config_data),bytes=len(self.config_data),ownerUid=0)
         self.manifest['unitSha256']=hashed(install.render_unit(self.manifest).encode())

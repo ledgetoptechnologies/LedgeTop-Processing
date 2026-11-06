@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import tarfile
+import time
 import uuid
 
 from ops.enrolled_coordinator_transport import BoundedSubprocess, TransportHeld, canonical, decode, digest, require
@@ -418,20 +419,76 @@ class Installer:
             os.chmod(directory,0o550);sync_directory(Path(directory))
         sync_directory(destination.parent)
 
-    def _tree(self,path):
+    def _tree(self,path,*,budget=None):
         entries={};count=0
         for directory,subdirs,files in os.walk(path):
             for name in sorted(subdirs+files):
+                if budget is not None:budget.check()
                 current=Path(directory)/name;original(current);info=current.lstat();count+=1
                 require(count<=MAX_FILES and info.st_uid==0 and info.st_gid==self.m['service']['gid'] and
                         stat.S_IMODE(info.st_mode) in (0o440,0o550),'immutable_worker_tree_required')
                 record=dict(identity=identity(info))
                 if stat.S_ISREG(info.st_mode):
+                    if budget is not None:budget.charge(info.st_size)
                     data=read_file(current,owner=0,maximum=64*1024**2,mode=stat.S_IMODE(info.st_mode))
                     record['sha256']=hashlib.sha256(data).hexdigest()
                 else:require(stat.S_ISDIR(info.st_mode),'immutable_worker_tree_required')
                 entries[current.relative_to(path).as_posix()]=record
         return dict(rootIdentity=identity(path.lstat()),entries=entries)
+
+    def installed_tree_sha256(self,steps):
+        """Opaque version1 install proof; readable paths only, no journal access.
+
+        Root-directory mtime/ctime are excluded because publishing enrollment
+        metadata legitimately changes them. Every source/dependency leaf and
+        private config/unit descriptor remains covered by its existing proof.
+        """
+        original(self.root);info=self.root.lstat()
+        require(stat.S_ISDIR(info.st_mode) and info.st_uid==0 and info.st_gid==self.m['service']['gid']
+                and stat.S_IMODE(info.st_mode)==0o750,'original_installation_root_required')
+        parent=self.root.parent.lstat()
+        require(parent.st_uid==0 and not parent.st_mode&0o022,'root_owned_installation_ancestor_required')
+        fields=('source','dependencies','stageConfig','config','unit')
+        require(all(name in steps for name in fields),'complete_install_only_tree_required')
+        return digest(dict(schemaVersion=1,rootIdentity=[info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid],
+                           parentIdentity=[parent.st_dev,parent.st_ino,parent.st_mode,parent.st_uid,parent.st_gid],
+                           steps={name:steps[name] for name in fields},tls=self._tls_proofs()))
+
+    def _tls_proofs(self):
+        config=decode(read_file(self.root/'worker-config.json',owner=self.m['service']['uid'],maximum=65536),65536)
+        proofs={}
+        for name in ('caFile','serverCertFile','serverKeyFile'):
+            path=absolute(config.get(name));original(path);info=path.lstat();mode=stat.S_IMODE(info.st_mode)
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and info.st_uid in (0,self.m['service']['uid'])
+                    and mode in (0o400,0o440,0o600,0o644)
+                    and (name!='serverKeyFile' or info.st_uid==self.m['service']['uid'] and mode==0o600),
+                    'installed_tls_file_changed')
+            data=read_file(path,owner=info.st_uid,maximum=65536,mode=mode)
+            proofs[name]=dict(identity=identity(info),parentIdentity=directory_identity(path.parent),
+                              sha256=hashlib.sha256(data).hexdigest())
+        return proofs
+
+    def observe_installed_tree(self):
+        """Fresh service-readable whole-tree proof with aggregate/time budgets."""
+        class Budget:
+            remaining=2*MAX_EXPANDED
+            deadline=time.monotonic()+60
+            def check(self):require(time.monotonic()<self.deadline,'installed_tree_duration_exceeded')
+            def charge(self,amount):
+                self.check();require(type(amount) is int and 0<=amount<=self.remaining,'installed_tree_bytes_exceeded')
+                self.remaining-=amount
+        budget=Budget();steps={name:self._tree(self.root/relative,budget=budget)
+                              for name,relative in (('source','source'),('dependencies','venv'))}
+        for name,path in (('stageConfig',self.root/'worker-config.json'),('config',self.config),('unit',self.unit)):
+            budget.check();steps[name]=self._private_proof(path,self.m['service']['uid'])
+        pyvenv=read_file(self.root/'venv/pyvenv.cfg',owner=0,maximum=65536,mode=0o440).decode()
+        entries={}
+        for line in pyvenv.splitlines():
+            if not line.strip():continue
+            require('=' in line,'closed_python_environment_required');key,value=line.split('=',1)
+            require(key.strip() not in entries,'closed_python_environment_required');entries[key.strip()]=value.strip()
+        require(entries.get('include-system-site-packages')=='false','isolated_python_environment_required')
+        return self.installed_tree_sha256(steps)
 
     def _new_private(self,path,raw,owner):
         return self._new_at_parent(path,raw,owner,directory_identity(path.parent))
@@ -477,6 +534,11 @@ class Installer:
                 require(state['steps'][name]==self._private_proof(path,self.m['service']['uid']),
                         'enrolled_worker_file_changed')
         self.boundary.validate_prepared(self.m,stage)
+        receipt=state.get('receipt')
+        if receipt is not None and ('installedTreeSchemaVersion' in receipt or 'installedTreeSha256' in receipt):
+            require(type(receipt.get('installedTreeSchemaVersion')) is int and receipt['installedTreeSchemaVersion']==1
+                    and receipt.get('installedTreeSha256')==self.installed_tree_sha256(state['steps']),
+                    'installed_tree_receipt_changed')
 
     def _config_bytes(self,*,fresh):
         raw=self._artifact('config');config=decode(raw,65536)
@@ -554,7 +616,8 @@ class Installer:
             if state['receipt'] is None:state['receipt']=dict(schemaVersion=1,protocol=PROTOCOL,operationId=self.m['operationId'],
                 manifestSha256=digest(self.m),sourceSha256=self.m['source']['footprintSha256'],
                 configSha256=self.m['config']['sha256'],unitSha256=self.m['unitSha256'],unitInstalled=True,
-                serviceStartIssued=False,serviceEnableIssued=False,engineMutationIssued=False)
+                serviceStartIssued=False,serviceEnableIssued=False,engineMutationIssued=False,
+                installedTreeSchemaVersion=1,installedTreeSha256=self.installed_tree_sha256(state['steps']))
             self._save(state);return state['receipt']
 
     def _receipt(self,state):
