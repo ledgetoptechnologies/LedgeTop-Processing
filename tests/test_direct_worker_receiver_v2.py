@@ -128,6 +128,14 @@ class WorkerV2Tests(unittest.TestCase):
         self.assertTrue(target.exists())
         with self.assertRaisesRegex(PolicyConflict,'active or uncertain'): self.put_zero()
 
+    def test_observation_directory_sync_failure_never_reports_durable(self):
+        self.put_zero()
+        with patch.object(self.spool,'_fsync_directory',side_effect=OSError('synthetic observation sync failure')):
+            with self.assertRaises(OSError):
+                self.boundary.observe(self.headers,protected_transport=True,object_id=fixtures.GCP_ID)
+        with self.ledger._transaction() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
+
     def test_v2_failure_after_hold_before_pin_still_blocks_resolution(self):
         with patch.object(self.ledger,'_handover_v2_writer',side_effect=RuntimeError('synthetic crash')):
             with self.assertRaises(RuntimeError):self.put_zero()
@@ -393,6 +401,42 @@ class WorkerV2Tests(unittest.TestCase):
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0],1)
             self.assertFalse((self.spool.root/self.item['jobId']).exists())
+        finally:
+            server.shutdown();server.server_close();thread.join(3)
+            self.assertFalse(thread.is_alive())
+
+    def test_tls_fsync_failure_and_reopened_ledger_do_not_claim_durability(self):
+        from ops.qualify_enrolled_phase_transport import configuration_material
+        from processing.direct_worker_http import create_direct_worker_server
+        from processing.direct_worker_sender import DirectDeliveryUncertain
+        from processing.direct_worker_sender_v2 import DirectWorkerSenderV2
+        material=configuration_material(str(uuid.uuid4()),str(uuid.uuid4()))['configurationFiles']
+        for name in ('fixture-ca.pem','fixture-cert.pem','fixture-key.pem'):
+            (self.root/name).write_bytes(material[name])
+        context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(str(self.root/'fixture-cert.pem'),str(self.root/'fixture-key.pem'))
+        server=create_direct_worker_server(self.boundary,'127.0.0.1',0,ssl_context=context,idle_timeout=2)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            sender=DirectWorkerSenderV2(origin='https://127.0.0.1:'+str(server.server_port),
+                connect_ip='127.0.0.1',ca_file=str(self.root/'fixture-ca.pem'),bearer=self.bearer,
+                inventory=self.index,item=self.item,reservation_binding=self.reservation,
+                expected_worker=self.worker,issuer_id='worker-issuer',key_id='worker-key',
+                worker_public_key=self.proof_key.public_key(),idle_timeout=2,total_timeout=5)
+            target=self.spool.root/self.spool.storage_key(self.item['jobId'],1,fixtures.GCP_ID)
+            original=self.spool._fsync_directory
+            def fail_after_link(path):
+                if target.exists():raise OSError('synthetic directory sync failure')
+                return original(path)
+            with patch.object(self.spool,'_fsync_directory',side_effect=fail_after_link):
+                with self.assertRaises(DirectDeliveryUncertain):sender.put(fixtures.GCP_ID,io.BytesIO(b''))
+            self.assertTrue(target.exists())
+            reopened=ScratchLedger(self.root/'private'/'ledger.sqlite',self.root,
+                capacity_probe=lambda _:1000000,clock=lambda:1000,safety_floor_bytes=100)
+            self.boundary.ledger=reopened
+            with self.assertRaises(DirectDeliveryUncertain):sender.observe(fixtures.GCP_ID)
+            with reopened._transaction() as db:
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
         finally:
             server.shutdown();server.server_close();thread.join(3)
             self.assertFalse(thread.is_alive())

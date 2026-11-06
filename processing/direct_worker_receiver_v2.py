@@ -157,6 +157,13 @@ class DirectWorkerBoundaryV2:
             pin=self.ledger.begin_direct_writer(scratch_id,settings(item,scratch_id))
             self.spool.verify_object(job_id=item['jobId'],generation=item['generation'],object_id=object_id,
                                      byte_size=obj['byteSize'],sha256=obj['sha256'])
+            # A content hash alone does not establish durable namespace
+            # publication. Re-sync the exact parent and then recheck both
+            # mount identity and the final file before reporting durability.
+            self.spool._fsync_directory(path.parent)
+            self.spool._assert_mount()
+            self.spool.verify_object(job_id=item['jobId'],generation=item['generation'],object_id=object_id,
+                                     byte_size=obj['byteSize'],sha256=obj['sha256'])
             require_fenced(self.ledger,item,expected_worker=self.worker)
             self.ledger._retire_direct_writer(scratch_id,pin)
         return dict(protocol='ltds-direct-local-object-v2',reservationId=item['reservationId'],
