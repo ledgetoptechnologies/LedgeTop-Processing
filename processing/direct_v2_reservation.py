@@ -230,6 +230,9 @@ class DirectV2Reservations:
                 if row['status']!='held' or row['held_reason']!='direct_preparing':
                     raise Conflict('V2 direct job not pending')
                 if preparing:
+                    self.queue._refresh_nodes(db)
+                    if self.queue._node(db,item['nodeId'])['state'] not in ('active','scheduled'):
+                        raise Conflict('V2 node entered maintenance; preparation remains held')
                     from .direct_preparation_journal import metadata_bytes as preparation_metadata_bytes
                     preparation_metadata_bytes(db)
                     intent=db.execute('SELECT * FROM direct_preparation_intents WHERE reservation_id=?',(item['reservationId'],)).fetchone()

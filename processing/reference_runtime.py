@@ -403,6 +403,7 @@ class _DynamicAPI:
         self.discover_capacities = discover_capacities
         self.discover_fleet = discover_fleet
         self._worker_refresh_lock = threading.RLock()
+        self._direct_preparation_scheduler = None
 
     def handle_direct_source_tls(self, connection, method, path, headers, body=b''):
         """Authenticate the actual listener connection; direct intake stays disabled."""
@@ -440,7 +441,8 @@ class _DynamicAPI:
                         nodeId=identity['node_id'],workerId=identity['worker_id'],
                         workerInstanceId=identity['worker_instance_id'],capabilityFingerprint=capability,
                         optionsFingerprint=options,allowedOdmOptions=sorted(allowed),
-                        directPreparationEnabled=False,sourceCustodyAccepted=False))
+                        directPreparationEnabled=bool(self._direct_preparation_scheduler is not None and
+                            self._direct_preparation_scheduler.policy_enabled_for(identity)),sourceCustodyAccepted=False))
                 except Exception:
                     return Response(503, {'error':'worker_catalog_unavailable'})
         worker_admission = ((method == 'GET' and path == '/ltds/worker/v1/next')
@@ -577,7 +579,7 @@ from .coordinator_freeze import runtime_constructor
 class ReferenceRuntime:
     @runtime_constructor
     def __init__(self, queue, config, settings, *, discover=None, discover_capacities=None,
-                 server_factory=None):
+                 server_factory=None, direct_scheduler_settings=None):
         """Construct services around the existing authority; never create a Queue."""
         self.queue, self.config, self.settings = queue, config, settings
         self._server_factory = server_factory or create_reference_http_server
@@ -589,6 +591,7 @@ class ReferenceRuntime:
         self._source_timer_thread = None
         self._source_release_stop = threading.Event()
         self._viewer_transfer_stop = threading.Event()
+        self._direct_preparation_scheduler = None
         try:
             recovery=settings.recovery_bindings
             node_ids = _validate_node_configuration(config, queue.node_ids)
@@ -678,8 +681,37 @@ class ReferenceRuntime:
             discover = discover or (lambda: self._discover_fleet()[0])
             discover_capacities = discover_capacities or self._discover_capacities
             self.api = _DynamicAPI(self.control, config, settings, discover, discover_capacities,discover_fleet)
+            if direct_scheduler_settings is not None:
+                # This is an explicit trusted-process entrypoint, not a public
+                # API or a configuration-file activation path. The caller
+                # must load enrollment from an independently protected source.
+                p._closed(direct_scheduler_settings,('enrollmentFile',),'direct scheduler settings')
+                from .direct_preparation_scheduler import DirectPreparationScheduler
+                self._direct_preparation_scheduler=DirectPreparationScheduler.from_protected_file(
+                    self.store,direct_scheduler_settings['enrollmentFile'])
+                self.api._direct_preparation_scheduler=self._direct_preparation_scheduler
         except Exception:
             raise RuntimeConfigurationError("reference TLS runtime initialization failed") from None
+
+    def run_direct_preparation_once(self):
+        """Explicit trusted coordinator step; disabled unless enrolled at construction."""
+        if self._direct_preparation_scheduler is None:
+            raise RuntimeConfigurationError('direct preparation scheduler disabled')
+        if self.api.discover_fleet is not None:
+            discovered,capacities=self.api.discover_fleet()
+        else:
+            discovered,capacities=self.api.discover(),self.api.discover_capacities()
+        snapshot=_available_discovery_snapshot(discovered)
+        self.store.update_fleet_snapshot(capacities,snapshot['nodes'])
+        capability,options,allowed=discovered_policy(snapshot,self.config)
+        def current_policy(node,expected_capability,expected_options,expected_allowed):
+            latest=_available_discovery_snapshot(self.api.discover())
+            cap,opt,names=discovered_policy(latest,self.config)
+            actual=next((n for n in latest['nodes'] if n.get('role')==node),None)
+            return bool(actual is not None and actual.get('available') is True
+                        and (cap,opt,set(names))==(expected_capability,expected_options,set(expected_allowed)))
+        return self._direct_preparation_scheduler.run_once(capability_fingerprint=capability,
+            options_fingerprint=options,allowed_odm_options=allowed,revalidate_policy=current_policy)
 
     def _discover_fleet(self):
         options, probes = self._worker_catalog.discover()

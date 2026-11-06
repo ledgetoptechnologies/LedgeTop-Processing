@@ -16,9 +16,9 @@ from ops import reference_worker_daemon as daemon
 
 class WorkerEnrollmentTests(unittest.TestCase):
     def record(self):
-        return dict(schemaVersion=2,protocol=enrollment.PROTOCOL,configPath='/configured/worker.json',
+        return dict(schemaVersion=3,protocol=enrollment.PROTOCOL,configPath='/configured/worker.json',
             configSha256='a'*64,authorityId=str(uuid.uuid4()),nodeId='cluster',workerId='worker',workerInstanceId='instance',
-            credentialSha256={name:'b'*64 for name in ('certificate','privateKey','clientCA','signingKey')})
+            credentialSha256={name:'b'*64 for name in ('certificate','privateKey','clientCA','signingKey','coordinatorCA')})
 
     def test_daemon_entrypoint_passes_independent_pin_and_checks_identity(self):
         record=self.record();config={k:record[k] for k in ('authorityId','nodeId','workerId','workerInstanceId')}
@@ -36,7 +36,8 @@ class WorkerEnrollmentTests(unittest.TestCase):
         record=self.record()
         for version, protocol in ((1,'ltds-worker-direct-enrollment-v1'),
                                   (1,enrollment.PROTOCOL),
-                                  (2,'ltds-worker-direct-enrollment-v1')):
+                                  (2,'ltds-worker-direct-enrollment-v1'),
+                                  (2,'ltds-worker-direct-enrollment-v2')):
             old=dict(record,schemaVersion=version,protocol=protocol)
             with patch.object(enrollment.os,'name','posix'), patch.object(enrollment.os,'geteuid',return_value=10001), \
                  patch.object(enrollment,'_read',return_value=json.dumps(old).encode()):

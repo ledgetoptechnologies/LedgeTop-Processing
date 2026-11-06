@@ -302,7 +302,7 @@ class ViewerResultV2RoundTripTests(unittest.TestCase):
                     allowed_odm_options={"numeric-probe"}, result_proxy=proxy,
                     viewer_receipt_keys=viewer_receipt_keys, source_spool=spool,
                     source_attestation_keys=trusted_source_keys, authority_id=queue.authority_id,
-                    source_release_service=release_service)
+                    source_bearer_principals={BEARER:'viewer-staging'}, source_release_service=release_service)
                 original_handle = api.handle
                 def track_acceptance(method, route, headers, body=b"", **kwargs):
                     response = original_handle(method, route, headers, body, **kwargs)

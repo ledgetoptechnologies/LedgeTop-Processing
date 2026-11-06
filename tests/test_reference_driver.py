@@ -1232,7 +1232,10 @@ class ReferenceDriverTests(unittest.TestCase):
             def read(self, _size): return b'{}'
             def close(self): pass
 
-        client._open = lambda request, timeout: sent.append(request) or Reply()
+        # Renewal now has its own coordinator TLS opener. A broker opener
+        # must never receive coordinator credentials.
+        client._open = lambda request, timeout: self.fail('renewal sent to broker opener')
+        client._renewal_open = lambda request, timeout: sent.append(request) or Reply()
         client.renew_grant({'previousGrant': data['grant']})
         self.assertEqual(sent[0].full_url.split('/api/')[0], self.driver.origin)
         self.assertEqual(sent[0].get_header('X-claim-token'), data['claim']['claimToken'])

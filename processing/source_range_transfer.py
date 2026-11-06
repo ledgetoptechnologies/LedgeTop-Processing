@@ -317,7 +317,8 @@ class SourceRangeClient:
     """Durably fetch canonical byte ranges and publish one verified object."""
 
     def __init__(self, origin, ledger_path, *, opener=None, ssl_context=None,
-                 clock=time.time, timeout=60, renewal_origin=None, renewal_headers=None):
+                 clock=time.time, timeout=60, renewal_origin=None, renewal_headers=None,
+                 renewal_ssl_context=None):
         """``renewal_headers(route, payload)`` adds the worker's own credentials.
 
         They go only to ``renewal_origin``, the coordinator; range reads keep
@@ -335,12 +336,17 @@ class SourceRangeClient:
         context = ssl_context or ssl.create_default_context()
         if not context.check_hostname or context.verify_mode != ssl.CERT_REQUIRED:
             raise ValueError("source broker TLS verification is required")
+        if renewal_ssl_context is not None and (not isinstance(renewal_ssl_context,ssl.SSLContext)
+                or not renewal_ssl_context.check_hostname or renewal_ssl_context.verify_mode!=ssl.CERT_REQUIRED):
+            raise ValueError('source coordinator TLS verification is required')
         if type(timeout) not in (int, float) or isinstance(timeout, bool) or not 0 < timeout <= 300:
             raise ValueError("invalid source transfer timeout")
         self.origin, self.clock, self.timeout = origin.rstrip("/"), clock, timeout
         self.renewal_origin = self.origin if renewal_origin is None else renewal_origin.rstrip("/")
         self.renewal_headers = renewal_headers
         self._open = opener or build_opener(_RefuseRedirects(), HTTPSHandler(context=context)).open
+        self._renewal_open = (build_opener(_RefuseRedirects(),HTTPSHandler(context=renewal_ssl_context)).open
+                              if renewal_ssl_context is not None else None)
         self.ledger_path = Path(ledger_path).absolute()
         if any(p.is_symlink() for p in (self.ledger_path.parent, *self.ledger_path.parent.parents)):
             raise ValueError("private ledger directory required")
@@ -374,7 +380,7 @@ class SourceRangeClient:
         request = Request(url, data=body, method="POST", headers=headers)
         try:
             try:
-                response = self._open(request, timeout=self.timeout)
+                response = (self._renewal_open or self._open)(request, timeout=self.timeout)
             except HTTPError as error:
                 response = error
             except Exception:
