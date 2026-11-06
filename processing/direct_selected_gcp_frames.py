@@ -232,6 +232,7 @@ def _coordinate_header(horizontal,vertical,height_source):
         return 'EPSG:6319' if horizontal=='EPSG:6318' else 'EPSG:4979'
     if normalized=='egm96height':return horizontal+'+5773'
     if normalized=='egm2008height':return horizontal+'+3855'
+    if normalized:raise ValueError('unsupported vertical coordinate system')
     return horizontal
 
 

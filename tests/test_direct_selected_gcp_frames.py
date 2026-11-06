@@ -87,6 +87,14 @@ class FrameTests(unittest.TestCase):
                 with self.assertRaises(ValueError):verify_gcp_semantics(evidence_bytes=json.dumps(changed,separators=(',',':')).encode(),
                     file_bytes=file_bytes,generated_gcp=generated,source_records=sources,attempt_id='attempt-1',selected_image_ids=['photo-1'])
 
+        unknown_vertical=copy.deepcopy(evidence)
+        unknown_vertical['coordinateContract']['heightSource']='source'
+        unknown_vertical['coordinateContract']['outputVerticalSystem']=None
+        unknown_vertical['coordinateContract']['verticalSystem']='Local vertical datum 2025'
+        with self.assertRaisesRegex(ValueError,'unsupported vertical coordinate system'):
+            verify_gcp_semantics(evidence_bytes=json.dumps(unknown_vertical,separators=(',',':')).encode(),
+                file_bytes=file_bytes,generated_gcp=generated,source_records=sources,attempt_id='attempt-1',selected_image_ids=['photo-1'])
+
         navd_file=b'EPSG:6349\n-88.1 44.5 244 12 20 photo.jpg\n'
         navd=dict(schemaVersion=2,coordinateContract=dict(schemaVersion=1,horizontalCrs='EPSG:6318',verticalSystem='NAVD88(GEOID18) height',
             zSource='Elevation',sourceUnits='ftUS',outputZUnit='m',sourceCoordinateSystem='NAD83(2011) / WISCRS',parser='emlid-all-columns-v1'),
