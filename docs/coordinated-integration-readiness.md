@@ -23,6 +23,24 @@ not be added together or described as a complete suite.
 | TreeDar and Gaussian splats | Genuine-LiDAR validation/scaffolding | Typed usable TreeDar output registration and real processing; Gaussian remains disabled |
 | Customer/project/task workspace | Historical #406 behavior and hierarchy tests | Current owner/release reconciliation and rendered/deployed acceptance |
 
+### Recovery follow-on under review
+
+Claude's local `c59f600` recovery candidate is not yet selected into this review
+branch or installed. Independent static review confirms a remaining automatic
+recovery gap: coordinator restart after claim but before transfer reservation
+commits leaves `source_recovery_claim_unreserved`; an initial lost claim reply
+has a related replay gap. The negative processing-recovery test deliberately
+expects that hold. Preserving this hold is safe, but does not satisfy unattended
+same-claim recovery. Claude yielded the follow-on to the Processing agent; the
+isolated design checkpoint is `e439115`, with implementation to follow his final
+tested-head handoff. Never requeue or invent a replacement claim to bypass it.
+
+The same review distinguishes delivery to a signed synthetic Viewer receipt
+from actual Viewer import, and uncertain native init/upload holds from automatic
+recovery. Those evidence boundaries remain explicit when combining candidates.
+The normal frozen-bootstrap-before-worker sequence has no static catalog-call
+cycle; the new isolated regression at `8eec4a4` is prepared but not yet run.
+
 The selected cutover journal/projection/policy commits are now integrated at
 `2778a89`, with independent review. The pre-dispatch recovery, stale rejection
 after rearm and pre-write completion defects found during review are fixed.
