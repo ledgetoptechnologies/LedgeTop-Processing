@@ -176,6 +176,19 @@ def process_identity(pid):
     return raw[19]
 
 
+def transport_diagnostic(error):
+    """Types and numeric OS errno only; never stringify exception payloads."""
+    result={'exceptionType':type(error).__name__[:80]}
+    nested=getattr(error,'reason',None)
+    if isinstance(nested,BaseException):
+        result['reasonType']=type(nested).__name__[:80]
+        number=getattr(nested,'errno',None)
+        if type(number) is int and -65535<=number<=65535:result['errno']=number
+    elif nested is not None:
+        result['reasonType']='non_exception_reason'
+    return result
+
+
 def invoke(entry,mode,payload,home,*,timeout=15):
     source=str(Path(entry['root'])/'source');python=str(Path(entry['root'])/'venv/bin/python')
     body='import sys;sys.path.insert(0,'+repr(source)+');from tests.fixtures.enrolled_worker_factory_process import main;main('+repr(mode)+')'
@@ -183,13 +196,13 @@ def invoke(entry,mode,payload,home,*,timeout=15):
     if mode=='probe':
         diagnostic=Path(home)/('probe-'+str(uuid.uuid4()))
         body=('import os,json,traceback;from pathlib import Path;'+body.split(';from tests.',1)[0]+
-            ';from ops.qualify_enrolled_worker_preparation import write_private,process_identity;'+
+            ';from ops.qualify_enrolled_worker_preparation import write_private,process_identity,transport_diagnostic;'+
             'd=Path('+repr(str(diagnostic))+');'+
             'write_private(d.with_suffix(".start.json"),json.dumps(dict(pid=os.getpid(),startTime=process_identity(os.getpid()))).encode())\n'+
             'try:\n from tests.fixtures.enrolled_worker_factory_process import main;main("probe")\n'+
             'except BaseException as e:\n'+
             ' frames=[dict(file=Path(f.filename).name,line=f.lineno,function=f.name) for f in traceback.extract_tb(e.__traceback__)[-8:]]\n'+
-            ' raw=json.dumps(dict(exceptionType=type(e).__name__[:80],frames=frames)).encode()\n'+
+            ' raw=json.dumps(dict(**transport_diagnostic(e),frames=frames)).encode()\n'+
             ' write_private(d.with_suffix(".stderr.json"),raw[:4096]);raise\n')
     try:
         result=BoundedSubprocess().run(['/usr/bin/env','-i',*[key+'='+value for key,value in clean_environment(home).items()],
@@ -302,9 +315,10 @@ def stop_worker(instance):
         process.send_signal(signal.SIGTERM)
         try:process.wait(timeout=10)
         except subprocess.TimeoutExpired:raise RuntimeError('factory_worker_shutdown_uncertain') from None
-    require(process.returncode==0,'factory_worker_failed_before_shutdown')
-    require(instance['log'].stat().st_size<=262144,'bounded_private_worker_log_required')
+    # Record the reaped child's exact result even when the success guard refuses it.
     write_private(instance['root']/'factory-child-exit.json',canonical(dict(schemaVersion=1,
         pid=process.pid,startTime=instance['startTime'],exitCode=process.returncode,retired=True,
         scope='local-fixture-process')))
+    require(process.returncode==0,'factory_worker_failed_before_shutdown')
+    require(instance['log'].stat().st_size<=262144,'bounded_private_worker_log_required')
 

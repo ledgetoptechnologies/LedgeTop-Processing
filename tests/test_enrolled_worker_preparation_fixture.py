@@ -152,13 +152,35 @@ class FixtureLifecycleUnitTests(unittest.TestCase):
                 w.stop_worker(dict(process=process,startTime='456'))
         process.send_signal.assert_called_once();process.kill.assert_not_called()
 
+    def test_transport_diagnostic_excludes_payload_and_handles_nonexception_reason(self):
+        from urllib.error import URLError
+        secret='private-config-must-never-appear'
+        value=w.transport_diagnostic(URLError(ConnectionRefusedError(111,secret)))
+        self.assertEqual(value,dict(exceptionType='URLError',reasonType='ConnectionRefusedError',errno=111))
+        self.assertNotIn(secret,json.dumps(value))
+        self.assertEqual(w.transport_diagnostic(URLError(secret)),
+                         dict(exceptionType='URLError',reasonType='non_exception_reason'))
+        self.assertEqual(w.transport_diagnostic(ValueError(secret)),dict(exceptionType='ValueError'))
+
+    def test_nonzero_reaped_child_result_is_retained_before_success_refusal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            process=Mock(pid=123,returncode=-15);process.poll.return_value=-15
+            root=Path(temporary)
+            with self.assertRaisesRegex(RuntimeError,'factory_worker_failed_before_shutdown'):
+                w.stop_worker(dict(process=process,startTime='456',root=root))
+            value=json.loads((root/'factory-child-exit.json').read_bytes())
+            self.assertEqual(value['exitCode'],-15)
+            self.assertTrue(value['retired'])
+            self.assertEqual(value['pid'],123)
+            process.send_signal.assert_not_called();process.kill.assert_not_called()
+
     def test_probe_diagnostic_program_is_valid_and_retains_production_masking(self):
         with tempfile.TemporaryDirectory() as temporary:
             home=Path(temporary)
             def run(argv,**kwargs):
                 program=argv[-1]
                 compile(program,'<fixture-probe>','exec')
-                self.assertIn('exceptionType',program)
+                self.assertIn('transport_diagnostic(e)',program)
                 self.assertIn('traceback.extract_tb',program)
                 self.assertNotIn('str(e)',program)
                 self.assertNotIn('repr(e)',program)
