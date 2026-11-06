@@ -90,8 +90,8 @@ outer/child retirement and a full named/bind alias zero-reference census.
 
 ## Tests proposed before any actual run
 
-The preparation-only selection has passed; seed-volume, actual child-factory
-and full-phase stages remain unexecuted. First bounded Linux selection:
+The preparation-only selection and separately granted seed helper have passed;
+actual child-factory and full-phase stages remain unexecuted. Linux selection:
 
 ```text
 tests.test_enrolled_worker_preparation_fixture
@@ -126,3 +126,43 @@ TLS/loaded-source/readiness, swapped planned workers and engine-pin mismatch.
 No actual full forward/rollback rerun is authorized by this patch. Current649b
 image proofs stay closed and source-specific; typed prestart adaptation remains
 unqualified until these new checks and independently reviewed actual phases pass.
+
+## Actual seed-only qualification
+
+Operation `4b532a2c-78f4-4dbd-8b3a-bf8f05dbf3e2` ran the exact tested e83
+source/archive in one separately granted helper, image5d466/source649b,
+UID/GID10001, one CPU/512MiB, network none, pids32, readonly root/source/archive,
+32MiB tmpfs, no Docker socket or ports. Only one new labelled layout volume was
+writable. Reviewed launcher SHA256
+`541aba88bedf8d0c8472383d942ddc472fe09dfe477e4f096a94d53524dbb5d3`;
+literal helper-body SHA256
+`693b7dacaacbed8ccc6ef58158fb90020c8ab4fac1d7d9976986a8965feeafdf`.
+The O_EXCL dispatch marker remains consumed; no create/start was retried.
+
+Exact helper `b0e38e2486773039112f1e70f76a7724b0709ce6d8fd82da2db8195309093537`
+started `2026-11-06T04:40:10.267829145Z`, finished `04:40:15.405100026Z`:
+5.137 seconds, exit0/PID0/no OOM. Fresh inspection verified exact image, labels,
+user/resource/network policy and only the two readonly source binds plus the
+single owned volume. It and `ltds-worker-layout-4b532a2c78f44dbd` remain retained
+for independent root inspection; no worker/factory/controller was started.
+
+Cold layout SHA256 `ad3d1d1dc5b62a548a2eba96f691f44dafc3ea1923a3172652e5266fda75bd8a`;
+source TAR7cef02 above was copied byte-exactly. Independently recomputed actual
+146-Python-file worker footprint:
+`f67c6b3d88f8ddb847d419a0b7040405b4a3f68f316fc90243574d3faeadb5a1`.
+Dependency TAR SHA256 `0e5e30fca9be95dfb06861c6ea9a278980c9e90aabd0f5b30e15f6571357e571`;
+all 181 regular leaves (179 package files plus interpreter/venv config) matched
+the cold venv bytes, UID/GID10001 headers, no symlink/hardlink. Python3.13.17
+binary SHA256 `73b68fc2dac176af16098180a2c98a03ee9f1f1b02db25d42d44d782e79e2330`;
+observed cryptography50.0.2, cffi2.1.1, pycparser3.12, rfc8785 0.1.4.
+Complete cold copy: 186 files/42,277,469 bytes, manifest SHA256
+`3e39e7390f4ded4570d7158622369bbf84a5daa21265b7dc800b81c8c0a8a2ed`;
+helper log SHA256 `96b658b64d1146163f8efdb7882e4dac14571bc02649c84dee68b3e5a77839b5`.
+
+This proves seed construction/readback only. It predates later9ab installer
+fixes and does not prove the versioned interpreter can start the real factory,
+root-owned installation, actual activation, SSH/systemd, native jobs or full
+cutover. Before a future child-factory run, the inherited unittest temporary
+directory should become a retained owned artifact on failure so an uncertain
+child shutdown cannot cause automatic test-state deletion. No frozen e83 bytes
+were modified and no such factory run is authorized by this receipt.
