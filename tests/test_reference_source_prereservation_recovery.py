@@ -350,6 +350,30 @@ class RuntimePreReservationDiscoveryTests(ProcessingHarness):
         self.assertEqual(self.request('POST',request).status,200)
         self.assertEqual(len(self.receipts()),1)
 
+    def test_combined_private_catalog_snapshot_is_used_once_per_recovery_turn(self):
+        self.runtime_after_restart()
+        calls=[]
+        def paired():
+            calls.append('paired')
+            return copy.deepcopy(self.catalog),copy.deepcopy(self.capacities)
+        def separate():
+            raise AssertionError('paired private catalog must not be split')
+        # Root's integrated private-catalog runtime has this existing seam;
+        # this regression intentionally requires its recovery-hook adaptation.
+        self.runtime.api.discover_fleet=paired
+        self.runtime.api.discover=separate
+        self.runtime.api.discover_capacities=separate
+        self.assertTrue(self.request().body['eligible'])
+        self.assertEqual(calls,['paired'])
+        self.control=self.runtime.api
+        self.down.add('recover')
+        self.assertEqual(self.driver.step()['state'],'retry_wait')
+        self.down.clear()
+        request=self.row()[1]['sourceRecovery']['pending']['request']
+        previous=len(calls)
+        self.assertEqual(self.request('POST',request).status,200)
+        self.assertEqual(len(calls),previous+1)
+
     def test_invalid_claim_token_probes_no_catalog(self):
         self.runtime_after_restart()
         self.assertIn(self.request(token='not-the-claim').status,(401,403,409))
@@ -358,6 +382,9 @@ class RuntimePreReservationDiscoveryTests(ProcessingHarness):
     def test_processing_recovery_does_not_depend_on_catalog(self):
         self.runtime_after_restart(processing=True)
         self.catalog=None
+        def paired():
+            raise AssertionError('started recovery must not discover fleet')
+        self.runtime.api.discover_fleet=paired
         response=self.request()
         self.assertEqual(response.status,200)
         self.assertEqual(response.body['schemaVersion'],3)
