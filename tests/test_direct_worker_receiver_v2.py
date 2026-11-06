@@ -521,15 +521,19 @@ class WorkerV2Tests(unittest.TestCase):
             if kill_during_write:
                 sender=make_sender(port);outcomes=[]
                 def upload():
-                    try:sender.put(fixtures.GCP_ID,io.BytesIO(b''))
+                    try:sender.put(fixtures.IMAGE_ID,io.BytesIO(b'abc'))
                     except Exception as error:outcomes.append(error)
                 upload_thread=threading.Thread(target=upload);upload_thread.start()
                 deadline=time.monotonic()+5
                 while not (self.root/'writer-entered').exists() and time.monotonic()<deadline:time.sleep(.01)
                 self.assertTrue((self.root/'writer-entered').exists())
+                target=self.spool.root/self.spool.storage_key(self.item['jobId'],1,fixtures.IMAGE_ID)
+                partial=target.parent/('.'+target.name+'.part')
+                self.assertEqual(partial.stat().st_size,1)
                 process.kill();process.communicate(timeout=3);process=None;upload_thread.join(5)
                 self.assertFalse(upload_thread.is_alive());self.assertEqual(len(outcomes),1)
                 self.assertIsInstance(outcomes[0],DirectDeliveryUncertain)
+                self.assertTrue(partial.exists());self.assertFalse(target.exists())
                 config['resume']=True;config['block_first']=False
                 config_path.write_text(json.dumps(config));config_path.chmod(0o600)
                 child=subprocess.Popen([sys.executable,str(script),str(config_path)],stdout=subprocess.PIPE,

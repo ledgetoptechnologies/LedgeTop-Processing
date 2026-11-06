@@ -24,9 +24,19 @@ ledger=ScratchLedger(root/'private'/'ledger.sqlite',root,capacity_probe=lambda _
 spool=SourceSpool(config['spool'],mount_path='/tmp',mount_id='a'*32,marker_name=config['marker'],
                   safety_floor_bytes=0,require_mount=True)
 if config.get('block_first'):
+    original_receive=spool.receive_object
     def block_receive(**kwargs):
-        (root/'writer-entered').write_text('synthetic pinned writer')
-        while True:time.sleep(1)
+        source=kwargs['reader']
+        class PartialReader:
+            def __init__(self):self.first=True
+            def read(self,count):
+                if self.first:
+                    self.first=False
+                    return source.read(min(count,1))
+                (root/'writer-entered').write_text('synthetic partial writer')
+                while True:time.sleep(1)
+        kwargs['reader']=PartialReader()
+        return original_receive(**kwargs)
     spool.receive_object=block_receive
 key=serialization.load_pem_private_key(config['key'].encode(),password=None)
 signer=WorkerClosureSignerV2(issuer_id='worker-issuer',key_id='worker-key',identity=config['worker'],private_key=key)
