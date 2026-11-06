@@ -6,15 +6,16 @@ approval. Runtime acceptance remains incomplete.
 
 ## Current release boundary (November 6 integration review)
 
-The source-only Viewer presentation candidate `01ff415d` is **not ready to
-publish**: independent review found incompatible receiving-response validation,
-a disconnect path that fails to clear its historical witness, and an unrelated
-ambiguous-upload deferral regression. The Viewer owner is preparing corrections;
-the published draft Ops #446 head remains `76f7c112`. The exact review and passing
-three-case accepted-copy cross-language check are recorded in
-[the presentation integration review](evidence/viewer-presentation-review-20261106.md).
-Do not confuse the passing receipt verifier with a successful source submission
-or full end-to-end acceptance.
+The Viewer findings on `01ff415d` are closed in `ee9e750a`, with exported fixture
+bytes pinned to LF in `ca5eedf3`. Draft Ops #446 now publishes that exact head.
+Processing presentation/recovery is selected at `c3d7eac8`; preparation-only
+runtime configuration tooling follows at `c57c99e8`. Independent selections pass
+271 Linux cases, a separate 193-case correction regression, and 25 frozen Viewer
+host cases. Four actual local Viewer photo-result round trips pass across two
+runs; the mixed five-case run still has one existing TreeDar cleanup assertion
+failure, retaining data. See the exact scope and failed runner history in
+[the combined qualification](evidence/coordinated-presentation-pair-20261106.md).
+These overlapping selections are not an aggregate suite or installed acceptance.
 
 The configured-node/early-drain maintenance extension is staged separately in
 [draft PR #367](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/367),
