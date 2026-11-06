@@ -163,6 +163,40 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertNotIn(REFERENCE_PROFILE, handler.prototype_queue.allowed_profiles)
         self.assertIn(VIEWER_PROFILE, handler.prototype_queue.allowed_profiles)
 
+    def test_worker_direct_source_policy_is_authenticated_and_non_authorizing(self):
+        queue=Queue(self.root/'policy-state',node_ids=('cluster','main'),reference_enabled=True)
+        self.addCleanup(queue.close)
+        runtime=self.runtime(queue)
+        api=runtime.api;path='/ltds/worker/v1/direct-source-policy'
+        token=self.value['workers']['cluster']['bearer']
+        headers={'Authorization':'Bearer '+token}
+        self.assertEqual(api.handle('GET',path,headers,protected_transport=False).status,503)
+        self.assertEqual(api.handle('GET',path,{},protected_transport=True).status,401)
+        self.assertEqual(api.handle('POST',path,headers,protected_transport=True).status,400)
+        result=api.handle('GET',path,headers,protected_transport=True)
+        self.assertEqual(result.status,200)
+        self.assertEqual((result.body['nodeId'],result.body['workerId'],result.body['workerInstanceId']),
+                         ('cluster','worker-cluster','instance-cluster'))
+        self.assertFalse(result.body['directPreparationEnabled'])
+        self.assertFalse(result.body['sourceCustodyAccepted'])
+        capability,options,allowed=discovered_policy(self.snapshot,self.config)
+        self.assertEqual((result.body['capabilityFingerprint'],result.body['optionsFingerprint']),
+                         (capability,options))
+        self.assertEqual(result.body['allowedOdmOptions'],sorted(allowed))
+        from processing.reference_driver import ReferenceDriver, DriverHeld
+        from types import SimpleNamespace
+        driver=ReferenceDriver.__new__(ReferenceDriver)
+        driver.worker=SimpleNamespace(authority_id=queue.authority_id,node_id='cluster',worker_id='worker-cluster')
+        driver.worker_instance_id='instance-cluster'
+        driver._request=lambda *args:(200,result.body)
+        self.assertEqual(driver.direct_source_policy(),result.body)
+        altered=dict(result.body,nodeId='main')
+        driver._request=lambda *args:(200,altered)
+        with self.assertRaises(DriverHeld):driver.direct_source_policy()
+        altered=dict(result.body,directPreparationEnabled=True)
+        driver._request=lambda *args:(200,altered)
+        with self.assertRaises(DriverHeld):driver.direct_source_policy()
+
     def recovery_config(self,authority='11111111-1111-4111-8111-111111111111',config=None):
         config=config or self.config
         value=copy.deepcopy(self.value);value['schemaVersion']=2

@@ -405,6 +405,31 @@ class _DynamicAPI:
         self._worker_refresh_lock = threading.RLock()
 
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
+        if path == '/ltds/worker/v1/direct-source-policy':
+            # Expose the coordinator's live fleet-derived policy to an already
+            # enrolled worker. This is read-only and does not enable direct
+            # admission, authorize a node, or accept source custody.
+            if protected_transport is not True:
+                return Response(503, {'error':'protected_transport_required'})
+            identity=self.control.worker._authenticate(headers)
+            if identity is None:
+                return Response(401, {'error':'unauthorized'})
+            if method!='GET' or body not in (b'', ''):
+                return Response(400, {'error':'invalid_request'})
+            with self._worker_refresh_lock:
+                try:
+                    snapshot=_available_discovery_snapshot(self.discover())
+                    capability,options,allowed=discovered_policy(snapshot,self.config)
+                    node=next(n for n in snapshot['nodes'] if n.get('role')==identity['node_id'])
+                    if node.get('available') is not True:
+                        return Response(503, {'error':'worker_catalog_unavailable'})
+                    return Response(200,dict(schemaVersion=1,authorityId=self.coordinator_queue.authority_id,
+                        nodeId=identity['node_id'],workerId=identity['worker_id'],
+                        workerInstanceId=identity['worker_instance_id'],capabilityFingerprint=capability,
+                        optionsFingerprint=options,allowedOdmOptions=sorted(allowed),
+                        directPreparationEnabled=False,sourceCustodyAccepted=False))
+                except Exception:
+                    return Response(503, {'error':'worker_catalog_unavailable'})
         worker_admission = ((method == 'GET' and path == '/ltds/worker/v1/next')
                             or (method == 'POST' and path == '/ltds/worker/v1/claim'))
         if worker_admission:
