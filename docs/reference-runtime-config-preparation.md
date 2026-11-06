@@ -83,3 +83,6 @@ physical ownership and installed Viewer signer behavior remain separate gates.
 The first-cutover policy currently requires its reviewed two-node inventory;
 this preparer accepts bounded configured inventory without creating another
 scheduler or broadening that policy.
+# V2 source bearer principal binding
+
+Schema 6 may explicitly set `sourceBearerPrincipals` as an environment-to-principal map, for example `{"production":"viewer-production"}`. Each configured environment must have a Viewer bearer and a trusted source-attestation key for the same principal. New V2 admissions and exact replays reject unbound bearers and proofs for a different principal; V1 credential behavior is unchanged. A schema-6 configuration without this map continues to load but cannot submit V2 jobs. The private runtime preparer emits the mapping from its existing explicit Viewer principal input. This admission binding alone does not implement per-principal authorization for every other job operation.

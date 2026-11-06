@@ -29,7 +29,8 @@ class ReferenceAPI:
     def __init__(self, store, *, bearer_tokens, capability_fingerprint,
                  options_fingerprint, allowed_odm_options=(), treedar_available=False,
                  result_proxy=None, viewer_receipt_keys=None, source_spool=None,
-                 source_attestation_keys=None, authority_id=None, source_release_service=None):
+                 source_attestation_keys=None, authority_id=None, source_release_service=None,
+                 source_bearer_principals=None):
         protocol._hash(capability_fingerprint, "capability fingerprint")
         protocol._hash(options_fingerprint, "options fingerprint")
         if type(bearer_tokens) is not dict or not bearer_tokens:
@@ -46,6 +47,12 @@ class ReferenceAPI:
             raise ValueError("invalid ODM option allowlist")
         self.store = store
         self._bearers = MappingProxyType(dict(bearer_tokens))
+        principals = {} if source_bearer_principals is None else source_bearer_principals
+        if type(principals) is not dict or not set(principals) <= set(bearer_tokens):
+            raise ValueError('source principals require configured Viewer bearers')
+        for principal in principals.values():
+            protocol._slug(principal, 'source bearer principal')
+        self._source_principals = MappingProxyType(dict(principals))
         self.capability_fingerprint = capability_fingerprint
         self.options_fingerprint = options_fingerprint
         self.allowed_odm_options = options
@@ -81,7 +88,21 @@ class ReferenceAPI:
                 environment = bound_environment
         return environment
 
-    def _capabilities(self, environment, *, source_intake=False):
+    def _source_principal(self, headers):
+        entries = [value for name, value in headers.items()
+                   if type(name) is str and name.lower() == 'authorization'] if hasattr(headers, 'items') else []
+        if len(entries) != 1 or type(entries[0]) is not str or not entries[0].startswith('Bearer '):
+            return None
+        token = entries[0][7:]
+        if not token.isascii() or not 16 <= len(token) <= 4096:
+            return None
+        principal = None
+        for configured, bound in self._source_principals.items():
+            if hmac.compare_digest(token, configured):
+                principal = bound
+        return principal
+
+    def _capabilities(self, environment, *, source_intake=False, source_principal=None):
         result={"protocol": "ltds-reference-v1", "schemaVersion": 1,
                 "environment": environment, "capabilityFingerprint": self.capability_fingerprint,
                 "limits": {"metadataBytes": protocol.MAX_BODY_BYTES, "objects": protocol.MAX_OBJECTS,
@@ -93,7 +114,7 @@ class ReferenceAPI:
         if not source_intake:
             return result
         result['viewerAcceptance']={'enabled': bool(self.viewer_receipt_keys)}
-        if self.source_spool is not None and self.source_attestation_keys is not None and self.authority_id:
+        if self.source_spool is not None and self.source_attestation_keys is not None and self.authority_id and source_principal is not None:
             from .reference_limits import V2_SOURCE_INTAKE_BYTES
             result['sourceIntake']={**self.store.source_capacity(self.source_spool),
                                     'maxMetadataBytes': V2_SOURCE_INTAKE_BYTES, 'enabled': True}
@@ -114,7 +135,7 @@ class ReferenceAPI:
             return None
         return job
 
-    def _source_replay_response(self, body, environment):
+    def _source_replay_response(self, body, environment, principal):
         if (self.source_spool is None or self.source_attestation_keys is None
                 or not self.authority_id):
             return None
@@ -122,6 +143,10 @@ class ReferenceAPI:
             from .reference_limits import V2_SOURCE_INTAKE_BYTES
             from .reference_source_replay import replay_source_intake
             payload = protocol.decode_submission(body, max_bytes=V2_SOURCE_INTAKE_BYTES)
+            if type(payload) is not dict:
+                return self._error(400, 'invalid_request')
+            if type(payload.get('sourceAttestation')) is not dict or type(payload['sourceAttestation'].get('proof')) is not dict or payload['sourceAttestation']['proof'].get('principalId') != principal:
+                return self._error(403, 'source_principal_mismatch')
             job = replay_source_intake(self.store, payload, environment=environment,
                 authority_id=self.authority_id, trusted_source_keys=self.source_attestation_keys)
             return Response(200, job) if job is not None else None
@@ -146,7 +171,8 @@ class ReferenceAPI:
         if type(method) is not str or type(path) is not str:
             return self._error(404, "not_found")
         if method == "GET" and path in (protocol.PREFIX + "/capabilities", "/ltds/v2/capabilities"):
-            return Response(200, self._capabilities(environment, source_intake=path == "/ltds/v2/capabilities"))
+            return Response(200, self._capabilities(environment, source_intake=path == "/ltds/v2/capabilities",
+                source_principal=self._source_principal(headers)))
         try:
             from . import reference_logs as logs
             log_request = logs.request(path, protocol.PREFIX)
@@ -171,7 +197,10 @@ class ReferenceAPI:
                 if (self.source_spool is None or self.source_attestation_keys is None
                         or not self.authority_id):
                     return self._error(503, "source_intake_unavailable")
-                replay = self._source_replay_response(body, environment)
+                principal = self._source_principal(headers)
+                if principal is None:
+                    return self._error(403, 'source_principal_required')
+                replay = self._source_replay_response(body, environment, principal)
                 if replay is not None:
                     return replay
                 from .reference_source_intake import validate_source_intake
@@ -182,6 +211,8 @@ class ReferenceAPI:
                     options_fingerprint=self.options_fingerprint,allowed_odm_options=self.allowed_odm_options,
                     available_engines=("odm","treedar") if self.treedar_available else ("odm",),
                     trusted_source_keys=self.source_attestation_keys,authority_id=self.authority_id)
+                if validated['sourceAttestation']['proof']['principalId'] != principal:
+                    return self._error(403, 'source_principal_mismatch')
                 job,created=self.store.submit_source_intake(validated,
                     capability_fingerprint=self.capability_fingerprint,
                     options_fingerprint=self.options_fingerprint,allowed_odm_options=self.allowed_odm_options,

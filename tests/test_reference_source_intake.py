@@ -588,6 +588,36 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
         with self.assertRaisesRegex(p.ProtocolError, "stale capability"):
             self.validate(capability_fingerprint="f" * 64)
 
+    def test_v2_admission_and_replay_require_authenticated_signer_principal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/'spool';root.mkdir(mode=0o700)
+            marker=root/'.ltds-source-spool-id';marker.write_text('a'*64,encoding='ascii')
+            if os.name!='nt':marker.chmod(0o600)
+            with patch('processing.source_spool.os.path.ismount',return_value=True):
+                spool=SourceSpool(root,mount_id='a'*64,safety_floor_bytes=0,max_object_bytes=1024,chunk_bytes=3)
+                queue=Queue(directory);queue.allowed_profiles.add(PROFILE)
+                try:
+                    self.authority_id=queue.authority_id
+                    signed=self.validate();request=copy.deepcopy(self.payload)
+                    request['sourceAttestation']=signed['sourceAttestation']
+                    a='synthetic-staging-token-a';b='synthetic-staging-token-b';unknown='synthetic-staging-token-c'
+                    api=ReferenceAPI(ReferenceStore(queue),bearer_tokens={a:'staging',b:'staging',unknown:'staging'},
+                        capability_fingerprint='a'*64,options_fingerprint=self.payload['pipeline']['odm']['optionsFingerprint'],
+                        source_spool=spool,source_attestation_keys=self.trusted_keys,authority_id=queue.authority_id,
+                        source_bearer_principals={a:'viewer-staging',b:'other-viewer'})
+                    def post(token):
+                        return api.handle('POST','/ltds/v2/jobs',{'Authorization':'Bearer '+token},
+                            p.canonical_json(request),protected_transport=True)
+                    unknown_cap=api.handle('GET','/ltds/v2/capabilities',{'Authorization':'Bearer '+unknown},protected_transport=True)
+                    self.assertFalse(unknown_cap.body['sourceIntake']['enabled'])
+                    self.assertEqual(post(b).status,403)
+                    self.assertEqual(post(unknown).status,403)
+                    created=post(a);self.assertEqual(created.status,201,created.body)
+                    self.assertEqual(post(b).status,403)
+                    self.assertEqual(post(unknown).status,403)
+                    replay=post(a);self.assertEqual((replay.status,replay.body['jobId']),(200,created.body['jobId']))
+                finally:queue.close()
+
     def test_authenticated_post_streamed_objects_completion_and_exact_replay(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)/"spool";root.mkdir(mode=0o700)
@@ -604,7 +634,8 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                     api=ReferenceAPI(ReferenceStore(queue),bearer_tokens={"synthetic-staging-token":"staging"},
                         capability_fingerprint="a"*64,options_fingerprint=self.payload["pipeline"]["odm"]["optionsFingerprint"],
                         allowed_odm_options={"numeric-probe"},source_spool=spool,
-                        source_attestation_keys=self.trusted_keys,authority_id=queue.authority_id)
+                        source_attestation_keys=self.trusted_keys,authority_id=queue.authority_id,
+                        source_bearer_principals={'synthetic-staging-token':'viewer-staging'})
                     signed_payload=self.validate(allowed_odm_options={"numeric-probe"})
                     request=copy.deepcopy(self.payload)
                     request["sourceAttestation"]=signed_payload["sourceAttestation"]
@@ -682,7 +713,8 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                     replay_api=ReferenceAPI(reopened,bearer_tokens={"synthetic-staging-token":"staging"},
                         capability_fingerprint="a"*64,options_fingerprint=self.payload["pipeline"]["odm"]["optionsFingerprint"],
                         allowed_odm_options={"numeric-probe"},source_spool=spool,
-                        source_attestation_keys=self.trusted_keys,authority_id=queue.authority_id)
+                        source_attestation_keys=self.trusted_keys,authority_id=queue.authority_id,
+                        source_bearer_principals={'synthetic-staging-token':'viewer-staging'})
                     completion_replay=replay_api.handle("POST",f"/ltds/v2/jobs/{job['jobId']}/source/complete",
                         {"Authorization":"Bearer synthetic-staging-token"},p.canonical_json(completion),
                         protected_transport=True)

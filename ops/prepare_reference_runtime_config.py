@@ -190,7 +190,8 @@ def compose(spec):
     bootstrap = dict(schemaVersion=2, listener=listener, viewerBearers=viewers, workers=workers,
                      streamBudget=budget, recoveryBindings=recovery)
     final = dict(bootstrap, schemaVersion=6, viewerReceiptKeys=copy_keys, viewerAcceptance={},
-                 sourceSpool=spool, sourceAttestationKeys=source_keys)
+                 sourceSpool=spool, sourceAttestationKeys=source_keys,
+                 sourceBearerPrincipals={env:record['principalId'] for env,record in envs.items()})
     trust = dict(schemaVersion=1, authorityId=spec['authorityId'], nodeEndpoints=endpoints,
                  recoveryBindings=recovery, sourceAttestationKeys=source_keys, viewerReceiptKeys=copy_keys,
                  inputBindings=evidence)

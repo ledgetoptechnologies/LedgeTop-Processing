@@ -72,6 +72,7 @@ class ReferenceSettings:
     source_spool: object | None = None
     source_attestation_keys: object | None = None
     source_release: object | None = None
+    source_bearer_principals: dict | None = None
 
 
 def _file(path, *, private):
@@ -123,6 +124,7 @@ def load_reference_settings(path, config):
                 required.add("sourceAttestationKeys")
                 allowed.add("sourceAttestationKeys")
                 allowed.add("sourceRelease")
+                allowed.add("sourceBearerPrincipals")
             if not required <= set(value) or set(value) - allowed:
                 raise RuntimeConfigurationError("runtime configuration fields differ")
         else:
@@ -250,6 +252,17 @@ def load_reference_settings(path, config):
         if value["schemaVersion"]==6:
             from .viewer_source_attestation import validate_trusted_keys
             source_attestation_keys=validate_trusted_keys(value["sourceAttestationKeys"])
+        source_principals = {}
+        if 'sourceBearerPrincipals' in value:
+            configured_principals = value['sourceBearerPrincipals']
+            if type(configured_principals) is not dict or not set(configured_principals) <= set(viewers):
+                raise RuntimeConfigurationError('source principal environments must match Viewer credentials')
+            for environment, principal in configured_principals.items():
+                p._slug(principal, 'source bearer principal')
+                if not any(key[0] == environment and record[0] == principal
+                           for key, record in source_attestation_keys.records.items()):
+                    raise RuntimeConfigurationError('source principal requires trusted signing key')
+                source_principals[viewers[environment]] = principal
         release_settings=None
         if 'sourceRelease' in value:
             from .source_release import ReleaseSettings
@@ -257,7 +270,8 @@ def load_reference_settings(path, config):
                 viewer_bearers={token:env for env,token in viewers.items()},spool=source_spool)
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
                                  {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery,
-                                 viewer_keys, viewer_targets or None, source_spool, source_attestation_keys,release_settings)
+                                 viewer_keys, viewer_targets or None, source_spool, source_attestation_keys,release_settings,
+                                 source_principals)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 
@@ -398,7 +412,10 @@ class _DynamicAPI:
             if environment is None:
                 return Response(401, {"error": "unauthorized"})
             if method == 'POST' and path == SOURCE_PREFIX + '/jobs':
-                replay = self.control.viewer._source_replay_response(body, environment)
+                principal = self.control.viewer._source_principal(headers)
+                if principal is None:
+                    return Response(403, {'error': 'source_principal_required'})
+                replay = self.control.viewer._source_replay_response(body, environment, principal)
                 if replay is not None:
                     return replay
             try:
@@ -417,6 +434,7 @@ class _DynamicAPI:
                     viewer_receipt_keys=self.settings.viewer_receipt_keys,
                     source_spool=self.settings.source_spool,
                     source_attestation_keys=self.settings.source_attestation_keys,
+                    source_bearer_principals=self.settings.source_bearer_principals,
                     authority_id=self.control.viewer.store.queue.authority_id,
                     source_release_service=self.control.viewer.source_release_service)
             except Exception:
@@ -522,6 +540,7 @@ class ReferenceRuntime:
                 recovery_bindings=recovery, viewer_receipt_keys=settings.viewer_receipt_keys,
                 source_spool=settings.source_spool,
                 source_attestation_keys=settings.source_attestation_keys,
+                source_bearer_principals=settings.source_bearer_principals,
                 authority_id=queue.authority_id,source_release_service=self._source_release)
             if settings.viewer_acceptance_targets:
                 from .reference_viewer_transfer_worker import ReferenceViewerTransferWorker

@@ -252,6 +252,7 @@ class RuntimePreparationTests(unittest.TestCase):
         boot=json.loads((self.out/'bootstrap.json').read_bytes()); final=json.loads((self.out/'final.json').read_bytes())
         viewer=json.loads((self.out/'viewer-production.json').read_bytes())
         self.assertEqual(boot['schemaVersion'],2);self.assertEqual(final['schemaVersion'],6)
+        self.assertEqual(final['sourceBearerPrincipals']['production'],viewer['VIEWER_REFERENCE_SOURCE_PRINCIPAL_ID'])
         self.assertNotIn('sourceRelease',final);self.assertEqual(final['viewerAcceptance'],{})
         self.assertEqual(boot['recoveryBindings'],final['recoveryBindings'])
         self.assertEqual(final['recoveryBindings']['main']['gateGeneration'],7)

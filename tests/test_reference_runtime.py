@@ -276,6 +276,17 @@ class ReferenceRuntimeTests(unittest.TestCase):
         with patch('processing.source_spool.os.path.ismount',return_value=True):
             with self.assertRaises(RuntimeConfigurationError):self.settings()
 
+    def test_schema6_source_bearer_principal_requires_matching_trusted_key(self):
+        self.source_intake_config()
+        self.value['sourceBearerPrincipals']={'staging':'viewer-staging'};self.write_config()
+        with patch('processing.source_spool.os.path.ismount',return_value=True):
+            loaded=self.settings()
+        self.assertEqual(loaded.source_bearer_principals,{self.value['viewerBearers']['staging']:'viewer-staging'})
+        for bad in ({'staging':'other-viewer'},{'production':'viewer-staging'},{'staging':'bad id'}):
+            self.value['sourceBearerPrincipals']=bad;self.write_config()
+            with self.subTest(binding=bad),patch('processing.source_spool.os.path.ismount',return_value=True):
+                with self.assertRaises(RuntimeConfigurationError):self.settings()
+
     def test_schema6_pull_only_starts_no_legacy_sender_and_keeps_receipt_pins(self):
         self.source_intake_config()
         self.value['viewerAcceptance'] = {}
