@@ -47,7 +47,7 @@ def load_listener_settings(path=None):
         raise RuntimeConfigurationError('invalid private V2 worker listener settings') from None
 
 
-def create_listener(settings_path=None, *, boundary_kwargs=None, tls_context=None):
+def create_listener(settings_path=None, *, boundary_kwargs=None, tls_context=None, client_principals=None):
     """Construct a pinned boundary and TLS listener, or return None if disabled.
 
     `boundary_kwargs` and `tls_context` must come from a trusted local owner;
@@ -59,7 +59,10 @@ def create_listener(settings_path=None, *, boundary_kwargs=None, tls_context=Non
     if type(boundary_kwargs) is not dict:
         raise RuntimeConfigurationError('trusted V2 boundary dependencies required')
     boundary = DirectWorkerBoundaryV2(**boundary_kwargs)
-    server = create_direct_worker_server(boundary, settings['host'], settings['port'], ssl_context=tls_context)
+    if client_principals is None:
+        raise RuntimeConfigurationError('coordinator client identity mapping required')
+    server = create_direct_worker_server(boundary, settings['host'], settings['port'],
+                                         ssl_context=tls_context, client_principals=client_principals)
     return ListenerOwner(server)
 
 

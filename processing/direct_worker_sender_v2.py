@@ -21,10 +21,11 @@ class DirectWorkerSenderV2(DirectWorkerSender):
     def __init__(self, *, origin, connect_ip, ca_file, bearer, inventory, item, reservation_binding,
                  expected_worker, issuer_id, key_id, worker_public_key,
                  max_object_bytes=20*1024**3, response_limit=65536,
-                 idle_timeout=10, total_timeout=120):
+                 idle_timeout=10, total_timeout=120, client_cert_file=None, client_key_file=None):
         self._configure_transport(origin=origin,connect_ip=connect_ip,ca_file=ca_file,bearer=bearer,
             max_object_bytes=max_object_bytes,response_limit=response_limit,
-            idle_timeout=idle_timeout,total_timeout=total_timeout)
+            idle_timeout=idle_timeout,total_timeout=total_timeout,
+            client_cert_file=client_cert_file,client_key_file=client_key_file)
         if not isinstance(inventory,VerifiedWorkerInventory):raise ValueError('verified V2 inventory required')
         self._item,self._sha,_=identity(item,expected_worker=expected_worker)
         saved=json.loads(inventory._wire)
