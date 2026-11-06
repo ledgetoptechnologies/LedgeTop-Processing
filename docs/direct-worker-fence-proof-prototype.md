@@ -19,7 +19,8 @@ network certificate binding, key enrollment or capability endpoint here.
 This proof observes a fence at issuance; it does **not** establish that all
 software honors the gate. The experimental NodeGate code persists a direct hold
 before creating a readiness or reader pin, and refuses resolve, acknowledgement,
-empty release, new reservation and ownership handover while that hold exists.
+empty release, new reservation, binding, completion preparation and ownership
+handover while that hold exists.
 The hold is part of atomically replaced `gate.json` schema 2, so the reviewed
 schema-1 NodeGate executable rejects it before mutating the gate. A prior
 prototype's separate marker is also refused for inspection, never migrated

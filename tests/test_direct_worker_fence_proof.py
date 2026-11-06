@@ -125,6 +125,16 @@ class FenceProofTests(unittest.TestCase):
                 gate.resolve(f.observation['bindingSha256'][:32],1,old_worker_stopped=True,
                     coordinator_resolved=True,note='synthetic')
 
+    def test_direct_hold_refuses_bind_and_prepare_completion_without_mutation(self):
+        f=self.f;self.issue();path=f.root/'gate'/'gate.json';before=path.read_bytes()
+        with NodeGate(f.engine) as gate:
+            state=gate.snapshot();receipt=state['reservation']['receiptId'];job=state['reservation']['job']
+            with self.assertRaisesRegex(GateError,'direct transfer hold'):
+                gate.bind(receipt,job)
+            with self.assertRaisesRegex(GateError,'direct transfer hold'):
+                gate.prepare_completion(receipt,{'status':'succeeded','result':{}})
+        self.assertEqual(path.read_bytes(),before)
+
     def test_old_gate_schema_reader_cannot_accept_direct_hold(self):
         f=self.f;self.issue()
         state=json.loads((f.root/'gate'/'gate.json').read_text())

@@ -323,6 +323,7 @@ class NodeGate:
         return {key: job[key] for key in ('id', 'workerId', 'nodeId', 'authorityId')}
 
     def bind(self, receipt_id, job):
+        self._refuse_direct_hold()
         state, reservation = self._reservation(receipt_id)
         identity = self._job(state, job)
         if reservation['job'] is not None and reservation['job'] != identity:
@@ -332,6 +333,7 @@ class NodeGate:
         return reservation
 
     def prepare_completion(self, receipt_id, payload):
+        self._refuse_direct_hold()
         state, reservation = self._reservation(receipt_id)
         if reservation['job'] is None:
             raise GateError('completion requires a bound job')
