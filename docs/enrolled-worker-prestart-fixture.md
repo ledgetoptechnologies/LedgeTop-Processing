@@ -162,7 +162,36 @@ helper log SHA256 `96b658b64d1146163f8efdb7882e4dac14571bc02649c84dee68b3e5a7783
 This proves seed construction/readback only. It predates later9ab installer
 fixes and does not prove the versioned interpreter can start the real factory,
 root-owned installation, actual activation, SSH/systemd, native jobs or full
-cutover. Before a future child-factory run, the inherited unittest temporary
-directory should become a retained owned artifact on failure so an uncertain
-child shutdown cannot cause automatic test-state deletion. No frozen e83 bytes
-were modified and no such factory run is authorized by this receipt.
+cutover. No frozen e83 bytes were modified and no factory run is authorized by
+this seed-only receipt.
+
+## Test-only persistent artifact lifetime follow-up (not executed)
+
+The inherited TemporaryDirectory factory context is replaced by the test-only
+`RetainedQualificationArtifacts`, requiring explicit
+`LTDS_QUALIFICATION_ARTIFACT_ROOT`: an original owned mode0700 persistent task
+parent. It creates one new private child directory and pins both original
+inodes. A failed test or uncertain child shutdown records retention outside the
+child and preserves every remaining byte. Success cleanup is unavailable until
+both actual Popen child handles report successful reap and their original
+PID/start identities are absent. A complete bounded ownership/type/link/inventory
+preflight precedes any deletion. Cleanup is anchored to original directory
+descriptors, verifies the snapshot at each effect, and never uses a generic
+rmtree, glob, chmod/adoption, kill or unrelated path. Root replacement, symlink,
+foreign leaf, missing/live child or partial cleanup failure holds remaining
+artifacts and records the uncertainty. A cleanup-started receipt is fsynced
+before effects and cleanup-complete only after the original directory is gone.
+
+Explicit unit cases cover confirmed-success cleanup, uncertain-shutdown
+retention, unconfirmed/live child refusal, symlink and root-swap refusal. These
+are controlled child-handle tests, not actual worker readiness proof; only static
+AST/diff checks have run for this follow-up.
+
+The seed producer, all ops/Processing source and the actual factory child shim
+remain byte-identical to e83. To reuse the retained seed safely, a future test
+controller may run this newer test-only archive but MUST mount the original
+frozen e83 tree at each versioned worker source root and use the e83 worker
+archive/revision/footprint pins. Do not mount a newer whole tree while claiming
+the old archive digest merely because runtime Python hashes happen to match.
+The new retention helper is controller-test-only and is not a worker input.
+Final combined9ab source still requires a fresh reviewed seed and qualification.

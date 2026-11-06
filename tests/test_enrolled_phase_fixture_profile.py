@@ -81,8 +81,11 @@ class ActualWorkerFixtureTests(unittest.TestCase):
         layout=load_layout(layout_path,operation,source_commit=os.environ['LTDS_QUALIFICATION_SOURCE_COMMIT'],
             candidate_image=raw['candidateImageId'],expected_sha256=os.environ['LTDS_QUALIFICATION_WORKER_LAYOUT_SHA256'])
         material=q.configuration_material(operation,authority)
-        with tempfile.TemporaryDirectory() as temporary:
-            with q.LocalWorkerReadinessFixtures(Path(temporary)/'workers',material,authority,layout=layout,
+        from tests.fixtures.retained_qualification_artifacts import RetainedQualificationArtifacts
+        parent=os.environ.get('LTDS_QUALIFICATION_ARTIFACT_ROOT')
+        self.assertTrue(parent,'explicit persistent owned fixture artifact parent required')
+        with RetainedQualificationArtifacts(parent) as artifacts:
+            with q.LocalWorkerReadinessFixtures(artifacts.root/'workers',material,authority,layout=layout,
                     controller_id=os.environ['LTDS_QUALIFICATION_CONTROLLER_ID']) as workers:
                 planned=workers.manifests()
                 first=workers.ready(planned);second=workers.ready(planned)
@@ -100,6 +103,9 @@ class ActualWorkerFixtureTests(unittest.TestCase):
                 with sqlite3.connect(Path(instance['config']['stateRoot'])/'driver.sqlite') as db:
                     db.execute("UPDATE driver_engine_pin SET pin='wrong-fixture-pin'")
                 with self.assertRaises(RuntimeError):workers.ready()
+            # No cleanup can occur until both owned actual child processes
+            # were reaped successfully; an uncertain __exit__ skips this line.
+            artifacts.confirm_children_retired(workers.instances)
 
 
 if __name__ == '__main__':
