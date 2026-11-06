@@ -64,6 +64,19 @@ class SnapshotJournalTests(unittest.TestCase):
             self.assertGreaterEqual(self.store._metadata_used_bytes(db),len(self.snapshot.raw)+len(self.snapshot.frames)+SESSION_OVERHEAD)
             with self.assertRaises(sqlite3.IntegrityError):db.execute('DELETE FROM direct_snapshot_pages')
 
+    def test_inspection_keeps_operation_pin_until_reader_returns(self):
+        self.assertEqual(self.call('begin',self.begin).status,200)
+        self.assertEqual(self.call('pages/0',self.snapshot.frames[:-1]).status,200)
+        def inspect(*args,**kwargs):
+            with self.queue._db() as db:
+                pins=db.execute("SELECT COUNT(*) FROM coordinator_operation_pins WHERE kind='source-io-admission' AND state='active'").fetchone()[0]
+            self.assertGreaterEqual(pins,1)
+            return {'sourceCustodyAccepted':False}
+        self.reservations.inspect_held_snapshot.side_effect=inspect
+        self.assertEqual(self.call('complete').status,200)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM coordinator_operation_pins WHERE kind='source-io-admission' AND state='active'").fetchone()[0],0)
+
     def test_noncanonical_encoding_wrong_key_and_quota_hold(self):
         data=json.loads(self.begin);data['intentBase64url']+='='
         self.assertEqual(self.call('begin',p.canonical_json(data)).status,409)

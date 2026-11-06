@@ -180,19 +180,20 @@ class SnapshotPageJournal:
             return {'state':'snapshot_receiving','sourceCustodyAccepted':False}
 
     def _complete(self,reservation,snapshot,principal,environment):
-        with self.queue.coordinator_operation('source-io-admission'),self.queue._db() as db:
-            db.execute('BEGIN');self._scope(db,reservation,principal,environment);metadata_bytes(db)
-            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_snapshot_sessions'").fetchone():
-                raise Conflict('snapshot session unavailable')
-            session=db.execute('SELECT * FROM direct_snapshot_sessions WHERE reservation=?',(reservation,)).fetchone()
-            if session is None or (session['snapshot'],session['principal'],session['environment'])!=(snapshot,principal,environment):raise Conflict('snapshot session unavailable')
-            intent=_decode(session['intent'],MAX_INTENT_BYTES)
-            if type(intent.get('sourceFrameBytes')) is not int or intent['sourceFrameBytes']!=session['frame_bytes']:
-                raise Conflict('source frame reservation changed')
-            rows=db.execute('SELECT page_index,page FROM direct_snapshot_pages WHERE reservation=? ORDER BY page_index',(reservation,)).fetchall()
-            if len(rows)!=len(intent['sourcePageHashes']) or any(row['page_index']!=i for i,row in enumerate(rows)):raise Conflict('source pages incomplete')
-            frames=b''.join(row['page']+b'\n' for row in rows)
-            if len(frames)!=intent['sourceFrameBytes']:raise Conflict('source frames incomplete')
-            raw,signature=session['intent'],session['signature']
-        return self.reservations.inspect_held_snapshot(reservation,authenticated_principal=principal,
-            issuer_id=intent['issuerId'],key_id=intent['keyId'],intent_bytes=raw,signature=signature,source_frames=frames)
+        with self.queue.coordinator_operation('source-io-admission'):
+            with self.queue._db() as db:
+                db.execute('BEGIN');self._scope(db,reservation,principal,environment);metadata_bytes(db)
+                if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_snapshot_sessions'").fetchone():
+                    raise Conflict('snapshot session unavailable')
+                session=db.execute('SELECT * FROM direct_snapshot_sessions WHERE reservation=?',(reservation,)).fetchone()
+                if session is None or (session['snapshot'],session['principal'],session['environment'])!=(snapshot,principal,environment):raise Conflict('snapshot session unavailable')
+                intent=_decode(session['intent'],MAX_INTENT_BYTES)
+                if type(intent.get('sourceFrameBytes')) is not int or intent['sourceFrameBytes']!=session['frame_bytes']:
+                    raise Conflict('source frame reservation changed')
+                rows=db.execute('SELECT page_index,page FROM direct_snapshot_pages WHERE reservation=? ORDER BY page_index',(reservation,)).fetchall()
+                if len(rows)!=len(intent['sourcePageHashes']) or any(row['page_index']!=i for i,row in enumerate(rows)):raise Conflict('source pages incomplete')
+                frames=b''.join(row['page']+b'\n' for row in rows)
+                if len(frames)!=intent['sourceFrameBytes']:raise Conflict('source frames incomplete')
+                raw,signature=session['intent'],session['signature']
+            return self.reservations.inspect_held_snapshot(reservation,authenticated_principal=principal,
+                issuer_id=intent['issuerId'],key_id=intent['keyId'],intent_bytes=raw,signature=signature,source_frames=frames)
