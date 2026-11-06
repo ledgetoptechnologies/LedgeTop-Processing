@@ -122,8 +122,12 @@ class FreezeGate:
         self._pid = os.getpid()
         with queue._db() as db:
             existing = {item[0] for item in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if existing.intersection(('coordinator_admission', 'coordinator_admission_operations', 'legacy_fence_requirement')):
+            if existing.intersection(('coordinator_admission', 'coordinator_admission_operations')):
                 raise CoordinatorFrozen('reviewed_legacy_barrier_conversion_required')
+            if 'legacy_fence_requirement' in existing:
+                from .direct_v2_reservation_schema import verify_fence, verify_schema
+                verify_fence(db)
+                verify_schema(db)
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS coordinator_freeze_state (
                   singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL,

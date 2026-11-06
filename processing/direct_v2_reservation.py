@@ -32,10 +32,9 @@ class DirectV2Reservations:
             pinned[node]=(dict(identity),value['issuerId'],value['keyId'],value['publicKey'])
         self._workers=MappingProxyType(pinned)
         with self.queue.coordinator_operation('source-io-admission'),self.queue._db() as db:
-            db.execute('''CREATE TABLE IF NOT EXISTS direct_v2_reservations (
-                reservation_id TEXT PRIMARY KEY,job_id TEXT UNIQUE NOT NULL,node_id TEXT UNIQUE NOT NULL,
-                principal TEXT NOT NULL,request_digest TEXT NOT NULL,item_json BLOB NOT NULL,
-                proof_json BLOB NOT NULL,challenge_id TEXT NOT NULL,state TEXT NOT NULL)''')
+            from .direct_v2_reservation_schema import ensure_schema
+            db.execute('BEGIN IMMEDIATE')
+            ensure_schema(db)
 
     def reserve(self, *, payload, authenticated_principal, item, expected_worker,
                 readiness_proof, challenge_id, gate_generation, issuer_id, key_id, worker_public_key,
@@ -89,6 +88,8 @@ class DirectV2Reservations:
         if len(item_bytes)>8192 or len(proof_bytes)>8192:raise Conflict('V2 reservation metadata exceeds bounds')
         with self.queue.coordinator_operation('source-io-admission'),self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            from .direct_v2_reservation_schema import verify_fence,verify_schema,validate_receiving
+            verify_fence(db);verify_schema(db)
             if time.monotonic()>=deadline:raise Conflict('V2 worker readiness expired')
             direct_worker_fence_proof_v2.verify(readiness_proof,now=int(time.time()),**proof_args)
             require_mode(db,item['jobId'],'direct-v2')
@@ -113,6 +114,7 @@ class DirectV2Reservations:
             values=(item['reservationId'],item['jobId'],item['nodeId'],authenticated_principal,
                     request_digest,item_bytes,proof_bytes,challenge_id,'receiving')
             if old:
+                validate_receiving(db,item['reservationId'])
                 saved_node=db.execute('SELECT node_id FROM reference_jobs WHERE job_id=?',(item['jobId'],)).fetchone()
                 if (len(old)!=1 or tuple(old[0])!=values or row['status']!='held'
                         or row['held_reason']!='direct_v2_receiving' or row['node_id']!=item['nodeId']
@@ -138,6 +140,7 @@ class DirectV2Reservations:
                                    (item['nodeId'],item['jobId'])).rowcount
                 if changed!=1:raise Conflict('V2 direct admission changed')
                 db.execute('UPDATE reference_jobs SET node_id=? WHERE job_id=?',(item['nodeId'],item['jobId']))
+                validate_receiving(db,item['reservationId'])
                 replayed=False
         # The transaction has committed: expiration now is uncertain, not a
         # safe rejection or reason to release its durable reservation.

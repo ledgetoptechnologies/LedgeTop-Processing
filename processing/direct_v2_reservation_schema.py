@@ -9,6 +9,8 @@ from . import reference_protocol as p
 from .maintenance import Conflict
 
 TABLE='direct_v2_reservations'
+FENCE_TABLE='legacy_fence_requirement'
+FENCE_SCHEMA="CREATE TABLE legacy_fence_requirement (version INTEGER NOT NULL CHECK(version=2))"
 SCHEMA='''CREATE TABLE direct_v2_reservations (
                 reservation_id TEXT PRIMARY KEY,job_id TEXT UNIQUE NOT NULL,node_id TEXT UNIQUE NOT NULL,
                 principal TEXT NOT NULL,request_digest TEXT NOT NULL,item_json BLOB NOT NULL,
@@ -23,13 +25,31 @@ def verify_schema(db):
 
 def ensure_schema(db):
     if not db.in_transaction:raise Conflict('direct V2 schema transaction required')
-    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(TABLE,)).fetchone() is None:
+    table_exists=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(TABLE,)).fetchone() is not None
+    fence_exists=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(FENCE_TABLE,)).fetchone() is not None
+    if table_exists != fence_exists:
+        raise Conflict('direct V2 reservation fence mismatch')
+    if not table_exists:
+        db.execute(FENCE_SCHEMA)
+        db.execute('INSERT INTO legacy_fence_requirement(version) VALUES(2)')
         db.execute(SCHEMA)
+    verify_fence(db)
     verify_schema(db)
+
+def verify_fence(db):
+    row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(FENCE_TABLE,)).fetchone()
+    if row is None or type(row['sql']) is not str or _normalized(row['sql'])!=_normalized(FENCE_SCHEMA):
+        raise Conflict('direct V2 reservation fence requires inspection')
+    values=db.execute('SELECT version FROM legacy_fence_requirement LIMIT 2').fetchall()
+    if len(values)!=1 or type(values[0][0]) is not int or values[0][0]!=2:
+        raise Conflict('direct V2 reservation fence requires inspection')
 
 def metadata_bytes(db):
     if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(TABLE,)).fetchone() is None:
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(FENCE_TABLE,)).fetchone():
+            raise Conflict('direct V2 reservation fence mismatch')
         return 0
+    verify_fence(db)
     verify_schema(db)
     if db.execute('''SELECT 1 FROM direct_v2_reservations WHERE
         typeof(reservation_id)!='text' OR typeof(job_id)!='text' OR typeof(node_id)!='text'
