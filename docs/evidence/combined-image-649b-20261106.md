@@ -36,6 +36,33 @@ Local evidence lives under
 
 This image includes the later maintenance and report-contract corrections absent
 from earlier image7adf6e6e. Earlier forward/rollback receipts do not qualify this
-new artifact. New actual local cutover/rollback/audit runs are assigned separately;
-installed NAS/Viewer/worker acceptance remains open. No registry publication or
-mutable live/latest tag was performed.
+new artifact. The new actual local
+[forward22](enrolled-combined-649b-forward-20261106.md) and
+[rollback30 plus post-restart custody audit](enrolled-combined-649b-rollback-20261106.md)
+passed; root independently read the results, rehashed all277/321 retained files
+respectively, and reviewed exact terminal resources before their removal. Task
+container/volume inventories are empty; private cold evidence remains retained.
+Installed NAS/Viewer/worker acceptance remains open. Later ops-only pre-start
+review changes require their own qualification and are not covered by these runs.
+
+## Actual cluster cache staging
+
+The saved image archive is50,284,544bytes, SHA-256
+`c2645b5917a472bf1ad4a4069f3870bae0ac097e4b0c81ea7738a8b4918addac`.
+Authenticated SSH as bkoltz created a new UID1000/mode0700 directory on cluster89:
+
+`/home/bkoltz/.local/share/ledgetop-processing-reference/release-candidates/release-649b8c0e-51408fb3-7612-4cc2-b7dd-7d566abe1098`
+
+Its new `coordinator-image.tar` was opened nofollow/single-link, hash/size and
+descriptor/name identity checked, set0600 and fsynced. `docker image load`
+succeeded, and actual cluster inspect matched immutable image5d466eb5,
+revision649b8c0e and UID10001. A new readonly/network-none quarter-CPU128MiB probe
+checked all99 packaged Python hashes against footprinta346ef1b and auto-removed;
+the exact task-labelled inventory was empty. No running service was replaced,
+started or stopped; no Gate, NAS setting or client dataset was changed.
+
+Local `cluster-staging-stdout.log` SHA-256:
+`bef58f4c9221f61c786ce7b98db588ae92ab9799d3a8b6c1fa26549f290e68d6`.
+Operation metadata and empty stderr are retained alongside it. Main88 did not
+receive a second orchestrator image/service. No registry publication or mutable
+live/latest tag was performed.

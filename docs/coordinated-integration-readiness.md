@@ -44,10 +44,18 @@ See [the combined qualification](evidence/integrated-maintenance-20261106.md).
 It is not installed; timers remain disabled. The already staged image7adf6e6e
 predates this source change and is not relabelled as the combined release image.
 
-New combined image `5d466eb5`, revision `649b8c0e`, is built locally. All99 Python
-files match the frozen source and basic application health returns200. Its new
-actual cutover/rollback qualification and installed staging remain open; see
-[the immutable build receipt](evidence/combined-image-649b-20261106.md).
+New combined image `5d466eb5`, revision `649b8c0e`, is built and staged in the
+actual cluster cache. All99 Python files match the frozen source, basic health
+returns200, and new actual local forward22 and rollback30/post-restart custody
+audit pass. Root independently rehashed the complete retained evidence and
+reviewed exact resource retirement. Installed NAS/Viewer/worker acceptance stays
+open; see [the immutable build/staging receipt](evidence/combined-image-649b-20261106.md).
+An ops-only follow-up is defining a typed worker pre-start configuration-review
+artifact: the present `workerQualificationSha256` hash pin does not itself prove
+worker activation or fresh installed readiness. Those post-bootstrap checks stay
+with the existing activation receipt and must not be moved before their own
+prerequisite frozen plan. The follow-up is not selected or qualified by the649b
+component runs yet.
 
 This section and the remaining-delivery list at the end describe current gates.
 Intermediate checkpoints below are historical; their statements that source
@@ -60,7 +68,7 @@ not be added together or described as a complete suite.
 | Production/staging queue and ordered per-node routing | Actual Viewer/Python synthetic pairings; 332-test integrated selection | Installed source intake and concurrent two-node jobs; correct user-facing queued/preparing/running witness (see status audit) |
 | Private per-node engine boundary and dynamic flags | Authenticated worker relay and coordinator discovery integrated; 96/96 frozen-source Linux catalog/runtime/factory checks passed at `18750d4` | Install workers and qualify relay on both PCs; verify native engine submission cannot bypass the worker boundary |
 | Durable result return and selective cleanup | Signed ready proof, real Viewer process death/recovery, synthetic 24-hour timer and preserved raw GCP/originals | Installed credentials, NAS durability and actual return to Viewer |
-| Coordinator/worker maintenance | Frozen image `7adf6e6e` passed local Docker forward22 and rollback30/audit. Later configured early-drain changes are selected at `162f489c`, passing228/228 affected cases | New combined image/pins and release qualification, actual private config/NAS/Viewer trust, real worker installation/activation, installed drain/update/resume |
+| Coordinator/worker maintenance | Combined image `5d466eb5` includes selected early-drain changes:228/228 affected cases, local Docker forward22 and rollback30/audit; image is hash-checked in cluster cache | Typed pre-start review follow-up, actual private config/NAS/Viewer trust, real worker installation/activation, installed drain/update/resume |
 | Long transfer after coordinator outage | Renewal/mint plus scratch and per-receipt delivery fences integrated; 442/442 frozen Linux checks passed at `b467c3b` | Actual coordinator-restart fetching/processing recovery, worker enrollment and connected delivery remain open |
 | Viewer GCP workflow | Corrected curated Viewer `7598858b` passed 158/158 Linux checks and 3/3 actual local Processing/Viewer pairings, including licensed conversion, result acceptance and signed 24-hour cleanup | Installed deployment/return acceptance, NAVD88 geoid qualification and rendered UI acceptance remain open |
 | TreeDar and Gaussian splats | Genuine-LiDAR validation, native stage/publication and typed V2 wire exist; availability remains false | Finish combined execution and typed transport, Viewer LiDAR submission/typed ingestion/readiness, then genuine real processing; Gaussian remains disabled |
