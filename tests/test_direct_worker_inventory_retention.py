@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import unittest
 import subprocess
@@ -64,6 +65,19 @@ class InventoryRetentionTests(unittest.TestCase):
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         with self.assertRaises(module.PolicyConflict):
             module.ScratchLedger(self.f.ledger.path,self.f.root,capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
+
+    def test_recover_signed_inventory_in_new_process(self):
+        retention.retain(self.f.ledger,**self.args)
+        args={k:v for k,v in self.args.items() if k!='payload'}
+        args['verification']=dict(args['verification'],allowed_odm_options=list(args['verification']['allowed_odm_options']))
+        script=("import json,sys; from processing.scratch_policy import ScratchLedger; "
+            "from processing.direct_worker_inventory_retention import recover; "
+            "x=json.load(sys.stdin); x['args']['verification']['allowed_odm_options']=set(x['args']['verification']['allowed_odm_options']); "
+            "l=ScratchLedger(x['path'],x['root'],capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100); "
+            "print(recover(l,**x['args'])['submissionId'])")
+        child=subprocess.run([sys.executable,'-c',script],input=json.dumps(dict(path=str(self.f.ledger.path),root=str(self.f.root),args=args)),
+                             capture_output=True,text=True,timeout=10)
+        self.assertEqual(child.returncode,0,child.stderr);self.assertEqual(child.stdout.strip(),self.f.payload['submissionId'])
 
     def test_missing_guard_refused_on_restart(self):
         retention.retain(self.f.ledger,**self.args)
