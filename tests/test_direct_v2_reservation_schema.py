@@ -1,6 +1,9 @@
 """Isolated schema/census review fixture; no live reservation or custody."""
 import unittest
 import uuid
+import os
+import subprocess
+import sys
 from processing import direct_v2_reservation_schema as schema
 from processing.maintenance import Conflict
 from processing.coordinator_freeze import CoordinatorFrozen
@@ -78,5 +81,17 @@ class ReservationSchemaTests(unittest.TestCase):
             with self.assertRaisesRegex(Conflict,'fence mismatch'):schema.metadata_bytes(db)
             db.execute('BEGIN IMMEDIATE')
             with self.assertRaisesRegex(Conflict,'fence mismatch'):schema.ensure_schema(db)
+
+    @unittest.skipUnless(os.environ.get('LTDS_PRE_FENCE_SOURCE'),'pre-fence source not supplied')
+    def test_actual_prior_queue_rejects_v2_reservation_fence(self):
+        with self.f.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');schema.ensure_schema(db)
+        path=self.f.temp.name;self.f.queue.close()
+        old=os.environ['LTDS_PRE_FENCE_SOURCE']
+        code='from processing.prototype import Queue; import sys; Queue(sys.argv[1],node_ids=("cluster","main"),reference_enabled=True)'
+        result=subprocess.run([sys.executable,'-c',code,path],cwd=old,
+            env=dict(os.environ,PYTHONPATH=old),capture_output=True,text=True,timeout=10)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('reviewed_legacy_barrier_conversion_required',result.stderr)
 
 if __name__=='__main__':unittest.main()

@@ -136,6 +136,10 @@ class DirectV2AdmissionTests(unittest.TestCase):
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM direct_v2_reservations').fetchone()[0],0)
             db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?',(original,job['jobId']))
+        with patch('processing.direct_v2_reservation.time.monotonic',side_effect=[0,0,1000]):
+            with self.assertRaisesRegex(Conflict,'readiness expired'):reservations.reserve(**options)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM direct_v2_reservations').fetchone()[0],0)
         from processing.direct_v2_reservation import V2ReservationUncertain
         with patch('processing.direct_v2_reservation.time.monotonic',side_effect=[0,0,0,1000]):
             with self.assertRaises(V2ReservationUncertain):reservations.reserve(**options)
