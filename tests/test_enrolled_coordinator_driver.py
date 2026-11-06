@@ -101,7 +101,7 @@ class ModelBoundary:
     def fresh(self,identity,source,**kwargs):
         if b'SELECT * FROM coordinator_freeze_receipts' in source:
             request=packet(source);return copy.deepcopy(self.driver.docker.receipts.get(request['requestId'],{'found':False}))
-        if b'HTTPConnection' in source:return dict(status=200,body={'healthy':True})
+        if b'HTTPConnection' in source:return dict(status=200,body={'status':'ok','mode':'routing_probe'})
         return copy.deepcopy(self.physical)
     def __call__(self,role,context):
         item=self.driver.docker.inspect(context['containerId']);t.require(item['State']['Running'],'model_owner_not_running')
@@ -232,6 +232,16 @@ class ConcreteDriverTests(unittest.TestCase):
         count=sum(call[0]=='start' for call in self.docker.calls)
         state=self.controller.inspect();self.assertEqual(state['phase'],'final-frozen')
         self.assertEqual(sum(call[0]=='start' for call in self.docker.calls),count)
+
+    def test_start_health_cannot_accept_restarted_or_stopped_incarnation(self):
+        for field,value in (('Pid',999999),('StartedAt','changed'),('Running',False)):
+            with self.subTest(field=field):
+                item=copy.deepcopy(self.docker.original)
+                item['State'].update(Running=True,Pid=123,StartedAt='original')
+                after=copy.deepcopy(item);after['State'][field]=value
+                with patch.object(self.driver.docker,'inspect',return_value=after):
+                    with self.assertRaisesRegex(t.TransportHeld,'startup_incarnation_changed'):
+                        self.driver._health(item,initial=True)
 
     def test_delayed_recreated_controller_uses_actual_start_not_current_inspection_clock(self):
         self.advance_until('final-created');self.docker.lose='start'

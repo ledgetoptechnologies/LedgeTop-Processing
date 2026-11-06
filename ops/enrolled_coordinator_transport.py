@@ -801,6 +801,58 @@ finally:connection.close()
 ''').encode()
 
 
+def startup_health_script():
+    """One retired read-only observer, inside the existing 30-second RPC budget.
+
+    Only a refused connect before any HTTP request is sent may wait. A timeout,
+    lost response, HTTP error, or malformed readiness body is never retried.
+    """
+    source = '''import errno,http.client,json,os,time,signal
+from pathlib import Path
+def incarnation():
+ return Path('/proc/1/stat').read_text().rsplit(')',1)[1].split()[19]
+original=incarnation()
+token=os.environ.get('PROCESSING_PROTOTYPE_OPERATOR_TOKEN','')
+if len(token)<32:raise RuntimeError('operator_credential_unavailable')
+if int(os.environ.get('PROCESSING_PORT','8080'))!=8080:raise RuntimeError('reviewed_native_listener_required')
+deadline=time.monotonic()+20
+def expired(signum,frame):raise TimeoutError('startup_health_deadline')
+if signal.getitimer(signal.ITIMER_REAL)!=(0.0,0.0):raise RuntimeError('startup_observer_timer_in_use')
+signal.signal(signal.SIGALRM,expired)
+signal.setitimer(signal.ITIMER_REAL,20)
+while True:
+ if incarnation()!=original:raise RuntimeError('startup_incarnation_changed')
+ remaining=deadline-time.monotonic()
+ if remaining<=0:raise RuntimeError('startup_health_deadline')
+ connection=http.client.HTTPConnection('127.0.0.1',8080,timeout=min(5,remaining))
+ try:
+  try:connection.connect()
+  except OSError as error:
+   if error.errno!=errno.ECONNREFUSED:raise
+   connection.close()
+   remaining=deadline-time.monotonic()
+   if remaining<=0:raise RuntimeError('startup_health_deadline')
+   time.sleep(min(.1,remaining))
+   continue
+  connection.request('GET','/healthz',headers={'Authorization':'Bearer '+token,'Accept':'application/json','Connection':'close'})
+  response=connection.getresponse();raw=response.read(65537)
+  if response.status!=200:raise RuntimeError('actual_application_health_required')
+  if len(raw)>65536 or response.getheader('Content-Encoding','identity')!='identity' or response.getheader('Content-Type','').split(';')[0]!='application/json':raise RuntimeError('operator_rpc_unavailable')
+  body=json.loads(raw)
+  if type(body) is not dict or body.get('status')!='ok' or body.get('mode')!='routing_probe':raise RuntimeError('invalid_startup_health_body')
+  if incarnation()!=original:raise RuntimeError('startup_incarnation_changed')
+  if time.monotonic()>deadline:raise RuntimeError('startup_health_deadline')
+  print(json.dumps(dict(status=200,body=body),sort_keys=True,separators=(',',':')))
+  break
+ finally:connection.close()
+'''
+    # The tracked wrapper executes this on its main thread in a fresh Linux
+    # process. The alarm also bounds slow headers/body/parsing, and is retired
+    # before the wrapper writes its own completion/retirement records.
+    return ('import signal\ndef observe():\n'+''.join(' '+line+'\n' for line in source.splitlines())+
+            'try:\n observe()\nfinally:\n signal.setitimer(signal.ITIMER_REAL,0)\n').encode()
+
+
 def gate_receipt_script(request):
     """Read exact existing receipt. This never repeats a POST as a lookup."""
     fields = {'requestId', 'planId', 'expectedRevision', 'action', 'startupId'}

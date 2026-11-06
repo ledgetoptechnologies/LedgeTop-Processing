@@ -17,7 +17,7 @@ from .enrolled_coordinator_deployment import (validate_bundle,verify_private_art
                                              derived_holder_settings)
 from .enrolled_coordinator_transport import (DockerCLI,TrackedExec,PrivateProofs,HostOperation,require,canonical,digest,
     decode,private_bytes,environment_file,immutable_container_recipe,container_environment,create_arguments,
-    operator_script,gate_receipt_script,physical_binding_script,OWNER_LABEL,ROLE_LABEL,INTENT_LABEL)
+    operator_script,startup_health_script,gate_receipt_script,physical_binding_script,OWNER_LABEL,ROLE_LABEL,INTENT_LABEL)
 from .enrolled_coordinator_ssh import TrackedWorkerProbe
 
 
@@ -157,9 +157,19 @@ class ConcreteCutoverDriver:
                 and item['State'].get('OOMKilled') is False and not item['State'].get('Error'),
                 'verified_graceful_container_stop_required')
 
-    def _health(self,item):
-        result=self.boundary.fresh(item['Id'],operator_script('GET','/healthz'))
+    def _health(self,item,*,initial=False):
+        if initial:
+            require(item['State']['Running'] is True and item['State']['Pid']>0,'started_candidate_required')
+        result=self.boundary.fresh(item['Id'],startup_health_script() if initial else operator_script('GET','/healthz'))
         require(result.get('status')==200,'actual_application_health_required')
+        if initial:
+            require(type(result.get('body')) is dict and result['body'].get('status')=='ok'
+                    and result['body'].get('mode')=='routing_probe','invalid_startup_health_body')
+            after=self.docker.inspect(item['Id'])
+            require(after['Id']==item['Id'] and after['Image']==item['Image']
+                    and after['State']['Running'] is True
+                    and all(after['State'][key]==item['State'][key] for key in ('Pid','StartedAt')),
+                    'startup_incarnation_changed')
 
     def _gate_request(self,action,state):
         startup=self._prior(state,'start-final' if action=='resume-final-gate' else 'start-bootstrap')['gate']['snapshot']['startupId']
@@ -416,7 +426,7 @@ finally:db.close()
             item=self._find('holder');self._stopped(item);return self._summary(item)
         if action in ('start-bootstrap','start-final'):
             role=action.removeprefix('start-');item=self._find(role)
-            self.boundary.container(item['Id'],role,self._creation(item));self._health(item)
+            self.boundary.container(item['Id'],role,self._creation(item));self._health(item,initial=True)
             gate=self.boundary.gate(item['Id']);snapshot=gate['snapshot']
             require(snapshot['authorityId']==self.plan['authorityId'] and gate['ownerSha256']==self._preflight()['ownerSha256']
                     and snapshot['phase']==('open' if role=='bootstrap' else 'frozen')
