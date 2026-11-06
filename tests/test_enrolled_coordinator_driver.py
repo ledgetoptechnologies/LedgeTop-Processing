@@ -243,6 +243,14 @@ class ConcreteDriverTests(unittest.TestCase):
                     with self.assertRaisesRegex(t.TransportHeld,'startup_incarnation_changed'):
                         self.driver._health(item,initial=True)
 
+    def test_only_initial_predecessor_start_uses_bounded_health_without_new_start(self):
+        before=list(self.docker.calls)
+        for action in ('start-exact-predecessor','verify-predecessor-readiness','restore-predecessor-restart'):
+            with patch.object(self.driver,'_health') as health:
+                self.driver._observe(action,{}, {})
+                health.assert_called_once_with(self.docker.original,initial=action=='start-exact-predecessor')
+        self.assertEqual(self.docker.calls,before)
+
     def test_delayed_recreated_controller_uses_actual_start_not_current_inspection_clock(self):
         self.advance_until('final-created');self.docker.lose='start'
         with self.assertRaises(j.CutoverHeld):self.controller.advance()

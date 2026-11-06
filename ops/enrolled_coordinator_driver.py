@@ -503,7 +503,8 @@ finally:db.close()
         if action=='restore-predecessor-name':
             old=self._original();require(old['Name']=='/'+journal.NAME,'original_name_not_restored');return self._summary(old)
         if action in ('start-exact-predecessor','verify-predecessor-readiness','restore-predecessor-restart'):
-            old=self._original();require(old['State']['Running'] is True,'original_not_running');self._health(old)
+            old=self._original();require(old['State']['Running'] is True,'original_not_running')
+            self._health(old,initial=action=='start-exact-predecessor')
             if action=='restore-predecessor-restart':
                 require(old['HostConfig']['RestartPolicy']==self.plan['predecessor']['restartPolicy'],'original_restart_not_restored')
             return self._summary(old)
