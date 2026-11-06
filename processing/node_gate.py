@@ -201,6 +201,39 @@ class NodeGate:
     def _save(self, state):
         self._write('gate.json', state)
 
+    def _refuse_direct_hold(self):
+        """An unknown or retained direct hold always requires inspection."""
+        self._check_lock()
+        if os.path.lexists(self.root / 'direct-hold.json'):
+            raise GateError('direct transfer hold requires reconciliation')
+
+    def _arm_direct_hold(self, receipt_id, scratch_binding_sha256):
+        """Durably latch a direct reservation before any source writer/pin.
+
+        No automatic clearing path exists; verified cross-system recovery must
+        be designed separately. Older executables do not honor this marker.
+        """
+        state,reservation=self._reservation(receipt_id)
+        if (type(scratch_binding_sha256) is not str or
+                re.fullmatch('[0-9a-f]{64}',scratch_binding_sha256) is None or
+                receipt_id!=scratch_binding_sha256[:32] or reservation['job'] is None):
+            raise GateError('direct hold binding invalid')
+        expected=dict(schema=1,receiptId=receipt_id,generation=state['generation'],
+                      scratchBindingSha256=scratch_binding_sha256)
+        path=self.root / 'direct-hold.json'
+        if os.path.lexists(path):
+            try:
+                if path.is_symlink() or not path.is_file() or path.stat().st_size>1024:
+                    raise ValueError()
+                existing=json.loads(path.read_bytes())
+                if (type(existing) is not dict or
+                    json.dumps(existing,sort_keys=True,separators=(',',':'))!=
+                    json.dumps(expected,sort_keys=True,separators=(',',':'))):raise ValueError()
+            except (OSError,ValueError,TypeError):
+                raise GateError('direct transfer hold requires reconciliation') from None
+            return
+        self._write('direct-hold.json',expected)
+
     def _write(self, name, value):
         self._check_lock()
         temporary = self.root / ('gate-' + uuid.uuid4().hex + '.tmp')
@@ -232,6 +265,7 @@ class NodeGate:
         return state
 
     def handover(self, node_id, origin, authority_id, expected_generation, *, old_worker_stopped, note):
+        self._refuse_direct_hold()
         binding = _binding(node_id, origin, authority_id)
         state = self.snapshot()
         self._generation(state, expected_generation)
@@ -249,6 +283,7 @@ class NodeGate:
             raise GateError('stale node ownership generation')
 
     def reserve(self, node_id, origin, authority_id, generation, receipt_id):
+        self._refuse_direct_hold()
         binding = _binding(node_id, origin, authority_id)
         state = self.snapshot()
         self._generation(state, generation)
@@ -297,6 +332,7 @@ class NodeGate:
         self._save(state)
 
     def acknowledge(self, receipt_id, job_ack):
+        self._refuse_direct_hold()
         state = self.snapshot()
         identity, digest = self._job(state, job_ack), _digest(job_ack)
         tombstone = {'receiptId': receipt_id, 'job': identity, 'completionDigest': digest,
@@ -312,6 +348,7 @@ class NodeGate:
         self._save(state)
 
     def release_empty(self, receipt_id, response):
+        self._refuse_direct_hold()
         state = self.snapshot()
         tombstone = {'receiptId': receipt_id, 'generation': state['generation'], 'kind': 'empty'}
         if (state['reservation'] is None and state.get('lastAcknowledgment') == tombstone
@@ -381,6 +418,7 @@ class NodeGate:
         first, including uncertain claims whose job UUID was never received.
         The new generation fences stale worker invocations after recovery.
         """
+        self._refuse_direct_hold()
         state, reservation = self._reservation(receipt_id)
         self._generation(state, expected_generation)
         if (old_worker_stopped is not True or coordinator_resolved is not True

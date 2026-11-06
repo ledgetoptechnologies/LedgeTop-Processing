@@ -1,13 +1,16 @@
 """Disposable local gate/pin tests, not a live coordinator handoff."""
 import copy
 import io
+import threading
 import unittest
 import uuid
+from unittest.mock import patch
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from processing import direct_worker_fence_proof as proof
 from processing.direct_limits import PROFILE
 from processing.scratch_policy import PolicyConflict
 from processing import direct_worker_receiver as receiver
+from processing.node_gate import NodeGate, GateBusy, GateError
 from tests import test_direct_worker_receiver as fixture
 
 class FenceProofTests(unittest.TestCase):
@@ -69,5 +72,53 @@ class FenceProofTests(unittest.TestCase):
         f.ledger=f.open_ledger()
         with self.assertRaises(PolicyConflict):
             f.ledger.settle_unstarted(f.observation['scratchReservationId'],transfer_ended=True)
+        with NodeGate(f.engine) as gate:
+            with self.assertRaisesRegex(GateError,'direct transfer hold'):
+                gate.resolve(f.observation['bindingSha256'][:32],1,old_worker_stopped=True,
+                    coordinator_resolved=True,note='synthetic')
+
+    def test_operator_resolve_cannot_race_active_first_writer(self):
+        f=self.f;signed=self.issue();pin=self.verify(signed)['pinId']
+        started=threading.Event();proceed=threading.Event();errors=[]
+        class BlockingReader(io.BytesIO):
+            def read(self,n=-1):
+                started.set()
+                if not proceed.wait(3):raise TimeoutError('test wait expired')
+                return super().read(n)
+        def run():
+            try:
+                receiver.receive(f.ledger,f.spool,f.manifest,f.item,expected_worker=f.worker,engine_id=f.engine,
+                    coordinator_origin=f.origin,gate_generation=1,object_id='object-1',derived_ids=f.derived_ids,
+                    reader=BlockingReader(f.data),_readiness_pin=pin)
+            except BaseException as e:errors.append(e)
+        thread=threading.Thread(target=run);thread.start()
+        try:
+            self.assertTrue(started.wait(3))
+            with self.assertRaises(GateBusy):
+                with NodeGate(f.engine):pass
+        finally:
+            proceed.set();thread.join(3)
+        self.assertFalse(thread.is_alive());self.assertEqual(errors,[])
+        with NodeGate(f.engine) as gate:
+            with self.assertRaisesRegex(GateError,'direct transfer hold'):
+                gate.resolve(f.observation['bindingSha256'][:32],1,old_worker_stopped=True,
+                    coordinator_resolved=True,note='synthetic')
+
+    def test_failure_after_gate_latch_before_pin_still_blocks_resolve(self):
+        f=self.f
+        with patch.object(f.ledger,'begin_direct_writer',side_effect=RuntimeError('synthetic crash')):
+            with self.assertRaises(RuntimeError):self.issue()
+        with NodeGate(f.engine) as gate:
+            with self.assertRaisesRegex(GateError,'direct transfer hold'):
+                gate.resolve(f.observation['bindingSha256'][:32],1,old_worker_stopped=True,
+                    coordinator_resolved=True,note='synthetic')
+
+    def test_corrupt_direct_hold_still_blocks_gate_mutation(self):
+        f=self.f;self.issue()
+        (f.root/'gate'/'direct-hold.json').write_text('{broken')
+        with NodeGate(f.engine) as gate:
+            with self.assertRaisesRegex(GateError,'direct transfer hold'):
+                gate.resolve(f.observation['bindingSha256'][:32],1,old_worker_stopped=True,
+                    coordinator_resolved=True,note='synthetic')
 
 if __name__=='__main__':unittest.main()

@@ -127,6 +127,7 @@ def receive(ledger, spool, manifest, item, *, expected_worker, engine_id,
         raise ValueError('owned open source reader required')
     with NodeGate(engine_id) as gate:
         check_scope(ledger,spool,item,sha,scratch_id,gate,coordinator_origin=coordinator_origin,gate_generation=gate_generation)
+        gate._arm_direct_hold(sha[:32],sha)
         pin = (ledger.begin_direct_writer(scratch_id, scratch_settings(item, scratch_id)) if _readiness_pin is None else
                ledger._handover_direct_writer(scratch_id, scratch_settings(item, scratch_id), _readiness_pin))
         # On any exception, including a close failure or process death, retain
