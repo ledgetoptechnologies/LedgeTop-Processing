@@ -43,6 +43,14 @@ DIRECT_CUSTODY_VERSION = 1
 MAX_DIRECT_CUSTODY_FENCES = 4096
 DIRECT_GRANT_SCHEMA = '''CREATE TABLE IF NOT EXISTS direct_worker_grants (
  reservation TEXT PRIMARY KEY, operation TEXT UNIQUE NOT NULL, principal TEXT NOT NULL, binding_sha TEXT NOT NULL)'''
+READINESS_ISSUE_SCHEMA = '''CREATE TABLE IF NOT EXISTS direct_readiness_issues (
+ challenge TEXT PRIMARY KEY, reservation TEXT NOT NULL, request_sha TEXT NOT NULL,
+ state TEXT NOT NULL, proof BLOB)'''
+READINESS_ISSUE_TRIGGERS = (
+    "CREATE TRIGGER IF NOT EXISTS readiness_issue_no_replace BEFORE INSERT ON direct_readiness_issues WHEN EXISTS (SELECT 1 FROM direct_readiness_issues WHERE challenge=NEW.challenge) BEGIN SELECT RAISE(ABORT,'readiness issue retained'); END",
+    "CREATE TRIGGER IF NOT EXISTS readiness_issue_no_delete BEFORE DELETE ON direct_readiness_issues BEGIN SELECT RAISE(ABORT,'readiness issue retained'); END",
+    "CREATE TRIGGER IF NOT EXISTS readiness_issue_update_guard BEFORE UPDATE ON direct_readiness_issues WHEN OLD.challenge!=NEW.challenge OR OLD.reservation!=NEW.reservation OR OLD.request_sha!=NEW.request_sha OR OLD.state!='issuing' OR NEW.state!='issued' OR OLD.proof IS NOT NULL OR NEW.proof IS NULL BEGIN SELECT RAISE(ABORT,'readiness issue retained'); END",
+)
 DIRECT_GRANT_TRIGGERS = (
     "CREATE TRIGGER IF NOT EXISTS direct_grant_no_replace BEFORE INSERT ON direct_worker_grants WHEN EXISTS (SELECT 1 FROM direct_worker_grants WHERE reservation=NEW.reservation OR operation=NEW.operation) BEGIN SELECT RAISE(ABORT,'direct grant retained'); END",
     "CREATE TRIGGER IF NOT EXISTS direct_grant_no_update BEFORE UPDATE ON direct_worker_grants BEGIN SELECT RAISE(ABORT,'direct grant retained'); END",
@@ -161,6 +169,14 @@ class ScratchLedger:
                 saved=db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
                 try: prior=json.loads(saved[0]) if saved else {}
                 except (ValueError,TypeError):raise PolicyConflict('unknown accounting version or ledger policy') from None
+                if 'directReadinessIssueVersion' in prior:
+                    row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='direct_readiness_issues'").fetchone()
+                    if row is None or ' '.join(row['sql'].split())!=' '.join(READINESS_ISSUE_SCHEMA.replace(' IF NOT EXISTS','').split()):
+                        raise PolicyConflict('readiness issue schema changed')
+                    for sql in READINESS_ISSUE_TRIGGERS:
+                        row=db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(sql.split()[5],)).fetchone()
+                        if row is None or ' '.join(row['sql'].split())!=' '.join(sql.replace(' IF NOT EXISTS','').split()):
+                            raise PolicyConflict('readiness issue guards changed')
                 if 'directGrantVersion' in prior:
                     row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='direct_worker_grants'").fetchone()
                     if row is None or ' '.join(row['sql'].split())!=' '.join(DIRECT_GRANT_SCHEMA.replace(' IF NOT EXISTS','').split()):
@@ -227,6 +243,8 @@ class ScratchLedger:
                 db.execute(trigger)
             db.execute(CUSTODY_SCHEMA)
             db.execute(DIRECT_GRANT_SCHEMA)
+            db.execute(READINESS_ISSUE_SCHEMA)
+            for trigger in READINESS_ISSUE_TRIGGERS:db.execute(trigger)
             for trigger in DIRECT_GRANT_TRIGGERS:db.execute(trigger)
             for trigger in CUSTODY_TRIGGERS:
                 db.execute(trigger)
@@ -298,6 +316,31 @@ class ScratchLedger:
         if config is None:raise PolicyConflict('accounting configuration missing')
         try: observed_config=json.loads(config[0])
         except (TypeError,ValueError):raise PolicyConflict('unknown accounting version or ledger policy') from None
+        schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='direct_readiness_issues'").fetchone()
+        if schema is None or ' '.join(schema['sql'].split())!=' '.join(READINESS_ISSUE_SCHEMA.replace(' IF NOT EXISTS','').split()):
+            raise PolicyConflict('readiness issue schema changed')
+        for sql in READINESS_ISSUE_TRIGGERS:
+            row=db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(sql.split()[5],)).fetchone()
+            if row is None or ' '.join(row['sql'].split())!=' '.join(sql.replace(' IF NOT EXISTS','').split()):
+                raise PolicyConflict('readiness issue guards changed')
+        issues=db.execute('SELECT * FROM direct_readiness_issues LIMIT 4097').fetchall()
+        if len(issues)>4096:raise PolicyConflict('readiness issue capacity exceeded')
+        if issues or 'directReadinessIssueVersion' in observed_config:
+            if (type(observed_config.get('directReadinessIssueVersion')) is not int or observed_config['directReadinessIssueVersion']!=1
+                    or type(observed_config.get('directReadinessIssueCount')) is not int or observed_config['directReadinessIssueCount']!=len(issues)):
+                raise PolicyConflict('readiness issue marker changed')
+            base['directReadinessIssueVersion']=1;base['directReadinessIssueCount']=len(issues)
+        for issue in issues:
+            if (not re.fullmatch(r'direct-[a-f0-9]{64}',issue['reservation'])
+                    or not re.fullmatch(r'[a-f0-9]{64}',issue['request_sha'])
+                    or issue['state'] not in ('issuing','issued')
+                    or (issue['state']=='issued')!=(issue['proof'] is not None)
+                    or (issue['proof'] is not None and (type(issue['proof']) is not bytes or len(issue['proof'])>8192))
+                    or db.execute('SELECT 1 FROM reservations WHERE id=?',(issue['reservation'],)).fetchone() is None):
+                raise PolicyConflict('readiness issue journal changed')
+            try:
+                if str(uuid.UUID(issue['challenge']))!=issue['challenge']:raise ValueError()
+            except (ValueError,TypeError,AttributeError):raise PolicyConflict('readiness issue challenge changed') from None
         schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='direct_worker_grants'").fetchone()
         if schema is None or ' '.join(schema['sql'].split())!=' '.join(DIRECT_GRANT_SCHEMA.replace(' IF NOT EXISTS','').split()):
             raise PolicyConflict('direct grant schema changed')
@@ -500,6 +543,7 @@ class ScratchLedger:
             outstanding += db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             outstanding += db.execute('SELECT COUNT(*) FROM direct_custody_fences').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             outstanding += db.execute('SELECT COUNT(*) FROM direct_worker_grants').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
+            outstanding += db.execute('SELECT COUNT(*) FROM direct_readiness_issues').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             free = _integer(self.probe(self.root), "free bytes")
             if free - outstanding - self.floor < total:
                 raise PolicyConflict("insufficient unreserved scratch")
@@ -551,6 +595,7 @@ class ScratchLedger:
             outstanding += db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             outstanding += db.execute('SELECT COUNT(*) FROM direct_custody_fences').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             outstanding += db.execute('SELECT COUNT(*) FROM direct_worker_grants').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
+            outstanding += db.execute('SELECT COUNT(*) FROM direct_readiness_issues').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             free = _integer(self.probe(self.root), 'free bytes')
             if free - outstanding - self.floor < DIRECT_WRITER_PIN_ALLOWANCE:
                 raise PolicyConflict('insufficient unreserved scratch for direct writer pin')
@@ -589,6 +634,7 @@ class ScratchLedger:
             outstanding+=(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0]
                           +db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0]
                           +db.execute('SELECT COUNT(*) FROM direct_worker_grants').fetchone()[0]
+                          +db.execute('SELECT COUNT(*) FROM direct_readiness_issues').fetchone()[0]
                           +count)*DIRECT_WRITER_PIN_ALLOWANCE
             if _integer(self.probe(self.root),'free bytes')-outstanding-self.floor < DIRECT_WRITER_PIN_ALLOWANCE:
                 raise PolicyConflict('direct custody metadata budget unavailable')
@@ -650,6 +696,7 @@ class ScratchLedger:
             outstanding+=(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0]
                           +db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0]
                           +db.execute('SELECT COUNT(*) FROM direct_worker_grants').fetchone()[0]
+                          +db.execute('SELECT COUNT(*) FROM direct_readiness_issues').fetchone()[0]
                           +db.execute('SELECT COUNT(*) FROM direct_custody_fences').fetchone()[0])*DIRECT_WRITER_PIN_ALLOWANCE
             if _integer(self.probe(self.root),'free bytes')-outstanding-self.floor < DIRECT_WRITER_PIN_ALLOWANCE:
                 raise PolicyConflict('insufficient scratch for V2 readiness journal')

@@ -78,3 +78,10 @@ intent size instead of the maximum for every session. A merged run passed 72
 tests with three external-fixture skips. This is not a physical SQLite/WAL disk
 quota, and old journal migration, safe 24-hour retirement and large-workload
 performance remain unqualified.
+
+The worker readiness prototype can journal a request and replay an unexpired
+proof while its exact pin remains present. Uncertain failures retain the pin;
+no automatic reclaim is authorized. An integrated run passed 100 tests with
+12 external-fixture skips. This journal is not wired to an authenticated worker
+endpoint and does not prove installed restart recovery. Its retained history
+also has an unqualified 4,096-record lifetime limit and scan cost.
