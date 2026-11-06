@@ -92,7 +92,15 @@ TAR verification proves retained bytes, not original authority or permission to
 restore; the separate original-boundary proofs provide lease/writer evidence.
 
 The successful harness retired its exact owned inner containers and volumes.
-Both transport task-label inventories were verified empty. The stopped outer
-and its one artifact volume remain retained pending root review; no additional
-retirement, rollback or new operation is implied by this receipt. Private host
-evidence remains independent of those disposable resources.
+Both transport task-label inventories were verified empty. After root reviewed
+the complete cold export, the exact stopped outer and its single artifact volume
+were also retired without force. Fresh checks bound full image/operation label/
+PID0/exit0/no-OOM, followed by a closed full-container inventory proving no
+named-volume or bind/parent/child alias users of that exact volume. Both outer
+task-label inventories were empty afterward. Private host evidence remains.
+
+The sanitized result JSON, complete stdout, journal and cold operation are
+retained at the private host evidence directory recorded in the handoff. The
+original manifest covers its original 276 files; the subsequently added sanitized
+result is explicitly separate. No rollback or new operation is implied by this
+resource retirement.
