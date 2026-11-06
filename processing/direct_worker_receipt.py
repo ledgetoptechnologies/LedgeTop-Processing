@@ -16,6 +16,33 @@ CLOSURE_FIELDS=frozenset(('protocol','reservationId','scratchBindingSha256','aut
 class ReceiptRejected(ValueError):pass
 
 
+def validate_closure(value):
+    """Closed exact-type local observation; not an upstream custody receipt."""
+    try:
+        if type(value) is not dict or set(value)!=CLOSURE_FIELDS:
+            raise ValueError()
+        if (type(value['protocol']) is not str or value['protocol']!='ltds-direct-local-closure-v1'
+                or value['localClosureComplete'] is not True
+                or value['sourceCustodyAccepted'] is not False
+                or value['processingAuthorized'] is not False):
+            raise ValueError()
+        for name in ('reservationId','authorityId','jobId','attemptId'):
+            p._uuid(value[name],name)
+        for name in ('nodeId','workerId','workerInstanceId'):
+            p._slug(value[name],name)
+        for name in ('scratchBindingSha256','manifestSha256','derivedManifestSha256'):
+            p._hash(value[name],name)
+        p._environment(value['environment'])
+        p._integer(value['generation'],'generation')
+        p._integer(value['sourceObjectCount'],'sourceObjectCount')
+        p._integer(value['derivedObjectCount'],'derivedObjectCount',allow_zero=True)
+        if value['sourceObjectCount']+value['derivedObjectCount']>p.MAX_OBJECTS:
+            raise ValueError()
+        return copy.deepcopy(value)
+    except (ValueError,TypeError,KeyError):
+        raise ReceiptRejected('invalid worker closure') from None
+
+
 class WorkerClosureSigner:
     def __init__(self,*,issuer_id,key_id,identity,private_key):
         p._slug(issuer_id,'issuer');p._slug(key_id,'key')
@@ -27,11 +54,8 @@ class WorkerClosureSigner:
         self.issuer_id,self.key_id,self.identity,self._key=issuer_id,key_id,dict(identity),private_key
 
     def issue(self,closure):
-        if (type(closure) is not dict or set(closure)!=CLOSURE_FIELDS or any(closure.get(k)!=self.identity[k] for k in IDENTITY)
-                or closure.get('protocol')!='ltds-direct-local-closure-v1'
-                or closure.get('localClosureComplete') is not True
-                or closure.get('sourceCustodyAccepted') is not False
-                or closure.get('processingAuthorized') is not False):
+        closure=validate_closure(closure)
+        if any(closure[k]!=self.identity[k] for k in IDENTITY):
             raise ReceiptRejected('worker closure identity mismatch')
         body=dict(protocol=PROTOCOL,schemaVersion=1,issuerId=self.issuer_id,keyId=self.key_id,closure=copy.deepcopy(closure))
         signature=self._key.sign(DOMAIN+p.canonical_json(body))
@@ -39,14 +63,14 @@ class WorkerClosureSigner:
 
 
 def verify(receipt,*,expected_closure,issuer_id,key_id,public_key):
+    expected_closure=validate_closure(expected_closure)
     if (type(receipt) is not dict or set(receipt)!={'protocol','schemaVersion','issuerId','keyId','closure','signature'}
             or receipt['protocol']!=PROTOCOL or type(receipt['schemaVersion']) is not int or receipt['schemaVersion']!=1
             or receipt['issuerId']!=issuer_id or receipt['keyId']!=key_id
-            or type(expected_closure) is not dict or set(expected_closure)!=CLOSURE_FIELDS
-            or expected_closure.get('localClosureComplete') is not True
-            or expected_closure.get('sourceCustodyAccepted') is not False
-            or expected_closure.get('processingAuthorized') is not False or receipt['closure']!=expected_closure
             or not isinstance(public_key,Ed25519PublicKey)):
+        raise ReceiptRejected('worker receipt binding mismatch')
+    observed=validate_closure(receipt['closure'])
+    if p.canonical_json(observed)!=p.canonical_json(expected_closure):
         raise ReceiptRejected('worker receipt binding mismatch')
     value=receipt['signature']
     try:

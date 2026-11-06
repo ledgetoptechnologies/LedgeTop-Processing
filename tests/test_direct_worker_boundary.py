@@ -101,5 +101,23 @@ class DirectWorkerBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(PolicyConflict,'receipt changed'):self.complete()
         self.assertEqual(receipt_path.read_bytes(),before)
 
+    def test_exact_closure_types_and_scalar_bounds_fail_closed(self):
+        self.upload();signed=self.complete();good=signed['closure']
+        invalid=(('generation',True),('generation',1.0),('generation',0),('generation',2**53),
+            ('sourceObjectCount',True),('sourceObjectCount',1.0),('sourceObjectCount',0),
+            ('derivedObjectCount',False),('derivedObjectCount',1.0),('derivedObjectCount',-1),
+            ('derivedObjectCount',10001),('jobId','not-a-uuid'),('authorityId','NOT-UUID'),
+            ('workerId','bad/worker'),('manifestSha256','A'*64),('environment','other'),
+            ('localClosureComplete',1),('sourceCustodyAccepted',0),('processingAuthorized',0))
+        for field,value in invalid:
+            with self.subTest(field=field,value=value):
+                bad=copy.deepcopy(good);bad[field]=value
+                with self.assertRaises(ReceiptRejected):self.signer.issue(bad)
+                with self.assertRaises(ReceiptRejected):verify(signed,expected_closure=bad,
+                    issuer_id='worker-issuer',key_id='worker-key',public_key=self.key.public_key())
+                altered=copy.deepcopy(signed);altered['closure'][field]=value
+                with self.assertRaises(ReceiptRejected):verify(altered,expected_closure=good,
+                    issuer_id='worker-issuer',key_id='worker-key',public_key=self.key.public_key())
+
 
 if __name__=='__main__':unittest.main()
