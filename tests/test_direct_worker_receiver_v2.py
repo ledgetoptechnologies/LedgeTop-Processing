@@ -8,6 +8,7 @@ import os
 import ssl
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -165,6 +166,11 @@ class WorkerV2Tests(unittest.TestCase):
             with self.assertRaisesRegex(GateError,'direct transfer hold'):
                 gate.resolve(self.observation['bindingSha256'][:32],1,old_worker_stopped=True,
                              coordinator_resolved=True,note='synthetic')
+
+    def test_monotonic_deadline_prevents_clock_rollback_extension(self):
+        self.boundary._proof_deadline=time.monotonic()-1
+        with self.assertRaisesRegex(DirectBoundaryDenied,'proof expired'):self.put_zero()
+        self.assertIsNotNone(self.boundary._readiness_pin)
 
     def test_full_v2_closure_requires_raw_and_derived_objects(self):
         from processing.direct_worker_closure_v2 import verify_closure
