@@ -23,6 +23,14 @@ class InventoryRetentionTests(unittest.TestCase):
         self.assertEqual(retention.recover(reopened,**args),self.f.payload)
         with self.assertRaises(PolicyConflict):retention.recover(reopened,**dict(args,coordinator_principal='coord-b'))
         with self.assertRaises(PolicyConflict):retention.retain(reopened,**dict(self.args,coordinator_principal='coord-b'))
+    def test_inventory_count_and_bytes_must_match_signed_manifests(self):
+        for field in ('objectCount','inputBytes'):
+            item=dict(self.f.item,**{field:self.f.item[field]+1})
+            with self.subTest(field=field),self.assertRaises(PolicyConflict):
+                retention.retain(self.f.ledger,**dict(self.args,item=item))
+        with self.f.ledger._transaction() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM direct_inventory_blobs').fetchone()[0],0)
+
     def test_quota_and_rollback(self):
         with patch.object(self.f.ledger,'probe',return_value=200000):
             with self.assertRaises(PolicyConflict):retention.retain(self.f.ledger,**self.args)

@@ -12,7 +12,9 @@ def _validate(payload, item, worker, verification):
     checked=inventory.prepare(payload,**verification)
     item,digest,reservation=scratch.identity(item,expected_worker=worker)
     if (item['jobId']!=checked['providerTaskId'] or item['attemptId']!=checked['submissionId']
-            or item['inventorySha256']!=checked['inventorySha256'] or
+            or item['inventorySha256']!=checked['inventorySha256']
+            or item['objectCount']!=sum(len(checked[k]['objects']) for k in ('sourceManifest','derivedManifest'))
+            or item['inputBytes']!=sum(o['byteSize'] for k in ('sourceManifest','derivedManifest') for o in checked[k]['objects']) or
             any(item[k]!=checked[k] for k in ('authorityId','environment','sourceManifestSha256',
                                                'derivedManifestSha256','pipelineManifestSha256'))):
         raise PolicyConflict('direct inventory binding changed')
