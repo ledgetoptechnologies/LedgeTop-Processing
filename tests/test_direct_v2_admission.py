@@ -32,9 +32,21 @@ class DirectV2AdmissionTests(unittest.TestCase):
             self.assertEqual(tuple(row),(0,'receiving','receiving','direct-v2','direct_admission_pending'))
         replay,created=self.store.submit_source_intake(self.validated,**self.options)
         self.assertFalse(created);self.assertEqual(replay['jobId'],job['jobId'])
+        with self.assertRaisesRegex(Conflict,'custody reconciliation'):
+            self.queue.operator(job['jobId'],'resolve',dict(note='synthetic',workerStopped=True))
         with self.assertRaises(Conflict):
             self.store.submit_source_intake(self.validated,**dict(self.options,authenticated_principal='other'))
         with self.assertRaises(Conflict):
             self.store.submit_source_intake(self.validated,**dict(self.options,ingress_mode='spool-v1',
                 source_spool=SimpleNamespace(check_capacity=lambda *args,**kwargs:None)))
+
+    def test_persisted_source_attestation_consumes_metadata_quota(self):
+        self.store.submit_source_intake(self.validated,**self.options)
+        with self.queue._db() as db:
+            attestation_bytes=db.execute('SELECT length(CAST(source_attestation_json AS BLOB)) FROM reference_source_intakes').fetchone()[0]
+            self.assertGreater(attestation_bytes,0)
+            used=self.store._metadata_used_bytes(db)
+            self.store.max_metadata_bytes=used-attestation_bytes
+            with self.assertRaisesRegex(Conflict,'metadata quota'):
+                self.store._quota(db)
 

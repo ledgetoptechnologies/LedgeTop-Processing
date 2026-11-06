@@ -310,7 +310,8 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
           COALESCE(length(CAST(transfer_json AS BLOB)),0)+COALESCE(length(CAST(result_json AS BLOB)),0)),0)
           FROM reference_jobs""").fetchone()[0]
         used += db.execute("""SELECT COALESCE(SUM(length(CAST(source_manifest_json AS BLOB))+
-          length(CAST(derived_manifest_json AS BLOB))),0) FROM reference_source_intakes""").fetchone()[0]
+          length(CAST(derived_manifest_json AS BLOB))+
+          COALESCE(length(CAST(source_attestation_json AS BLOB)),0)),0) FROM reference_source_intakes""").fetchone()[0]
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_source_intake_modes'").fetchone():
             from .source_intake_mode import _check_schema as check_source_mode_schema
             check_source_mode_schema(db)

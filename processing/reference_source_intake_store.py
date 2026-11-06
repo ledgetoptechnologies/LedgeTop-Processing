@@ -1128,6 +1128,7 @@ class ReferenceSourceIntakeMethods:
         encoded = _json(submission)
         source_encoded = _json(validated['sourceManifest'])
         derived_encoded = _json(validated['derivedManifest'])
+        attestation_encoded = _json(validated['sourceAttestation'])
         reserved_bytes = validated['sourceManifest']['totalBytes'] + sum(
             item['byteSize'] for item in validated['derivedManifest']['objects'])
         if ingress_mode == 'direct-v2':
@@ -1156,7 +1157,8 @@ class ReferenceSourceIntakeMethods:
             if db.execute('SELECT 1 FROM jobs WHERE id=?', (job_id,)).fetchone():
                 raise Conflict('providerTaskId already belongs to another queue job')
             self._quota(db, len(encoded.encode('utf-8')) + len(source_encoded.encode('utf-8'))
-                        + len(derived_encoded.encode('utf-8')) + len(job_id.encode('utf-8')) + len(ingress_mode))
+                        + len(derived_encoded.encode('utf-8')) + len(attestation_encoded.encode('utf-8'))
+                        + len(job_id.encode('utf-8')) + len(ingress_mode))
             status='held' if ingress_mode=='direct-v2' else 'queued'
             reason='direct_admission_pending' if ingress_mode=='direct-v2' else None
             db.execute("INSERT INTO jobs(id,request_id,environment,profile,status,held_reason) VALUES(?,?,?,?,?,?)",
@@ -1170,7 +1172,7 @@ class ReferenceSourceIntakeMethods:
                 derived_manifest_json,source_manifest_sha,derived_manifest_sha,pipeline_manifest_sha,reserved_bytes,
                 source_state,derived_state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'receiving','receiving')""",
                 (job_id, validated['requestDigest'], validated['viewerTaskId'], validated['providerTaskId'],
-                 _json(validated['sourceAttestation']), validated['sourceAttestation']['attestationSha256'],
+                 attestation_encoded, validated['sourceAttestation']['attestationSha256'],
                  source_encoded, derived_encoded,
                  validated['sourceManifestSha256'], validated['derivedManifestSha256'],
                  validated['manifestSha256'], reserved_bytes))
