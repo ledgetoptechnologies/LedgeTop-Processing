@@ -306,8 +306,12 @@ hold delivers, completes and reaches signed acceptance without any recovery.
 
 ### Limits
 
-A claim held with no reservation stays held for an operator; same-claim reservation
-recovery is required later work. TreeDar and combined jobs stay held. `/phase`
+A source-range-v2 ODM claim held before reservation uses schema 4: the exact
+original transfer request, accepted source custody and local unstarted proof
+atomically bind its reservation and restore running under the same claim. Lost
+claim replies replay only their original durable request/token. A lost committed
+reservation reply continues through schema 3. No source or scratch budget is
+reset. TreeDar and combined jobs stay held. `/phase`
 reports `processing` before `start()`, so that word does not mean an engine began.
 Tests use a real coordinator, worker, gate and ledger, and SIGKILL both processes,
 but the engine is synthetic: NodeODM `/task/list`, `/output` and commit behaviour,

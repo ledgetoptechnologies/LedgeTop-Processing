@@ -45,13 +45,11 @@ PREFIX = '/ltds/worker/v1'
 SOURCE_RECOVERY_ATTEMPTS = 8
 # Worker stage -> coordinator phases it can resume from. Any other pairing means
 # the worker is ahead of the coordinator, whose history was lost, so it stays held.
-SOURCE_RECOVERY_PHASES = {'reservation_pending': ('awaiting_transfer',), 'awaiting_grant': ('awaiting_transfer',),
+SOURCE_RECOVERY_PHASES = {'reservation_pending': ('queued', 'waiting_capacity', 'awaiting_transfer'), 'awaiting_grant': ('awaiting_transfer',),
     'fetching_pending': ('awaiting_transfer', 'fetching'), 'fetching': ('fetching',),
     'processing_pending': ('fetching', 'processing'), 'execution_pending': ('processing',),
     'executing': ('processing',)}
-# A claim the coordinator holds with no reservation has nothing to bind, so it waits
-# for an operator. Add these to reservation_pending above to change that, along
-# with a coordinator state for a job with no transfer.
+# Exact original claims before reservation use the closed schema-4 transition.
 SOURCE_UNRESERVED_PHASES = ('queued', 'waiting_capacity')
 # Consecutive bad engine reads before they are reported; a good read resets both.
 ENGINE_TASK_MISSING_READS = 10
@@ -1274,8 +1272,6 @@ class ReferenceDriver:
             return
         if self._restart_recoverable(state, data, stage):
             self._recover_source_fetch(job_id, stage, data)
-        elif (state['heldReason'], state['executionPhase'] in SOURCE_UNRESERVED_PHASES) == ('coordinator_restart', True):
-            raise DriverHeld('source_recovery_claim_unreserved')
 
     def _source_recovery_journal(self, data):
         from .reference_recovery import ClaimRecoveryService
@@ -1289,6 +1285,9 @@ class ReferenceDriver:
                 if type(pending) is not dict or set(pending) != {'request', 'evidence'}:
                     raise ValueError()
                 ClaimRecoveryService._source_request(pending['request'])
+                if (pending['request'].get('schemaVersion')==4
+                        and pending['request']['transferRequest']!=data.get('reservation')):
+                    raise ValueError()
                 if pending['request']['workerEvidenceSha256'] != p.digest(pending['evidence']):
                     raise ValueError()
             except (ValueError, TypeError, KeyError):
@@ -1302,7 +1301,8 @@ class ReferenceDriver:
         an occupied gate or a live task with no row is a start nobody recorded.
         An engine that cannot answer proves nothing, so it waits and spends nothing.
         """
-        if self._kind(job_id) != 'odm':
+        kind=(self._pipeline_kind(data['claim']['submission']) if phase in SOURCE_UNRESERVED_PHASES else self._kind(job_id))
+        if kind != 'odm':
             raise DriverHeld('source_recovery_engine_unsupported')
         try:
             self.worker._row(job_id)
@@ -1317,10 +1317,17 @@ class ReferenceDriver:
         with self.ledger._transaction() as db:
             current = self.ledger._reservation(db, reservation)
             state, allocated = current['state'], current['allocated']
+            if phase in SOURCE_UNRESERVED_PHASES:
+                settings=json.loads(current['settings'])
+                expected_settings=dict(job_id=job_id,generation=data['claim']['generation'],reservation_id=reservation,
+                    manifest_sha256=data['claim']['manifestSha256'],input_bytes=data['claim']['submission']['manifest']['totalBytes'],
+                    output_budget=self.output_budget,environment=data['claim']['environment'],ttl_seconds=self.transfer_ttl)
+                if settings!=expected_settings or current['job']!=job_id or current['generation']!=data['claim']['generation']:
+                    raise DriverHeld('source_recovery_ledger_changed')
         # Before the transfer nothing is fenced or written; after it, all of it is.
-        expected = (False, 0) if phase == 'awaiting_transfer' else (True, data['claim']['submission']['manifest']['totalBytes'])
+        expected = (False, 0) if phase in ('awaiting_transfer',)+SOURCE_UNRESERVED_PHASES else (True, data['claim']['submission']['manifest']['totalBytes'])
         if (state != 'reserved' or (fenced, allocated) != expected or self.ledger.result_registered(reservation)
-                or (phase == 'awaiting_transfer' and data.get('inputPaths'))):
+                or (phase in ('awaiting_transfer',)+SOURCE_UNRESERVED_PHASES and data.get('inputPaths'))):
             raise DriverHeld('source_recovery_ledger_changed')
         with NodeGate(self.worker.engine_id) as gate:
             if gate.snapshot()['reservation'] is not None:
@@ -1400,7 +1407,9 @@ class ReferenceDriver:
             expected = dict(reservationId=data['reservation']['reservationId'],
                 transferRequestSha256=p.digest(data['reservation']),
                 inputBytes=claim['submission']['manifest']['totalBytes'])
-            schema = 3 if state['claim']['executionPhase'] in SOURCE_UNSTARTED_PHASES else 2
+            unreserved=state['claim']['executionPhase'] in SOURCE_UNRESERVED_PHASES
+            schema = 4 if unreserved else 3 if state['claim']['executionPhase'] in SOURCE_UNSTARTED_PHASES else 2
+            if unreserved:expected=None
             if (state['schemaVersion'] != schema or state['protocol'] != SOURCE_STATE_PROTOCOL
                     or state['authorityId'] != self.worker.authority_id or type(state['eligible']) is not bool
                     or state['reservation'] != expected or not self._claim_bound(job_id, claim, state['claim'])
@@ -1493,15 +1502,19 @@ class ReferenceDriver:
             inputObjects=len(data.get('inputPaths', {})), **(proof or {}))
         binding = {key: state['claim'][key] for key in ('jobId', 'generation', 'environment', 'nodeId', 'workerId',
             'workerInstanceId', 'authorityId', 'claimRequestId', 'claimTokenSha256', 'manifestSha256', 'pipelineDigest')}
-        binding.update(reservationId=state['reservation']['reservationId'], inputBytes=state['reservation']['inputBytes'])
+        reservation_binding=state['reservation'] or dict(reservationId=data['reservation']['reservationId'],
+            inputBytes=claim['submission']['manifest']['totalBytes'],transferRequestSha256=p.digest(data['reservation']))
+        binding.update(reservationId=reservation_binding['reservationId'], inputBytes=reservation_binding['inputBytes'])
         request = dict(schemaVersion=2, requestId=str(uuid4()), coordinatorEpoch=state['coordinatorEpoch'],
             expectedNodeRevision=state['node']['revision'], claimBinding=binding,
-            transferRequestSha256=state['reservation']['transferRequestSha256'],
+            transferRequestSha256=reservation_binding['transferRequestSha256'],
             sourceClosureSha256=state['sourceTransfer']['closureSha256'], grantSha256=grant_sha,
             renewalSequence=sequence, committedRanges=ranges, committedBytes=committed,
             workerEvidenceSha256=p.digest(evidence))
         if proof is not None:
             request.update(schemaVersion=3, executionPhase=phase, engineClass=proof['engineClass'])
+        if state['schemaVersion']==4:
+            request.update(schemaVersion=4,transferRequest=data['reservation'])
         ClaimRecoveryService._source_request(request)
         journal.update(attempts=journal['attempts'] + 1, pending=dict(request=request, evidence=evidence))
         data['sourceRecovery'] = journal
@@ -1690,13 +1703,32 @@ class ReferenceDriver:
                 with self._db() as db:
                     db.execute("DELETE FROM driver_jobs WHERE job=? AND stage='claim_pending'", (job_id,))
                 return {'state': 'claim_dropped', 'jobId': job_id}
+            recovered_claim=False
             if 'claimState' in claim or claim['status'] != 'running':
-                raise DriverHeld('unstarted_claim_requires_reconciliation')
+                # Exact claim replay may return the original token after its
+                # lost reply. Persist only that authenticated original identity;
+                # schema-4 recovery, not this replay, can resume it.
+                if ('claimState' in claim or not self.source_range_v2_enabled
+                        or self.combined_preparation is not None or claim.get('sourceIntakeVersion')!=2
+                        or self._pipeline_kind(claim['submission'])!='odm'):
+                    raise DriverHeld('unstarted_claim_requires_reconciliation')
+                state=self._claim_state(job_id,claim)
+                if (state is None or (state['status'],state['heldReason'])!=('held','coordinator_restart')
+                        or state['executionPhase'] not in SOURCE_UNRESERVED_PHASES
+                        or claim.get('transferRequest') is not None):
+                    raise DriverHeld('unstarted_claim_requires_reconciliation')
+                self._validate_job(claim)
+                recovered_claim=True
             if self.combined_preparation is None:
                 # The coordinator shows running from here, so a bind refusal must be reportable.
                 data['claim'] = claim
                 self._save(job_id, 'claim_pending', data)
                 self._active_job = job_id
+            if recovered_claim:
+                # New execution routes require running. Bind only after the
+                # recovery CAS and fresh original-claim replay prove that state.
+                self._save(job_id,'claimed',data)
+                return {'state':'claimed','jobId':job_id}
             self._bind_claim(claim, data)
             if self.combined_preparation is not None:
                 if 'reservation' in data and 'originalCombinedClaim' not in data:raise DriverHeld('combined_claim_intent_binding_missing')
@@ -1736,6 +1768,16 @@ class ReferenceDriver:
             if status == 409:
                 self._source_refused(job_id, 'reservation_pending', data)
                 return {'state': 'reservation_pending', 'jobId': job_id}
+            if claim['status']!='running':
+                # A recovery may have committed before this worker died. Route
+                # creation still waits for fresh exact original-claim state.
+                status,fresh=self._request('POST','/claim',{'jobId':job_id,'claimRequestId':request_id})
+                state=None if status!=200 else self._claim_state(job_id,fresh)
+                if state is None or state['status']!='running' or state['executionPhase']!='awaiting_transfer':
+                    raise DriverHeld('source_execution_not_admitted')
+                self._bind_claim(fresh,data)
+                claim=fresh
+                data['claim']=claim
             claim.update(public)
             self._save(job_id, 'awaiting_grant', data)
             return {'state': 'awaiting_grant', 'jobId': job_id}

@@ -910,13 +910,15 @@ class PreflightTests(ProcessingHarness):
         self.run_to_engine()
         self.assertEqual([item['requestId'] for item in self.receipts()], [request['requestId']])
 
-    def test_no_reservation_stays_held_for_an_operator(self):
+    def test_no_reservation_recovers_the_original_claim(self):
         self.down.add('reservation')
         self.assertEqual(self.driver.step()['state'], 'retry_wait')
         self.down.clear()
         self.assertEqual(self.store.get(self.job_id)['phase'], 'queued')
         self.restart_coordinator()
-        self.assert_stays_held('source_recovery_claim_unreserved')
+        self.step('reservation_pending')
+        self.assertEqual(self.receipts()[0]['schemaVersion'],4)
+        self.run_to_engine()
 
     def test_worker_ahead_in_fetching_with_awaiting_transfer_stays_held(self):
         self.to_fetching()

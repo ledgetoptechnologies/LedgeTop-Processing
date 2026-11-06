@@ -368,10 +368,18 @@ class ReferenceSourceIntakeMethods:
                 raise Conflict('source transfer already began')
         stored = db.execute('SELECT digest FROM reference_transfer_grants WHERE job_id=?', (job_id,)).fetchone()
         if stored is not None:
+            if row['transfer_json'] is None:
+                raise Conflict('source grant without reservation')
             return self._source_fetch_closure(db, job_id)
         self._source_custody_open(db, row, job_id)
-        transfer = json.loads(row['transfer_json'])
-        if datetime.fromisoformat(transfer['expiresAt'].replace('Z', '+00:00')).timestamp() <= clock():
+        if row['transfer_json'] is None:
+            for table in ('reference_source_grant_tokens','reference_source_object_pins',
+                          'reference_source_grant_renewals','reference_source_range_usage','reference_source_range_requests'):
+                if (db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(table,)).fetchone()
+                        and db.execute(f'SELECT 1 FROM {table} WHERE job_id=? LIMIT 1',(job_id,)).fetchone()):
+                    raise Conflict('source effects without reservation')
+        transfer = json.loads(row['transfer_json']) if row['transfer_json'] is not None else None
+        if transfer is not None and datetime.fromisoformat(transfer['expiresAt'].replace('Z', '+00:00')).timestamp() <= clock():
             raise Conflict('source reservation expired')
         receipts = [dict(item) for item in db.execute('''SELECT generation,object_id,byte_size,sha256,mount_id,
             storage_key,receipt_json FROM reference_source_object_receipts WHERE job_id=? ORDER BY object_id''', (job_id,))]

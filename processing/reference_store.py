@@ -789,6 +789,15 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         A safe retry needs an explicit ScratchLedger expiry attestation proving
         no engine mutation, plus a future reconciliation API. Until then freeze.
         """
+        encoded, source_range_v2 = self._validate_transfer_request(transfer_request)
+        self.queue._known_node(node_id)
+        with self.queue._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            return self._reserve_transfer(db, job_id, transfer_request, node_id=node_id,
+                                          encoded=encoded, source_range_v2=source_range_v2)
+
+    @staticmethod
+    def _validate_transfer_request(transfer_request, *, allow_expired=False):
         source_range_v2 = type(transfer_request) is dict and transfer_request.get('protocol') == 'source-range-v2'
         if source_range_v2:
             protocol._closed(transfer_request, ("protocol", "reservationId", "generation", "expiresAt",
@@ -824,38 +833,43 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                 raise ValueError("missing offset")
         except ValueError:
             raise ValueError("transfer expiry must be an offset timestamp") from None
-        if source_range_v2 and expiry.timestamp() <= time.time():
+        if source_range_v2 and not allow_expired and expiry.timestamp() <= time.time():
             raise Conflict('source-range-v2 reservation already expired')
-        self.queue._known_node(node_id)
-        encoded = _json(transfer_request)
-        with self.queue._db() as db:
-            db.execute("BEGIN IMMEDIATE")
-            row = self._row(db, job_id)
-            if row["status"] != "running" or row["node_id"] != node_id or not row["private_claim_token"]:
-                raise Conflict("reservation requires a running reference claim on this node")
-            if row["transfer_json"] == encoded and row["node_id"] == node_id:
-                return self._public(row)
-            if row["phase"] not in ("queued", "waiting_capacity"):
-                raise Conflict("reference job cannot be reserved in this phase")
-            submission = json.loads(row["input_json"])
-            total_bytes = submission['manifest']['totalBytes']
-            if source_range_v2:
-                manifest = submission['manifest']
-                required_ranges = sum((item['byteSize'] + CHUNK_BYTES - 1) // CHUNK_BYTES for item in manifest['objects'])
-                if (transfer_request['sourceVersion'] != source_version_for_manifest(manifest)
-                        or set(transfer_request['objectIds']) != {item['id'] for item in manifest['objects']}
-                        or transfer_request['requestBudget'] != required_ranges
-                        or transfer_request['attemptBudget'] < required_ranges
-                        or transfer_request['attemptBudget'] > 3 * required_ranges):
-                    raise Conflict('source-range-v2 transfer identity mismatch')
-            if ((transfer_request['generation'], transfer_request['manifestSha256']) != (
-                    row['generation'], row['manifest_sha']) or not total_bytes <= transfer_request['byteBudget'] <=
-                    min(protocol.MAX_SAFE_INTEGER, 3 * total_bytes)):
-                raise Conflict("transfer reservation identity mismatch")
-            self._quota(db, len(encoded.encode("utf-8")))
-            db.execute("UPDATE reference_jobs SET phase='awaiting_transfer',node_id=?,transfer_json=?,updated_at=CURRENT_TIMESTAMP WHERE job_id=?",
-                       (node_id, encoded, job_id))
-            return self._public(self._row(db, job_id))
+        return _json(transfer_request), source_range_v2
+
+    def _reserve_transfer(self, db, job_id, transfer_request, *, node_id, encoded,
+                          source_range_v2, recovering=False):
+        # Internal caller owns the writer transaction; recovery performs its
+        # exact-claim/epoch/custody CAS and receipt in this SAME transaction.
+        if source_range_v2:
+            from .source_range_transfer import CHUNK_BYTES, source_version_for_manifest
+        row = self._row(db, job_id)
+        valid_status = row["status"] == "running" if not recovering else (row["status"], row["held_reason"]) == ("held", "coordinator_restart")
+        if not valid_status or row["node_id"] != node_id or not row["private_claim_token"]:
+            raise Conflict("reservation requires a running reference claim on this node")
+        if row["transfer_json"] == encoded and row["node_id"] == node_id:
+            return self._public(row)
+        if row["phase"] not in ("queued", "waiting_capacity"):
+            raise Conflict("reference job cannot be reserved in this phase")
+        submission = json.loads(row["input_json"])
+        total_bytes = submission['manifest']['totalBytes']
+        if source_range_v2:
+            manifest = submission['manifest']
+            required_ranges = sum((item['byteSize'] + CHUNK_BYTES - 1) // CHUNK_BYTES for item in manifest['objects'])
+            if (transfer_request['sourceVersion'] != source_version_for_manifest(manifest)
+                    or set(transfer_request['objectIds']) != {item['id'] for item in manifest['objects']}
+                    or transfer_request['requestBudget'] != required_ranges
+                    or transfer_request['attemptBudget'] < required_ranges
+                    or transfer_request['attemptBudget'] > 3 * required_ranges):
+                raise Conflict('source-range-v2 transfer identity mismatch')
+        if ((transfer_request['generation'], transfer_request['manifestSha256']) != (
+                row['generation'], row['manifest_sha']) or not total_bytes <= transfer_request['byteBudget'] <=
+                min(protocol.MAX_SAFE_INTEGER, 3 * total_bytes)):
+            raise Conflict("transfer reservation identity mismatch")
+        self._quota(db, len(encoded.encode("utf-8")))
+        db.execute("UPDATE reference_jobs SET phase='awaiting_transfer',node_id=?,transfer_json=?,updated_at=CURRENT_TIMESTAMP WHERE job_id=?",
+                   (node_id, encoded, job_id))
+        return self._public(self._row(db, job_id))
 
     def set_result_manifest(self, job_id, result):
         with self.queue._db() as db:
