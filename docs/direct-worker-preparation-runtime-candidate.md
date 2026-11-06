@@ -11,8 +11,11 @@ bytes. The candidate daemon can obtain that digest through an explicit
 `--direct-enrollment` record whose file and every ancestor are root-owned and
 not writable by group or other users. It validates the enrolled worker identity
 and exact certificate, private-key, client-CA and signer bytes before
-constructing the service. Enrollment creation, unit installation,
-rollback fencing and host ownership verification are not implemented; without
+constructing the service. The v2 record refuses v1 without migration.
+Enrollment creation, unit installation, mandatory
+service-unit enrollment, old-process/old-binary rollback fencing and host ownership
+verification are not implemented. Removing the enrollment flag or running an old
+binary is not fenced by this candidate. Without
 the explicit record the daemon still refuses enabled direct configuration.
 
 The current coordinator policy always returns `directPreparationEnabled: false`;

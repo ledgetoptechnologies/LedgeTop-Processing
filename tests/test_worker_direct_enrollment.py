@@ -16,7 +16,7 @@ from ops import reference_worker_daemon as daemon
 
 class WorkerEnrollmentTests(unittest.TestCase):
     def record(self):
-        return dict(schemaVersion=1,protocol=enrollment.PROTOCOL,configPath='/configured/worker.json',
+        return dict(schemaVersion=2,protocol=enrollment.PROTOCOL,configPath='/configured/worker.json',
             configSha256='a'*64,authorityId=str(uuid.uuid4()),nodeId='cluster',workerId='worker',workerInstanceId='instance',
             credentialSha256={name:'b'*64 for name in ('certificate','privateKey','clientCA','signingKey')})
 
@@ -31,6 +31,17 @@ class WorkerEnrollmentTests(unittest.TestCase):
             load.assert_called_once_with(record['configPath'],expected_direct_config_sha256=record['configSha256'],
                                          expected_direct_credential_sha256=record['credentialSha256'])
         with self.assertRaises(ValueError):enrollment.require_identity(record,dict(config,nodeId='wrong'))
+
+    def test_prior_enrollment_version_is_refused_without_migration(self):
+        record=self.record()
+        for version, protocol in ((1,'ltds-worker-direct-enrollment-v1'),
+                                  (1,enrollment.PROTOCOL),
+                                  (2,'ltds-worker-direct-enrollment-v1')):
+            old=dict(record,schemaVersion=version,protocol=protocol)
+            with patch.object(enrollment.os,'name','posix'), patch.object(enrollment.os,'geteuid',return_value=10001), \
+                 patch.object(enrollment,'_read',return_value=json.dumps(old).encode()):
+                with self.assertRaises(ValueError):
+                    enrollment.load('/etc/worker-enrollment.json',config_path=record['configPath'])
 
     @unittest.skipUnless(os.name=='posix' and os.geteuid()==0,'root fixture needed to create root-owned enrollment')
     def test_root_owned_record_is_read_by_unprivileged_child_and_unsafe_parent_rejected(self):

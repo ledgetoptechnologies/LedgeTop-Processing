@@ -4,7 +4,7 @@ from pathlib import PurePosixPath
 from processing import reference_protocol as p
 from processing.direct_protected_transport import _read
 
-PROTOCOL='ltds-worker-direct-enrollment-v1'
+PROTOCOL='ltds-worker-direct-enrollment-v2'
 
 
 def load(path, *, config_path):
@@ -15,7 +15,7 @@ def load(path, *, config_path):
     value=p.decode_submission(raw,max_bytes=16384)
     p._closed(value,('schemaVersion','protocol','configPath','configSha256',
         'authorityId','nodeId','workerId','workerInstanceId','credentialSha256'),'worker direct enrollment')
-    if type(value['schemaVersion']) is not int or value['schemaVersion']!=1 or value['protocol']!=PROTOCOL:
+    if type(value['schemaVersion']) is not int or value['schemaVersion']!=2 or value['protocol']!=PROTOCOL:
         raise ValueError('worker direct enrollment version invalid')
     if (type(config_path) is not str or not config_path.startswith('/')
             or str(PurePosixPath(config_path))!=config_path or value['configPath']!=config_path):
