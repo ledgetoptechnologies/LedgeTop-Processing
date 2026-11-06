@@ -404,6 +404,19 @@ class _DynamicAPI:
         self.discover_fleet = discover_fleet
         self._worker_refresh_lock = threading.RLock()
 
+    def handle_direct_source_tls(self, connection, method, path, headers, body=b''):
+        """Authenticate the actual listener connection; direct intake stays disabled."""
+        from .direct_source_request import authenticate_source_request
+        try:
+            context = authenticate_source_request(self.control.viewer, connection, headers)
+        except (ValueError, OSError):
+            return Response(401, {'error': 'unauthorized'})
+        try:
+            context.require_current()
+            return Response(503, {'error': 'direct_intake_disabled'})
+        finally:
+            context.invalidate()
+
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
         if path == '/ltds/worker/v1/direct-source-policy':
             # Expose the coordinator's live fleet-derived policy to an already

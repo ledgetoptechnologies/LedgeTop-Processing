@@ -221,6 +221,18 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             if self.command not in ("POST", "PUT") and length:
                 self._error(400, "unexpected_request_body")
                 return
+            if self.path == '/ltds/v2/direct/jobs' and callable(getattr(api, 'handle_direct_source_tls', None)):
+                # Disabled direct admission is authenticated and rejected before
+                # reading any body. _reply closes the connection with the body
+                # unread; no source slot or body allocation can be held here.
+                try:
+                    response = api.handle_direct_source_tls(self.connection, self.command, self.path,
+                                                            dict(self.headers.items()))
+                except Exception:
+                    self._error(500, 'internal_error')
+                    return
+                self._reply(response)
+                return
             source_submit = self.command == "POST" and self.path == "/ltds/v2/jobs"
             source_slot_acquired = False
             if source_submit:
