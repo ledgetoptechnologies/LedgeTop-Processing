@@ -106,7 +106,13 @@ later controller code; this receipt must not be relabeled as a new-image or
 latest full-release acceptance.
 
 The successful harness retired owned inner fixtures, and transport task-label
-container/volume inventories were empty. The stopped outer and its single
-artifact volume remain retained for root review; private host proof is already
-independent of those resources. No new operation or deployment is authorized
-by this receipt.
+container/volume inventories were empty. After root independently reviewed the
+sanitized result and accepted audit, the exact stopped outer and single owned
+artifact volume were also retired without force. Fresh full-image/operation/
+PID0/exit0/no-OOM checks preceded outer removal; a closed full-container
+inventory proved no named-volume or bind-parent/child alias references before
+that exact volume was removed. Both transport and outer task-label container
+and volume inventories were empty afterward. All 321 private host export files
+were subsequently rehashed against the unchanged manifest (1,401,208 bytes).
+No owned runner, container or volume remains active. No new operation or
+deployment is authorized by this receipt.
