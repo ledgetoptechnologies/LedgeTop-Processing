@@ -27,3 +27,9 @@ and its startup refusal test ran. This does not fence a process that was
 already running or prevent filesystem operations outside the ledger. The
 local fence remains indefinite, and neither Viewer acknowledgment nor an
 authenticated release has been implemented.
+
+The candidate also retains partial uploads during audit and rejects V2
+readiness and writes after the custody fence. A 53-test isolated check passed
+with three old-code fixture skips. Reconciliation now holds jobs containing
+uncertain partials instead of automatically adopting or deleting those files;
+operator-safe recovery and cross-process spool confinement remain unfinished.

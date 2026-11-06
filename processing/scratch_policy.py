@@ -491,11 +491,14 @@ class ScratchLedger:
                 raise PolicyConflict("allocation outside reservation")
             self._fence(db, reservation_id, now)
 
-    def begin_direct_writer(self, reservation_id, expected_settings):
+    def begin_direct_writer(self, reservation_id, expected_settings, *, require_unclosed=False):
         """Fence one direct reader before any bytes; prior crashes remain held."""
         if not isinstance(reservation_id,str) or not re.fullmatch(r'direct-[a-f0-9]{64}',reservation_id):
             raise PolicyConflict('direct reservation identity required')
         with self._transaction() as db:
+            if require_unclosed and db.execute('SELECT 1 FROM direct_custody_fences WHERE reservation=?',
+                                               (reservation_id,)).fetchone():
+                raise PolicyConflict('direct custody is retained')
             row=self._reservation(db,reservation_id)
             if (row['state']!='reserved' or row['allocated']!=0 or row['settings']!=_json(expected_settings)
                     or not db.execute('SELECT 1 FROM transfer_fences WHERE reservation=?',(reservation_id,)).fetchone()):
@@ -571,6 +574,8 @@ class ScratchLedger:
             raise PolicyConflict('direct readiness identity required')
         with self._transaction() as db:
             row=self._reservation(db,reservation_id)
+            if db.execute('SELECT 1 FROM direct_custody_fences WHERE reservation=?',(reservation_id,)).fetchone():
+                raise PolicyConflict('direct custody is retained')
             if (row['state']!='reserved' or row['allocated']!=0 or row['settings']!=_json(expected_settings)
                     or not db.execute('SELECT 1 FROM transfer_fences WHERE reservation=?',(reservation_id,)).fetchone()):
                 raise PolicyConflict('direct scratch fence changed')
@@ -591,6 +596,8 @@ class ScratchLedger:
             raise PolicyConflict('V2 readiness identity required')
         with self._transaction() as db:
             row=self._reservation(db,reservation_id)
+            if db.execute('SELECT 1 FROM direct_custody_fences WHERE reservation=?',(reservation_id,)).fetchone():
+                raise PolicyConflict('direct custody is retained')
             if (row['state']!='reserved' or row['allocated']!=0 or row['settings']!=_json(expected_settings)
                     or not db.execute('SELECT 1 FROM transfer_fences WHERE reservation=?',(reservation_id,)).fetchone()):
                 raise PolicyConflict('V2 scratch fence changed')

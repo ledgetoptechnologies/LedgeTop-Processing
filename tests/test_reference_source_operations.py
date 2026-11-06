@@ -59,6 +59,15 @@ def uncertain_operation(directory):
 
 @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux process lease required')
 class SourceOperationTests(unittest.TestCase):
+    def test_reconcile_holds_partial_without_deleting_it(self):
+        with tempfile.TemporaryDirectory() as directory, source_fixture(directory) as (_, store, spool, job, _, image):
+            target = spool.root / spool.storage_key(job['jobId'], 1, image)
+            partial = target.parent / ('.' + target.name + '.part')
+            partial.write_bytes(b'active-write'); partial.chmod(0o600)
+            result = store.reconcile_source_spool(spool)
+            self.assertEqual(result['held'], 1)
+            self.assertEqual(partial.read_bytes(), b'active-write')
+
     def test_source_errors_reach_retryable_capacity_mount_and_conflict_responses(self):
         with tempfile.TemporaryDirectory() as directory, source_fixture(directory) as (queue, store, spool, job, _, image):
             from processing.source_spool import SourceSpoolError

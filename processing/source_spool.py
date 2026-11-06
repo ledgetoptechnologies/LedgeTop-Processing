@@ -324,7 +324,7 @@ class SourceSpool:
                 raise SourceSpoolError("spool_mount_changed")
 
     def audit_job(self, *, job_id, generation, expected_objects):
-        """Verify closed manifest files and remove only known orphan .part files."""
+        """Verify closed manifest files; retain partials pending writer reconciliation."""
         self._assert_mount()
         protocol._slug(job_id, "job ID")
         protocol._integer(generation, "generation")
@@ -362,14 +362,13 @@ class SourceSpool:
             known[key] = object_id
             known["." + key + ".part"] = object_id
         found = {}
-        # Resolve a crash after hard-link publication but before partial-name
-        # removal before validating either directory entry as a singleton.
+        # An audit cannot establish that another process has stopped writing.
+        # Even a valid hard-link pair may be an in-progress publication.
         for object_id, obj in expected.items():
             key = Path(self._key(job_id, generation, object_id)).name
             target, temporary = generation_dir / key, generation_dir / ("." + key + ".part")
             if (target.exists() or target.is_symlink()) and (temporary.exists() or temporary.is_symlink()):
-                self._recover_published_partial(generation_dir, target, temporary,
-                    obj["byteSize"], obj["sha256"])
+                raise SourceSpoolError("source_object_conflict")
         try:
             entries = list(generation_dir.iterdir())
         except OSError:
@@ -382,9 +381,7 @@ class SourceSpool:
                 info = self._identity(entry, directory=False)
                 if info.st_dev != self._mount_identity[0]:
                     raise SourceSpoolError("spool_mount_changed")
-                entry.unlink()
-                self._fsync_directory(generation_dir)
-                continue
+                raise SourceSpoolError("source_object_conflict")
             obj = expected[object_id]
             found[object_id] = self.verify_object(job_id=job_id, generation=generation,
                 object_id=object_id, byte_size=obj["byteSize"], sha256=obj["sha256"])
