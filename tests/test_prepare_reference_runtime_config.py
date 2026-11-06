@@ -20,6 +20,42 @@ from tests import test_prepare_reference_worker_config as fixtures
 from tests.test_enrolled_coordinator_deployment import bundle as deployment_bundle
 
 
+class ForbiddenInventoryReaderTests(unittest.TestCase):
+    def artifact(self, raw, length=None):
+        return dict(path='/private/inventory-entry', sha256='0'*64, bytes=len(raw) if length is None else length, ownerUid=1000)
+
+    def read(self, reader, raw):
+        with patch.object(prep, 'pinned', return_value=raw):
+            return reader(self.artifact(raw))
+
+    def test_short_and_maximum_printable_entries_are_read_exactly(self):
+        for raw in (b'n', b'!', b'~', b'n'*31, b'n'*32, b'n'*4096):
+            with self.subTest(length=len(raw)):
+                self.assertEqual(self.read(prep.forbidden_token, raw), raw.decode('ascii'))
+
+    def test_unprintable_oversized_or_empty_entries_refuse_without_value(self):
+        for index, raw in enumerate((b'private value', b'private-value\n', b'private\x7fvalue', b'private\x00value',
+                                     b'private-\xc3\xa9', b'private-\xff', b'n'*4097)):
+            with self.subTest(index=index):
+                with self.assertRaises(Exception) as caught: self.read(prep.forbidden_token, raw)
+                self.assertEqual(str(caught.exception), 'literal_forbidden_credential_required')
+                self.assertIsNone(caught.exception.__cause__)
+        with patch.object(prep, 'pinned', return_value=b''):
+            with self.assertRaises(Exception): prep.forbidden_token(self.artifact(b'', 0))
+
+    def test_oversized_descriptor_is_refused_before_reading(self):
+        with patch.object(prep, 'pinned', side_effect=AssertionError('must refuse first')) as read:
+            with self.assertRaisesRegex(Exception, 'literal_forbidden_credential_required'):
+                prep.forbidden_token(self.artifact(b'', 4097))
+        read.assert_not_called()
+
+    def test_generated_role_reader_keeps_its_minimum(self):
+        self.assertEqual(self.read(prep.token, b'r'*32), 'r'*32)
+        for raw in (b'r', b'r'*31, b'r'*4097):
+            with self.subTest(length=len(raw)):
+                with self.assertRaisesRegex(Exception, 'literal_private_token_required'): self.read(prep.token, raw)
+
+
 GATE_ENGINES = ('e', 'actual.test-engine:abc', 'ABCD:EFGH:IJKL', str(uuid.UUID(int=7)), 'A'*256)
 NON_GATE_ENGINES = ('', '.leading', ':leading', '-leading', 'white space', 'trailing\n', 'a/b', 'A'*257, '\u00e9ngine', None, 7)
 
@@ -258,6 +294,32 @@ class RuntimePreparationTests(unittest.TestCase):
     def test_private_key_permissions_refuse(self):
         Path(self.keys['source']['privateKey']['path']).chmod(0o644)
         with self.assertRaises(Exception):prep.prepare(self.spec)
+        self.assertFalse(self.out.exists())
+
+    def test_complete_inventory_accepts_short_native_token_without_publishing_it(self):
+        f=self.fixture; value=b'short-native~1'
+        self.spec['forbiddenCredentials'].append(f.file('short-native-token',value))
+        receipt=prep.prepare(self.spec)
+        self.assertNotIn(value.decode(),str(receipt))
+        for path in self.out.iterdir():self.assertNotIn(value,path.read_bytes())
+
+    def test_short_or_invalid_generated_roles_are_not_rescued_by_the_forbidden_reader(self):
+        short=self.fixture.file('short-role-token',b'c'*31)
+        self.spec['forbiddenCredentials'].append(short);self.spec['nodes'][0]['bearer']=short
+        with self.assertRaisesRegex(Exception,'literal_private_token'):prep.prepare(self.spec)
+        self.assertFalse(self.out.exists())
+
+    def test_forbidden_collision_with_each_generated_role_refuses(self):
+        node=self.spec['nodes'][0];viewer=self.spec['environments']['production']
+        for artifact in (node['bearer'],node['resultBearer'],viewer['bearer']):
+            with self.subTest(path=Path(artifact['path']).name):
+                self.spec['forbiddenCredentials']=[artifact]
+                with self.assertRaisesRegex(Exception,'disjoint_private_roles'):prep.prepare(self.spec)
+                self.assertFalse(self.out.exists())
+
+    def test_unprintable_forbidden_entry_refuses_before_output(self):
+        self.spec['forbiddenCredentials'].append(self.fixture.file('bad-native-token',b'native\n'))
+        with self.assertRaisesRegex(Exception,'literal_forbidden_credential'):prep.prepare(self.spec)
         self.assertFalse(self.out.exists())
 
     def test_token_collision_refuses(self):
