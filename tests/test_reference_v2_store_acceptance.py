@@ -9,12 +9,14 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from processing import reference_protocol as protocol
+from processing.maintenance import Conflict
 from processing.prototype import Queue
 from processing.reference_api import ReferenceAPI
 from processing.reference_store import PROFILE, ReferenceStore
@@ -23,6 +25,15 @@ from tests.viewer_receipt_signer import SyntheticViewerSigner
 
 
 VIEWER_BEARER = "synthetic-staging-token-for-acceptance"
+
+
+def make_pull_acceptance(job, viewer_manifest):
+    return dict(schemaVersion=1,receiptId=str(uuid.uuid4()),storageReceiptId=str(uuid.uuid4()),
+        jobId=job['jobId'],generation=job['generation'],environment=job['environment'],
+        inputManifestSha256=job['manifestSha256'],pipelineDigest=job['pipelineDigest'],
+        resultManifestSha256=viewer_manifest['resultManifestSha256'],
+        acceptedObjectIds=sorted(item['id'] for item in viewer_manifest['objects']),
+        acceptedAt='2026-11-04T00:00:02.000Z',validationVersion=protocol.VALIDATION_VERSION)
 
 
 def _private_pem(key):
@@ -105,14 +116,6 @@ class ReferenceV2StoreAcceptanceTests(unittest.TestCase):
             terminal_job = store.get(job["jobId"])
             self.assertEqual((terminal_job["status"], terminal_job["phase"]),
                 ("succeeded", "awaiting_acceptance"))
-            acceptance = store.ensure_viewer_transfer(job["jobId"], accepted_at="2026-11-04T00:00:02.000Z")
-            leased_transfer = store.claim_viewer_transfer(now=1_800_000_000)
-            self.assertIsNotNone(leased_transfer)
-            self.assertEqual(leased_transfer["jobId"], job["jobId"])
-            self.assertEqual(leased_transfer["acceptance"], acceptance)
-            private = store.get(job["jobId"], private=True)
-            expected = {**private["sourceAcceptanceBinding"],
-                "resultManifestSha256": leased_transfer["viewerResultManifest"]["resultManifestSha256"]}
             key = Ed25519PrivateKey.generate()
             trusted_keys = {"synthetic-copy-key": {"issuerId": "synthetic-copy-issuer",
                 "publicKeyPem": _public_pem(key)}}
@@ -121,11 +124,24 @@ class ReferenceV2StoreAcceptanceTests(unittest.TestCase):
                 options_fingerprint=source_case.payload["pipeline"]["odm"]["optionsFingerprint"],
                 allowed_odm_options={"numeric-probe"}, source_spool=spool,
                 source_attestation_keys=source_case.trusted_keys, authority_id=queue.authority_id,
+                source_bearer_principals={VIEWER_BEARER:'viewer-staging'},
                 viewer_receipt_keys=trusted_keys)
+            # Viewer pulls the sealed result and constructs its own copy receipt;
+            # source-bound jobs must never enter the legacy push-transfer queue.
+            pulled=api.handle('GET',f"/ltds/v1/jobs/{job['jobId']}/results",
+                {'Authorization':f'Bearer {VIEWER_BEARER}'},protected_transport=True)
+            self.assertEqual(pulled.status,200,pulled.body)
+            viewer_manifest=pulled.body
+            acceptance=make_pull_acceptance(job,viewer_manifest)
+            private=store.get(job['jobId'],private=True)
+            expected={**private['sourceAcceptanceBinding'],
+                'resultManifestSha256':viewer_manifest['resultManifestSha256']}
+            with self.assertRaisesRegex(Conflict,'Viewer pull acceptance path'):
+                store.ensure_viewer_transfer(job['jobId'])
             state = {"source_case": source_case, "spool": spool, "mount_patch": mount_patch,
                 "queue": queue, "store": store, "api": api, "job": job,
                 "claim_token": claim_token, "result": result, "acceptance": acceptance,
-                "viewer_result_manifest": leased_transfer["viewerResultManifest"],
+                "viewer_result_manifest": viewer_manifest,
                 "expected": expected, "key": key, "trusted_keys": trusted_keys,
                 "viewer_root": viewer_root}
             return state

@@ -18,6 +18,7 @@ import uuid
 from processing import reference_protocol as p
 from processing.reference_acceptance_observed import make_request, validate_request, make_ack, validate_ack, ACK_FIELDS, ensure_schema, PROTOCOL
 from processing.reference_control import ReferenceControlAPI
+from processing.maintenance import Conflict
 from processing.reference_delivery import DeliveryReceiver
 from processing.reference_driver import DriverHeld, DriverWait
 from processing.reference_store import ReferenceStore
@@ -308,7 +309,8 @@ class AcceptanceObservationDriverTests(unittest.TestCase):
             worker_bearers={TOKEN: dict(node_id='cluster', worker_id='worker', worker_instance_id='instance')},
             capability_fingerprint='a' * 64, options_fingerprint=source.payload['pipeline']['odm']['optionsFingerprint'],
             allowed_odm_options={'numeric-probe'}, source_spool=spool, source_attestation_keys=source.trusted_keys,
-            authority_id=fixture.queue.authority_id, viewer_receipt_keys=self.signer.trusted_keys)
+            authority_id=fixture.queue.authority_id, viewer_receipt_keys=self.signer.trusted_keys,
+            source_bearer_principals={VIEWER:'viewer-staging'})
         fixture.contents.update({IMAGE_ID: b'abc', GCP_ID: b'id,lat,lon\n1,2,3\n', 'gcp_' + ATTEMPT: b'1,2,3\n'})
         fixture.transport.options = [dict(name='numeric-probe', type='float', value=1e-7, help='Numeric setting.')]
         self.claim = fixture.store.get(job['jobId'], private=True)
@@ -324,8 +326,14 @@ class AcceptanceObservationDriverTests(unittest.TestCase):
             self.assertNotEqual(outcome['state'], 'held', outcome)
         else:
             self.fail('actual source V2 driver did not reach accepted result wait')
-        acceptance = fixture.store.ensure_viewer_transfer(self.job_id)
-        result = fixture.store.get(self.job_id, private=True)['resultManifest']
+        pulled=fixture.api.handle('GET',f'/ltds/v1/jobs/{self.job_id}/results',
+            {'Authorization':'Bearer '+VIEWER},protected_transport=True)
+        self.assertEqual(pulled.status,200,pulled.body)
+        result=pulled.body
+        from tests.test_reference_v2_store_acceptance import make_pull_acceptance
+        acceptance=make_pull_acceptance(job,result)
+        with self.assertRaisesRegex(Conflict,'Viewer pull acceptance path'):
+            fixture.store.ensure_viewer_transfer(self.job_id)
         expected = dict(fixture.store.get(self.job_id, private=True)['sourceAcceptanceBinding'], resultManifestSha256=result['resultManifestSha256'])
         self.envelope = self.signer.envelope(expected, acceptance, result)
         fixture.store.accept(self.job_id, acceptance, viewer_receipt=self.envelope['viewerReceipt'], trusted_viewer_receipt_keys=self.signer.trusted_keys)
