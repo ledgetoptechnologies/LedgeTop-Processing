@@ -307,6 +307,22 @@ class NodeGate:
         self._save(state)
         return state['reservation']
 
+    def reserve_bound(self, node_id, origin, authority_id, generation, receipt_id, job):
+        """Persist a directly prepared job and its reservation in one gate write."""
+        self._refuse_direct_hold()
+        binding=_binding(node_id,origin,authority_id)
+        state=self.snapshot();self._generation(state,generation)
+        if any(state[key]!=value for key,value in binding.items()):
+            raise GateError('coordinator does not own this physical node')
+        if not isinstance(receipt_id,str) or not RECEIPT.fullmatch(receipt_id):
+            raise GateError('invalid worker receipt identity')
+        if state['reservation'] is not None:
+            raise GateError('unresolved reservation blocks new work')
+        identity=self._job(state,job)
+        state['reservation']={'receiptId':receipt_id,'job':identity,'completionDigest':None}
+        self._save(state)
+        return state['reservation']
+
     def _reservation(self, receipt_id):
         state = self.snapshot()
         if state['reservation'] is None or state['reservation']['receiptId'] != receipt_id:

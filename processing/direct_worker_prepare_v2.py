@@ -10,6 +10,7 @@ from . import direct_worker_readiness_journal_v2 as readiness
 from .node_gate import NodeGate
 from .scratch_policy import PolicyConflict
 from .source_spool import SourceSpool
+from . import reference_protocol as p
 
 
 def prepare_signed_job(ledger, *, payload, item, principal, worker, engine_id,
@@ -19,6 +20,11 @@ def prepare_signed_job(ledger, *, payload, item, principal, worker, engine_id,
     """Verify source first; bind physical node, reserve scratch and sign readiness."""
     if type(source_verification) is not dict:
         raise ValueError('protected source verification settings required')
+    p._slug(principal,'coordinator principal');p._uuid(challenge_id,'challenge')
+    p._slug(issuer_id,'issuer');p._slug(key_id,'key');p._integer(gate_generation,'gate generation')
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    if not isinstance(private_key,Ed25519PrivateKey) or type(validity_seconds) is not int or not 1<=validity_seconds<=60:
+        raise ValueError('protected readiness signer required')
     # Viewer principal is authenticated by the independently pinned source
     # signature; coordinator principal is separate and comes from mTLS.
     checked=inventory.prepare(payload,**source_verification)
@@ -36,16 +42,21 @@ def prepare_signed_job(ledger, *, payload, item, principal, worker, engine_id,
             or normalized['objectCount']!=sum(len(checked[key]['objects']) for key in ('sourceManifest','derivedManifest'))
             or normalized['inputBytes']!=sum(obj['byteSize'] for key in ('sourceManifest','derivedManifest') for obj in checked[key]['objects'])):
         raise PolicyConflict('signed worker inventory binding changed')
+    # Inspect the actual mount/marker and private worker root before taking a
+    # durable node hold; recheck the same identities after taking the gate.
+    preflight=SourceSpool(ledger.root,mount_path=mount_path,mount_id=mount_id,marker_name=marker_name,
+                          safety_floor_bytes=0,require_mount=True)
     receipt=digest[:32]
     with NodeGate(engine_id) as gate:
+        preflight._assert_mount()
         state=gate.snapshot()
         if (state['nodeId']!=normalized['nodeId'] or state['coordinatorOrigin']!=coordinator_origin
                 or state['authorityId']!=normalized['authorityId'] or state['generation']!=gate_generation):
             raise PolicyConflict('node authority or generation changed')
         if state['reservation'] is None:
-            gate.reserve(normalized['nodeId'],coordinator_origin,normalized['authorityId'],gate_generation,receipt)
-            gate.bind(receipt,dict(id=normalized['jobId'],workerId=normalized['workerId'],
-                nodeId=normalized['nodeId'],authorityId=normalized['authorityId']))
+            gate.reserve_bound(normalized['nodeId'],coordinator_origin,normalized['authorityId'],gate_generation,receipt,
+                dict(id=normalized['jobId'],workerId=normalized['workerId'],
+                     nodeId=normalized['nodeId'],authorityId=normalized['authorityId']))
         else:
             job=dict(id=normalized['jobId'],workerId=normalized['workerId'],
                      nodeId=normalized['nodeId'],authorityId=normalized['authorityId'])
@@ -59,6 +70,7 @@ def prepare_signed_job(ledger, *, payload, item, principal, worker, engine_id,
         directory.mkdir(mode=0o700,exist_ok=True)
         spool=SourceSpool(directory,mount_path=mount_path,mount_id=mount_id,marker_name=marker_name,
                           safety_floor_bytes=0,require_mount=True)
+        preflight._assert_mount();spool._assert_mount()
     proof=readiness.issue(ledger,spool,normalized,principal=principal,expected_worker=worker,
         engine_id=engine_id,coordinator_origin=coordinator_origin,gate_generation=gate_generation,
         challenge_id=challenge_id,validity_seconds=validity_seconds,issuer_id=issuer_id,

@@ -46,6 +46,10 @@ class WorkerPrepareTests(unittest.TestCase):
         with patch('processing.node_gate.canonical_gate_path',return_value=root/'gate'):
             with NodeGate('fixture-v2') as gate:
                 gate.provision('cluster','https://127.0.0.1:8443',f.worker['authorityId'])
+            with self.assertRaises(ValueError):prepare_signed_job(ledger,**dict(kwargs,principal='!invalid'))
+            with NodeGate('fixture-v2') as gate:self.assertIsNone(gate.snapshot()['reservation'])
+            with self.assertRaises(ValueError):prepare_signed_job(ledger,**dict(kwargs,mount_id='0'*32))
+            with NodeGate('fixture-v2') as gate:self.assertIsNone(gate.snapshot()['reservation'])
             _,_,proof=prepare_signed_job(ledger,**kwargs)
             with NodeGate('fixture-v2') as gate:
                 self.assertEqual(gate.snapshot()['schema'],2)
@@ -54,3 +58,21 @@ class WorkerPrepareTests(unittest.TestCase):
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
                 self.assertEqual(db.execute('SELECT state FROM direct_readiness_issues').fetchone()[0],'issued')
             self.assertFalse(proof['body']['processingAuthorized'])
+
+    def test_interrupted_atomic_gate_binding_replays_exact_reservation(self):
+        f,kwargs=self.fixture()
+        root=f.root/'restart-worker';root.mkdir(mode=0o700)
+        ledger=ScratchLedger(root/'ledger.sqlite',root,capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
+        with patch('processing.node_gate.canonical_gate_path',return_value=root/'gate'):
+            with NodeGate('fixture-v2') as gate:gate.provision('cluster','https://127.0.0.1:8443',f.worker['authorityId'])
+            original=NodeGate._save;seen=[]
+            def save_then_fail(gate,state):
+                original(gate,state)
+                if state['reservation'] is not None and not seen:
+                    seen.append(True);raise OSError('synthetic lost gate reply')
+            with patch.object(NodeGate,'_save',save_then_fail):
+                with self.assertRaises(OSError):prepare_signed_job(ledger,**kwargs)
+            with NodeGate('fixture-v2') as gate:
+                self.assertEqual(gate.snapshot()['reservation']['job']['id'],f.item['jobId'])
+            _,_,proof=prepare_signed_job(ledger,**kwargs)
+            self.assertFalse(proof['body']['sourceCustodyAccepted'])
