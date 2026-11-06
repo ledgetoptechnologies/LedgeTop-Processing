@@ -9,11 +9,13 @@ from contextlib import closing
 import json
 import os
 from pathlib import Path
+import signal
 import socket
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -25,13 +27,43 @@ from tests import test_reference_source_intake as intake
 from tests.test_viewer_result_v2_roundtrip import _write_tls_material
 
 REPOSITORY = Path(__file__).resolve().parent.parent
+REPLY_SECONDS = 60  # a step takes milliseconds; past this the child is stuck
+REAP_SECONDS = 10
+
+
+def process_census():
+    """Each process in /proc as pid -> (parent, process group, state); the image has no ps."""
+    census = {}
+    for entry in os.listdir('/proc'):
+        if entry.isdigit():
+            try:
+                stat = Path('/proc', entry, 'stat').read_text(errors='replace')
+            except OSError:
+                continue
+            state, parent, group = stat[stat.rindex(')') + 2:].split()[:3]
+            census[int(entry)] = (int(parent), int(group), state)
+    return census
 
 
 @unittest.skipIf(os.name == 'nt', 'SIGKILL and the private ledger paths are POSIX')
 class ProcessHarness(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.spawned = cls.reaped = 0
+
+    @classmethod
+    def tearDownClass(cls):
+        left = sorted(pid for pid, row in process_census().items() if row[0] == os.getpid())
+        print(f'reap census {cls.__name__}: spawned={cls.spawned} reaped={cls.reaped} remaining={left}',
+              file=sys.stderr, flush=True)
+        if left or cls.spawned != cls.reaped:
+            raise AssertionError('children outlived ' + cls.__name__)
+
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
+        self.children = []
+        self.addCleanup(self.assert_reaped)  # runs after every child's own cleanup
         self.root = Path(directory.name)
         case = intake.ReferenceSourceIntakeTests('runTest')
         case.setUp()
@@ -64,22 +96,57 @@ class ProcessHarness(unittest.TestCase):
 
     def spawn(self, role, **env):
         child = subprocess.Popen([sys.executable, '-m', 'tests.source_fetch_process_fixture', role, str(self.config)],
-            cwd=REPOSITORY, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env={**os.environ, **env})
+            cwd=REPOSITORY, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env={**os.environ, **env},
+            start_new_session=True)
+        self.children.append(child)
+        type(self).spawned += 1
         self.addCleanup(self.kill, child)
-        self.assertEqual(child.stdout.readline().strip(), 'ready', role + ' did not start')
+        self.assertEqual(self.reply(child).strip(), 'ready', role + ' did not start')
         return child
 
     @staticmethod
-    def kill(child):
-        child.kill()
-        child.wait()
+    def kill_group(child):
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    def reply(self, child):
+        """One line, or EOF once a stuck child's whole group has been killed."""
+        watchdog = threading.Timer(REPLY_SECONDS, self.kill_group, (child,))
+        watchdog.start()
+        try:
+            return child.stdout.readline()
+        finally:
+            watchdog.cancel()
+
+    def kill(self, child):
+        self.kill_group(child)
+        child.wait(REAP_SECONDS)
         child.stdin.close()
         child.stdout.close()
+
+    def descendants(self):
+        """pid -> state of this process's children and anything left in their groups."""
+        groups = {child.pid for child in self.children}
+        return {pid: state for pid, (parent, group, state) in process_census().items()
+                if parent == os.getpid() or group in groups}
+
+    def tearDown(self):
+        """Before teardown: the live children are exactly those not yet reaped, none a zombie."""
+        census = self.descendants()
+        self.assertEqual(set(census), {child.pid for child in self.children if child.returncode is None})
+        self.assertNotIn('Z', census.values())
+
+    def assert_reaped(self):
+        self.assertEqual(self.descendants(), {})
+        self.assertEqual([child.pid for child in self.children if child.returncode is None], [])
+        type(self).reaped += len(self.children)
 
     def step(self, worker):
         worker.stdin.write('step\n')
         worker.stdin.flush()
-        line = worker.stdout.readline()
+        line = self.reply(worker)
         return json.loads(line) if line else None
 
     def advance(self, worker, *states):
@@ -213,7 +280,7 @@ class ProcessRestartTests(ProcessHarness):
         self.fetched(dying)
         self.advance(dying, 'execution_pending')
         self.assertIsNone(self.step(dying))
-        self.assertEqual(dying.wait(), -9)
+        self.assertEqual(dying.wait(REAP_SECONDS), -9)
         self.restart_both(dying, coordinator)
         worker = self.spawn('worker')
         for _ in range(4):
@@ -268,7 +335,7 @@ class ProcessRestartTests(ProcessHarness):
         self.spawn('coordinator')
         dying = self.spawn('worker', SOURCE_FETCH_DIE='before_post')
         self.assertIsNone(self.step(dying))
-        self.assertEqual(dying.wait(), -9)
+        self.assertEqual(dying.wait(REAP_SECONDS), -9)
         recovery = self.journal()[1]['sourceRecovery']
         self.assertEqual(recovery['attempts'], 1)
         self.assertEqual(self.status(), ('held', 'coordinator_restart'))
@@ -286,7 +353,7 @@ class ProcessRestartTests(ProcessHarness):
         self.spawn('coordinator')
         dying = self.spawn('worker', SOURCE_FETCH_DIE='after_post')
         self.assertIsNone(self.step(dying))
-        self.assertEqual(dying.wait(), -9)
+        self.assertEqual(dying.wait(REAP_SECONDS), -9)
         self.assertIsNotNone(self.journal()[1]['sourceRecovery']['pending'])
         self.assertEqual((self.status(), len(self.receipts())), (('running', None), 1))
         worker = self.spawn('worker')
@@ -297,7 +364,7 @@ class ProcessRestartTests(ProcessHarness):
         coordinator = self.spawn('coordinator')
         dying = self.spawn('worker', SOURCE_NORMAL_CLAIM='1', SOURCE_FETCH_DIE='after_claim')
         self.assertIsNone(self.step(dying))
-        self.assertEqual(dying.wait(), -9)
+        self.assertEqual(dying.wait(REAP_SECONDS), -9)
         self.assertEqual(self.journal()[0], 'claim_pending')
         claims = self.read(self.database,'SELECT request_id,token FROM reference_claims')
         self.assertEqual(len(claims),1)
@@ -312,7 +379,7 @@ class ProcessRestartTests(ProcessHarness):
         coordinator = self.spawn('coordinator')
         dying = self.spawn('worker', SOURCE_FETCH_DIE='before_reservation')
         self.assertIsNone(self.step(dying))
-        self.assertEqual(dying.wait(),-9)
+        self.assertEqual(dying.wait(REAP_SECONDS),-9)
         reservation = self.journal()[1]['reservation']
         self.assertEqual(self.read(self.database,'SELECT transfer_json FROM reference_jobs'),[(None,)])
         self.restart_both(dying,coordinator)
@@ -325,7 +392,7 @@ class ProcessRestartTests(ProcessHarness):
         coordinator = self.spawn('coordinator')
         dying = self.spawn('worker', SOURCE_FETCH_DIE='after_reservation')
         self.assertIsNone(self.step(dying))
-        self.assertEqual(dying.wait(),-9)
+        self.assertEqual(dying.wait(REAP_SECONDS),-9)
         reservation = self.journal()[1]['reservation']
         self.assertEqual(json.loads(self.read(self.database,'SELECT transfer_json FROM reference_jobs')[0][0]),reservation)
         self.restart_both(dying,coordinator)
