@@ -117,7 +117,8 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                 worker_instance_id="instance")}, capability_fingerprint="a" * 64,
             options_fingerprint=self.payload["pipeline"]["odm"]["optionsFingerprint"],
             allowed_odm_options={"numeric-probe"}, source_spool=spool,
-            source_attestation_keys=self.trusted_keys, authority_id=queue.authority_id)
+            source_attestation_keys=self.trusted_keys, authority_id=queue.authority_id,
+            source_bearer_principals={'synthetic-staging-token':'viewer-staging'})
         signed = self.validate(allowed_odm_options={"numeric-probe"})
         request = copy.deepcopy(self.payload)
         request["sourceAttestation"] = signed["sourceAttestation"]
@@ -432,7 +433,7 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                     capability_fingerprint="a" * 64,
                     options_fingerprint=payload["pipeline"]["odm"]["optionsFingerprint"],
                     source_spool=spool, source_attestation_keys=self.trusted_keys,
-                    authority_id=AUTHORITY)
+                    authority_id=AUTHORITY, source_bearer_principals={'synthetic-staging-token':'viewer-staging'})
                 response = api.handle("POST", "/ltds/v2/jobs",
                     {"Authorization": "Bearer synthetic-staging-token"}, body,
                     protected_transport=True)
@@ -616,6 +617,29 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                     self.assertEqual(post(b).status,403)
                     self.assertEqual(post(unknown).status,403)
                     replay=post(a);self.assertEqual((replay.status,replay.body['jobId']),(200,created.body['jobId']))
+                    job_id=created.body['jobId'];submission_id=request['submissionId']
+                    for method,path in (
+                        ('GET',f'/ltds/v2/jobs/{job_id}'),
+                        ('GET',f'/ltds/v1/jobs/{job_id}'),
+                        ('GET',f'/ltds/v1/jobs/by-submission/{submission_id}'),
+                        ('GET',f'/ltds/v1/jobs/{job_id}/logs?generation=1&after=0&limit=10'),
+                        ('GET',f'/ltds/v1/jobs/{job_id}/results'),
+                        ('GET',f'/ltds/v1/jobs/{job_id}/results/synthetic-object'),
+                        ('GET',f'/ltds/v1/jobs/{job_id}/terminal-outcome'),
+                        ('POST',f'/ltds/v1/jobs/{job_id}/terminal-acceptance'),
+                        ('POST',f'/ltds/v1/jobs/{job_id}/acceptance'),
+                        ('POST',f'/ltds/v1/jobs/{job_id}/transfer-grants'),
+                        ('GET',f'/ltds/v2/jobs/{job_id}/source/acceptance-observation'),
+                        ('POST',f'/ltds/v2/jobs/{job_id}/source/complete')):
+                        for token in (b,unknown):
+                            with self.subTest(method=method,path=path,token=token):
+                                denied=api.handle(method,path,{'Authorization':'Bearer '+token},b'',protected_transport=True)
+                                self.assertEqual((denied.status,denied.body),(404,{'error':'not_found'}))
+                    denied=api.stream_source_object(f'/ltds/v2/jobs/{job_id}/source/{IMAGE_ID}?generation=1',
+                        {'Authorization':'Bearer '+b,'Content-SHA256':'0'*64},io.BytesIO(b'abc'),3,protected_transport=True)
+                    self.assertEqual((denied.status,denied.body),(404,{'error':'not_found'}))
+                    self.assertEqual(api.handle('GET',f'/ltds/v2/jobs/{job_id}',
+                        {'Authorization':'Bearer '+a},protected_transport=True).status,200)
                 finally:queue.close()
 
     def test_authenticated_post_streamed_objects_completion_and_exact_replay(self):
@@ -760,7 +784,8 @@ class ReferenceSourceIntakeTests(unittest.TestCase):
                             worker_instance_id="instance")},capability_fingerprint="a"*64,
                         options_fingerprint=self.payload["pipeline"]["odm"]["optionsFingerprint"],
                         allowed_odm_options={"numeric-probe"},source_spool=spool,
-                        source_attestation_keys=self.trusted_keys,authority_id=queue.authority_id)
+                        source_attestation_keys=self.trusted_keys,authority_id=queue.authority_id,
+                        source_bearer_principals={'synthetic-staging-token':'viewer-staging'})
                     signed=self.validate(allowed_odm_options={"numeric-probe"})
                     request=copy.deepcopy(self.payload);request["sourceAttestation"]=signed["sourceAttestation"]
                     viewer_headers={"Authorization":"Bearer synthetic-staging-token"}

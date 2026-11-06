@@ -6,6 +6,7 @@ module performs no transfer, execution, token issuance or network requests.
 """
 from dataclasses import dataclass, field
 import hmac
+import json
 from urllib.parse import parse_qs, urlsplit
 import re
 from types import MappingProxyType
@@ -126,7 +127,36 @@ class ReferenceAPI:
     def _error(status, code):
         return Response(status, {"error": code})
 
-    def _job(self, job_id, environment, *, private=False):
+    def _owned_source_job(self, job_id, environment, principal):
+        """Check V2 ownership before reading metadata or acting on any route."""
+        try:
+            with self.store.queue._db() as db:
+                row = db.execute('''SELECT r.environment,r.input_json,s.source_attestation_json,s.source_attestation_sha
+                    FROM reference_jobs r LEFT JOIN reference_source_intakes s ON s.job_id=r.job_id
+                    WHERE r.job_id=?''', (job_id,)).fetchone()
+            if row is None or row['environment'] != environment:
+                return False
+            submission = json.loads(row['input_json'])
+            if type(submission) is not dict:
+                return False
+            source_record = row['source_attestation_json']
+            if 'sourceIntakeVersion' not in submission and source_record is None:
+                return True  # Existing V1 jobs keep environment-scoped behavior.
+            if type(submission.get('sourceIntakeVersion')) is not int or submission['sourceIntakeVersion'] != 2 or type(principal) is not str or not source_record:
+                return False
+            from .viewer_source_attestation import proof_digest
+            attestation = json.loads(source_record)
+            proof = attestation['proof']
+            return (type(proof) is dict and proof.get('principalId') == principal
+                    and proof.get('environment') == environment and proof.get('authorityId') == self.authority_id
+                    and attestation.get('attestationSha256') == row['source_attestation_sha']
+                    and proof_digest(proof) == row['source_attestation_sha'])
+        except (ValueError, TypeError, KeyError, AttributeError, Conflict):
+            return False
+
+    def _job(self, job_id, environment, *, private=False, principal=None):
+        if not self._owned_source_job(job_id, environment, principal):
+            return None
         try:
             job = self.store.get(job_id, private=private)
         except Conflict:
@@ -170,6 +200,7 @@ class ReferenceAPI:
             return self._error(401, "unauthorized")
         if type(method) is not str or type(path) is not str:
             return self._error(404, "not_found")
+        principal = self._source_principal(headers)
         if method == "GET" and path in (protocol.PREFIX + "/capabilities", "/ltds/v2/capabilities"):
             return Response(200, self._capabilities(environment, source_intake=path == "/ltds/v2/capabilities",
                 source_principal=self._source_principal(headers)))
@@ -180,7 +211,7 @@ class ReferenceAPI:
                 if method != 'GET' or body not in (b'', ''):
                     return self._error(400, 'invalid_log_request')
                 job_id, generation, after, limit = log_request
-                job = self._job(job_id, environment)
+                job = self._job(job_id, environment, principal=principal)
                 if job is None:
                     return self._error(404, 'not_found')
                 if generation != job['generation']:
@@ -227,7 +258,7 @@ class ReferenceAPI:
                 token=self._header(headers,'Authorization')
                 principal=service.settings.principal(token[7:] if token.startswith('Bearer ') else '',environment)
                 if principal is None:return self._error(403,'source_release_role_required')
-                if self._job(release[1],environment) is None:return self._error(404,'not_found')
+                if self._job(release[1],environment,principal=principal) is None:return self._error(404,'not_found')
                 if method=='POST' and release[2] is None:
                     if not service.settings.enabled:return self._error(503,'source_release_disabled')
                     from .source_release_contract import MAX_BYTES
@@ -240,7 +271,7 @@ class ReferenceAPI:
                 return self._error(405,'method_not_allowed')
             observation = re.fullmatch(r'/ltds/v2/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/source/acceptance-observation', path)
             if observation:
-                if self._job(observation[1], environment) is None:
+                if self._job(observation[1], environment, principal=principal) is None:
                     return self._error(404, 'not_found')
                 if method != 'GET':
                     return self._error(405, 'method_not_allowed')
@@ -250,7 +281,7 @@ class ReferenceAPI:
                 return Response(200, ack) if ack is not None else self._error(404, 'observation_pending')
             source_job=re.fullmatch(r"/ltds/v2/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})(/source/complete)?",path)
             if source_job:
-                job_id,suffix=source_job.groups();job=self._job(job_id,environment)
+                job_id,suffix=source_job.groups();job=self._job(job_id,environment,principal=principal)
                 if job is None:return self._error(404,"not_found")
                 if method=="GET" and suffix is None:return Response(200,job)
                 if method=="POST" and suffix=="/source/complete":
@@ -266,7 +297,7 @@ class ReferenceAPI:
                 return self._error(405,"method_not_allowed")
             binary = re.fullmatch(re.escape(protocol.PREFIX) + r'/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/results/([A-Za-z0-9][A-Za-z0-9_-]{0,127})', path)
             if method == 'GET' and binary:
-                job = self._job(binary[1], environment, private=True)
+                job = self._job(binary[1], environment, private=True, principal=principal)
                 if job is None:
                     return self._error(404, 'not_found')
                 if self.result_proxy is None or job['resultManifest'] is None:
@@ -280,7 +311,7 @@ class ReferenceAPI:
                 range_header = range_values[0] if range_values else None
                 if range_header is not None and type(range_header) is not str:
                     return self._error(400, 'invalid_request')
-                public = self._job(binary[1], environment)
+                public = self._job(binary[1], environment, principal=principal)
                 stream = self.result_proxy.open(public, job['resultManifest'], binary[2],
                                                 range_header=range_header)
                 from .reference_binary import BinaryResponse
@@ -288,7 +319,7 @@ class ReferenceAPI:
             lookup = re.fullmatch(re.escape(protocol.PREFIX) + r'/jobs/by-submission/([0-9a-f-]{36})', path)
             if method == 'GET' and lookup:
                 job = self.store.find_submission(lookup[1], environment=environment)
-                return Response(200, job) if job else self._error(404, 'not_found')
+                return Response(200, job) if job and self._owned_source_job(job['jobId'],environment,principal) else self._error(404, 'not_found')
             if method == "POST" and path == protocol.PREFIX + "/jobs":
                 payload = protocol.decode_submission(body)
                 validated = protocol.validate_submission(payload, environment=environment,
@@ -304,7 +335,7 @@ class ReferenceAPI:
             job_id, suffix = match.groups()
             # Scope authorization before parsing action bodies or returning any
             # details about existing jobs or their execution/acceptance state.
-            job = self._job(job_id, environment)
+            job = self._job(job_id, environment, principal=principal)
             if job is None:
                 return self._error(404, "not_found")
             if method == "GET" and suffix is None:
@@ -315,7 +346,7 @@ class ReferenceAPI:
                 receipt = protocol.decode_submission(body)
                 return Response(200, self.terminal.accept(job_id, receipt, environment))
             if method == "GET" and suffix == "/results":
-                private = self._job(job_id, environment, private=True)
+                private = self._job(job_id, environment, private=True, principal=principal)
                 if private["resultManifest"] is None:
                     return self._error(409, "result_not_ready")
                 return Response(200, private["resultManifest"])
@@ -373,7 +404,7 @@ class ReferenceAPI:
         try:
             if set(query)!={"generation"} or len(query["generation"])!=1:return self._error(400,"invalid_request")
             job_id,object_id=match.groups()
-            if self._job(job_id,environment) is None:return self._error(404,"not_found")
+            if self._job(job_id,environment,principal=self._source_principal(headers)) is None:return self._error(404,"not_found")
             generation_text=query["generation"][0];digest=self._header(headers,"Content-SHA256")
             if not re.fullmatch(r"[1-9][0-9]{0,8}",generation_text) or type(content_length) is not int or content_length<0:return self._error(400,"invalid_request")
             expected=self.store.source_object_expectation(job_id,generation=int(generation_text),object_id=object_id)
