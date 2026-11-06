@@ -54,7 +54,7 @@ class SnapshotTests(unittest.TestCase):
         values.update(overrides);return verify_snapshot(**values)
 
     def test_signature_pages_and_source_closure(self):
-        result=self.verify();self.assertEqual(result['state'],'source_snapshot_verified_not_custody')
+        result=self.verify();self.assertEqual(result['state'],'source_pages_verified_not_custody')
         self.assertFalse(result['sourceCustodyAccepted']);self.assertFalse(result['processingAuthorized'])
         self.assertNotIn('paths',result)
         for field,value in [('snapshot_sha','0'*64),('task_id',RES),('pipeline_sha','d'*64),('key_id','other'),
@@ -68,6 +68,32 @@ class SnapshotTests(unittest.TestCase):
         self.page['records'][0]['relativePath']='flight/a.jpg';self.page['records'].append(copy.deepcopy(self.record))
         self.intent['sourceCount']=2;self.prepare()
         with self.assertRaises(ValueError):self.verify()
+
+    def test_duplicate_path_or_case_folded_basename_across_distinct_ids_rejected(self):
+        for path in ('flight/a.jpg','another/A.JPG'):
+            with self.subTest(path=path):
+                self.setUp();other='66666666-6666-4666-8666-666666666666'
+                obj=copy.deepcopy(self.source['objects'][0]);obj['id']=other;obj['name']=path.rsplit('/',1)[-1]
+                self.source['objects'].append(obj);self.source['objectCount']=2;self.source['totalBytes']=6
+                self.source['sha256']=p.digest({k:v for k,v in self.source.items() if k!='sha256'})
+                record=copy.deepcopy(self.record);record['datasetFileId']=other;record['relativePath']=path
+                self.page['records'].append(record);self.intent['datasetFileCount']=2;self.intent['sourceCount']=2;self.prepare()
+                with self.assertRaises(ValueError):self.verify()
+
+    def test_source_type_role_and_media_mismatches_fail_closed(self):
+        for changes in ({'byteSize':True},{'kind':'lidar'},{'mediaType':'text/plain'},{'processingRole':'gcp_source'}):
+            with self.subTest(changes=changes):
+                self.setUp();self.record.update(changes);self.prepare()
+                with self.assertRaises(ValueError):self.verify()
+        self.setUp();self.record['relativePath']='flight/source.csv';self.record['kind']='auxiliary';self.record['mediaType']='text/csv'
+        self.source['objects'][0].update(name='source.csv',sourceType='gcp_source_csv',retentionClass='permanent_viewer_hold',retentionHoldId=FILE)
+        self.prepare()
+        with self.assertRaises(ValueError):self.verify()
+
+    def test_generated_gcp_snapshot_is_explicitly_held(self):
+        self.intent['gcp']={'generatedGcp':{'sha256':'a'*64,'byteSize':True}}
+        self.prepare()
+        with self.assertRaisesRegex(ValueError,'GCP snapshot inspection unsupported'):self.verify()
 
     @unittest.skipUnless(os.environ.get('LTDS_VIEWER_SOURCE_ROOT'),'actual Viewer source not supplied')
     def test_actual_viewer_node_frame_encoder_and_signer(self):
