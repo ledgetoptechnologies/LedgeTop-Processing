@@ -11,6 +11,7 @@ import unittest
 import uuid
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from ops.qualify_enrolled_phase_transport import configuration_material
 from processing.direct_v2_reservation import DirectV2Reservations
@@ -25,6 +26,12 @@ from tests import test_reference_source_intake as source_fixture
 
 class DirectV2PairSyntheticTests(unittest.TestCase):
     def test_signed_admission_reservation_and_tls_local_closure(self):
+        self.run_pair(False)
+
+    def test_lost_local_closure_response_remains_held(self):
+        self.run_pair(True)
+
+    def run_pair(self, lose_closure):
         f=fixture.WorkerV2Tests();f.setUp();self.addCleanup(f.doCleanups)
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
@@ -71,7 +78,24 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                                        ('gcp_'+f.item['attemptId'],b'1,2,3\n')):
                     observed=handoff.send_object(token,protected_transport=True,object_id=object_id,reader=io.BytesIO(data))
                     self.assertTrue(observed['localObjectDurable']);self.assertFalse(observed['sourceCustodyAccepted'])
+                if lose_closure:
+                    from processing.direct_worker_sender import DirectDeliveryUncertain
+                    from processing.maintenance import Conflict
+                    original=sender.complete
+                    def lose_after_worker_commit():
+                        original()
+                        raise DirectDeliveryUncertain('synthetic lost closure observation')
+                    with patch.object(sender,'complete',side_effect=lose_after_worker_commit):
+                        with self.assertRaises(DirectDeliveryUncertain):handoff.complete(token,protected_transport=True)
+                    with queue._db() as db:
+                        self.assertEqual(db.execute('SELECT state FROM direct_v2_handoff_sessions').fetchone()[0],'closure_pending')
+                    with self.assertRaisesRegex(Conflict,'outcome uncertain'):
+                        handoff.complete(token,protected_transport=True)
+                    self.assertEqual(queue.get(job['jobId'])['status'],'held')
+                    self.assertTrue((f.spool.root.parent/'direct-v2-worker-signed-closure.json').exists())
+                    return
                 closure=handoff.complete(token,protected_transport=True)
+                self.assertEqual(handoff.complete(token,protected_transport=True),closure)
                 self.assertEqual((closure['closure']['sourceObjectCount'],closure['closure']['derivedObjectCount']),(2,1))
                 self.assertFalse(closure['closure']['sourceCustodyAccepted'])
                 with queue._db() as db:

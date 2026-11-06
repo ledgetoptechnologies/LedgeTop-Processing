@@ -87,10 +87,9 @@ class DirectWorkerSenderV2(DirectWorkerSender):
             if guard is not None:guard.finish()
             if connection is not None:connection.close()
 
-    def complete(self):
-        from .direct_worker_receipt_v2 import verify
+    def _expected_closure(self):
         item=self._item
-        expected=dict(protocol='ltds-direct-local-closure-v2',reservationId=item['reservationId'],
+        return dict(protocol='ltds-direct-local-closure-v2',reservationId=item['reservationId'],
             scratchBindingSha256=self._sha,jobId=item['jobId'],attemptId=item['attemptId'],
             generation=item['generation'],authorityId=item['authorityId'],nodeId=item['nodeId'],
             workerId=item['workerId'],workerInstanceId=item['workerInstanceId'],
@@ -98,6 +97,10 @@ class DirectWorkerSenderV2(DirectWorkerSender):
             pipelineManifestSha256=item['pipelineManifestSha256'],inventorySha256=item['inventorySha256'],
             sourceObjectCount=self._source_count,derivedObjectCount=self._derived_count,
             localClosureComplete=True,sourceCustodyAccepted=False,transferComplete=False,processingAuthorized=False)
+
+    def complete(self):
+        from .direct_worker_receipt_v2 import verify
+        expected=self._expected_closure()
         deadline=time.monotonic()+self._total;connection=guard=None
         try:
             connection,guard=self._connect(deadline)

@@ -142,7 +142,11 @@ class DirectV2Handoff:
             with self.queue._db() as db:
                 db.execute('BEGIN IMMEDIATE');state=self._session(db)
                 if state=='closure_observed':
-                    raise Conflict('V2 closure replay verification requires reconciliation')
+                    from .direct_worker_receipt_v2 import verify
+                    saved=db.execute('SELECT closure FROM direct_v2_handoff_sessions WHERE reservation=?',
+                                     (self.item['reservationId'],)).fetchone()['closure']
+                    return verify(json.loads(saved),expected_closure=self.sender._expected_closure(),
+                        issuer_id=self.sender._issuer,key_id=self.sender._key,public_key=self.sender._public)
                 if state!='receiving':raise Conflict('V2 closure outcome uncertain')
                 rows=db.execute('SELECT * FROM direct_v2_handoff_objects WHERE reservation=?',
                                 (self.item['reservationId'],)).fetchall()
