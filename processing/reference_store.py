@@ -282,8 +282,15 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         result_record.update(queue_status(stored_record(row)) or {})
         return result_record
 
-    def _record(self, row, private):
+    def _record(self, row, private, db=None):
         result = self._public(row)
+        if not private:
+            # Here and not in _public: claim.update(public) would journal it, and
+            # worker replies stay byte-unchanged.
+            from .reference_presentation import latch, project
+            presentation = project(result, latch(db, row['job_id']))
+            if presentation is not None:
+                result['presentation'] = presentation
         if private:
             result.update(submission=json.loads(row["input_json"]),
                           resultManifest=json.loads(row["result_json"]) if row["result_json"] else None,
@@ -379,7 +386,7 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
 
     def get(self, job_id, *, private=False):
         with self.queue._db() as db:
-            return self._record(self._row(db, job_id), private)
+            return self._record(self._row(db, job_id), private, db)
 
     def find_submission(self, submission_id, *, environment):
         """Recover a lost submit response without issuing another execution."""
@@ -388,12 +395,12 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         with self.queue._db() as db:
             row = db.execute('SELECT job_id FROM reference_jobs WHERE submission_id=? AND environment=?',
                              (submission_id, environment)).fetchone()
-            return self._public(self._row(db, row[0])) if row else None
+            return self._record(self._row(db, row[0]), False, db) if row else None
 
     def list(self, *, private=False):
         with self.queue._db() as db:
             ids = [row[0] for row in db.execute("SELECT job_id FROM reference_jobs ORDER BY created_at,job_id")]
-            return [self._record(self._row(db, job_id), private) for job_id in ids]
+            return [self._record(self._row(db, job_id), private, db) for job_id in ids]
 
     @staticmethod
     def _transition(row, phase, expected_phase=None):
