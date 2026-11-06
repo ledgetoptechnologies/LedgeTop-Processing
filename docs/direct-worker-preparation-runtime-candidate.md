@@ -10,7 +10,8 @@ SHA-256 supplied to the loader and a protected descriptor reread of those exact
 bytes. The candidate daemon can obtain that digest through an explicit
 `--direct-enrollment` record whose file and every ancestor are root-owned and
 not writable by group or other users. It validates the enrolled worker identity
-before constructing the service. Enrollment creation, unit installation,
+and exact certificate, private-key, client-CA and signer bytes before
+constructing the service. Enrollment creation, unit installation,
 rollback fencing and host ownership verification are not implemented; without
 the explicit record the daemon still refuses enabled direct configuration.
 

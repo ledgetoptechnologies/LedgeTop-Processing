@@ -152,9 +152,11 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
         with patch('processing.direct_protected_transport._read',side_effect=lambda path,**kw:Path(path).read_bytes()):
             path=self.root/'private.json';path.write_text(json.dumps(self.config),encoding='utf8');path.chmod(0o600)
             digest=hashlib.sha256(path.read_bytes()).hexdigest()
+            pins={name:hashlib.sha256(Path(self.config['directPreparation'][name]).read_bytes()).hexdigest()
+                  for name in ('certificate','privateKey','clientCA','signingKey')}
             with self.assertRaises(ValueError):daemon.load_config(str(path))
             with self.assertRaises(ValueError):daemon.load_config(str(path),expected_direct_config_sha256='0'*64)
-            loaded=daemon.load_config(str(path),expected_direct_config_sha256=digest)
+            loaded=daemon.load_config(str(path),expected_direct_config_sha256=digest,expected_direct_credential_sha256=pins)
         _,server=self.build(loaded,provision=True)
         self.assertEqual(server.worker_direct_owner.status(),'not_started')
         server.server_close()
@@ -181,9 +183,22 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
                 signingKey=str(signer_path),issuerId='worker',keyId='worker-key',mountPath='/tmp',mountId='a'*32,markerName='.marker')
             path=root/'config.json';path.write_text(json.dumps(self.config));path.chmod(0o600)
             digest=hashlib.sha256(path.read_bytes()).hexdigest()
+            pins={name:hashlib.sha256(Path(self.config['directPreparation'][name]).read_bytes()).hexdigest()
+                  for name in ('certificate','privateKey','clientCA','signingKey')}
             with self.assertRaises(ValueError):daemon.load_config(str(path))
             with self.assertRaises(ValueError):daemon.load_config(str(path),expected_direct_config_sha256='0'*64)
-            self.assertTrue(daemon.load_config(str(path),expected_direct_config_sha256=digest)['directPreparation']['enabled'])
+            self.assertTrue(daemon.load_config(str(path),expected_direct_config_sha256=digest,
+                                              expected_direct_credential_sha256=pins)['directPreparation']['enabled'])
+            for name in pins:
+                altered=dict(pins);altered[name]='0'*64
+                with self.subTest(credential=name),self.assertRaises(ValueError):
+                    daemon.load_config(str(path),expected_direct_config_sha256=digest,expected_direct_credential_sha256=altered)
+                credential=Path(self.config['directPreparation'][name]);original=credential.read_bytes()
+                try:
+                    credential.write_bytes(original+b'\n')
+                    with self.assertRaises(ValueError):
+                        daemon.load_config(str(path),expected_direct_config_sha256=digest,expected_direct_credential_sha256=pins)
+                finally:credential.write_bytes(original)
             path.write_text(json.dumps(dict(self.config,engineVersion='changed')))
             with self.assertRaises(ValueError):daemon.load_config(str(path),expected_direct_config_sha256=digest)
             absent=copy.deepcopy(self.config);absent.pop('directPreparation')

@@ -14,13 +14,15 @@ def load(path, *, config_path):
     raw=_read(path,private=False,maximum=16384,trusted_uids={0})
     value=p.decode_submission(raw,max_bytes=16384)
     p._closed(value,('schemaVersion','protocol','configPath','configSha256',
-        'authorityId','nodeId','workerId','workerInstanceId'),'worker direct enrollment')
+        'authorityId','nodeId','workerId','workerInstanceId','credentialSha256'),'worker direct enrollment')
     if type(value['schemaVersion']) is not int or value['schemaVersion']!=1 or value['protocol']!=PROTOCOL:
         raise ValueError('worker direct enrollment version invalid')
     if (type(config_path) is not str or not config_path.startswith('/')
             or str(PurePosixPath(config_path))!=config_path or value['configPath']!=config_path):
         raise ValueError('worker direct config identity changed')
     p._hash(value['configSha256'],'worker config digest')
+    p._closed(value['credentialSha256'],('certificate','privateKey','clientCA','signingKey'),'direct credential digests')
+    for digest in value['credentialSha256'].values():p._hash(digest,'direct credential digest')
     p._uuid(value['authorityId'],'worker authority')
     for field in ('nodeId','workerId','workerInstanceId'):p._slug(value[field],field)
     return value

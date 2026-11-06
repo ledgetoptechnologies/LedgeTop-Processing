@@ -17,7 +17,8 @@ from ops import reference_worker_daemon as daemon
 class WorkerEnrollmentTests(unittest.TestCase):
     def record(self):
         return dict(schemaVersion=1,protocol=enrollment.PROTOCOL,configPath='/configured/worker.json',
-            configSha256='a'*64,authorityId=str(uuid.uuid4()),nodeId='cluster',workerId='worker',workerInstanceId='instance')
+            configSha256='a'*64,authorityId=str(uuid.uuid4()),nodeId='cluster',workerId='worker',workerInstanceId='instance',
+            credentialSha256={name:'b'*64 for name in ('certificate','privateKey','clientCA','signingKey')})
 
     def test_daemon_entrypoint_passes_independent_pin_and_checks_identity(self):
         record=self.record();config={k:record[k] for k in ('authorityId','nodeId','workerId','workerInstanceId')}
@@ -27,7 +28,8 @@ class WorkerEnrollmentTests(unittest.TestCase):
              patch.object(daemon,'WorkerService') as service:
             service.return_value.run.return_value=0
             self.assertEqual(daemon.main(['--config',record['configPath'],'--direct-enrollment','/etc/worker-enrollment.json']),0)
-            load.assert_called_once_with(record['configPath'],expected_direct_config_sha256=record['configSha256'])
+            load.assert_called_once_with(record['configPath'],expected_direct_config_sha256=record['configSha256'],
+                                         expected_direct_credential_sha256=record['credentialSha256'])
         with self.assertRaises(ValueError):enrollment.require_identity(record,dict(config,nodeId='wrong'))
 
     @unittest.skipUnless(os.name=='posix' and os.geteuid()==0,'root fixture needed to create root-owned enrollment')

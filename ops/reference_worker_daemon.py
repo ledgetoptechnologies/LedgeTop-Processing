@@ -309,7 +309,7 @@ def _file(path, *, private=False):
     return candidate, info
 
 
-def load_config(path, *, expected_direct_config_sha256=None):
+def load_config(path, *, expected_direct_config_sha256=None, expected_direct_credential_sha256=None):
     """Return private settings; never include their values in an exception."""
     try:
         candidate, initial = _file(path, private=True)
@@ -405,6 +405,9 @@ def load_config(path, *, expected_direct_config_sha256=None):
                 # enrollment record, never from this config or an HTTP request.
                 if expected_direct_config_sha256 is None:
                     raise ValueError('enrolled direct worker configuration required')
+                p._closed(expected_direct_credential_sha256,('certificate','privateKey','clientCA','signingKey'),
+                          'enrolled direct credential digests')
+                for digest in expected_direct_credential_sha256.values():p._hash(digest,'direct credential digest')
                 address=ipaddress.ip_address(direct['host'])
                 if not address.is_loopback or type(direct['port']) is not int or not 1<=direct['port']<=65535:
                     raise ValueError('private loopback listener required')
@@ -419,12 +422,17 @@ def load_config(path, *, expected_direct_config_sha256=None):
                 from cryptography.hazmat.primitives import serialization
                 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
                 keybytes=_read(direct['signingKey'],private=True,maximum=8192)
+                if hashlib.sha256(keybytes).hexdigest()!=expected_direct_credential_sha256['signingKey']:
+                    raise ValueError('enrolled direct signer changed')
                 signer=serialization.load_pem_private_key(keybytes,password=None)
                 if not isinstance(signer,Ed25519PrivateKey):raise ValueError('worker signer required')
                 direct['_signer']=signer
                 cert=_read(direct['certificate'],private=False)
                 secret=_read(direct['privateKey'],private=True)
                 ca=_read(direct['clientCA'],private=False)
+                for name,data in (('certificate',cert),('privateKey',secret),('clientCA',ca)):
+                    if hashlib.sha256(data).hexdigest()!=expected_direct_credential_sha256[name]:
+                        raise ValueError('enrolled direct TLS material changed')
                 context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2
                 context.load_verify_locations(cadata=ca.decode('ascii'));context.verify_mode=ssl.CERT_REQUIRED
                 certfd=_sealed(cert);keyfd=None
@@ -631,7 +639,8 @@ def main(argv=None):
         if args.direct_enrollment is not None:
             from .worker_direct_enrollment import load as load_direct_enrollment
             enrollment=load_direct_enrollment(args.direct_enrollment,config_path=args.config)
-        config = load_config(args.config,expected_direct_config_sha256=(enrollment['configSha256'] if enrollment else None))
+        config = load_config(args.config,expected_direct_config_sha256=(enrollment['configSha256'] if enrollment else None),
+                             expected_direct_credential_sha256=(enrollment['credentialSha256'] if enrollment else None))
         if enrollment is not None:
             from .worker_direct_enrollment import require_identity
             require_identity(enrollment,config)
