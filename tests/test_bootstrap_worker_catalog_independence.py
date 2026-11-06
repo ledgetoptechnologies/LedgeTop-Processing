@@ -14,13 +14,13 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from tests.test_first_coordinator_quarantine import FirstCoordinatorQuarantineTests
+from tests import test_first_coordinator_quarantine as _quarantine
 
 
 @unittest.skipUnless(sys.platform.startswith('linux'),'normal Linux authority/process fixture')
 class BootstrapWorkerCatalogIndependenceTests(unittest.TestCase):
     def test_normal_frozen_boot_and_health_make_no_catalog_request_without_workers(self):
-        h=FirstCoordinatorQuarantineTests(methodName='runTest')
+        h=_quarantine.FirstCoordinatorQuarantineTests(methodName='runTest')
         self.addCleanup(h.doCleanups);h.setUp()
         marker=h.root/'outbound-catalog-observations.jsonl'
         # Keep the worker ports reserved but explicitly NOT listening. They
