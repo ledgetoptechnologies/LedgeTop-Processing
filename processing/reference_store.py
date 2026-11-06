@@ -717,9 +717,31 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             return None
         # Keep its position as a queue barrier, but never advertise it to an
         # ordinary worker before a direct-custody handoff exists.
-        if 'directIntakeVersion' in json.loads(row['input_json']):
+        if not self._ordinary_source_execution_allowed(db, row):
             return None
         return row
+
+    def _ordinary_source_execution_allowed(self, db, row):
+        """Only spool-mode V2 sources may enter the ordinary claim path.
+
+        Direct custody needs a separately qualified exact-worker transition;
+        even an erroneously accepted/queued direct row remains a queue barrier.
+        Missing or damaged source mode evidence fails closed.
+        """
+        from .source_intake_mode import _check_schema
+        _check_schema(db)
+        submission = json.loads(row['input_json'])
+        if type(submission) is not dict or 'directIntakeVersion' in submission:
+            return False
+        mode = db.execute('SELECT mode FROM reference_source_intake_modes WHERE job_id=?',
+                          (row['job_id'],)).fetchone()
+        version = submission.get('sourceIntakeVersion')
+        if mode is None:
+            return version is None and row['source_state'] is None
+        if (type(version) is not int or version != 2 or row['source_state'] is None
+                or mode['mode'] not in ('spool-v1', 'direct-v2')):
+            return False
+        return mode['mode'] == 'spool-v1'
 
     def _required_node(self, submission):
         """Return the first configured capacity-compatible node, ignoring load."""
@@ -752,6 +774,11 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._row(db, job_id)
+            # Replays also confer the prior claim token. Never return that
+            # authority to an ordinary worker for direct-mode or damaged V2
+            # metadata, even if an old claim row is present.
+            if not self._ordinary_source_execution_allowed(db, row):
+                return None
             old = db.execute("SELECT * FROM reference_claims WHERE request_id=?", (claim_request_id,)).fetchone()
             if old:
                 if (old["job_id"], old["node_id"], old["worker_id"], old["instance_id"]) != (
@@ -770,8 +797,6 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             # Future direct-intake records must not enter ordinary execution
             # before a separately qualified worker-custody transition exists.
             # V1/V2 do not carry this reserved marker and retain their behavior.
-            if 'directIntakeVersion' in submission:
-                return None
             candidate = self._candidate_row(db, node_id)
             if candidate is None or candidate["job_id"] != job_id:
                 return None
