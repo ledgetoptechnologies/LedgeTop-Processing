@@ -11,8 +11,100 @@ from unittest.mock import patch
 
 from cryptography.hazmat.primitives import serialization as s
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from ops import enroll_reference_worker as install
+from ops import enrolled_coordinator_deployment as deployment
+from ops import enrolled_worker_readiness_probe as probe
 from ops import prepare_reference_runtime_config as prep
+from processing.node_gate import ENGINE, GateError, canonical_gate_path
 from tests import test_prepare_reference_worker_config as fixtures
+from tests.test_enrolled_coordinator_deployment import bundle as deployment_bundle
+
+
+GATE_ENGINES = ('e', 'actual.test-engine:abc', 'ABCD:EFGH:IJKL', str(uuid.UUID(int=7)), 'A'*256)
+NON_GATE_ENGINES = ('', '.leading', ':leading', '-leading', 'white space', 'trailing\n', 'a/b', 'A'*257, '\u00e9ngine', None, 7)
+
+
+class EngineGrammarAlignmentTests(unittest.TestCase):
+    """Pure validators: every first-install stage agrees with the original Gate."""
+    def manifest(self, engine):
+        operation = str(uuid.uuid4()); authority = str(uuid.uuid4())
+        name = hashlib.sha256(engine.encode()).hexdigest() if type(engine) is str else '0'*64
+        artifact = dict(path='/private/artifact', sha256='1'*64, bytes=1, ownerUid=1000)
+        return dict(schemaVersion=1, protocol=install.PROTOCOL, operationId=operation,
+            host=dict(hostname='worker', bootId=str(uuid.uuid4()), dockerEngineId=engine),
+            service=dict(name='fixture', uid=1000, gid=1000, home='/home/fixture'),
+            installationRoot='/opt/ledgetop-processing-reference/'+operation,
+            source=dict(artifact, commit='2'*40, footprintSha256='3'*64, requirementsSha256='4'*64),
+            dependencies=dict(artifact, pythonSha256='5'*64, pythonVersion='3.10.12', versions=dict(
+                cryptography='50.0.2', cffi='2.1.1', pycparser='2.23', rfc8785='0.1.4')),
+            config=dict(artifact), unitSha256=hashlib.sha256(b'unit').hexdigest(),
+            gate=dict(path='/home/fixture/.local/state/LedgeTop-Processing/node-gates/'+name+'/gate.json',
+                sha256='6'*64, nodeId='main', authorityId=authority, generation=1,
+                coordinatorOrigin='http://127.0.0.1:18080'),
+            engine=dict(containerId='7'*64, imageId='sha256:'+'8'*64, version='3.8.5', loopbackPort=13004,
+                catalogSha256='9'*64))
+
+    def preparer(self, engine):
+        m = self.manifest(engine)
+        prep.node_binding(dict(schemaVersion=1, protocol=prep.BINDING_PROTOCOL, host=m['host'],
+                               service=m['service'], gate=m['gate']))
+
+    def installer(self, engine):
+        with patch.object(install, 'render_unit', return_value='unit'):
+            install.validate_manifest(self.manifest(engine))
+
+    def bundle_worker(self):
+        value, plan = deployment_bundle()
+        return copy.deepcopy(value['workers'][0]), plan['authorityId']
+
+    def deployed(self, engine):
+        worker, authority = self.bundle_worker(); worker['expected']['engineId'] = engine
+        deployment.worker(worker, authority)
+
+    def readiness(self, engine):
+        worker = self.bundle_worker()[0]; worker['expected']['engineId'] = engine
+        probe.validate_request(worker, str(uuid.uuid4()))
+
+    def stages(self):
+        return (self.preparer, self.installer, self.deployed, self.readiness)
+
+    def test_gate_valid_engine_passes_every_stage(self):
+        for engine in GATE_ENGINES:
+            canonical_gate_path(engine)
+            for stage in self.stages():
+                with self.subTest(stage=stage.__name__, length=len(engine)): stage(engine)
+
+    def test_gate_invalid_engine_refuses_at_every_stage(self):
+        for index, engine in enumerate(NON_GATE_ENGINES):
+            with self.assertRaises(GateError): canonical_gate_path(engine)
+            for stage in self.stages():
+                with self.subTest(stage=stage.__name__, index=index):
+                    with self.assertRaises(Exception): stage(engine)
+
+    def test_node_and_worker_slugs_are_not_broadened(self):
+        for field in ('nodeId', 'workerId', 'workerInstanceId'):
+            for check in (deployment.worker, probe.validate_request):
+                worker, authority = self.bundle_worker()
+                worker['expected'][field] = 'colon:dotted.value'
+                if field == 'nodeId': worker['nodeId'] = 'colon:dotted.value'
+                with self.subTest(field=field, check=check.__name__):
+                    with self.assertRaises(Exception):
+                        check(worker, authority if check is deployment.worker else str(uuid.uuid4()))
+
+    def test_stages_share_the_original_gate_definition(self):
+        for module in (install, prep, deployment, probe):
+            text = Path(module.__file__).read_text()
+            self.assertIn('ENGINE.fullmatch', text); self.assertNotIn(ENGINE.pattern[:-2], text)
+
+    def test_serialized_probe_imports_engine_only_after_source_verification(self):
+        worker = self.bundle_worker()[0]; worker['expected']['engineId'] = 'actual.test-engine:abc'
+        script = probe.serialize_probe(worker, str(uuid.uuid4())).decode()
+        compile(script, '<serialized-probe>', 'exec')
+        self.assertEqual(script.count('from processing.node_gate import ENGINE'), 1)
+        self.assertLess(script.index('_source_digest(worker["settings"]["sourceRoot"])=='),
+                        script.index('sys.path.insert(0,worker["settings"]["sourceRoot"])'))
+        self.assertLess(script.index('sys.path.insert(0,worker["settings"]["sourceRoot"])'),
+                        script.index('from processing.node_gate import ENGINE'))
 
 
 @unittest.skipUnless(os.name == 'posix' and os.geteuid() != 0, 'owner-private Linux fixture')
@@ -70,6 +162,11 @@ class RuntimePreparationTests(unittest.TestCase):
         self.assertEqual(config['engineId'],f.engine);self.assertEqual(config['gateGeneration'],7)
         self.assertEqual(config['viewerReceiptKeys'],json.loads((self.out/'final.json').read_bytes())['viewerReceiptKeys'])
         self.assertFalse(original_config.exists());self.assertFalse(Path(config['stateRoot']).exists())
+
+    def test_colon_dotted_gate_engine_prepares_through_binding(self):
+        f=self.fixture; self.assertIn(':',f.engine); self.assertIn('.',f.engine); self.use_binding()
+        self.assertTrue(prep.prepare(self.spec)['preparationOnly'])
+        self.assertEqual(json.loads((self.out/'final.json').read_bytes())['recoveryBindings']['main']['engineId'],f.engine)
 
     def test_binding_and_manifest_modes_produce_identical_runtime_and_viewer_bytes(self):
         old=prep.compose(self.spec);self.use_binding();new=prep.compose(self.spec)
