@@ -3,6 +3,7 @@
 No real Viewer or ODM engine runs, and local closure is not a Viewer ACK.
 """
 import io
+import base64
 import copy
 import sqlite3
 import ssl
@@ -93,6 +94,13 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                         reopened.settle_unstarted(scratch_id,transfer_ended=True)
                 def assert_signed_retention_replay():
                     if lose_retention:
+                        # A full journal applies backpressure; it never evicts
+                        # an existing receipt or reports source custody.
+                        with patch('processing.direct_v2_retention_journal.MAX_OBSERVATIONS',0):
+                            with self.assertRaisesRegex(Conflict,'capacity exceeded'):
+                                handoff.observe_retention(token,protected_transport=True)
+                        self.assertEqual(queue.get(job['jobId'])['status'],'held')
+                    if lose_retention:
                         from processing.direct_worker_sender import DirectDeliveryUncertain
                         original_observe=sender.observe_retention
                         def lost(*args,**kwargs):
@@ -104,6 +112,7 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                         with queue._db() as db:
                             self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_v2_retention_observations').fetchone()[0],0)
                     observed=handoff.observe_retention(token,protected_transport=True)
+                    self.assertEqual((observed['protocol'],observed['schemaVersion']),('ltds-direct-worker-retention-observation-v2',2))
                     self.assertTrue(observed['retentionFenceObserved'])
                     self.assertFalse(observed['sourceCustodyAccepted'])
                     self.assertFalse(observed['transferComplete'])
@@ -113,6 +122,15 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                         saved=db.execute('SELECT closure FROM direct_v2_handoff_sessions WHERE reservation=?',(f.item['reservationId'],)).fetchone()[0]
                     import json
                     signed=json.loads(saved)
+                    from processing import reference_protocol as protocol
+                    old={key:value for key,value in observed.items() if key!='signature'}
+                    old['protocol']='ltds-direct-worker-retention-observation-v1';old['schemaVersion']=1
+                    old['retentionFenceActive']=old.pop('retentionFenceObserved')
+                    old['signature']=base64.urlsafe_b64encode(f.proof_key.sign(
+                        b'LTDS-DIRECT-WORKER-RETENTION-OBSERVATION-V1\0'+protocol.canonical_json(old))).decode('ascii').rstrip('=')
+                    with self.assertRaises(ReceiptRejected):
+                        verify_retention(old,signed_closure=signed,expected_closure=sender._expected_closure(),
+                            issuer_id=sender._issuer,key_id=sender._key,public_key=sender._public)
                     for key,value in (('sourceCustodyAccepted',True),('localClosureSha256','0'*64),
                                       ('workerClosureReceiptSha256','1'*64),('signature','A'*86)):
                         changed=copy.deepcopy(observed);changed[key]=value
@@ -124,6 +142,14 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                         self.assertEqual(restarted.observe_retention(token,protected_transport=True),observed)
                     with self.assertRaises(Conflict):
                         restarted.observe_retention('wrong-viewer-token-012345678901234',protected_transport=True)
+                    # A prior version remains untouched and is not implicitly migrated.
+                    with queue._db() as db:
+                        db.execute('UPDATE coordinator_identity SET direct_v2_retention_version=1 WHERE singleton=1')
+                    with self.assertRaises(Conflict):
+                        restarted.observe_retention(token,protected_transport=True)
+                    with queue._db() as db:
+                        self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_v2_retention_observations').fetchone()[0],1)
+                        db.execute('UPDATE coordinator_identity SET direct_v2_retention_version=2 WHERE singleton=1')
                     # Stored evidence cannot be replaced/deleted, and removing
                     # its guard makes the coordinator fail closed on replay.
                     with queue._db() as db:

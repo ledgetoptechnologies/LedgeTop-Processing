@@ -20,7 +20,9 @@ def validate(db):
         'SELECT direct_v2_retention_version FROM coordinator_identity WHERE singleton=1').fetchone()[0]
     row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='direct_v2_retention_observations'").fetchone()
     if version==0 and row is None and 'direct_v2_retention_count' not in columns:return
-    if (type(version) is not int or version!=1 or 'direct_v2_retention_count' not in columns
+    # Version 1 used a different signed field and signature domain. Existing
+    # journals are held for an explicit migration; never reinterpret or erase.
+    if (type(version) is not int or version!=2 or 'direct_v2_retention_count' not in columns
             or row is None or ' '.join(row['sql'].split())!=' '.join(SCHEMA.split())):
         raise Conflict('V2 retention journal schema requires inspection')
     for sql in TRIGGERS:
@@ -47,7 +49,7 @@ def ensure(db):
         db.execute('ALTER TABLE coordinator_identity ADD COLUMN direct_v2_retention_count INTEGER NOT NULL DEFAULT 0')
         db.execute(SCHEMA)
         for sql in TRIGGERS:db.execute(sql)
-        db.execute('UPDATE coordinator_identity SET direct_v2_retention_version=1 WHERE singleton=1')
+        db.execute('UPDATE coordinator_identity SET direct_v2_retention_version=2 WHERE singleton=1')
     validate(db)
 
 def save(db, *, reservation, signed_closure, observation, sender):
