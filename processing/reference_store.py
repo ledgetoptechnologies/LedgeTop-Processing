@@ -384,6 +384,8 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         used += direct_v2_reservation_metadata(db)
         from .direct_snapshot_page_journal import metadata_bytes as direct_snapshot_metadata
         used += direct_snapshot_metadata(db)
+        from .direct_snapshot_page_journal import selected_metadata_bytes
+        used += selected_metadata_bytes(db)
         return used
 
     def _quota(self, db, extra_bytes=0):

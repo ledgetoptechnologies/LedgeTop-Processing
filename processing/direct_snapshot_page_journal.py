@@ -35,6 +35,57 @@ TRIGGERS=tuple(f"CREATE TRIGGER {table}_{action} BEFORE {event} ON {table} {cond
  ('direct_snapshot_pages','no_replace','INSERT','WHEN EXISTS (SELECT 1 FROM direct_snapshot_pages WHERE reservation=NEW.reservation AND page_index=NEW.page_index)'),
  ('direct_snapshot_pages','no_update','UPDATE',''),('direct_snapshot_pages','no_delete','DELETE','')))
 
+# Separate append-only journal: old source-only sessions remain readable and
+# selected bytes are charged before the first selected page is admitted.
+SELECTED_TABLES={
+ 'direct_selected_sessions':"CREATE TABLE direct_selected_sessions (reservation TEXT PRIMARY KEY,frame_bytes INTEGER NOT NULL,allowance INTEGER NOT NULL)",
+ 'direct_selected_pages':"CREATE TABLE direct_selected_pages (reservation TEXT NOT NULL,page_index INTEGER NOT NULL,page BLOB NOT NULL,PRIMARY KEY(reservation,page_index))",
+}
+SELECTED_TRIGGERS=tuple(f"CREATE TRIGGER {table}_{action} BEFORE {event} ON {table} {condition} BEGIN SELECT RAISE(ABORT,'direct selected immutable'); END"
+ for table,action,event,condition in (
+ ('direct_selected_sessions','no_replace','INSERT','WHEN EXISTS (SELECT 1 FROM direct_selected_sessions WHERE reservation=NEW.reservation)'),
+ ('direct_selected_sessions','no_update','UPDATE',''),('direct_selected_sessions','no_delete','DELETE',''),
+ ('direct_selected_pages','no_replace','INSERT','WHEN EXISTS (SELECT 1 FROM direct_selected_pages WHERE reservation=NEW.reservation AND page_index=NEW.page_index)'),
+ ('direct_selected_pages','no_update','UPDATE',''),('direct_selected_pages','no_delete','DELETE','')))
+
+def selected_metadata_bytes(db):
+    cols={r['name'] for r in db.execute('PRAGMA table_info(coordinator_identity)')}
+    names={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    present=set(SELECTED_TABLES)&names
+    if not present and not ({'direct_selected_version','direct_selected_session_count','direct_selected_page_count'}&cols):return 0
+    if present!=set(SELECTED_TABLES) or not {'direct_selected_version','direct_selected_session_count','direct_selected_page_count'}<=cols:raise Conflict('selected journal requires inspection')
+    identity=db.execute('SELECT direct_selected_version,direct_selected_session_count,direct_selected_page_count FROM coordinator_identity WHERE singleton=1').fetchone()
+    for name,sql in SELECTED_TABLES.items():
+        row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(name,)).fetchone()
+        if row is None or ' '.join(row['sql'].split())!=' '.join(sql.split()):raise Conflict('selected schema changed')
+    for sql in SELECTED_TRIGGERS:
+        row=db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(sql.split()[2],)).fetchone()
+        if row is None or ' '.join(row['sql'].split())!=' '.join(sql.split()):raise Conflict('selected guards changed')
+    n=db.execute('SELECT COUNT(*) FROM direct_selected_sessions').fetchone()[0]
+    pages=db.execute('SELECT COUNT(*) FROM direct_selected_pages').fetchone()[0]
+    if tuple(identity)!=(1,n,pages) or n>MAX_SESSIONS or pages>MAX_SESSIONS*MAX_PAGES:raise Conflict('selected count changed')
+    if db.execute("""SELECT 1 FROM direct_selected_sessions x LEFT JOIN direct_snapshot_sessions s ON s.reservation=x.reservation
+      WHERE s.reservation IS NULL OR typeof(x.frame_bytes)!='integer' OR x.frame_bytes<1 OR x.frame_bytes>?
+      OR typeof(x.allowance)!='integer' OR x.allowance!=x.frame_bytes+? OR CASE WHEN json_valid(CAST(s.intent AS TEXT))
+      THEN COALESCE(json_type(CAST(s.intent AS TEXT),'$.selectedFrameBytes')!='integer' OR json_extract(CAST(s.intent AS TEXT),'$.selectedFrameBytes')!=x.frame_bytes,1) ELSE 1 END LIMIT 1""",(MAX_FRAME_BYTES,SESSION_OVERHEAD)).fetchone():raise Conflict('selected session changed')
+    if db.execute("""SELECT 1 FROM direct_selected_pages p LEFT JOIN direct_selected_sessions s ON s.reservation=p.reservation
+      WHERE s.reservation IS NULL OR typeof(p.page_index)!='integer' OR p.page_index<0 OR p.page_index>=? OR typeof(p.page)!='blob' OR length(p.page)=0 OR length(p.page)>? LIMIT 1""",(MAX_PAGES,MAX_PAGE_BYTES)).fetchone():raise Conflict('selected page changed')
+    if db.execute("""SELECT 1 FROM direct_selected_pages p JOIN direct_selected_sessions s ON s.reservation=p.reservation
+       GROUP BY p.reservation HAVING SUM(length(p.page)+1)>MAX(s.frame_bytes) LIMIT 1""").fetchone():raise Conflict('selected budget changed')
+    return db.execute('SELECT COALESCE(SUM(allowance),0) FROM direct_selected_sessions').fetchone()[0]
+
+def ensure_selected(db):
+    if not db.in_transaction:raise Conflict('selected transaction required')
+    selected_metadata_bytes(db)
+    cols={r['name'] for r in db.execute('PRAGMA table_info(coordinator_identity)')}
+    if 'direct_selected_version' not in cols:
+        for name in ('direct_selected_version','direct_selected_session_count','direct_selected_page_count'):
+            db.execute('ALTER TABLE coordinator_identity ADD COLUMN '+name+' INTEGER NOT NULL DEFAULT 0')
+        for sql in SELECTED_TABLES.values():db.execute(sql)
+        for sql in SELECTED_TRIGGERS:db.execute(sql)
+        db.execute('UPDATE coordinator_identity SET direct_selected_version=1 WHERE singleton=1')
+    selected_metadata_bytes(db)
+
 def metadata_bytes(db):
     cols={r['name'] for r in db.execute('PRAGMA table_info(coordinator_identity)')}
     marker=0 if 'direct_snapshot_version' not in cols else db.execute('SELECT direct_snapshot_version FROM coordinator_identity WHERE singleton=1').fetchone()[0]
@@ -113,10 +164,11 @@ class SnapshotPageJournal:
         try:
             if operation=='begin':return Response(200,self._begin(reservation,snapshot,principal,environment,body))
             if operation.startswith('pages/'):return Response(200,self._page(reservation,snapshot,principal,environment,int(operation[6:]),body))
-            if operation=='complete':
+            if operation.startswith('selected-pages/'):return Response(200,self._selected_page(reservation,snapshot,principal,environment,int(operation[15:]),body))
+            if operation in ('complete','complete-selected'):
                 if body:raise ValueError('empty completion required')
                 if not self._completion.acquire(blocking=False):return Response(429,{'error':'snapshot_busy'})
-                try:return Response(200,self._complete(reservation,snapshot,principal,environment))
+                try:return Response(200,self._complete(reservation,snapshot,principal,environment,include_selected=operation=='complete-selected'))
                 finally:self._completion.release()
             return Response(404,{'error':'not_found'})
         except (ValueError,TypeError,KeyError,Conflict):return Response(409,{'error':'snapshot_unavailable'})
@@ -179,7 +231,40 @@ class SnapshotPageJournal:
                 db.execute('UPDATE coordinator_identity SET direct_snapshot_page_count=direct_snapshot_page_count+1 WHERE singleton=1')
             return {'state':'snapshot_receiving','sourceCustodyAccepted':False}
 
-    def _complete(self,reservation,snapshot,principal,environment):
+    def _selected_page(self,reservation,snapshot,principal,environment,index,body):
+        from .direct_selected_gcp_frames import SELECTED_DOMAIN
+        if type(index) is not int or not 0<=index<MAX_PAGES or type(body) is not bytes or not 0<len(body)<=MAX_PAGE_BYTES:raise ValueError('invalid selected page')
+        frame=_decode(body,MAX_PAGE_BYTES)
+        if (type(frame) is not dict or set(frame)!={'version','index','records'} or frame['version']!='ltds-viewer-selected-frames-v1'
+                or type(frame['index']) is not int or frame['index']!=index or type(frame['records']) is not list or not 1<=len(frame['records'])<=512):raise ValueError('invalid selected page')
+        with self.queue.coordinator_operation('source-io-admission'),self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');self._scope(db,reservation,principal,environment);metadata_bytes(db)
+            session=db.execute('SELECT * FROM direct_snapshot_sessions WHERE reservation=?',(reservation,)).fetchone()
+            if session is None or (session['snapshot'],session['principal'],session['environment'])!=(snapshot,principal,environment):raise Conflict('snapshot session unavailable')
+            intent=_decode(session['intent'],MAX_INTENT_BYTES);hashes=intent['selectedPageHashes'];size=intent['selectedFrameBytes']
+            if (intent['gcp'] is not None or type(hashes) is not list or not 1<=len(hashes)<=MAX_PAGES
+                    or any(type(x) is not str or not re.fullmatch('[a-f0-9]{64}',x) for x in hashes)
+                    or type(size) is not int or not len(hashes)<=size<=min(MAX_FRAME_BYTES,len(hashes)*(MAX_PAGE_BYTES+1))
+                    or index>=len(hashes) or hashlib.sha256(SELECTED_DOMAIN+body).hexdigest()!=hashes[index]):raise Conflict('selected page differs')
+            ensure_selected(db)
+            selected=db.execute('SELECT * FROM direct_selected_sessions WHERE reservation=?',(reservation,)).fetchone()
+            if selected is None:
+                if db.execute('SELECT direct_selected_session_count FROM coordinator_identity WHERE singleton=1').fetchone()[0]>=MAX_SESSIONS:raise Conflict('selected capacity reached')
+                self.store._quota(db,size+SESSION_OVERHEAD)
+                db.execute('INSERT INTO direct_selected_sessions VALUES(?,?,?)',(reservation,size,size+SESSION_OVERHEAD))
+                db.execute('UPDATE coordinator_identity SET direct_selected_session_count=direct_selected_session_count+1 WHERE singleton=1')
+            elif selected['frame_bytes']!=size:raise Conflict('selected size changed')
+            old=db.execute('SELECT page FROM direct_selected_pages WHERE reservation=? AND page_index=?',(reservation,index)).fetchone()
+            if old:
+                if not hmac.compare_digest(old['page'],body):raise Conflict('selected page differs')
+            else:
+                total=db.execute('SELECT COALESCE(SUM(length(page)+1),0) FROM direct_selected_pages WHERE reservation=?',(reservation,)).fetchone()[0]
+                if total+len(body)+1>size:raise Conflict('selected frame budget exceeded')
+                db.execute('INSERT INTO direct_selected_pages VALUES(?,?,?)',(reservation,index,body))
+                db.execute('UPDATE coordinator_identity SET direct_selected_page_count=direct_selected_page_count+1 WHERE singleton=1')
+            return {'state':'selected_pages_receiving','sourceCustodyAccepted':False,'processingAuthorized':False}
+
+    def _complete(self,reservation,snapshot,principal,environment,*,include_selected=False):
         with self.queue.coordinator_operation('source-io-admission'):
             with self.queue._db() as db:
                 db.execute('BEGIN');self._scope(db,reservation,principal,environment);metadata_bytes(db)
@@ -195,5 +280,15 @@ class SnapshotPageJournal:
                 frames=b''.join(row['page']+b'\n' for row in rows)
                 if len(frames)!=intent['sourceFrameBytes']:raise Conflict('source frames incomplete')
                 raw,signature=session['intent'],session['signature']
+                selected_frames=None
+                if include_selected:
+                    selected_metadata_bytes(db)
+                    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_selected_sessions'").fetchone():raise Conflict('selected pages unavailable')
+                    selected=db.execute('SELECT frame_bytes FROM direct_selected_sessions WHERE reservation=?',(reservation,)).fetchone()
+                    if selected is None or selected['frame_bytes']!=intent['selectedFrameBytes']:raise Conflict('selected pages unavailable')
+                    selected_rows=db.execute('SELECT page_index,page FROM direct_selected_pages WHERE reservation=? ORDER BY page_index',(reservation,)).fetchall()
+                    if len(selected_rows)!=len(intent['selectedPageHashes']) or any(row['page_index']!=i for i,row in enumerate(selected_rows)):raise Conflict('selected pages incomplete')
+                    selected_frames=b''.join(row['page']+b'\n' for row in selected_rows)
+                    if len(selected_frames)!=selected['frame_bytes']:raise Conflict('selected frames incomplete')
             return self.reservations.inspect_held_snapshot(reservation,authenticated_principal=principal,
-                issuer_id=intent['issuerId'],key_id=intent['keyId'],intent_bytes=raw,signature=signature,source_frames=frames)
+                issuer_id=intent['issuerId'],key_id=intent['keyId'],intent_bytes=raw,signature=signature,source_frames=frames,selected_frames=selected_frames)
