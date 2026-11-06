@@ -142,13 +142,6 @@ class ScratchLedger:
                   id TEXT PRIMARY KEY, reservation TEXT UNIQUE NOT NULL);
                 CREATE TABLE IF NOT EXISTS direct_v2_readiness_uses (
                   challenge TEXT PRIMARY KEY, reservation TEXT NOT NULL, proof_sha256 TEXT NOT NULL);
-                CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_replace BEFORE INSERT ON direct_v2_readiness_uses
-                  WHEN EXISTS (SELECT 1 FROM direct_v2_readiness_uses WHERE challenge=NEW.challenge)
-                  BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END;
-                CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_update BEFORE UPDATE ON direct_v2_readiness_uses
-                  BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END;
-                CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_delete BEFORE DELETE ON direct_v2_readiness_uses
-                  BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END;
                 CREATE TABLE IF NOT EXISTS reservations (
                   id TEXT PRIMARY KEY, settings TEXT NOT NULL, job TEXT NOT NULL,
                   generation INTEGER NOT NULL, environment TEXT NOT NULL,
@@ -180,6 +173,12 @@ class ScratchLedger:
             for statement in schema.split(";"):
                 if statement.strip():
                     db.execute(statement)
+            for trigger in (
+                "CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_replace BEFORE INSERT ON direct_v2_readiness_uses WHEN EXISTS (SELECT 1 FROM direct_v2_readiness_uses WHERE challenge=NEW.challenge) BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END",
+                "CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_update BEFORE UPDATE ON direct_v2_readiness_uses BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END",
+                "CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_delete BEFORE DELETE ON direct_v2_readiness_uses BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END",
+            ):
+                db.execute(trigger)
             for table, name, declaration in (
                 ("objects", "accepted_copy_verified", "INTEGER NOT NULL DEFAULT 0"),
                 ("receipts", "viewer_receipt", "TEXT"),
