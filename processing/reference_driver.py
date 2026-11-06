@@ -237,6 +237,7 @@ class ReferenceDriver:
             raise ValueError('invalid private worker credential')
         self.worker, self.ledger, self.outbox, self.broker = worker, ledger, outbox, broker
         self.origin, self._bearer = coordinator_origin.rstrip('/'), worker_bearer
+        self._initial_origin = self.origin
         self.node_id, self.worker_id, self.clock = node_id, worker_id, clock
         self._lock = threading.Lock()
         self.path = Path(state_path).absolute()
@@ -583,7 +584,7 @@ class ReferenceDriver:
             response.close()
 
     def direct_source_policy(self):
-        """Fetch authenticated coordinator policy; never authorize direct work."""
+        """Fetch coordinator policy; enabled only over the pinned TLS client."""
         status,value=self._request('GET','/direct-source-policy')
         try:
             if status!=200:raise ValueError()
@@ -593,8 +594,17 @@ class ReferenceDriver:
             if (type(value['schemaVersion']) is not int or value['schemaVersion']!=1
                     or value['authorityId']!=self.worker.authority_id or value['nodeId']!=self.worker.node_id
                     or value['workerId']!=self.worker.worker_id or value['workerInstanceId']!=self.worker_instance_id
-                    or value['directPreparationEnabled'] is not False or value['sourceCustodyAccepted'] is not False):
+                    or type(value['directPreparationEnabled']) is not bool or value['sourceCustodyAccepted'] is not False):
                 raise ValueError()
+            if value['directPreparationEnabled']:
+                # No forwarded header, replaced opener, or unverified TLS
+                # context may turn the preparation capability on.
+                if (getattr(self,'_open',None) is not getattr(self,'_initial_open',None)
+                        or not isinstance(getattr(self,'_ssl_context',None),ssl.SSLContext)
+                        or self._ssl_context.verify_mode!=ssl.CERT_REQUIRED or not self._ssl_context.check_hostname
+                        or type(getattr(self,'origin',None)) is not str or not self.origin.startswith('https://')
+                        or self.origin!=getattr(self,'_initial_origin',None)):
+                    raise ValueError()
             p._hash(value['capabilityFingerprint'],'capability fingerprint')
             p._hash(value['optionsFingerprint'],'options fingerprint')
             allowed=value['allowedOdmOptions']

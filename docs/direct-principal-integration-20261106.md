@@ -105,12 +105,12 @@ tests with 10 external-fixture skips. It has no authenticated daemon endpoint
 or provisioned fleet-policy trust, and does not establish old-process fencing or
 installed recovery; it must not be used to activate a node.
 
-An optional worker-service preparation listener is implemented but its
-coordinator policy refuses all preparation. Protected credentials and a pinned
-config are checked when explicitly configured; the daemon entrypoint does not
-yet have an installed enrollment record. A combined synthetic service run passed
-39 tests. Actual enabled preparation, worker enrollment, installation,
-process restart and per-job upload listener lifecycle remain unqualified.
+An optional worker-service preparation listener and coordinator policy path
+are implemented. The policy remains off by default and can be enabled only
+by explicit root-owned coordinator enrollment and matching protected worker
+configuration. The daemon entrypoint does not yet have an installed enrollment
+record. Worker enrollment, installation, process restart and per-job upload
+listener lifecycle remain unqualified.
 
 A policy-disabled worker can reconstruct a read-only observation listener
 after a synthetic process restart. It rejects upload and closure mutations;
@@ -124,3 +124,7 @@ proof. Missing preparation evidence fails closed on startup or replay. The
 merged synthetic queue/freeze/reservation suite passed 62 tests. Earlier
 unjournaled candidate state needs explicit reconciliation; old-running binary
 fencing, intent retirement and production runtime wiring are not qualified.
+Root-owned enrollment does not fence an older running coordinator or an older
+executable, and does not stop a root-privileged service modifying its own
+enrollment. A reviewed non-root service, process retirement and rollback plan
+are required before activation; this candidate performs no installation.

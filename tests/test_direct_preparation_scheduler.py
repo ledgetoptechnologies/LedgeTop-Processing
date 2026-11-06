@@ -2,6 +2,7 @@
 from contextlib import closing
 import hashlib
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -19,6 +20,10 @@ from processing.reference_source_intake import validate_source_intake
 from processing.reference_store import PROFILE,ReferenceStore
 from processing.reference_runtime import _DynamicAPI
 from processing.reference_worker_api import ReferenceWorkerAPI
+from processing.reference_driver import ReferenceDriver, _NoRedirects
+from processing.reference_http import create_reference_http_server
+from processing.reference_tls import verified_client_context
+from urllib.request import build_opener,ProxyHandler,HTTPSHandler
 from processing.scratch_policy import ScratchLedger
 from tests import test_direct_protected_transport as protected_fixture
 from tests import test_direct_snapshot_http as tls_fixture
@@ -78,6 +83,11 @@ class SchedulerTest(unittest.TestCase):
                         enrollment_file=secure.root/'scheduler-enrollment.json'
                         enrollment_file.write_text(json.dumps(dict(schemaVersion=1,trustedWorkers=worker_wire,enrollment=enrollment)))
                         enrollment_file.chmod(0o600)
+                        if os.geteuid()==0:
+                            os.chown(enrollment_file,10001,10001)
+                            with self.assertRaises(ValueError):
+                                DirectPreparationScheduler.from_protected_file(store,str(enrollment_file))
+                            os.chown(enrollment_file,0,0)
                         scheduler=DirectPreparationScheduler.from_protected_file(store,str(enrollment_file))
                         token='synthetic-worker-bearer-with-enough-length'
                         worker_api=ReferenceWorkerAPI(store,None,bearer_workers={token:dict(node_id='cluster',
@@ -85,19 +95,33 @@ class SchedulerTest(unittest.TestCase):
                         policy_api=_DynamicAPI(SimpleNamespace(worker=worker_api,coordinator_queue=queue),object(),None,
                             lambda:dict(nodes=[dict(role='cluster',available=True)]),lambda:{})
                         policy_api._direct_preparation_scheduler=scheduler
-                        def policy():
-                            response=policy_api.handle('GET','/ltds/worker/v1/direct-source-policy',
-                                {'Authorization':'Bearer '+token},protected_transport=True)
-                            if response.status!=200:raise RuntimeError('policy unavailable')
-                            return response.body
-                        driver.direct_source_policy=policy
+                        policy_server=create_reference_http_server(policy_api,'127.0.0.1',0,ssl_context=h.context)
+                        policy_thread=threading.Thread(target=policy_server.serve_forever);policy_thread.start()
+                        def stop_policy():
+                            policy_server.shutdown();policy_server.server_close();policy_thread.join(5)
+                        self.addCleanup(stop_policy)
+                        policy_origin='https://127.0.0.1:'+str(policy_server.server_port)
+                        policy_tls=verified_client_context(str(h.root/'fixture-ca.pem'))
+                        policy_tls.load_cert_chain(str(h.good),str(h.goodkey))
+                        policy_driver=object.__new__(ReferenceDriver)
+                        policy_driver.worker=SimpleNamespace(authority_id=queue.authority_id,node_id='cluster',
+                            worker_id='worker',origin=policy_origin)
+                        policy_driver.worker_instance_id='instance';policy_driver.origin=policy_origin
+                        policy_driver._initial_origin=policy_origin
+                        policy_driver._bearer=token;policy_driver._ssl_context=policy_tls
+                        policy_driver._open=build_opener(ProxyHandler({}),_NoRedirects(),HTTPSHandler(context=policy_tls)).open
+                        policy_driver._initial_open=policy_driver._open
+                        driver.direct_source_policy=policy_driver.direct_source_policy
                         with patch('processing.reference_runtime._available_discovery_snapshot',side_effect=lambda value:value), \
                              patch('processing.reference_runtime.discovered_policy',return_value=(opts['capability_fingerprint'],opts['options_fingerprint'],set())):
-                            self.assertTrue(policy()['directPreparationEnabled'])
+                            self.assertTrue(policy_driver.direct_source_policy()['directPreparationEnabled'])
+                            with queue._db() as db:db.execute("UPDATE nodes SET state='draining' WHERE id='cluster'")
+                            self.assertFalse(policy_driver.direct_source_policy()['directPreparationEnabled'])
+                            with queue._db() as db:db.execute("UPDATE nodes SET state='active' WHERE id='cluster'")
                             result=scheduler.run_once(capability_fingerprint=opts['capability_fingerprint'],
                                 options_fingerprint=opts['options_fingerprint'],allowed_odm_options=set(),revalidate_policy=lambda *_:True)
                             enrollment_file.write_text(enrollment_file.read_text()+' ')
-                            self.assertFalse(policy()['directPreparationEnabled'])
+                            self.assertFalse(policy_driver.direct_source_policy()['directPreparationEnabled'])
                         self.assertEqual((result['nodeId'],result['state']),('cluster','receiving'))
                         self.assertFalse(result['sourceCustodyAccepted']);self.assertFalse(result['processingAuthorized'])
                         with NodeGate('fixture-v2') as gate:self.assertEqual(gate.snapshot()['reservation']['job']['id'],f.payload['providerTaskId'])

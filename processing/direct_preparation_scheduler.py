@@ -42,7 +42,7 @@ class DirectPreparationScheduler:
         """Build only from an owner-protected local enrollment file."""
         from .direct_protected_transport import _read
         from cryptography.hazmat.primitives import serialization
-        raw=_read(path,private=True,maximum=1024*1024)
+        raw=_read(path,private=False,maximum=1024*1024,trusted_uids={0})
         value=p.decode_submission(raw,max_bytes=1024*1024)
         p._closed(value,('schemaVersion','trustedWorkers','enrollment'),'direct scheduler enrollment')
         if type(value['schemaVersion']) is not int or value['schemaVersion']!=1 or type(value['trustedWorkers']) is not dict:
@@ -61,7 +61,7 @@ class DirectPreparationScheduler:
         from .direct_protected_transport import _read
         if self._enrollment_path is None or node not in self._clients:
             raise Conflict('protected scheduler enrollment unavailable')
-        if hashlib.sha256(_read(self._enrollment_path,private=True,maximum=1024*1024)).hexdigest()!=self._enrollment_sha:
+        if hashlib.sha256(_read(self._enrollment_path,private=False,maximum=1024*1024,trusted_uids={0})).hexdigest()!=self._enrollment_sha:
             raise Conflict('protected scheduler enrollment changed')
         entry=self._enrollment[node]
         fresh=DirectPreparationClient(config_path=entry['configPath'],config_sha256=entry['configSha256'],
@@ -76,6 +76,9 @@ class DirectPreparationScheduler:
             node=identity['node_id'];worker=self._clients[node]._worker
             if (identity['worker_id'],identity['worker_instance_id'])!=(worker['workerId'],worker['workerInstanceId']):return False
             if self.queue._coordinator_freeze.status()['phase']!='open':return False
+            with self.queue._db() as db:
+                db.execute('BEGIN IMMEDIATE');self.queue._refresh_nodes(db)
+                if self.queue._node(db,node)['state'] not in ('active','scheduled'):return False
             self.revalidate_enrollment(node)
             return True
         except Exception:
