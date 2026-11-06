@@ -16,7 +16,7 @@ MAX_JSON_DEPTH = 4
 MAX_SELECTIONS = 64
 MAX_STORAGE_BYTES = 1024 * 1024
 REQUEST_FIELDS = frozenset(('operationId','principalId','authorityId','nodeId','workerId',
-    'workerInstanceId','jobId','attemptId','generation','environment','manifestSha256',
+    'workerInstanceId','jobId','attemptId','reservationId','generation','environment','manifestSha256',
     'derivedManifestSha256','profile'))
 CAP_FIELDS = frozenset(('authorityId','nodeId','workerId','workerInstanceId','profile',
     'maxSource','maxDerived','maxManifestBytes'))
@@ -64,7 +64,7 @@ def _decode(raw,maximum):
     except (ValueError,TypeError,UnicodeError,RecursionError):
         raise NegotiationHeld('invalid canonical JSON') from None
 
-def negotiate(db,raw_request,raw_capabilities,*,authenticated_principal,authenticated_worker,admission_guard,_store=None):
+def negotiate(db,raw_request,raw_capabilities,*,authenticated_principal,authenticated_worker,admission_guard,_store=None,_inside_transaction=False):
     """Persist selection for exact replay, never claims reservation or custody.
 
     Identity arguments are trusted adapter outputs, not request values or
@@ -78,7 +78,7 @@ def negotiate(db,raw_request,raw_capabilities,*,authenticated_principal,authenti
     cap=_decode(raw_capabilities,MAX_CAPABILITY_BYTES)
     try:
         if set(req)!=REQUEST_FIELDS or set(cap)!=CAP_FIELDS: raise ValueError()
-        for key in ('operationId','authorityId','jobId','attemptId'):p._uuid(req[key],key)
+        for key in ('operationId','authorityId','jobId','attemptId','reservationId'):p._uuid(req[key],key)
         for key in ('principalId','nodeId','workerId','workerInstanceId'):p._slug(req[key],key)
         p._integer(req['generation'],'generation');p._environment(req['environment'])
         for key in ('manifestSha256','derivedManifestSha256'):p._hash(req[key],key)
@@ -92,14 +92,15 @@ def negotiate(db,raw_request,raw_capabilities,*,authenticated_principal,authenti
     except (ValueError,TypeError,KeyError):
         raise NegotiationHeld('identity, capability or profile rejected') from None
     if not callable(admission_guard):raise NegotiationHeld('trusted admission guard required')
-    if db.in_transaction or db.execute('PRAGMA synchronous').fetchone()[0] not in (2,3):
+    if (db.in_transaction != _inside_transaction or (_inside_transaction and _store is None)
+            or db.execute('PRAGMA synchronous').fetchone()[0] not in (2,3)):
         raise NegotiationHeld('exclusive FULL transaction required')
     cap_hash=hashlib.sha256(raw_capabilities).hexdigest()
     response=p.canonical_json(dict(protocol='ltds-direct-profile-selection-candidate-v1',
         operationId=req['operationId'],profile=req['profile'],requestSha256=hashlib.sha256(raw_request).hexdigest(),
         capabilitySha256=cap_hash,state='selected_not_reserved',sourceCustodyAccepted=False,transferAuthorized=False))
     if len(response)>MAX_RESPONSE_BYTES:raise NegotiationHeld('response limit exceeded')
-    db.execute('BEGIN IMMEDIATE')
+    if not _inside_transaction:db.execute('BEGIN IMMEDIATE')
     try:
         if admission_guard(db,dict(req),dict(cap)) is not True:
             raise NegotiationHeld('freeze or capability freshness unverified')
@@ -124,7 +125,8 @@ def negotiate(db,raw_request,raw_capabilities,*,authenticated_principal,authenti
             raise NegotiationHeld('negotiation conflict; reconciliation required')
         if _store is None:db.commit()
     except BaseException:
-        db.rollback();raise
+        if not _inside_transaction:db.rollback()
+        raise
     return response
 
 def negotiate_in_coordinator(store,raw_request,raw_capabilities,*,authenticated_principal,authenticated_worker,admission_guard):

@@ -61,9 +61,7 @@ transfer and custody false. It does not authenticate a socket or capabilities,
 enforce a manifest wire limit, create a real coordinator reservation, bind a
 Viewer receipt, or prove power-loss safety of the installed database. It must
 not be called with identities accepted from untrusted request headers. The
-selection and real reservation must eventually become one crash-consistent
-transaction, or have an independently reviewed recovery protocol; this
-experiment alone is not that transaction.
+standalone selection function is not itself a reservation.
 
 The selection experiment additionally requires a trusted guard on **every**
 call, including replay, to check current worker capability in its database
@@ -72,8 +70,11 @@ freshness evidence exists yet. An isolated wrapper participates in the actual
 coordinator freeze operation and shared logical metadata census. Its journal
 also holds at 64 rows or 1 MiB of counted logical values, keeps existing
 selections for replay, and does not auto-delete them. These prototype caps do
-not account for SQLite overhead or define safe retention. Selection remains
-separate from the worker reservation transaction. Resolve those boundaries
+not account for SQLite overhead or define safe retention. An unwired reservation
+prototype selects the profile and reserves the node in the same freeze-gated
+coordinator transaction, and requires its persisted profile binding on replay.
+Its guard is synthetic and worker scratch is still a separate handoff. Resolve
+those boundaries
 before live use; a guard callback alone is not proof of safety. The added
 selection table must be included in any verified freeze backup and migration.
 Older executables may omit it from their census; rollback refusal is not proven

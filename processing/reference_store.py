@@ -356,6 +356,12 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             used += db.execute('''SELECT COALESCE(SUM(length(CAST(principal AS BLOB))+
                 length(CAST(operation AS BLOB))+length(request)+length(capability)+length(response)),0)
                 FROM direct_negotiation_candidate''').fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_intake_profile_bindings'").fetchone():
+            from .direct_intake_reservation import verify_profile_schema
+            verify_profile_schema(db)
+            used += db.execute('''SELECT COALESCE(SUM(length(CAST(reservation_id AS BLOB))+
+                length(CAST(principal AS BLOB))+length(CAST(operation AS BLOB))+
+                length(CAST(profile AS BLOB))),0) FROM direct_intake_profile_bindings''').fetchone()[0]
         return used
 
     def _quota(self, db, extra_bytes=0):

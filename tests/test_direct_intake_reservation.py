@@ -63,6 +63,78 @@ class DirectIntakeTests(unittest.TestCase):
         self.assertIsNone(self.direct.reserve(**self.submit(count=1)))
         self.assertEqual(self.direct.reserve(**small), dict(first, replayed=True))
 
+    def selection(self,request,node='cluster',guard=None):
+        from processing.direct_limits import PROFILE
+        worker=dict(authorityId=self.queue.authority_id,nodeId=node,**self.bindings[node])
+        profile=dict(operationId=str(uuid.uuid4()),principalId='viewer',reservationId=request['reservation_id'],
+            jobId=request['job_id'],attemptId=request['attempt_id'],generation=request['generation'],
+            environment='production',manifestSha256=request['manifest_sha'],
+            derivedManifestSha256=request['derived_manifest_sha'],profile=PROFILE,**worker)
+        cap=dict(profile=PROFILE,maxSource=10000,maxDerived=10000,maxManifestBytes=16*1024*1024,**worker)
+        return dict(request=p.canonical_json(profile),capabilities=p.canonical_json(cap),
+            principal='viewer',worker=worker,guard=guard or (lambda db,req,cap:True))
+
+    def test_profile_selection_and_reservation_share_transaction_and_replay(self):
+        from processing.direct_limits import PROFILE
+        request=self.submit();selection=self.selection(request)
+        first=self.direct.reserve(**request,profile_selection=selection)
+        self.assertEqual(first['limitProfile'],PROFILE)
+        self.assertEqual(self.direct.reserve(**request,profile_selection=selection),dict(first,replayed=True))
+        with self.assertRaisesRegex(Conflict,'profile replay'):self.direct.reserve(**request)
+        stale=dict(selection,guard=lambda db,req,cap:False)
+        with self.assertRaises(ValueError):self.direct.reserve(**request,profile_selection=stale)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM direct_intake_profile_bindings').fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT count(*) FROM direct_negotiation_candidate').fetchone()[0],1)
+
+    def test_reservation_failure_rolls_back_profile_selection(self):
+        import sqlite3
+        request=self.submit();selection=self.selection(request)
+        with self.queue._db() as db:
+            db.execute("CREATE TRIGGER synthetic_reservation_failure BEFORE INSERT ON direct_intake_reservations BEGIN SELECT RAISE(ABORT, 'injected'); END")
+        with self.assertRaises(sqlite3.IntegrityError):self.direct.reserve(**request,profile_selection=selection)
+        self.assertEqual(self.queue.get(request['job_id'])['status'],'queued')
+        with self.queue._db() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_negotiation_candidate'").fetchone())
+            db.execute('DROP TRIGGER synthetic_reservation_failure')
+        self.assertEqual(self.direct.reserve(**request,profile_selection=selection)['nodeId'],'cluster')
+
+    def test_profile_cannot_select_other_node_or_bypass_freeze(self):
+        from processing.coordinator_freeze import CoordinatorFrozen
+        request=self.submit()
+        with self.assertRaisesRegex(Conflict,'binding changed'):
+            self.direct.reserve(**request,profile_selection=self.selection(request,'main'))
+        gate=self.queue._coordinator_freeze
+        gate.transition(dict(requestId=str(uuid.uuid4()),planId=str(uuid.uuid4()),action='intent',
+            expectedRevision=gate.status()['revision'],startupId=self.queue.startup_id),owner_secret='synthetic-owner')
+        with self.assertRaises(CoordinatorFrozen):self.direct.reserve(**request,profile_selection=self.selection(request))
+
+    def test_profile_restart_replay_and_missing_binding_fail_closed(self):
+        request=self.submit();selection=self.selection(request)
+        first=self.direct.reserve(**request,profile_selection=selection)
+        self.queue.close()
+        self.queue=Queue(self.temp.name,node_ids=('cluster','main'),reference_enabled=True)
+        self.store=ReferenceStore(self.queue,local_max_photos=2)
+        self.direct=DirectIntakeReservations(self.store,worker_bindings=self.bindings)
+        self.assertEqual(self.direct.reserve(**request,profile_selection=selection),dict(first,replayed=True))
+        with self.queue._db() as db:db.execute('DELETE FROM direct_intake_profile_bindings')
+        with self.assertRaisesRegex(Conflict,'profile replay'):self.direct.reserve(**request)
+        with self.assertRaisesRegex(Conflict,'profile replay'):
+            self.direct.reserve(**request,profile_selection=selection)
+
+    def test_profile_competing_jobs_cannot_share_node(self):
+        requests=[self.submit(),self.submit()]
+        selections=[self.selection(request) for request in requests]
+        def run(i):
+            try:return self.direct.reserve(**requests[i],profile_selection=selections[i])
+            except Conflict:return None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results=list(pool.map(run,range(2)))
+        self.assertEqual(sum(value is not None for value in results),1)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM direct_intake_profile_bindings').fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT count(*) FROM direct_negotiation_candidate').fetchone()[0],1)
+
     def test_same_node_competing_direct_and_regular_claim_are_atomic(self):
         request = self.submit()
         def direct(): return self.direct.reserve(**request)

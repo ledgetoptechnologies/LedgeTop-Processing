@@ -16,7 +16,7 @@ class NegotiationTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.path=Path(self.temp.name)/'candidate.sqlite'
         self.worker=dict(authorityId=ID,nodeId='node',workerId='worker',workerInstanceId='instance')
-        self.req=dict(operationId=ID,principalId='viewer',jobId=ID,attemptId=ID,generation=1,
+        self.req=dict(operationId=ID,principalId='viewer',jobId=ID,attemptId=ID,reservationId=ID,generation=1,
             environment='staging',manifestSha256='a'*64,derivedManifestSha256='b'*64,
             profile=limits.PROFILE,**self.worker)
         self.cap=dict(profile=limits.PROFILE,maxSource=10000,maxDerived=10000,maxManifestBytes=16*1024*1024,**self.worker)
