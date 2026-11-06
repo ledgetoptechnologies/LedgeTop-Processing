@@ -25,7 +25,7 @@ CONTROL_LIMIT = 256 * 1024
 TRANSITION_RESERVE = 2048
 PLAN_FINISH_RESERVE = 8192
 STARTUP_TABLES = frozenset(('coordinator_identity', 'jobs', 'nodes', 'owned_maintenance_schedules',
-    'processing_node_inventory', 'reference_acceptances', 'reference_claims', 'reference_jobs',
+    'processing_node_inventory', 'direct_intake_reservations', 'direct_intake_profile_bindings', 'direct_negotiation_candidate', 'direct_v2_reservations', 'direct_handoff_sessions', 'direct_handoff_objects', 'direct_v2_handoff_sessions', 'direct_v2_handoff_objects', 'reference_acceptances', 'reference_claims', 'reference_jobs',
     'reference_outbox', 'reference_recovery_receipts', 'reference_recovery_startup',
     'reference_source_grant_renewals', 'reference_source_grant_tokens', 'reference_source_intakes',
     'reference_source_object_pins', 'reference_source_object_receipts', 'reference_source_range_requests',
@@ -122,8 +122,21 @@ class FreezeGate:
         self._pid = os.getpid()
         with queue._db() as db:
             existing = {item[0] for item in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if existing.intersection(('coordinator_admission', 'coordinator_admission_operations', 'legacy_fence_requirement')):
+            if existing.intersection(('coordinator_admission', 'coordinator_admission_operations')):
                 raise CoordinatorFrozen('reviewed_legacy_barrier_conversion_required')
+            from .direct_v2_reservation_schema import marker_version
+            if 'legacy_fence_requirement' in existing or marker_version(db)==1:
+                from .direct_v2_reservation_schema import verify_fence, verify_schema
+                verify_fence(db)
+                verify_schema(db)
+            columns={row['name'] for row in db.execute('PRAGMA table_info(coordinator_identity)')}
+            if 'direct_v2_handoff_version' in columns:
+                marker=db.execute('SELECT direct_v2_handoff_version FROM coordinator_identity WHERE singleton=1').fetchone()
+                if marker is None or type(marker[0]) is not int or marker[0] not in (0,1):
+                    raise CoordinatorFrozen('V2 handoff marker requires inspection')
+                if marker[0]==1:
+                    from .direct_v2_handoff_journal import full_census
+                    full_census(db)
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS coordinator_freeze_state (
                   singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL,
@@ -304,7 +317,15 @@ class FreezeGate:
         """Called under Queue's transaction/lifecycle mutex before yielding DB."""
         self._check()
         row = self._row(db)
+        def handoff_counter_authorized(action, first, second, database, source):
+            # A counter is mutated only by the exact validated AFTER INSERT
+            # trigger. last_insert_rowid alone is replayable on one connection.
+            if (action == sqlite3.SQLITE_UPDATE and first == 'direct_handoff_sessions'
+                    and second == 'object_count' and source != 'direct_handoff_object_insert'):
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
         if getattr(self._local, 'control', False):
+            db.set_authorizer(handoff_counter_authorized)
             return
         token = getattr(self._local, 'operation', None)
         if token is not None and self._active.get(token) == threading.get_ident():
@@ -313,8 +334,10 @@ class FreezeGate:
                     or saved['start_revision'] > row['revision']):
                 raise CoordinatorFrozen('coordinator_operation_ownership_uncertain')
             if row['phase'] in ('open', 'intent', 'draining'):
+                db.set_authorizer(handoff_counter_authorized)
                 return
         if row['phase'] == 'open':
+            db.set_authorizer(handoff_counter_authorized)
             return
         # Pure SELECTs and transaction bookkeeping still work. SQLite enforces
         # this on every coordinator DB connection, including background writers.
@@ -326,6 +349,8 @@ class FreezeGate:
                   sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH}
         denied_by_gate = [False]
         def authorize(action, first, second, database, source):
+            if handoff_counter_authorized(action,first,second,database,source) != sqlite3.SQLITE_OK:
+                return sqlite3.SQLITE_DENY
             startup = getattr(self._local, 'startup', None)
             if startup is not None and threading.get_ident() == self.queue._startup_thread:
                 # A real runtime's constructor/start may add only this reviewed

@@ -516,6 +516,7 @@ class ReferenceRuntime:
                 local_max_input_bytes=config.local_max_input_bytes,
                 main_node_id=next((node.id for node in endpoints if node.id == "main"), None),
                 node_limits=node_limits,
+                source_routing_keys=settings.source_attestation_keys,
                 node_option_validator=self._node_options_valid)
             from .node_inventory import pin_reference_inventory
             pin_reference_inventory(self.store, config, settings)

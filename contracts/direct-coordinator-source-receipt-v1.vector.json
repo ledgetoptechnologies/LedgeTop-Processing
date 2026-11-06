@@ -1,0 +1,53 @@
+{
+  "description": "Public synthetic RFC 8032 test key; never production",
+  "domainHex": "6c7464732e7669657765722e736f757263652d616363657074616e63652f763100",
+  "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=\n-----END PUBLIC KEY-----\n",
+  "receipt": {
+    "body": {
+      "coordinatorAuthorityId": "00000000-0000-4000-8000-000000000003",
+      "derivedManifestSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "derivedObjects": [
+        {
+          "byteSize": 5,
+          "id": "gcp-1",
+          "sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+        }
+      ],
+      "engineMappingSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "environment": "production",
+      "generation": 1,
+      "intakeProtocol": "ltds-direct-intake-v1",
+      "issuedAt": "2026-11-06T12:00:00.000Z",
+      "jobId": "00000000-0000-4000-8000-000000000007",
+      "mode": "direct",
+      "modeRevision": 1,
+      "operationId": "00000000-0000-4000-8000-000000000002",
+      "originalPathInventorySha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "receiptId": "00000000-0000-4000-8000-000000000001",
+      "retentionGuarantee": "until_explicit_source_release_v1",
+      "sourceManifestSha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "sourceObjects": [
+        {
+          "byteSize": 4,
+          "id": "image-1",
+          "sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+        }
+      ],
+      "sourceSnapshotSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "submissionId": "00000000-0000-4000-8000-000000000004",
+      "submissionIntentSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "viewerAttemptId": "00000000-0000-4000-8000-000000000006",
+      "viewerDestinationId": "destination-test",
+      "viewerPrincipalId": "viewer-test",
+      "viewerTaskId": "00000000-0000-4000-8000-000000000005",
+      "workerClosureReceiptSha256": "7777777777777777777777777777777777777777777777777777777777777777"
+    },
+    "issuerId": "coordinator-test",
+    "keyId": "test-key",
+    "protocol": "ltds.viewer.source-acceptance/v1",
+    "schemaVersion": 1,
+    "signature": "us5FinUPTzyrPJsDRTPxB804-7QG8yPw3UMWW6YpwC344zTQapzxhhyL7ePCm5jXHf27gKeM0shN9oLxehBkCQ"
+  },
+  "unsignedCanonicalUtf8": "{\"body\":{\"coordinatorAuthorityId\":\"00000000-0000-4000-8000-000000000003\",\"derivedManifestSha256\":\"5555555555555555555555555555555555555555555555555555555555555555\",\"derivedObjects\":[{\"byteSize\":5,\"id\":\"gcp-1\",\"sha256\":\"9999999999999999999999999999999999999999999999999999999999999999\"}],\"engineMappingSha256\":\"6666666666666666666666666666666666666666666666666666666666666666\",\"environment\":\"production\",\"generation\":1,\"intakeProtocol\":\"ltds-direct-intake-v1\",\"issuedAt\":\"2026-11-06T12:00:00.000Z\",\"jobId\":\"00000000-0000-4000-8000-000000000007\",\"mode\":\"direct\",\"modeRevision\":1,\"operationId\":\"00000000-0000-4000-8000-000000000002\",\"originalPathInventorySha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"receiptId\":\"00000000-0000-4000-8000-000000000001\",\"retentionGuarantee\":\"until_explicit_source_release_v1\",\"sourceManifestSha256\":\"4444444444444444444444444444444444444444444444444444444444444444\",\"sourceObjects\":[{\"byteSize\":4,\"id\":\"image-1\",\"sha256\":\"8888888888888888888888888888888888888888888888888888888888888888\"}],\"sourceSnapshotSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"submissionId\":\"00000000-0000-4000-8000-000000000004\",\"submissionIntentSha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"viewerAttemptId\":\"00000000-0000-4000-8000-000000000006\",\"viewerDestinationId\":\"destination-test\",\"viewerPrincipalId\":\"viewer-test\",\"viewerTaskId\":\"00000000-0000-4000-8000-000000000005\",\"workerClosureReceiptSha256\":\"7777777777777777777777777777777777777777777777777777777777777777\"},\"issuerId\":\"coordinator-test\",\"keyId\":\"test-key\",\"protocol\":\"ltds.viewer.source-acceptance/v1\",\"schemaVersion\":1}",
+  "unsignedSha256": "3d92c0510615f285cc6e8aa790a9c3432c0664a64e6de048dc8328c2b5227c57"
+}

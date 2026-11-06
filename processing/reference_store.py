@@ -57,13 +57,17 @@ def _reason(value):
 class ReferenceStore(ReferenceSourceIntakeMethods):
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
-                 main_node_id=None, node_limits=None, node_option_validator=None):
+                 main_node_id=None, node_limits=None, node_option_validator=None,
+                 source_routing_keys=None):
         if PROFILE not in queue.allowed_profiles:
             raise ValueError("reference queue profile is disabled")
         for value in (max_queued_jobs, max_metadata_bytes):
             if type(value) is not int or value < 1:
                 raise ValueError("metadata quotas must be positive integers")
         self.queue = queue
+        from .viewer_source_attestation import ValidatedSourceKeys, validate_trusted_keys
+        self._source_routing_keys = (source_routing_keys if isinstance(source_routing_keys,ValidatedSourceKeys)
+            else validate_trusted_keys(source_routing_keys) if source_routing_keys is not None else None)
         self.max_queued_jobs = max_queued_jobs
         self.max_metadata_bytes = max_metadata_bytes
         for value in (local_max_photos, local_max_input_bytes):
@@ -190,6 +194,10 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             transfer_columns = {row[1] for row in db.execute('PRAGMA table_info(reference_viewer_transfers)')}
             if 'viewer_manifest_json' not in transfer_columns:
                 db.execute('ALTER TABLE reference_viewer_transfers ADD COLUMN viewer_manifest_json TEXT')
+            from .source_intake_mode import initialize as initialize_source_mode
+            if not db.in_transaction:
+                db.execute('BEGIN IMMEDIATE')
+            initialize_source_mode(db)
             # Preserve execution phase across restart. Queue's held status is an
             # overlay; it neither authorizes replay nor erases worker progress.
         # The coordinator lease permits one runtime owner per Queue process;
@@ -306,7 +314,13 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
           COALESCE(length(CAST(transfer_json AS BLOB)),0)+COALESCE(length(CAST(result_json AS BLOB)),0)),0)
           FROM reference_jobs""").fetchone()[0]
         used += db.execute("""SELECT COALESCE(SUM(length(CAST(source_manifest_json AS BLOB))+
-          length(CAST(derived_manifest_json AS BLOB))),0) FROM reference_source_intakes""").fetchone()[0]
+          length(CAST(derived_manifest_json AS BLOB))+
+          COALESCE(length(CAST(source_attestation_json AS BLOB)),0)),0) FROM reference_source_intakes""").fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_source_intake_modes'").fetchone():
+            from .source_intake_mode import _check_schema as check_source_mode_schema
+            check_source_mode_schema(db)
+            used += db.execute("""SELECT COALESCE(SUM(length(CAST(job_id AS BLOB))+
+              length(CAST(mode AS BLOB))),0) FROM reference_source_intake_modes""").fetchone()[0]
         used += db.execute("SELECT COALESCE(SUM(length(CAST(receipt_json AS BLOB))),0) FROM reference_source_object_receipts").fetchone()[0]
         for table, column in (("reference_acceptances", "receipt_json"), ("reference_outbox", "payload_json"),
                               ("reference_viewer_receipts", "receipt_json"),
@@ -340,6 +354,34 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         used += freeze_metadata_bytes(db)
         from .source_release import metadata_bytes as source_release_metadata_bytes
         used += source_release_metadata_bytes(db)
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_intake_reservations'").fetchone():
+            columns={row['name'] for row in db.execute('PRAGMA table_info(direct_intake_reservations)')}
+            if columns!={'reservation_id','job_id','attempt_id','generation','environment','authority_id',
+                         'manifest_sha','derived_manifest_sha','node_id','worker_id','instance_id','state'}:
+                raise Conflict('direct reservation schema requires inspection')
+            used += db.execute('''SELECT COALESCE(SUM(length(reservation_id)+length(job_id)+length(attempt_id)
+                +length(CAST(generation AS TEXT))+length(environment)+length(authority_id)+length(manifest_sha)+length(derived_manifest_sha)
+                +length(node_id)+length(worker_id)+length(instance_id)+length(state)),0)
+                FROM direct_intake_reservations''').fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_negotiation_candidate'").fetchone():
+            from .direct_negotiation_candidate import verify_schema, NegotiationHeld
+            try: verify_schema(db)
+            except NegotiationHeld: raise Conflict('direct negotiation schema requires inspection') from None
+            used += db.execute('''SELECT COALESCE(SUM(length(CAST(principal AS BLOB))+
+                length(CAST(operation AS BLOB))+length(request)+length(capability)+length(response)),0)
+                FROM direct_negotiation_candidate''').fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_intake_profile_bindings'").fetchone():
+            from .direct_intake_reservation import verify_profile_schema
+            verify_profile_schema(db)
+            used += db.execute('''SELECT COALESCE(SUM(length(CAST(reservation_id AS BLOB))+
+                length(CAST(principal AS BLOB))+length(CAST(operation AS BLOB))+
+                length(CAST(profile AS BLOB))),0) FROM direct_intake_profile_bindings''').fetchone()[0]
+        from .direct_handoff_census import verify_census as direct_handoff_census
+        used += direct_handoff_census(db)
+        from .direct_v2_handoff_journal import metadata_bytes as direct_v2_handoff_bytes
+        used += direct_v2_handoff_bytes(db)
+        from .direct_v2_reservation_schema import metadata_bytes as direct_v2_reservation_metadata
+        used += direct_v2_reservation_metadata(db)
         return used
 
     def _quota(self, db, extra_bytes=0):
@@ -540,7 +582,8 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                 nodes = [node for node in self.queue.node_ids if self.queue._staging_open(db, node)]
                 if node_id not in nodes:
                     return None
-            rows = db.execute("SELECT id,profile,environment FROM jobs WHERE status='queued' AND environment=? "
+            rows = db.execute("SELECT id,profile,environment FROM jobs WHERE (status='queued' OR "
+                              "(status='held' AND held_reason='direct_admission_pending')) AND environment=? "
                               "ORDER BY seq", (environment,)).fetchall()
             for item in rows:
                 profile = item["profile"]
@@ -551,6 +594,47 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                     if row["phase"] not in ("queued", "waiting_capacity"):
                         continue
                     submission = json.loads(row["input_json"])
+                    if row['status']=='held' and row['held_reason']=='direct_admission_pending':
+                        try:
+                            if self._source_routing_keys is None:
+                                raise ValueError('trusted direct source keys unavailable')
+                            source=json.loads(row['source_manifest_json'])
+                            derived=json.loads(row['derived_manifest_json'])
+                            attestation=json.loads(row['source_attestation_json'])
+                            from .viewer_source_attestation import proof_digest
+                            proof=attestation['proof']
+                            total=sum(obj['byteSize'] for manifest in (source,derived) for obj in manifest['objects'])
+                            protocol._integer(total,'direct retained bytes',allow_zero=True)
+                            original=dict(schemaVersion=2,submissionId=submission['submissionId'],
+                                providerTaskId=row['provider_task_id'],viewerTaskId=row['viewer_task_id'],
+                                sourceManifest=source,derivedManifest=derived,manifest=submission['manifest'],
+                                pipeline=submission['pipeline'],capabilityFingerprint=submission['capabilityFingerprint'],
+                                sourceAttestation=attestation)
+                            if (sum(obj['byteSize'] for obj in source['objects'])!=source['totalBytes']
+                                    or source['sha256']!=protocol.digest({k:v for k,v in source.items() if k!='sha256'})
+                                    or derived['sha256']!=protocol.digest({k:v for k,v in derived.items() if k!='sha256'})
+                                    or source['sha256']!=row['source_manifest_sha']
+                                    or derived['sha256']!=row['derived_manifest_sha']
+                                    or attestation['attestationSha256']!=row['source_attestation_sha']
+                                    or attestation['attestationSha256']!=proof_digest(proof)
+                                    or proof['sourceManifestSha256']!=source['sha256']
+                                    or proof['derivedManifestSha256']!=derived['sha256']
+                                    or proof['pipelineManifestSha256']!=row['manifest_sha']
+                                    or proof['pipelineDigest']!=row['pipeline_digest']
+                                    or protocol.digest(original)!=row['source_request_digest']):
+                                raise ValueError('direct retained inventory changed')
+                            from .viewer_source_attestation import validate_and_verify
+                            validate_and_verify(attestation,trusted_keys=self._source_routing_keys,
+                                authority_id=self.queue.authority_id,environment=row['environment'],
+                                submission_id=submission['submissionId'],provider_task_id=row['provider_task_id'],
+                                attempt_id=submission['submissionId'],viewer_task_id=row['viewer_task_id'],
+                                source_manifest_sha256=source['sha256'],derived_manifest_sha256=derived['sha256'],
+                                pipeline_manifest_sha256=row['manifest_sha'],pipeline_digest=row['pipeline_digest'])
+                            submission['manifest']['totalBytes']=total
+                        except (ValueError,TypeError,KeyError,AttributeError):
+                            # Unknown size remains an ordering barrier; it is
+                            # never a reason to hand the node to a later job.
+                            return item
                     if self._select_node(db, submission, PROFILE, nodes) == node_id:
                         return item
                     continue
@@ -622,8 +706,16 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
 
     def _candidate_row(self, db, node_id):
         candidate = self._candidate_any_row(db, node_id)
-        return (self._row(db, candidate["id"])
-                if candidate is not None and candidate["profile"] == PROFILE else None)
+        if candidate is None or candidate['profile'] != PROFILE:
+            return None
+        row = self._row(db, candidate['id'])
+        if row['status'] != 'queued':
+            return None
+        # Keep its position as a queue barrier, but never advertise it to an
+        # ordinary worker before a direct-custody handoff exists.
+        if 'directIntakeVersion' in json.loads(row['input_json']):
+            return None
+        return row
 
     def _required_node(self, submission):
         """Return the first configured capacity-compatible node, ignoring load."""
@@ -671,6 +763,11 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             if row['source_state'] is not None and (row['source_state']!='accepted' or row['derived_state']!='accepted'):
                 raise Conflict("reference source custody is incomplete")
             submission = json.loads(row["input_json"])
+            # Future direct-intake records must not enter ordinary execution
+            # before a separately qualified worker-custody transition exists.
+            # V1/V2 do not carry this reserved marker and retain their behavior.
+            if 'directIntakeVersion' in submission:
+                return None
             candidate = self._candidate_row(db, node_id)
             if candidate is None or candidate["job_id"] != job_id:
                 return None

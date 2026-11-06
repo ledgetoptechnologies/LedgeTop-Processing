@@ -107,16 +107,34 @@ class Queue(Maintenance):
                 if 'held_reason' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
                     db.execute('ALTER TABLE jobs ADD COLUMN held_reason TEXT')
                 db.execute('CREATE TABLE IF NOT EXISTS coordinator_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)')
-                db.execute('INSERT OR IGNORE INTO coordinator_identity VALUES(1, ?)', (str(uuid.uuid4()),))
+                db.execute('INSERT OR IGNORE INTO coordinator_identity(singleton,authority_id) VALUES(1, ?)', (str(uuid.uuid4()),))
                 self.authority_id = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
                 if authority_lease is not None and authority_lease.authority != self.authority_id:
                     raise authority_leases.LeaseUnavailable('authority_lease_authority_changed')
                 from .node_inventory import validate_removed_nodes
                 validate_removed_nodes(db, self.node_ids)
-                unassigned = db.execute("SELECT 1 FROM jobs WHERE node_id IS NULL AND status IN ('running','held') LIMIT 1").fetchone()
+                pending=db.execute("SELECT id FROM jobs WHERE node_id IS NULL AND status='held' AND held_reason='direct_admission_pending'").fetchall()
+                if pending:
+                    from .source_intake_mode import _check_schema as check_source_mode_schema
+                    check_source_mode_schema(db)
+                    columns={row['name'] for row in db.execute('PRAGMA table_info(coordinator_identity)')}
+                    if 'source_mode_version' not in columns or db.execute('SELECT source_mode_version FROM coordinator_identity WHERE singleton=1').fetchone()[0]!=1:
+                        raise Conflict('direct pending migration marker missing')
+                    for entry in pending:
+                        record=db.execute('''SELECT m.mode,s.source_state,s.derived_state,r.input_json
+                            FROM reference_source_intake_modes m JOIN reference_source_intakes s ON s.job_id=m.job_id
+                            JOIN reference_jobs r ON r.job_id=m.job_id WHERE m.job_id=?''',(entry['id'],)).fetchone()
+                        try: submission=json.loads(record['input_json']) if record else None
+                        except (ValueError,TypeError): submission=None
+                        if (record is None or record['mode']!='direct-v2' or record['source_state']!='receiving'
+                                or record['derived_state']!='receiving' or type(submission) is not dict
+                                or type(submission.get('sourceIntakeVersion')) is not int
+                                or submission['sourceIntakeVersion']!=2):
+                            raise Conflict('direct pending source metadata changed')
+                unassigned = db.execute("SELECT 1 FROM jobs WHERE node_id IS NULL AND status IN ('running','held') AND COALESCE(held_reason,'')!='direct_admission_pending' LIMIT 1").fetchone()
                 if unassigned and 'cluster' not in self.node_ids:
                     raise Conflict('legacy unassigned execution requires its original cluster node')
-                db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held')")
+                db.execute("UPDATE jobs SET node_id='cluster' WHERE node_id IS NULL AND status IN ('running','held') AND COALESCE(held_reason,'')!='direct_admission_pending'")
                 db.execute("UPDATE jobs SET status='held', held_reason='coordinator_restart', updated_at=CURRENT_TIMESTAMP WHERE status='running'")
                 self._init_maintenance(db)
             from .coordinator_freeze import FreezeGate
@@ -409,6 +427,13 @@ class Queue(Maintenance):
             row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
             if not row:
                 raise Conflict("unknown job")
+            if (action == 'resolve' and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_intake_reservations'").fetchone()
+                    and db.execute('SELECT 1 FROM direct_intake_reservations WHERE job_id=?', (identifier,)).fetchone()):
+                raise Conflict('direct intake requires custody reconciliation')
+            if action == 'resolve' and (row['held_reason']=='direct_admission_pending' or (
+                    db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_source_intake_modes'").fetchone()
+                    and db.execute("SELECT 1 FROM reference_source_intake_modes WHERE job_id=? AND mode='direct-v2'",(identifier,)).fetchone())):
+                raise Conflict('direct intake requires custody reconciliation')
             if action == "hold" and (row["status"] == "running" or
                                      (row["status"] == "held" and row['held_reason'] == 'coordinator_restart')):
                 status = "held"

@@ -71,6 +71,15 @@ class FreezeTests(unittest.TestCase):
             db.execute("UPDATE nodes SET revision=revision+1")
         self.assertEqual(self.queue.get_node('cluster')['revision'], 0)
 
+    def test_pre_mode_migration_is_refused_while_frozen(self):
+        from processing.source_intake_mode import initialize
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE reference_source_intakes(job_id TEXT PRIMARY KEY)')
+        for action in ('intent', 'drain', 'seal'): self.change(action)
+        with self.assertRaises(CoordinatorFrozen), self.queue._db() as db:
+            initialize(db)
+        self.assertEqual(self.gate.status()['phase'], 'frozen')
+
     def test_sqlite_denial_remains_typed_without_python311_error_attributes(self):
         for action in ('intent', 'drain', 'seal'): self.change(action)
         connect = sqlite3.connect
