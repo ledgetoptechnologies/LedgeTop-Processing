@@ -130,6 +130,10 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
     def test_enabled_direct_listener_is_composed_but_closed_before_start(self):
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from ops.qualify_enrolled_phase_transport import configuration_material
+        tls=configuration_material(str(uuid.uuid4()),str(uuid.uuid4()))['configurationFiles']
+        for name in ('fixture-ca.pem','fixture-cert.pem','fixture-key.pem'):
+            (self.root/name).write_bytes(tls[name]);(self.root/name).chmod(0o600)
         signer=Ed25519PrivateKey.generate();signer_path=self.root/'direct-signer.pem'
         signer_path.write_bytes(signer.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption()))
         signer_path.chmod(0o600)
@@ -138,11 +142,15 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
         marker.write_text('a'*32);marker.chmod(0o600);self.addCleanup(lambda:marker.unlink(missing_ok=True))
         sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
         self.config['directPreparation']=dict(enabled=True,host='127.0.0.1',port=port,
-            certificate=str(self.ca),privateKey=str(self.key),clientCA=str(self.ca),
+            certificate=str(self.root/'fixture-cert.pem'),privateKey=str(self.root/'fixture-key.pem'),clientCA=str(self.root/'fixture-ca.pem'),
             clients={'b'*64:{'principal':'coord-a','environment':'staging'}},
             sourceAttestationKeys=[dict(environment='staging',issuerId='viewer',keyId='viewer-key',principalId='viewer-a',publicKeyPem=public)],
             signingKey=str(signer_path),issuerId='worker',keyId='worker-key',mountPath='/tmp',mountId='a'*32,markerName=marker_name)
-        loaded=self.load();_,server=self.build(loaded,provision=True)
+        # /tmp is intentionally unprotected; this composition test separately
+        # stubs file trust while the protected-reader tests cover that boundary.
+        with patch('processing.direct_protected_transport._read',side_effect=lambda path,**kw:Path(path).read_bytes()):
+            loaded=self.load()
+        _,server=self.build(loaded,provision=True)
         self.assertEqual(server.worker_direct_owner.status(),'not_started')
         server.server_close()
         self.assertEqual(server.worker_direct_owner.status(),'closed')
@@ -383,6 +391,13 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
             with self.assertRaises(ValueError):self.build()
         finally:release.set();thread.join(3)
         self.assertEqual(result,[0])
+
+    def test_direct_listener_failure_immediately_marks_service_unhealthy(self):
+        server=SimpleNamespace(worker_direct_owner=SimpleNamespace(status=lambda:'failed'))
+        service=daemon.WorkerService(SimpleNamespace(),server,poll_seconds=60)
+        service._state='ready'
+        self.assertEqual(service.health()['state'],'failed')
+        self.assertEqual(service.health()['reason'],'direct_preparation_listener_failed')
 
     def test_state_owner_check_rejects_replaced_lock_path_and_wrong_root(self):
         root=self.root/'owner'

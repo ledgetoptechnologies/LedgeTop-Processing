@@ -9,8 +9,10 @@ The worker service owns its startup, health observation and drain.
 The current coordinator policy always returns `directPreparationEnabled: false`;
 the endpoint therefore returns unavailable before touching the node gate or
 scratch. There is no enabled direct scheduler or per-job upload-listener
-handoff, and this is not ready for deployment. Credential enrollment, protected
-CA ownership and immutable key loading, proof of policy freshness across the
+handoff, and this is not ready for deployment. The candidate reads protected
+Linux-owned files through no-follow nonblocking descriptors and loads TLS from
+sealed in-memory copies. Credential enrollment, installed mount/owner verification,
+proof of policy freshness across the
 gate operation, real process restart, cleanup and supported recovery remain to
 be independently implemented and tested. Missing configuration leaves the
 existing worker service unchanged.

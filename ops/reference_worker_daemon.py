@@ -209,10 +209,12 @@ class WorkerService:
 
     def health(self):
         with self._lock:
-            return dict(state=self._state, reason=self._reason,
+            direct=self._direct_owner.status() if self._direct_owner is not None else 'disabled'
+            failed=direct=='failed'
+            return dict(state='failed' if failed else self._state, reason='direct_preparation_listener_failed' if failed else self._reason,
                 driverAlive=self._driver_thread is not None and self._driver_thread.is_alive(),
                 listenerAlive=self._server_thread is not None and self._server_thread.is_alive(),
-                directPreparationListener=(self._direct_owner.status() if self._direct_owner is not None else 'disabled'))
+                directPreparationListener=direct)
 
     def run(self, stop):
         if self._server_thread is not None:
@@ -392,11 +394,10 @@ def load_config(path):
                 'direct preparation settings')
             if type(direct['enabled']) is not bool:raise ValueError('invalid direct preparation flag')
             if direct['enabled']:
+                from processing.direct_protected_transport import _read, _sealed
                 address=ipaddress.ip_address(direct['host'])
                 if not address.is_loopback or type(direct['port']) is not int or not 1<=direct['port']<=65535:
                     raise ValueError('private loopback listener required')
-                for field in ('certificate','privateKey','clientCA','signingKey'):
-                    _file(direct[field],private=field in ('privateKey','signingKey'))
                 for field in ('issuerId','keyId'):p._slug(direct[field],field)
                 if type(direct['clients']) is not dict or not direct['clients'] or len(direct['clients'])>64:
                     raise ValueError('pinned coordinator clients required')
@@ -407,17 +408,23 @@ def load_config(path):
                 direct['_trustedSourceKeys']=validate_trusted_keys(direct['sourceAttestationKeys'])
                 from cryptography.hazmat.primitives import serialization
                 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-                path,initial=_file(direct['signingKey'],private=True)
-                fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
-                try:
-                    info=os.fstat(fd)
-                    if (info.st_dev,info.st_ino)!=(initial.st_dev,initial.st_ino):raise ValueError('signer changed')
-                    with os.fdopen(fd,'rb',closefd=False) as source:keybytes=source.read(8193)
-                finally:os.close(fd)
-                if len(keybytes)>8192:raise ValueError('signer too large')
+                keybytes=_read(direct['signingKey'],private=True,maximum=8192)
                 signer=serialization.load_pem_private_key(keybytes,password=None)
                 if not isinstance(signer,Ed25519PrivateKey):raise ValueError('worker signer required')
                 direct['_signer']=signer
+                cert=_read(direct['certificate'],private=False)
+                secret=_read(direct['privateKey'],private=True)
+                ca=_read(direct['clientCA'],private=False)
+                context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2
+                context.load_verify_locations(cadata=ca.decode('ascii'));context.verify_mode=ssl.CERT_REQUIRED
+                certfd=_sealed(cert);keyfd=None
+                try:
+                    keyfd=_sealed(secret)
+                    context.load_cert_chain('/proc/self/fd/'+str(certfd),'/proc/self/fd/'+str(keyfd))
+                finally:
+                    os.close(certfd)
+                    if keyfd is not None:os.close(keyfd)
+                direct['_tlsContext']=context
         return config
     except Exception:
         raise ValueError('invalid private worker configuration') from None
@@ -568,9 +575,7 @@ def _build_worker(config,owner,resources):
         # preparation routine rechecks it before/after the physical node hold.
         SourceSpool(scratch,mount_path=direct['mountPath'],mount_id=direct['mountId'],
                     marker_name=direct['markerName'],safety_floor_bytes=0,require_mount=True)
-        context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2
-        context.load_cert_chain(direct['certificate'],direct['privateKey'])
-        context.load_verify_locations(cafile=direct['clientCA']);context.verify_mode=ssl.CERT_REQUIRED
+        context=direct['_tlsContext']
         worker_identity=dict(authorityId=config['authorityId'],nodeId=config['nodeId'],
             workerId=config['workerId'],workerInstanceId=config['workerInstanceId'])
         backend=DirectPreparationAPI(driver=driver,ledger=ledger,worker=worker_identity,
