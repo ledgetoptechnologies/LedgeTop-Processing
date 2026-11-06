@@ -101,7 +101,7 @@ class DirectIntakeTests(unittest.TestCase):
         self.assertEqual(self.direct.reserve(**request,profile_selection=selection),dict(first,replayed=True))
         with self.assertRaisesRegex(Conflict,'profile selection required'):self.direct.core.reserve(**request)
         stale=dict(selection,guard=lambda req,cap:False)
-        with self.assertRaises(ValueError):self.direct.reserve(**request,profile_selection=stale)
+        with self.assertRaisesRegex(Conflict,'freshness'):self.direct.reserve(**request,profile_selection=stale)
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM direct_intake_profile_bindings').fetchone()[0],1)
             self.assertEqual(db.execute('SELECT count(*) FROM direct_negotiation_candidate').fetchone()[0],1)
@@ -110,6 +110,14 @@ class DirectIntakeTests(unittest.TestCase):
         request=self.submit()
         with self.assertRaisesRegex(Conflict,'profile selection required'):
             self.direct.core.reserve(**request)
+        self.assertEqual(self.queue.get(request['job_id'])['status'],'queued')
+
+    def test_stale_guard_runs_before_any_scheduler_candidate_inspection(self):
+        from unittest.mock import patch
+        request=self.submit();selection=self.selection(request,guard=lambda req,cap:False)
+        with patch.object(self.store,'_candidate_any_row',side_effect=AssertionError('scheduler was entered')):
+            with self.assertRaisesRegex(Conflict,'freshness'):
+                self.direct.reserve(**request,profile_selection=selection)
         self.assertEqual(self.queue.get(request['job_id'])['status'],'queued')
 
     def test_reservation_failure_rolls_back_profile_selection(self):

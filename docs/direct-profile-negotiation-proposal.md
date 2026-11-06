@@ -64,8 +64,9 @@ not be called with identities accepted from untrusted request headers. The
 standalone selection function is not itself a reservation.
 
 The selection experiment additionally requires a trusted guard on **every**
-call, including replay, to check current worker capability in its database
-transaction. Tests use a synthetic guard; no production guard or authenticated
+call, including replay. For reservation, this hook runs before the scheduler
+transaction to prevent a disruptive hook committing scheduler work; freshness
+may change between the hook and commit. Tests use a synthetic guard; no production guard or authenticated
 freshness evidence exists yet. An isolated wrapper participates in the actual
 coordinator freeze operation and shared logical metadata census. Its journal
 also holds at 64 rows or 1 MiB of counted logical values, keeps existing
@@ -74,9 +75,10 @@ not account for SQLite overhead or define safe retention. An unwired reservation
 prototype selects the profile and reserves the node in the same freeze-gated
 coordinator transaction, and requires its persisted profile binding on replay.
 Profile-less direct reservations are rejected; older records require inspection.
-The guard receives no database connection, and a savepoint detects an
-unexpected commit or rollback before selection writes. This does not sandbox
-same-process code. Its guard is synthetic and worker scratch is still a separate handoff. Resolve
+The guard receives no database connection. A savepoint detects an unexpected
+commit or rollback in the standalone selection path. This does not sandbox
+same-process code or establish atomic freshness. Its guard is synthetic and
+worker scratch is still a separate handoff. Resolve
 those boundaries
 before live use; a guard callback alone is not proof of safety. The added
 selection table must be included in any verified freeze backup and migration.

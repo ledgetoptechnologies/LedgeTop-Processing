@@ -85,6 +85,18 @@ class DirectIntakeReservations:
                 type(profile_selection['worker']) is not dict):
             raise Conflict('trusted profile selection required; older direct records require inspection')
         profile_selection=dict(profile_selection,worker=dict(profile_selection['worker']))
+        # An in-process hook is trusted code, not a sandbox. Run it before the
+        # reservation connection/transaction exists: the scheduler's candidate
+        # inspection may itself write maintenance state. This avoids committing
+        # partially completed scheduler work if a hook disrupts transactions.
+        from . import direct_negotiation_candidate as negotiation
+        req=negotiation._decode(profile_selection['request'],negotiation.MAX_REQUEST_BYTES)
+        cap=negotiation._decode(profile_selection['capabilities'],negotiation.MAX_CAPABILITY_BYTES)
+        guard=profile_selection['guard']
+        if not callable(guard) or guard(dict(req),dict(cap)) is not True:
+            raise Conflict('trusted capability freshness unverified')
+        # Internal fixed result only; real atomic freshness proof is not wired.
+        profile_selection['guard']=lambda request,capability: True
         for value, label in ((job_id, 'job'), (attempt_id, 'attempt'),
                              (reservation_id, 'reservation')):
             protocol._uuid(value, label)
