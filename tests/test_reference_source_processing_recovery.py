@@ -334,6 +334,25 @@ class StartedRecoveryTests(ProcessingHarness):
         self.step('executing')
         self.assert_started_receipt()
 
+    def commit_stuck_with_output(self, output):
+        self.to_execution_pending()
+        self.transport.die_on = 'commit'
+        self.driver.step()
+        self.transport.die_on = None
+        self.new_worker()
+        self.step_to_executing()
+        self.transport.output = output
+        self.restart_coordinator()
+
+    def test_commit_pending_with_only_blank_output_is_not_started(self):
+        self.commit_stuck_with_output(['', '   ', '	'])
+        self.assert_polls_on_unrecovered()
+
+    def test_commit_pending_with_real_output_after_blanks_is_started(self):
+        self.commit_stuck_with_output(['', '   ', 'synthetic engine line'])
+        self.step('executing')
+        self.assert_started_receipt()
+
     def step_to_executing(self):
         self.assertEqual(self.driver.worker._row(self.job_id)['phase'], 'commit_pending')
         self.assertEqual(self.row()[0], 'execution_pending')
