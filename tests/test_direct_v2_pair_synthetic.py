@@ -14,6 +14,7 @@ import uuid
 import hashlib
 import datetime
 from contextlib import closing
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -112,6 +113,27 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                     raise DirectDeliveryUncertain('synthetic lost grant reply')
                 with patch.object(sender,'authorize_reservation',side_effect=lost_grant):
                     with self.assertRaises(DirectDeliveryUncertain):
+                        handoff.authorize_worker(token,protected_transport=True)
+                original_check=handoff._check;checks=[]
+                def lost_postcheck(db):
+                    checks.append(True)
+                    if len(checks)==2:raise RuntimeError('synthetic coordinator journal failure')
+                    return original_check(db)
+                with patch.object(handoff,'_check',side_effect=lost_postcheck):
+                    with self.assertRaises(DirectDeliveryUncertain):
+                        handoff.authorize_worker(token,protected_transport=True)
+                self.assertEqual(len(checks),2)
+                original_operation=queue.coordinator_operation
+                @contextmanager
+                def fail_on_operation_exit(kind):
+                    with original_operation(kind):
+                        yield
+                        raise RuntimeError('synthetic operation retirement failure')
+                with patch.object(queue,'coordinator_operation',side_effect=fail_on_operation_exit):
+                    with self.assertRaises(DirectDeliveryUncertain):
+                        handoff.authorize_worker(token,protected_transport=True)
+                with patch.object(sender,'_client_identity_configured',False):
+                    with self.assertRaises(ValueError):
                         handoff.authorize_worker(token,protected_transport=True)
                 saved=handoff.authorize_worker(token,protected_transport=True)
                 self.assertEqual(saved['operationId'],f.challenge)

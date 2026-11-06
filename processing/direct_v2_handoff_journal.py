@@ -135,19 +135,33 @@ class DirectV2Handoff:
         The handoff session and reservation commit before network I/O. A lost
         reply is retried with the same operation; the worker journals replay.
         """
+        from .direct_worker_sender import DirectDeliveryUncertain
         self._auth(token,protected_transport)
-        with self.queue.coordinator_operation('source-io'):
-            with self.queue._db() as db:
-                db.execute('BEGIN IMMEDIATE')
-                if self._session(db)!='receiving':raise Conflict('V2 handoff closed')
-                reserved=validate_receiving(db,self.item['reservationId'])
-                operation_id=reserved['challenge_id']
-            result=self.sender.authorize_reservation(operation_id)
-            with self.queue._db() as db:
-                db.execute('BEGIN IMMEDIATE');self._check(db)
-                if validate_receiving(db,self.item['reservationId'])['challenge_id']!=operation_id:
-                    raise Conflict('V2 grant outcome uncertain')
-            return result
+        may_have_sent=False
+        try:
+            with self.queue.coordinator_operation('source-io'):
+                with self.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    if self._session(db)!='receiving':raise Conflict('V2 handoff closed')
+                    reserved=validate_receiving(db,self.item['reservationId'])
+                    operation_id=reserved['challenge_id']
+                # Known local rejections happen before the ambiguous boundary.
+                p._uuid(operation_id,'operation')
+                if not self.sender._client_identity_configured:
+                    raise ValueError('coordinator client certificate required')
+                if len(p.canonical_json(dict(operationId=operation_id,item=self.sender._item)))>8192:
+                    raise ValueError('reservation grant exceeds body limit')
+                may_have_sent=True
+                result=self.sender.authorize_reservation(operation_id)
+                with self.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE');self._check(db)
+                    if validate_receiving(db,self.item['reservationId'])['challenge_id']!=operation_id:
+                        raise Conflict('V2 grant binding changed')
+                return result
+        except Exception as error:
+            if may_have_sent and not isinstance(error,DirectDeliveryUncertain):
+                raise DirectDeliveryUncertain('V2 grant outcome uncertain') from None
+            raise
 
     def send_object(self,token,*,protected_transport,object_id,reader):
         self._auth(token,protected_transport)
