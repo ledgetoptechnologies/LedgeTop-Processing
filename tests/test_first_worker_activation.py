@@ -1,5 +1,6 @@
 """Portable synthetic activation boundaries; no systemd, SSH or host effects."""
 import copy
+import os
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from ops.enrolled_coordinator_cutover import FirstEnrolledCutover
 from ops.enrolled_coordinator_transport import canonical,digest,TransportHeld
 from ops import historical_pilot_closure as h
 from ops import first_worker_activation_service as service
+from ops import enroll_reference_worker as install
 
 
 def fixture():
@@ -131,6 +133,11 @@ class ConcreteDriverExclusionTests(unittest.TestCase):
 
 
 class ClosedProofTests(unittest.TestCase):
+    def test_missing_install_tree_pin_refuses_without_reading_running_worker(self):
+        boundary=a.ControllerActivationBoundary.__new__(a.ControllerActivationBoundary)
+        boundary.manifest=dict(operationId=str(uuid.uuid4()),source={'footprintSha256':'a'*64},config={'sha256':'b'*64},unitSha256='c'*64)
+        boundary.worker={};boundary.installed={}
+        with self.assertRaisesRegex(TransportHeld,'bound_installed_tree'):boundary._installation({})
     def test_missing_actual_pilot_validator_is_held_not_an_approval_flag(self):
         boundary=a.ControllerActivationBoundary.__new__(a.ControllerActivationBoundary);boundary.pilot_closure=None
         with self.assertRaisesRegex(TransportHeld,'retirement_unproved'):boundary._pilot({})
@@ -214,6 +221,50 @@ class RetainedNativeTests(unittest.TestCase):
     def test_changed_terminal_metadata_refuses(self):
         self.info['imagesCount']=13
         with self.assertRaisesRegex(TransportHeld,'metadata_changed'):service.retained_native_census(self.client,self.manifest,self.inventory)
+
+
+def service_fixture():
+    authority=str(uuid.uuid4());operation=str(uuid.uuid4());root='/opt/ledgetop-processing-reference/'+operation;home='/home/bkoltz'
+    manifest=dict(schemaVersion=1,protocol=install.PROTOCOL,operationId=operation,
+        host=dict(hostname='synthetic',bootId=str(uuid.uuid4()),dockerEngineId='engine'),
+        service=dict(name='bkoltz',uid=1000,gid=1000,home=home),installationRoot=root,
+        source=dict(path='/private/source.tar',sha256='c'*64,bytes=1,ownerUid=0,commit='d'*40,footprintSha256='b'*64,requirementsSha256='e'*64),
+        dependencies=dict(path='/private/deps.tar',sha256='d'*64,bytes=1,ownerUid=0,pythonSha256='f'*64,pythonVersion='3.13.17',
+            versions=dict(cryptography='50.0.2',cffi='2.1.1',pycparser='3.12',rfc8785='0.1.4')),
+        config=dict(path='/private/config.json',sha256='a'*64,bytes=1,ownerUid=0),unitSha256='0'*64,
+        gate=dict(path=home+'/.local/state/LedgeTop-Processing/node-gates/'+__import__('hashlib').sha256(b'engine').hexdigest()+'/gate.json',
+            sha256='c'*64,nodeId='main',authorityId=authority,generation=1,coordinatorOrigin='http://127.0.0.1:18080'),
+        engine=dict(containerId='a'*64,imageId='sha256:'+'b'*64,version='3.8.5',loopbackPort=13004,catalogSha256='d'*64))
+    manifest['unitSha256']=__import__('hashlib').sha256(install.render_unit(manifest).encode()).hexdigest()
+    worker=dict(nodeId='main',sshHost='192.0.2.88',sshUid=1000,
+        settings=dict(schemaVersion=1,unitName=install.UNIT,unitFile=home+'/.config/systemd/user/'+install.UNIT,
+            unitSha256=manifest['unitSha256'],pythonExecutable=root+'/venv/bin/python',configPath=home+'/.config/ledgetop-processing/reference-worker.json',
+            sourceRoot=root+'/source',sourceSha256='b'*64,readinessOrigin='https://192.0.2.88:9443',readinessCAFile=home+'/.config/ca.pem'),
+        expected=dict(nodeId='main',workerId='worker',workerInstanceId='instance',authorityId=authority,engineId='engine',
+            gateGeneration=1,engineVersion='3.8.5',configSha256='a'*64,sourceSha256='b'*64,activation=None))
+    return worker,manifest
+
+
+@unittest.skipUnless(os.name=='posix','Linux literal systemd paths and manifest/source serializer')
+class ServiceSourceContractTests(unittest.TestCase):
+    def test_exact_serialized_source_compiles_and_survives_receipt_key_order(self):
+        worker,manifest=service_fixture();challenge=str(uuid.uuid4())
+        source=service.serialize_service(worker,manifest,{}, {},'a'*64,'start',challenge)
+        compile(source,'serialized-service','exec')
+        self.assertEqual(source,service.serialize_service(__import__('json').loads(canonical(worker)),
+            __import__('json').loads(canonical(manifest)),{}, {},'a'*64,'start',challenge))
+        self.assertIn(b"control.command('start')",source);self.assertNotIn(b"command('stop')",source)
+        self.assertIn(b"['daemon-reload']",source);self.assertNotIn(b"['enable'",source)
+    def test_unknown_mutating_action_is_refused(self):
+        worker,manifest=service_fixture()
+        with self.assertRaisesRegex(TransportHeld,'fixed_activation'):service.serialize_service(worker,manifest,{}, {},'a'*64,'enable',str(uuid.uuid4()))
+    def test_private_secret_is_not_an_enrollment_manifest_field(self):
+        worker,manifest=service_fixture();manifest['engineToken']='synthetic-never-serialized'
+        with self.assertRaisesRegex(TransportHeld,'closed_enrollment'):service.serialize_service(worker,manifest,{}, {},'a'*64,'start',str(uuid.uuid4()))
+    def test_old_unbound_install_receipt_refuses_instead_of_learning_from_worker(self):
+        worker,manifest=service_fixture();boundary=a.ControllerActivationBoundary.__new__(a.ControllerActivationBoundary)
+        boundary.manifest=manifest;boundary.worker=worker;boundary.installed={}
+        with self.assertRaisesRegex(TransportHeld,'bound_installed_tree'):boundary._installation({})
 
 
 if __name__=='__main__':unittest.main()

@@ -237,7 +237,9 @@ def observe_service(worker,manifest,ingress_policy,native_inventory,installed_tr
 
 def serialize_service(worker,manifest,ingress,native_inventory,installed_tree_sha256,action,challenge):
     from ops.enrolled_worker_readiness_probe import validate_request,_source_digest
+    from ops.enroll_reference_worker import validate_manifest
     validate_request(worker,challenge)
+    manifest=validate_manifest(manifest)
     require(action in ('preflight','observe','reload','start'),'fixed_activation_service_action_required')
     # Canonical order is part of durable exact-source replay, including after a
     # controller restart reading its private sorted JSON journal.
