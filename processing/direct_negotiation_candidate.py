@@ -24,6 +24,13 @@ IDENTITY = ('authorityId','nodeId','workerId','workerInstanceId')
 
 class NegotiationHeld(ValueError): pass
 
+def verify_schema(db):
+    rows=db.execute('PRAGMA table_info(direct_negotiation_candidate)').fetchall()
+    expected=[('principal','TEXT',1,1),('operation','TEXT',1,2),('request','BLOB',1,0),
+              ('capability','BLOB',1,0),('response','BLOB',1,0)]
+    if [(r[1],r[2].upper(),r[3],r[5]) for r in rows]!=expected:
+        raise NegotiationHeld('direct negotiation schema requires inspection')
+
 def _decode(raw,maximum):
     if type(raw) is not bytes or not 0 < len(raw) <= maximum:
         raise NegotiationHeld('bounded bytes required')
@@ -57,7 +64,7 @@ def _decode(raw,maximum):
     except (ValueError,TypeError,UnicodeError,RecursionError):
         raise NegotiationHeld('invalid canonical JSON') from None
 
-def negotiate(db,raw_request,raw_capabilities,*,authenticated_principal,authenticated_worker,admission_guard):
+def negotiate(db,raw_request,raw_capabilities,*,authenticated_principal,authenticated_worker,admission_guard,_store=None):
     """Persist selection for exact replay, never claims reservation or custody.
 
     Identity arguments are trusted adapter outputs, not request values or
@@ -99,6 +106,7 @@ def negotiate(db,raw_request,raw_capabilities,*,authenticated_principal,authenti
         db.execute('''CREATE TABLE IF NOT EXISTS direct_negotiation_candidate (
             principal TEXT NOT NULL, operation TEXT NOT NULL, request BLOB NOT NULL,
             capability BLOB NOT NULL, response BLOB NOT NULL, PRIMARY KEY(principal,operation))''')
+        verify_schema(db)
         old=db.execute('SELECT request,capability,response FROM direct_negotiation_candidate WHERE principal=? AND operation=?',
                        (req['principalId'],req['operationId'])).fetchone()
         if old is None:
@@ -108,11 +116,25 @@ def negotiate(db,raw_request,raw_capabilities,*,authenticated_principal,authenti
             charge=len(req['principalId'].encode())+len(req['operationId'].encode())+len(raw_request)+len(raw_capabilities)+len(response)
             if count>=MAX_SELECTIONS or used+charge>MAX_STORAGE_BYTES:
                 raise NegotiationHeld('negotiation journal capacity reached')
+            if _store is not None:
+                _store._quota(db,charge)
             db.execute('INSERT INTO direct_negotiation_candidate VALUES(?,?,?,?,?)',
                        (req['principalId'],req['operationId'],raw_request,raw_capabilities,response))
         elif bytes(old[0])!=raw_request or bytes(old[1])!=raw_capabilities or bytes(old[2])!=response:
             raise NegotiationHeld('negotiation conflict; reconciliation required')
-        db.commit()
+        if _store is None:db.commit()
     except BaseException:
         db.rollback();raise
     return response
+
+def negotiate_in_coordinator(store,raw_request,raw_capabilities,*,authenticated_principal,authenticated_worker,admission_guard):
+    """Prototype using actual queue freeze operation and shared logical census.
+
+    The guard is still a trust hook, not authenticated network proof. Selection
+    is not atomic with a reservation; never expose or deploy this function.
+    """
+    from .reference_store import ReferenceStore
+    if not isinstance(store,ReferenceStore):raise NegotiationHeld('reference store required')
+    with store.queue._coordinator_freeze.operation('source-io-admission'), store.queue._db() as db:
+        return negotiate(db,raw_request,raw_capabilities,authenticated_principal=authenticated_principal,
+            authenticated_worker=authenticated_worker,admission_guard=admission_guard,_store=store)

@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 from processing import direct_negotiation_candidate as n, direct_limits as limits, reference_protocol as p
 
@@ -81,5 +82,50 @@ class NegotiationTests(unittest.TestCase):
         with patch.object(n,'MAX_STORAGE_BYTES',1):
             with self.assertRaisesRegex(n.NegotiationHeld,'capacity'):self.run_select(next_req)
             self.assertEqual(first,self.run_select())
+
+class IntegratedFreezeCensusTests(NegotiationTests):
+    def setUp(self):
+        super().setUp()
+        from processing.prototype import Queue
+        from processing.reference_store import ReferenceStore
+        self.queue=Queue(str(Path(self.temp.name)/'queue'),node_ids=('cluster',),reference_enabled=True)
+        self.addCleanup(self.queue.close)
+        self.store=ReferenceStore(self.queue)
+    def selected(self,request=None,guard=None):
+        return n.negotiate_in_coordinator(self.store,p.canonical_json(self.req if request is None else request),
+            p.canonical_json(self.cap),authenticated_principal='viewer',authenticated_worker=self.worker,
+            admission_guard=self.guard if guard is None else guard)
+    def test_real_freeze_and_shared_census(self):
+        from processing.coordinator_freeze import CoordinatorFrozen
+        with self.queue._db() as db:before=self.store._metadata_used_bytes(db)
+        first=self.selected()
+        with self.queue._db() as db:after=self.store._metadata_used_bytes(db)
+        self.assertGreater(after,before)
+        self.store.max_metadata_bytes=after
+        with self.assertRaisesRegex(Exception,'quota'):
+            self.selected(dict(self.req,operationId='00000000-0000-4000-8000-000000000002'))
+        self.assertEqual(first,self.selected())
+        self.store.max_metadata_bytes=64*1024*1024
+        gate=self.queue._coordinator_freeze
+        gate.transition(dict(requestId=str(uuid.uuid4()),planId=str(uuid.uuid4()),action='intent',
+            expectedRevision=gate.status()['revision'],startupId=self.queue.startup_id),owner_secret='synthetic-owner')
+        with self.assertRaises(CoordinatorFrozen):self.selected()
+    def test_changed_schema_fails_closed(self):
+        from processing.maintenance import Conflict
+        with self.queue._db() as db:
+            db.execute('CREATE TABLE direct_negotiation_candidate (principal TEXT, operation TEXT, request BLOB, capability BLOB, response BLOB)')
+        with self.queue._db() as db:
+            with self.assertRaisesRegex(Conflict,'schema requires inspection'):self.store._metadata_used_bytes(db)
+        with self.assertRaises(Conflict):self.selected()
+    def test_selection_replays_after_coordinator_restart_with_fresh_guard(self):
+        from processing.prototype import Queue
+        from processing.reference_store import ReferenceStore
+        first=self.selected();self.queue.close()
+        self.queue=Queue(str(Path(self.temp.name)/'queue'),node_ids=('cluster',),reference_enabled=True)
+        self.addCleanup(self.queue.close);self.store=ReferenceStore(self.queue)
+        calls=[]
+        self.assertEqual(first,self.selected(guard=lambda db,req,cap: calls.append(db.in_transaction) or True))
+        self.assertEqual(calls,[True])
+        with self.assertRaises(n.NegotiationHeld):self.selected(guard=lambda db,req,cap:False)
 
 if __name__=='__main__':unittest.main()

@@ -66,14 +66,18 @@ transaction, or have an independently reviewed recovery protocol; this
 experiment alone is not that transaction.
 
 The selection experiment additionally requires a trusted guard on **every**
-call, including replay, to check freeze and current worker capability within
-its database transaction. Tests use a synthetic guard; no production guard,
-authenticated liveness evidence, coordinator freeze integration or metadata
-census exists yet. Its separate journal holds at 64 rows or 1 MiB of counted
-logical values, keeps existing selections for replay, and does not auto-delete
-them. Those local caps do not account for SQLite overhead, integrate with the
-coordinator's shared quota, or define safe retention. All of those must be
-resolved before any live use; a guard callback alone is not proof of safety.
+call, including replay, to check current worker capability in its database
+transaction. Tests use a synthetic guard; no production guard or authenticated
+freshness evidence exists yet. An isolated wrapper participates in the actual
+coordinator freeze operation and shared logical metadata census. Its journal
+also holds at 64 rows or 1 MiB of counted logical values, keeps existing
+selections for replay, and does not auto-delete them. These prototype caps do
+not account for SQLite overhead or define safe retention. Selection remains
+separate from the worker reservation transaction. Resolve those boundaries
+before live use; a guard callback alone is not proof of safety. The added
+selection table must be included in any verified freeze backup and migration.
+Older executables may omit it from their census; rollback refusal is not proven
+and must be independently enforced before any deployment.
 
 ## One bounded local measurement
 

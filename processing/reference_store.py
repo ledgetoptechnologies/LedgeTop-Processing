@@ -349,6 +349,13 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                 +length(CAST(generation AS TEXT))+length(environment)+length(authority_id)+length(manifest_sha)+length(derived_manifest_sha)
                 +length(node_id)+length(worker_id)+length(instance_id)+length(state)),0)
                 FROM direct_intake_reservations''').fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_negotiation_candidate'").fetchone():
+            from .direct_negotiation_candidate import verify_schema, NegotiationHeld
+            try: verify_schema(db)
+            except NegotiationHeld: raise Conflict('direct negotiation schema requires inspection') from None
+            used += db.execute('''SELECT COALESCE(SUM(length(CAST(principal AS BLOB))+
+                length(CAST(operation AS BLOB))+length(request)+length(capability)+length(response)),0)
+                FROM direct_negotiation_candidate''').fetchone()[0]
         return used
 
     def _quota(self, db, extra_bytes=0):
