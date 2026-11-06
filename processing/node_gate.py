@@ -307,6 +307,27 @@ class NodeGate:
         self._save(state)
         return state['reservation']
 
+    def reserve_direct_bound(self, node_id, origin, authority_id, generation, receipt_id, job, scratch_binding_sha256):
+        """Atomically persist a bound reservation and its direct-transfer hold."""
+        self._refuse_direct_hold()
+        binding=_binding(node_id,origin,authority_id)
+        state=self.snapshot();self._generation(state,generation)
+        if any(state[key]!=value for key,value in binding.items()):
+            raise GateError('coordinator does not own this physical node')
+        if (type(scratch_binding_sha256) is not str or re.fullmatch('[0-9a-f]{64}',scratch_binding_sha256) is None
+                or receipt_id!=scratch_binding_sha256[:32]):
+            raise GateError('direct hold binding invalid')
+        if os.path.lexists(self.root/'direct-hold.json'):
+            raise GateError('earlier direct marker requires reconciliation')
+        if state['reservation'] is not None:
+            raise GateError('unresolved reservation blocks new work')
+        identity=self._job(state,job)
+        state['reservation']={'receiptId':receipt_id,'job':identity,'completionDigest':None}
+        state['schema']=2
+        state['directHold']=dict(receiptId=receipt_id,generation=state['generation'],scratchBindingSha256=scratch_binding_sha256)
+        self._save(state)
+        return state['reservation']
+
     def _reservation(self, receipt_id):
         state = self.snapshot()
         if state['reservation'] is None or state['reservation']['receiptId'] != receipt_id:

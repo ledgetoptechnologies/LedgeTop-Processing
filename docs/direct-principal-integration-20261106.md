@@ -85,3 +85,10 @@ no automatic reclaim is authorized. An integrated run passed 100 tests with
 12 external-fixture skips. This journal is not wired to an authenticated worker
 endpoint and does not prove installed restart recovery. Its retained history
 also has an unqualified 4,096-record lifetime limit and scan cost.
+
+An internal worker preparation candidate checks signed input, preflights the
+scratch mount and atomically writes a bound node reservation and direct hold.
+It retains uncertainty on any failed attempt. A combined local run passed 100
+tests with 10 external-fixture skips. It has no authenticated daemon endpoint
+or provisioned fleet-policy trust, and does not establish old-process fencing or
+installed recovery; it must not be used to activate a node.
