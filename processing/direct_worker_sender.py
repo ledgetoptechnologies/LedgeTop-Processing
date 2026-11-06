@@ -85,7 +85,7 @@ class DirectWorkerSender:
 
     def _configure_transport(self, *, origin, connect_ip, ca_file, bearer,
                              max_object_bytes, response_limit, idle_timeout, total_timeout,
-                             client_cert_file=None, client_key_file=None):
+                             client_cert_file=None, client_key_file=None, enrolled_transport=None):
         if (type(origin) is not str or not origin.isascii()
                 or any(ord(char)<33 or ord(char)==127 for char in origin)):
             raise ValueError('exact HTTPS worker origin required')
@@ -109,19 +109,27 @@ class DirectWorkerSender:
                 or type(response_limit) is not int or not 1<=response_limit<=1024*1024
                 or any(type(v) not in (int,float) or not math.isfinite(v) or v<=0 for v in (idle_timeout,total_timeout))):
             raise ValueError('bounded sender limits required')
-        ca=Path(ca_file)
-        if not ca.is_absolute() or not ca.is_file():raise ValueError('explicit CA file required')
-        context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        context.minimum_version=ssl.TLSVersion.TLSv1_2
-        context.load_verify_locations(cafile=str(ca))
-        if (client_cert_file is None) != (client_key_file is None):
-            raise ValueError('client certificate and key both required')
-        if client_cert_file is not None:
-            from .reference_runtime import _file
-            cert, _ = _file(client_cert_file, private=False)
-            key, _ = _file(client_key_file, private=True)
-            context.load_cert_chain(str(cert), str(key))
-        self._client_identity_configured = client_cert_file is not None
+        if enrolled_transport is not None:
+            from .direct_protected_transport import DisabledProtectedTransport
+            if (type(enrolled_transport) is not DisabledProtectedTransport
+                    or (origin,str(address),bearer)!=(enrolled_transport.origin,enrolled_transport.connect_ip,enrolled_transport._bearer)):
+                raise ValueError('protected transport binding changed')
+            context=enrolled_transport._context
+            self._client_identity_configured=True
+        else:
+            ca=Path(ca_file)
+            if not ca.is_absolute() or not ca.is_file():raise ValueError('explicit CA file required')
+            context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.minimum_version=ssl.TLSVersion.TLSv1_2
+            context.load_verify_locations(cafile=str(ca))
+            if (client_cert_file is None) != (client_key_file is None):
+                raise ValueError('client certificate and key both required')
+            if client_cert_file is not None:
+                from .reference_runtime import _file
+                cert, _ = _file(client_cert_file, private=False)
+                key, _ = _file(client_key_file, private=True)
+                context.load_cert_chain(str(cert), str(key))
+            self._client_identity_configured = client_cert_file is not None
         if context.verify_mode!=ssl.CERT_REQUIRED or not context.check_hostname:raise ValueError('verified TLS required')
         self._context,self._host,self._port=context,parsed.hostname,port
         self._address=address
