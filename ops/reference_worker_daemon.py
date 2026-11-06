@@ -395,9 +395,10 @@ def load_config(path, *, expected_direct_config_sha256=None, expected_direct_cre
             config['_loadedConfigSha256']=hashlib.sha256(raw).hexdigest()
         if 'directPreparation' in config:
             direct=config['directPreparation']
-            p._closed(direct,('enabled','host','port','certificate','privateKey','clientCA','clients',
-                'sourceAttestationKeys','signingKey','issuerId','keyId','mountPath','mountId','markerName'),
-                'direct preparation settings')
+            direct_fields=('enabled','host','port','certificate','privateKey','clientCA','clients',
+                'sourceAttestationKeys','signingKey','issuerId','keyId','mountPath','mountId','markerName')
+            if type(direct) is dict and 'observationUpload' in direct:direct_fields+=('observationUpload',)
+            p._closed(direct,direct_fields,'direct preparation settings')
             if type(direct['enabled']) is not bool:raise ValueError('invalid direct preparation flag')
             if direct['enabled']:
                 from processing.direct_protected_transport import _read, _sealed
@@ -411,6 +412,13 @@ def load_config(path, *, expected_direct_config_sha256=None, expected_direct_cre
                 address=ipaddress.ip_address(direct['host'])
                 if not address.is_loopback or type(direct['port']) is not int or not 1<=direct['port']<=65535:
                     raise ValueError('private loopback listener required')
+                if 'observationUpload' in direct:
+                    upload=direct['observationUpload'];p._closed(upload,('port','bearer'),'observation upload settings')
+                    if (type(upload['port']) is not int or not 1<=upload['port']<=65535 or upload['port']==direct['port']
+                            or type(upload['bearer']) is not str or not 32<=len(upload['bearer'])<=4096
+                            or not upload['bearer'].isascii() or not all(33<=ord(c)<=126 for c in upload['bearer'])
+                            or upload['bearer'] in (config['workerBearer'],config['resultReadBearer'],config['engineToken'])):
+                        raise ValueError('separate protected observation upload settings required')
                 for field in ('issuerId','keyId'):p._slug(direct[field],field)
                 if type(direct['clients']) is not dict or not direct['clients'] or len(direct['clients'])>64:
                     raise ValueError('pinned coordinator clients required')
@@ -596,13 +604,25 @@ def _build_worker(config,owner,resources):
         context=direct['_tlsContext']
         worker_identity=dict(authorityId=config['authorityId'],nodeId=config['nodeId'],
             workerId=config['workerId'],workerInstanceId=config['workerInstanceId'])
+        observation=None
+        if 'observationUpload' in direct:
+            from processing.direct_worker_observation_owner import ObservationOwner
+            observation=ObservationOwner(ledger=ledger,worker=worker_identity,driver=driver,mount_path=direct['mountPath'],
+                mount_id=direct['mountId'],marker_name=direct['markerName'],signer=direct['_signer'],
+                issuer_id=direct['issuerId'],key_id=direct['keyId'],host=direct['host'],
+                port=direct['observationUpload']['port'],bearer=direct['observationUpload']['bearer'],
+                tls_context=context,clients=direct['clients'])
         backend=DirectPreparationAPI(driver=driver,ledger=ledger,worker=worker_identity,
             mount_path=direct['mountPath'],mount_id=direct['mountId'],marker_name=direct['markerName'],
             source_keys=direct['_trustedSourceKeys'],signer=direct['_signer'],
-            issuer_id=direct['issuerId'],key_id=direct['keyId'])
+            issuer_id=direct['issuerId'],key_id=direct['keyId'],observation_owner=observation)
         direct_server=create_snapshot_server(direct['host'],direct['port'],enabled=True,ssl_context=context,
             client_scopes=direct['clients'],prepare_backend=backend)
-        server.worker_direct_owner=ListenerOwner(direct_server)
+        control_owner=ListenerOwner(direct_server)
+        if observation is not None:
+            from processing.direct_worker_observation_owner import CombinedOwner
+            server.worker_direct_owner=CombinedOwner(control_owner,observation)
+        else:server.worker_direct_owner=control_owner
     server.daemon_threads = False
     server.block_on_close = True
     close_lock = threading.Lock()

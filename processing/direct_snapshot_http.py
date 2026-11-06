@@ -80,9 +80,10 @@ def create_snapshot_server(host,port,*,enabled=False,ssl_context=None,client_sco
                 draining=self.server._draining
             if draining:self._reply(503,{'error':'snapshot_draining'});return
             is_prepare=self.path=='/internal/v2/worker/prepare' and prepare_backend is not None
+            is_resume=self.path=='/internal/v2/worker/resume-observation' and prepare_backend is not None
             match=_PATH.fullmatch(self.path)
-            if match is None and not is_prepare:self._reply(404,{'error':'not_found'});return
-            if not is_prepare:
+            if match is None and not (is_prepare or is_resume):self._reply(404,{'error':'not_found'});return
+            if not (is_prepare or is_resume):
                 try:p._uuid(match[1],'reservation');p._uuid(match[2],'snapshot')
                 except ValueError:self._reply(400,{'error':'invalid_request'});return
             if (self.headers.get_all('Transfer-Encoding') or self.headers.get_all('Expect')
@@ -91,10 +92,10 @@ def create_snapshot_server(host,port,*,enabled=False,ssl_context=None,client_sco
                 self._reply(400,{'error':'invalid_request'});return
             lengths=self.headers.get_all('Content-Length');length=lengths[0]
             if not re.fullmatch(r'0|[1-9][0-9]{0,7}',length):self._reply(400,{'error':'invalid_request'});return
-            length=int(length);operation='prepare' if is_prepare else match[3]
+            length=int(length);operation='prepare' if is_prepare else 'resume' if is_resume else match[3]
             if ((operation.startswith('pages/') and int(operation[6:])>=64) or (operation.startswith('selected-pages/') and int(operation[15:])>=64)):
                 self._reply(400,{'error':'invalid_request'});return
-            maximum=16*1024*1024 if is_prepare else 0 if operation in ('complete','complete-selected') else PAGE_LIMIT if operation.startswith(('pages/','selected-pages/')) else BEGIN_LIMIT
+            maximum=16*1024*1024 if is_prepare else 16384 if is_resume else 0 if operation in ('complete','complete-selected') else PAGE_LIMIT if operation.startswith(('pages/','selected-pages/')) else BEGIN_LIMIT
             if length>maximum:self._reply(413,{'error':'request_too_large'});return
             deadline=time.monotonic()+total_body_timeout;chunks=[];remaining=length
             while remaining:
@@ -109,6 +110,8 @@ def create_snapshot_server(host,port,*,enabled=False,ssl_context=None,client_sco
             if scope is None:self._reply(403,{'error':'client_unavailable'});return
             if is_prepare:
                 result=prepare_backend._prepare_from_listener(scope,b''.join(chunks))
+            elif is_resume:
+                result=prepare_backend._resume_from_listener(scope,b''.join(chunks))
             else:
                 if backend is None:self._reply(503,{'error':'snapshot_backend_unavailable'});return
                 result=backend._dispatch_from_listener(scope,match[1],match[2],operation,b''.join(chunks))

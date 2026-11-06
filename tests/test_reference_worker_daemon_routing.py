@@ -189,6 +189,17 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
             with self.assertRaises(ValueError):daemon.load_config(str(path),expected_direct_config_sha256='0'*64)
             self.assertTrue(daemon.load_config(str(path),expected_direct_config_sha256=digest,
                                               expected_direct_credential_sha256=pins)['directPreparation']['enabled'])
+            upload=copy.deepcopy(self.config)
+            upload['directPreparation']['observationUpload']=dict(port=20001,bearer='u'*40)
+            path.write_text(json.dumps(upload));upload_digest=hashlib.sha256(path.read_bytes()).hexdigest()
+            loaded=daemon.load_config(str(path),expected_direct_config_sha256=upload_digest,expected_direct_credential_sha256=pins)
+            self.assertEqual(loaded['directPreparation']['observationUpload']['port'],20001)
+            for bad in (dict(port=19999,bearer='u'*40),dict(port=20001,bearer='short'),
+                        dict(port=20001,bearer=self.config['workerBearer'])):
+                upload['directPreparation']['observationUpload']=bad
+                path.write_text(json.dumps(upload));bad_digest=hashlib.sha256(path.read_bytes()).hexdigest()
+                with self.assertRaises(ValueError):daemon.load_config(str(path),expected_direct_config_sha256=bad_digest,expected_direct_credential_sha256=pins)
+            path.write_text(json.dumps(self.config))
             for name in pins:
                 altered=dict(pins);altered[name]='0'*64
                 with self.subTest(credential=name),self.assertRaises(ValueError):
