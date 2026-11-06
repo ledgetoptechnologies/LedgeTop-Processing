@@ -20,7 +20,7 @@ class NegotiationTests(unittest.TestCase):
             environment='staging',manifestSha256='a'*64,derivedManifestSha256='b'*64,
             profile=limits.PROFILE,**self.worker)
         self.cap=dict(profile=limits.PROFILE,maxSource=10000,maxDerived=10000,maxManifestBytes=16*1024*1024,**self.worker)
-        self.guard=lambda db,req,cap: True # synthetic stub; not deployed freeze/freshness
+        self.guard=lambda req,cap: True # synthetic stub; not deployed freeze/freshness
     def run_select(self,req=None,cap=None,principal='viewer',worker=None,guard=None):
         with closing(sqlite3.connect(self.path)) as db:
             db.execute('PRAGMA synchronous=FULL')
@@ -66,12 +66,26 @@ class NegotiationTests(unittest.TestCase):
 
     def test_guard_rechecked_on_replay_and_refuses_freeze_or_stale_worker(self):
         first=self.run_select();calls=[]
-        def fail(db,req,cap):
-            calls.append(db.in_transaction);return False
+        def fail(req,cap):
+            calls.append(True);return False
         with self.assertRaisesRegex(n.NegotiationHeld,'freshness'):
             self.run_select(guard=fail)
         self.assertEqual(calls,[True]);self.assertEqual(first,self.run_select())
         with self.assertRaises(n.NegotiationHeld):self.run_select(guard=False)
+
+    def test_guard_commit_or_rollback_cannot_admit_selection(self):
+        for action in ('commit','rollback','commit_and_restart'):
+            with self.subTest(action=action), closing(sqlite3.connect(self.path)) as db:
+                db.execute('PRAGMA synchronous=FULL')
+                def disruptive(req,cap):
+                    if action=='commit_and_restart':
+                        db.commit();db.execute('BEGIN IMMEDIATE')
+                    else:getattr(db,action)()
+                    return True
+                with self.assertRaises(n.NegotiationHeld):
+                    n.negotiate(db,p.canonical_json(self.req),p.canonical_json(self.cap),
+                        authenticated_principal='viewer',authenticated_worker=self.worker,admission_guard=disruptive)
+                self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_negotiation_candidate'").fetchone())
 
     def test_bounded_rows_and_bytes_hold_without_discarding_replay(self):
         first=self.run_select()
@@ -124,8 +138,8 @@ class IntegratedFreezeCensusTests(NegotiationTests):
         self.queue=Queue(str(Path(self.temp.name)/'queue'),node_ids=('cluster',),reference_enabled=True)
         self.addCleanup(self.queue.close);self.store=ReferenceStore(self.queue)
         calls=[]
-        self.assertEqual(first,self.selected(guard=lambda db,req,cap: calls.append(db.in_transaction) or True))
+        self.assertEqual(first,self.selected(guard=lambda req,cap: calls.append(True) or True))
         self.assertEqual(calls,[True])
-        with self.assertRaises(n.NegotiationHeld):self.selected(guard=lambda db,req,cap:False)
+        with self.assertRaises(n.NegotiationHeld):self.selected(guard=lambda req,cap:False)
 
 if __name__=='__main__':unittest.main()

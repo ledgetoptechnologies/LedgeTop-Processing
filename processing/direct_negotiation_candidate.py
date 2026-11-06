@@ -7,6 +7,8 @@ transfer authorization, custody or output acceptance.
 """
 import hashlib
 import json
+import sqlite3
+import uuid
 from . import direct_limits as limits, reference_protocol as p
 
 MAX_REQUEST_BYTES = 4096
@@ -102,7 +104,14 @@ def negotiate(db,raw_request,raw_capabilities,*,authenticated_principal,authenti
     if len(response)>MAX_RESPONSE_BYTES:raise NegotiationHeld('response limit exceeded')
     if not _inside_transaction:db.execute('BEGIN IMMEDIATE')
     try:
-        if admission_guard(db,dict(req),dict(cap)) is not True:
+        checkpoint='direct_guard_'+uuid.uuid4().hex
+        db.execute('SAVEPOINT '+checkpoint)
+        # Do not pass a writable SQLite connection to the trust hook. It is
+        # still an in-process hook, not authenticated freshness evidence.
+        allowed=admission_guard(dict(req),dict(cap)) is True
+        try:db.execute('RELEASE SAVEPOINT '+checkpoint)
+        except sqlite3.DatabaseError:raise NegotiationHeld('guard changed transaction') from None
+        if not allowed or not db.in_transaction:
             raise NegotiationHeld('freeze or capability freshness unverified')
         db.execute('''CREATE TABLE IF NOT EXISTS direct_negotiation_candidate (
             principal TEXT NOT NULL, operation TEXT NOT NULL, request BLOB NOT NULL,

@@ -80,12 +80,11 @@ class DirectIntakeReservations:
         Exact retries return the persisted identity. A reservation holds the node
         across coordinator restarts; there is deliberately no timeout or release.
         """
-        if profile_selection is not None:
-            if (type(profile_selection) is not dict or
-                    set(profile_selection)!={'request','capabilities','principal','worker','guard'} or
-                    type(profile_selection['worker']) is not dict):
-                raise Conflict('trusted profile selection required')
-            profile_selection=dict(profile_selection,worker=dict(profile_selection['worker']))
+        if (type(profile_selection) is not dict or
+                set(profile_selection)!={'request','capabilities','principal','worker','guard'} or
+                type(profile_selection['worker']) is not dict):
+            raise Conflict('trusted profile selection required; older direct records require inspection')
+        profile_selection=dict(profile_selection,worker=dict(profile_selection['worker']))
         for value, label in ((job_id, 'job'), (attempt_id, 'attempt'),
                              (reservation_id, 'reservation')):
             protocol._uuid(value, label)

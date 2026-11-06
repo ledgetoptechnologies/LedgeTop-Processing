@@ -25,12 +25,30 @@ class DirectIntakeTests(unittest.TestCase):
         self.store = ReferenceStore(self.queue, local_max_photos=2)
         self.bindings = {node: {'workerId': 'worker-'+node, 'workerInstanceId': 'instance-'+node}
                          for node in self.queue.node_ids}
-        self.direct = DirectIntakeReservations(self.store, worker_bindings=self.bindings)
+        self._selections={}
+        self.direct = self.fixture_direct()
         self.fixture = json.loads((Path(__file__).resolve().parents[1] / 'contracts/reference-v1.contract.json').read_text())
 
     def tearDown(self):
         self.queue.close()
         self.temp.cleanup()
+
+    def fixture_direct(self):
+        """Supply explicit synthetic capability to legacy scheduling test calls."""
+        owner=self
+        class FixtureAdapter:
+            def __init__(self):self.core=DirectIntakeReservations(owner.store,worker_bindings=owner.bindings)
+            def reserve(self,**request):
+                if 'profile_selection' in request:return self.core.reserve(**request)
+                with owner.queue._db() as db:
+                    node=next((node for node in owner.queue.node_ids if (candidate:=owner.store._candidate_any_row(db,node))
+                               and candidate['id']==request['job_id']),None)
+                    saved=db.execute('SELECT node_id FROM direct_intake_reservations WHERE job_id=?',(request['job_id'],)).fetchone()
+                node=saved['node_id'] if saved else (node or 'cluster')
+                key=(request['job_id'],node)
+                if key not in owner._selections:owner._selections[key]=owner.selection(request,node)
+                return self.core.reserve(**request,profile_selection=owner._selections[key])
+        return FixtureAdapter()
 
     def submit(self, environment='production', count=1, direct=True):
         raw = copy.deepcopy(self.fixture['submission'])
@@ -66,13 +84,14 @@ class DirectIntakeTests(unittest.TestCase):
     def selection(self,request,node='cluster',guard=None):
         from processing.direct_limits import PROFILE
         worker=dict(authorityId=self.queue.authority_id,nodeId=node,**self.bindings[node])
+        with self.queue._db() as db:environment=self.store._row(db,request['job_id'])['environment']
         profile=dict(operationId=str(uuid.uuid4()),principalId='viewer',reservationId=request['reservation_id'],
             jobId=request['job_id'],attemptId=request['attempt_id'],generation=request['generation'],
-            environment='production',manifestSha256=request['manifest_sha'],
+            environment=environment,manifestSha256=request['manifest_sha'],
             derivedManifestSha256=request['derived_manifest_sha'],profile=PROFILE,**worker)
         cap=dict(profile=PROFILE,maxSource=10000,maxDerived=10000,maxManifestBytes=16*1024*1024,**worker)
         return dict(request=p.canonical_json(profile),capabilities=p.canonical_json(cap),
-            principal='viewer',worker=worker,guard=guard or (lambda db,req,cap:True))
+            principal='viewer',worker=worker,guard=guard or (lambda req,cap:True))
 
     def test_profile_selection_and_reservation_share_transaction_and_replay(self):
         from processing.direct_limits import PROFILE
@@ -80,12 +99,18 @@ class DirectIntakeTests(unittest.TestCase):
         first=self.direct.reserve(**request,profile_selection=selection)
         self.assertEqual(first['limitProfile'],PROFILE)
         self.assertEqual(self.direct.reserve(**request,profile_selection=selection),dict(first,replayed=True))
-        with self.assertRaisesRegex(Conflict,'profile replay'):self.direct.reserve(**request)
-        stale=dict(selection,guard=lambda db,req,cap:False)
+        with self.assertRaisesRegex(Conflict,'profile selection required'):self.direct.core.reserve(**request)
+        stale=dict(selection,guard=lambda req,cap:False)
         with self.assertRaises(ValueError):self.direct.reserve(**request,profile_selection=stale)
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM direct_intake_profile_bindings').fetchone()[0],1)
             self.assertEqual(db.execute('SELECT count(*) FROM direct_negotiation_candidate').fetchone()[0],1)
+
+    def test_new_unprofiled_direct_is_refused(self):
+        request=self.submit()
+        with self.assertRaisesRegex(Conflict,'profile selection required'):
+            self.direct.core.reserve(**request)
+        self.assertEqual(self.queue.get(request['job_id'])['status'],'queued')
 
     def test_reservation_failure_rolls_back_profile_selection(self):
         import sqlite3
@@ -115,10 +140,10 @@ class DirectIntakeTests(unittest.TestCase):
         self.queue.close()
         self.queue=Queue(self.temp.name,node_ids=('cluster','main'),reference_enabled=True)
         self.store=ReferenceStore(self.queue,local_max_photos=2)
-        self.direct=DirectIntakeReservations(self.store,worker_bindings=self.bindings)
+        self.direct=self.fixture_direct()
         self.assertEqual(self.direct.reserve(**request,profile_selection=selection),dict(first,replayed=True))
         with self.queue._db() as db:db.execute('DELETE FROM direct_intake_profile_bindings')
-        with self.assertRaisesRegex(Conflict,'profile replay'):self.direct.reserve(**request)
+        with self.assertRaisesRegex(Conflict,'profile selection required'):self.direct.core.reserve(**request)
         with self.assertRaisesRegex(Conflict,'profile replay'):
             self.direct.reserve(**request,profile_selection=selection)
 
@@ -150,8 +175,11 @@ class DirectIntakeTests(unittest.TestCase):
 
     def test_two_simultaneous_jobs_never_reserve_same_node(self):
         requests = [self.submit(), self.submit()]
+        def reserve_or_hold(request):
+            try:return self.direct.reserve(**request)
+            except Conflict:return None
         with ThreadPoolExecutor(max_workers=2) as pool:
-            values = list(pool.map(lambda request: self.direct.reserve(**request), requests))
+            values = list(pool.map(reserve_or_hold, requests))
         # If the later request races first, FIFO refuses it; retry after the
         # first reservation and verify it goes to the next eligible node.
         if values[1] is None:
@@ -181,7 +209,7 @@ class DirectIntakeTests(unittest.TestCase):
         self.queue.close()
         self.queue = Queue(self.temp.name, node_ids=('cluster', 'main'), reference_enabled=True)
         self.store = ReferenceStore(self.queue, local_max_photos=2)
-        self.direct = DirectIntakeReservations(self.store, worker_bindings=self.bindings)
+        self.direct = self.fixture_direct()
         self.assertEqual(self.direct.reserve(**request), dict(before, replayed=True))
         self.assertEqual(self.queue.get(request['job_id'])['status'], 'held')
 

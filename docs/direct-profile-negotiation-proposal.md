@@ -73,7 +73,10 @@ selections for replay, and does not auto-delete them. These prototype caps do
 not account for SQLite overhead or define safe retention. An unwired reservation
 prototype selects the profile and reserves the node in the same freeze-gated
 coordinator transaction, and requires its persisted profile binding on replay.
-Its guard is synthetic and worker scratch is still a separate handoff. Resolve
+Profile-less direct reservations are rejected; older records require inspection.
+The guard receives no database connection, and a savepoint detects an
+unexpected commit or rollback before selection writes. This does not sandbox
+same-process code. Its guard is synthetic and worker scratch is still a separate handoff. Resolve
 those boundaries
 before live use; a guard callback alone is not proof of safety. The added
 selection table must be included in any verified freeze backup and migration.
