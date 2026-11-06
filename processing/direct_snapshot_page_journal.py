@@ -311,10 +311,23 @@ class SnapshotPageJournal:
                 db.execute('UPDATE coordinator_identity SET direct_selected_page_count=direct_selected_page_count+1 WHERE singleton=1')
             return {'state':'selected_pages_receiving','sourceCustodyAccepted':False,'processingAuthorized':False}
 
+    @staticmethod
+    def _inspection_binding(db, reservation, job_id):
+        """Capture exact durable verifier inputs; no claim of current custody."""
+        values=[]
+        for table,key,value in (('direct_v2_reservations','reservation_id',reservation),
+                                ('jobs','id',job_id),('reference_jobs','job_id',job_id),
+                                ('reference_source_intakes','job_id',job_id)):
+            row=db.execute('SELECT * FROM '+table+' WHERE '+key+'=?',(value,)).fetchone()
+            if row is None:raise Conflict('snapshot verifier binding unavailable')
+            values.append(tuple(row))
+        return tuple(values)
+
     def _complete(self,reservation,snapshot,principal,environment,*,include_selected=False):
         with self.queue.coordinator_operation('source-io-admission'):
             with self.queue._db() as db:
-                db.execute('BEGIN');self._scope(db,reservation,principal,environment);metadata_bytes(db)
+                db.execute('BEGIN');scope=self._scope(db,reservation,principal,environment);metadata_bytes(db)
+                binding=self._inspection_binding(db,reservation,scope['job_id']) if include_selected else None
                 if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_snapshot_sessions'").fetchone():
                     raise Conflict('snapshot session unavailable')
                 session=db.execute('SELECT * FROM direct_snapshot_sessions WHERE reservation=?',(reservation,)).fetchone()
@@ -351,6 +364,7 @@ class SnapshotPageJournal:
                 if len(wire)>4096:raise Conflict('snapshot inspection exceeds allowance')
                 with self.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE');row=self._scope(db,reservation,principal,environment)
+                    if self._inspection_binding(db,reservation,row['job_id'])!=binding:raise Conflict('snapshot verifier binding changed')
                     metadata_bytes(db);selected_metadata_bytes(db);ensure_observations(db)
                     parent=db.execute('SELECT snapshot,principal,environment,intent,signature FROM direct_snapshot_sessions WHERE reservation=?',(reservation,)).fetchone()
                     if parent is None or tuple(parent)!=(snapshot,principal,environment,raw,signature):raise Conflict('snapshot identity changed')

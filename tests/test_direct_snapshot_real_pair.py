@@ -106,6 +106,18 @@ class SnapshotRealPair(unittest.TestCase):
         self.assertEqual(post('selected-pages/0',selected)[0],200)
         self.assertEqual(post('selected-pages/0',selected)[0],200)
         self.assertEqual(post('selected-pages/0',selected+b'x')[0],409)
+        # A pipeline write between real verifier and journal commit must hold.
+        original_inspect=reservations.inspect_held_snapshot
+        def inspect_then_change(*args,**kwargs):
+            result=original_inspect(*args,**kwargs)
+            with queue._db() as db:
+                db.execute("UPDATE reference_jobs SET input_json=input_json||' ' WHERE job_id=?",(payload['providerTaskId'],))
+            return result
+        with patch.object(reservations,'inspect_held_snapshot',side_effect=inspect_then_change):
+            self.assertEqual(post('complete-selected',b'')[0],409)
+        with queue._db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='direct_snapshot_observations'").fetchone()[0],0)
+            db.execute("UPDATE reference_jobs SET input_json=substr(input_json,1,length(input_json)-1) WHERE job_id=?",(payload['providerTaskId'],))
         selected_status,selected_response=post('complete-selected',b'')
         self.assertEqual(selected_status,200,selected_response)
         self.assertEqual(selected_response['state'],'source_and_selected_pages_verified_not_custody')

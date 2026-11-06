@@ -84,6 +84,9 @@ class SnapshotJournalTests(unittest.TestCase):
         self.snapshot.intent['selectedFrameBytes']=len(selected)+1
         self.snapshot.prepare()
         self.row['pipeline_manifest_sha']='c'*64
+        self.row['job_id']='synthetic-job'
+        binding_patch=patch.object(self.api,'_inspection_binding',return_value=('synthetic-binding',))
+        binding_patch.start();self.addCleanup(binding_patch.stop)
         self.reservations.inspect_held_snapshot.return_value={'state':'source_and_selected_pages_verified_not_custody',
             'sourceSnapshotSha256':self.snapshot.sha,'datasetFileCount':1,'selectedCount':1,'sourceCustodyAccepted':False,'processingAuthorized':False}
         self.row['source_attestation_json']=json.dumps({'proof':{'sourceSnapshotSha256':self.snapshot.sha}})
@@ -95,6 +98,8 @@ class SnapshotJournalTests(unittest.TestCase):
         self.queue.close();self.queue=Queue(self.root,reference_enabled=True);self.addCleanup(self.queue.close)
         self.store=ReferenceStore(self.queue);self.reservations.store=self.store;self.reservations.queue=self.queue
         self.api=SnapshotPageJournal(self.store,self.reservations)
+        binding_patch=patch.object(self.api,'_inspection_binding',return_value=('synthetic-binding',))
+        binding_patch.start();self.addCleanup(binding_patch.stop)
         self.assertEqual(self.call('selected-pages/0',selected).status,200)
         self.assertEqual(self.call('complete-selected').status,200)
         self.assertEqual(self.reservations.inspect_held_snapshot.call_args.kwargs['selected_frames'],selected+b'\n')
@@ -104,6 +109,8 @@ class SnapshotJournalTests(unittest.TestCase):
         self.queue.close();self.queue=Queue(self.root,reference_enabled=True);self.addCleanup(self.queue.close)
         self.store=ReferenceStore(self.queue);self.reservations.store=self.store;self.reservations.queue=self.queue
         self.api=SnapshotPageJournal(self.store,self.reservations)
+        binding_patch=patch.object(self.api,'_inspection_binding',return_value=('synthetic-binding',))
+        binding_patch.start();self.addCleanup(binding_patch.stop)
         self.assertEqual(self.call('complete-selected').status,200)
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_snapshot_observations').fetchone()[0],1)
