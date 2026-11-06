@@ -18,7 +18,7 @@ from tests import test_reference_source_intake as fixtures
 class DirectV2AdmissionTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
-        self.queue=Queue(self.temp.name,reference_enabled=True);self.addCleanup(self.queue.close)
+        self.queue=Queue(self.temp.name,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(self.queue.close)
         self.queue.allowed_profiles.add(PROFILE);self.store=ReferenceStore(self.queue)
         self.fixture=fixtures.ReferenceSourceIntakeTests();self.fixture.setUp()
         self.fixture.authority_id=self.queue.authority_id
