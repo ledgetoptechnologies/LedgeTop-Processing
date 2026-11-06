@@ -102,3 +102,9 @@ failure/restart boundaries, invalid types, duplicates and trust changes.
 The initial six-test run at `4be566a1` used the existing local image, offline:
 `docker run --rm --name ltds-receipt-tests-c7d3205c --network none --read-only --user 10001:10001 --cpus 1 --memory 768m --pids-limit 96 --tmpfs /tmp:rw,nosuid,nodev,size=64m --mount 'type=bind,source=C:/Projects/processing-direct-coordinator-receipt-vectors-20261106,target=/src,readonly' --workdir /src --entrypoint python sha256:bc48c6a81300a7c9b610c6e0f3f4d7cb8aa599075645b2ff1ac1c891dc0ce8c4 -B -m unittest tests.test_direct_coordinator_receipt_candidate`.
 It returned `...... Ran 6 tests in 0.097s OK`; it was a prototype-only test.
+
+An independent bounded Linux run of the standalone worker-boundary tests at
+`935fdd40` passed 8/8 (local synthetic boundary only, not a network or Viewer
+test). Its retained evidence is `C:/Users/fstor/AppData/Local/Temp/ltds-boundary-935fdd40-4c2b`:
+archive SHA-256 `e3a6292a26e962e7b5fd9bdfb303892f4e4eb9f13a5de202044c71682c0c5aba`,
+log SHA-256 `9b9aef77410d846e3fdec552333988c75b1e719affd79a63c899f0e9d50900f5`.
