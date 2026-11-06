@@ -9,6 +9,7 @@ import base64
 import copy
 import hmac
 import re
+import time
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from . import reference_protocol as p
@@ -36,10 +37,13 @@ def _body(value):
     except (ValueError,TypeError,KeyError):raise FenceProofRejected('invalid fence proof') from None
 
 def issue_fenced(ledger,spool,item,*,expected_worker,engine_id,coordinator_origin,gate_generation,
-                 challenge_id,issued_at,expires_at,issuer_id,key_id,private_key):
+                 challenge_id,validity_seconds,issuer_id,key_id,private_key):
     """Sign only after holding exact gate and persistent pin; pin remains held."""
     if not isinstance(private_key,Ed25519PrivateKey):raise FenceProofRejected('signing key required')
     p._slug(issuer_id,'issuer');p._slug(key_id,'key');p._uuid(challenge_id,'challenge')
+    if type(validity_seconds) is not int or not 1<=validity_seconds<=MAX_VALIDITY_SECONDS:
+        raise FenceProofRejected('bounded readiness validity required')
+    issued_at=int(time.time());expires_at=issued_at+validity_seconds
     item,sha,scratch_id=require_fenced(ledger,item,expected_worker=expected_worker)
     # Validate caller-supplied time bounds before taking a durable pin.
     _body(dict(protocol=PROTOCOL,challengeId=challenge_id,scratchBindingSha256=sha,pinId='0'*32,

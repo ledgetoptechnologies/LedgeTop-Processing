@@ -20,7 +20,7 @@ class DirectWorkerBoundaryV2:
     def __init__(self, *, ledger, spool, inventory, item, reservation_binding,
                  expected_worker, engine_id, coordinator_origin, gate_generation, bearer,
                  readiness_proof=None, challenge_id=None, issuer_id=None, key_id=None,
-                 public_key=None):
+                 public_key=None, closure_expected_binding=None, closure_verification=None, worker_signer=None):
         if (not isinstance(inventory, VerifiedWorkerInventory) or type(bearer) is not str
                 or not 32 <= len(bearer) <= 4096 or not bearer.isascii()
                 or not all(33 <= ord(c) <= 126 for c in bearer)):
@@ -57,6 +57,9 @@ class DirectWorkerBoundaryV2:
         self._proof_binding = dict(challenge_id=challenge_id, issuer_id=issuer_id,
                                    key_id=key_id, public_key=public_key)
         self._writer_lock = threading.Lock()
+        self._closure_binding=copy.deepcopy(closure_expected_binding)
+        self._closure_verification=dict(closure_verification) if type(closure_verification) is dict else None
+        self._closure_signer=worker_signer
 
     def put(self, headers, *, protected_transport, object_id, content_length, content_sha256, reader):
         from .direct_worker_boundary import DirectWorkerBoundary
@@ -112,3 +115,21 @@ class DirectWorkerBoundaryV2:
         return dict(protocol='ltds-direct-local-object-v2', reservationId=item['reservationId'],
             scratchBindingSha256=digest, objectId=object_id, byteSize=obj['byteSize'], sha256=obj['sha256'],
             localObjectDurable=True, sourceCustodyAccepted=False, transferComplete=False, replayed=replay)
+
+    def complete(self, headers, *, protected_transport):
+        from .direct_worker_boundary import DirectWorkerBoundary
+        supplied=DirectWorkerBoundary._header(headers,'Authorization')
+        if (protected_transport is not True or type(supplied) is not str or not supplied.startswith('Bearer ')
+                or not supplied[7:].isascii() or not hmac.compare_digest(supplied[7:],self._bearer)
+                or DirectWorkerBoundary._header(headers,'X-Coordinator-Authority')!=self.item['authorityId']):
+            raise DirectBoundaryDenied('private coordinator authorization required')
+        if (self._closure_binding is None or self._closure_verification is None or self._closure_signer is None):
+            raise DirectBoundaryDenied('V2 closure signing not configured')
+        from .direct_worker_closure_v2 import verify_closure
+        with self._writer_lock:
+            if self._readiness_pin is not None:
+                raise DirectBoundaryDenied('V2 initial handover required')
+            return verify_closure(self.ledger,self.spool,self.inventory,self.item,
+                expected_binding=self._closure_binding,reservation_binding=self.reservation,
+                verification=self._closure_verification,expected_worker=self.worker,engine_id=self.engine_id,
+                coordinator_origin=self.origin,gate_generation=self.generation,worker_signer=self._closure_signer)

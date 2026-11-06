@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import socket
 import ssl
 import sqlite3
 import tempfile
@@ -82,12 +83,16 @@ class WorkerV2Tests(unittest.TestCase):
         self.proof_key=Ed25519PrivateKey.generate();self.challenge=str(uuid.uuid4())
         self.readiness=proof.issue_fenced(self.ledger,self.spool,self.item,expected_worker=self.worker,
             engine_id='fixture-v2',coordinator_origin=origin,gate_generation=1,challenge_id=self.challenge,
-            issued_at=100,expires_at=120,issuer_id='worker-issuer',key_id='worker-key',private_key=self.proof_key)
+            validity_seconds=10,issuer_id='worker-issuer',key_id='worker-key',private_key=self.proof_key)
+        from processing.direct_worker_receipt_v2 import WorkerClosureSignerV2
+        self.signer=WorkerClosureSignerV2(issuer_id='worker-issuer',key_id='worker-key',
+                                          identity=self.worker,private_key=self.proof_key)
         self.boundary = DirectWorkerBoundaryV2(ledger=self.ledger,spool=self.spool,inventory=index,
             item=self.item,reservation_binding=self.reservation,expected_worker=self.worker,engine_id='fixture-v2',
             coordinator_origin=origin,gate_generation=1,bearer=self.bearer,
             readiness_proof=self.readiness,challenge_id=self.challenge,issuer_id='worker-issuer',
-            key_id='worker-key',public_key=self.proof_key.public_key())
+            key_id='worker-key',public_key=self.proof_key.public_key(),
+            closure_expected_binding=self.expected,closure_verification=self.options,worker_signer=self.signer)
 
     def put_zero(self, headers=None):
         return self.boundary.put(headers or self.headers,protected_transport=True,object_id=fixtures.GCP_ID,
@@ -333,6 +338,29 @@ class WorkerV2Tests(unittest.TestCase):
                     self.assertEqual(result['replayed'],expected_replay)
                     self.assertFalse(result['sourceCustodyAccepted'])
                 finally:connection.close()
+            from processing.direct_worker_sender_v2 import DirectWorkerSenderV2
+            sender=DirectWorkerSenderV2(origin='https://127.0.0.1:'+str(server.server_port),
+                connect_ip='127.0.0.1',ca_file=str(self.root/'fixture-ca.pem'),bearer=self.bearer,
+                inventory=self.index,item=self.item,reservation_binding=self.reservation,
+                expected_worker=self.worker,issuer_id='worker-issuer',key_id='worker-key',
+                worker_public_key=self.proof_key.public_key(),idle_timeout=2,total_timeout=5)
+            observed=sender.put(fixtures.IMAGE_ID,io.BytesIO(b'abc'))
+            self.assertTrue(observed['localObjectDurable']);self.assertFalse(observed['sourceCustodyAccepted'])
+            self.assertTrue(sender.put(fixtures.GCP_ID,io.BytesIO(b''))['replayed'])
+            sender.put('gcp_'+self.item['attemptId'],io.BytesIO(b'1,2,3\n'))
+            from processing.direct_worker_sender import DirectDeliveryUncertain
+            original_reply=server.RequestHandlerClass._reply; dropped=[]
+            def drop_first_complete(handler,status,payload):
+                if handler.path=='/direct/v2/complete' and status==200 and not dropped:
+                    dropped.append(True);handler.close_connection=True
+                    handler.connection.shutdown(socket.SHUT_RDWR);handler.connection.close();return
+                return original_reply(handler,status,payload)
+            with patch.object(server.RequestHandlerClass,'_reply',new=drop_first_complete):
+                with self.assertRaises(DirectDeliveryUncertain):sender.complete()
+                closure=sender.complete()
+            self.assertEqual(dropped,[True])
+            self.assertTrue(closure['closure']['localClosureComplete'])
+            self.assertFalse(closure['closure']['sourceCustodyAccepted'])
         finally:
             server.shutdown();server.server_close();thread.join(3)
             self.assertFalse(thread.is_alive())

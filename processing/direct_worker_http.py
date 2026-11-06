@@ -175,7 +175,7 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
                                           content_length=length,
                                           content_sha256=self.headers.get('Content-SHA256'), reader=body)
                     self._reply(200, result); return
-                if version == 'v1' and self.command == 'POST' and self.path == '/direct/v1/complete' and length == 0:
+                if self.command == 'POST' and self.path == '/direct/' + version + '/complete' and length == 0:
                     result = boundary.complete(headers, protected_transport=True)
                     self._reply(200, result); return
                 self._reply(404, {'error': 'not_found'})

@@ -73,6 +73,17 @@ class DirectWorkerSender:
                  expected_worker, issuer_id, key_id, worker_public_key,
                  max_object_bytes=20*1024**3, response_limit=65536,
                  idle_timeout=10, total_timeout=120):
+        self._configure_transport(origin=origin, connect_ip=connect_ip, ca_file=ca_file, bearer=bearer,
+            max_object_bytes=max_object_bytes, response_limit=response_limit,
+            idle_timeout=idle_timeout, total_timeout=total_timeout)
+        p._slug(issuer_id,'issuer');p._slug(key_id,'key')
+        if not isinstance(worker_public_key,Ed25519PublicKey):raise ValueError('pinned worker public key required')
+        self._item,self._sha,_=scratch_identity(item,expected_worker=expected_worker)
+        self._prepared=_PreparedManifest(manifest,self._item,derived_ids)
+        self._issuer,self._key,self._public=issuer_id,key_id,worker_public_key
+
+    def _configure_transport(self, *, origin, connect_ip, ca_file, bearer,
+                             max_object_bytes, response_limit, idle_timeout, total_timeout):
         if (type(origin) is not str or not origin.isascii()
                 or any(ord(char)<33 or ord(char)==127 for char in origin)):
             raise ValueError('exact HTTPS worker origin required')
@@ -92,8 +103,6 @@ class DirectWorkerSender:
         if (type(bearer) is not str or not 32<=len(bearer)<=4096
                 or not all(0x21<=ord(c)<=0x7e for c in bearer)):
             raise ValueError('scoped coordinator bearer required')
-        p._slug(issuer_id,'issuer');p._slug(key_id,'key')
-        if not isinstance(worker_public_key,Ed25519PublicKey):raise ValueError('pinned worker public key required')
         if (type(max_object_bytes) is not int or not 1<=max_object_bytes<=2**53-1
                 or type(response_limit) is not int or not 1<=response_limit<=1024*1024
                 or any(type(v) not in (int,float) or not math.isfinite(v) or v<=0 for v in (idle_timeout,total_timeout))):
@@ -107,9 +116,6 @@ class DirectWorkerSender:
         self._context,self._host,self._port=context,parsed.hostname,port
         self._address=address
         self._bearer=bearer
-        self._item,self._sha,_=scratch_identity(item,expected_worker=expected_worker)
-        self._prepared=_PreparedManifest(manifest,self._item,derived_ids)
-        self._issuer,self._key,self._public=issuer_id,key_id,worker_public_key
         self._max_object,self._response_limit=max_object_bytes,response_limit
         self._idle,self._total=idle_timeout,total_timeout
 
