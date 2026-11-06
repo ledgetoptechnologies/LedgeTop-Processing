@@ -2,9 +2,10 @@ import copy
 import os
 import unittest
 import uuid
+import importlib.util
 from unittest.mock import patch
 
-from processing.direct_worker_prepare_v2 import prepare_signed_job
+from processing.direct_worker_prepare_v2 import prepare_signed_job, WorkerPreparationUncertain
 from processing.scratch_policy import PolicyConflict
 from processing.scratch_policy import ScratchLedger
 from processing.node_gate import NodeGate
@@ -54,6 +55,10 @@ class WorkerPrepareTests(unittest.TestCase):
             with NodeGate('fixture-v2') as gate:
                 self.assertEqual(gate.snapshot()['schema'],2)
                 self.assertEqual(gate.snapshot()['reservation']['job']['id'],f.item['jobId'])
+                from processing.node_gate import GateError
+                with self.assertRaises(GateError):
+                    gate.resolve(gate.snapshot()['reservation']['receiptId'],1,
+                                 old_worker_stopped=True,coordinator_resolved=True,note='synthetic')
             with ledger._transaction() as db:
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
                 self.assertEqual(db.execute('SELECT state FROM direct_readiness_issues').fetchone()[0],'issued')
@@ -71,8 +76,22 @@ class WorkerPrepareTests(unittest.TestCase):
                 if state['reservation'] is not None and not seen:
                     seen.append(True);raise OSError('synthetic lost gate reply')
             with patch.object(NodeGate,'_save',save_then_fail):
-                with self.assertRaises(OSError):prepare_signed_job(ledger,**kwargs)
+                with self.assertRaises(WorkerPreparationUncertain):prepare_signed_job(ledger,**kwargs)
             with NodeGate('fixture-v2') as gate:
+                self.assertEqual(gate.snapshot()['schema'],2)
                 self.assertEqual(gate.snapshot()['reservation']['job']['id'],f.item['jobId'])
             _,_,proof=prepare_signed_job(ledger,**kwargs)
             self.assertFalse(proof['body']['sourceCustodyAccepted'])
+
+    @unittest.skipUnless(os.environ.get('LTDS_OLD_GATE_SOURCE'),'old gate source fixture not supplied')
+    def test_previous_gate_refuses_atomic_direct_hold(self):
+        f,kwargs=self.fixture();root=f.root/'old-reader';root.mkdir(mode=0o700)
+        ledger=ScratchLedger(root/'ledger.sqlite',root,capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
+        with patch('processing.node_gate.canonical_gate_path',return_value=root/'gate'):
+            with NodeGate('fixture-v2') as gate:gate.provision('cluster','https://127.0.0.1:8443',f.worker['authorityId'])
+            prepare_signed_job(ledger,**kwargs)
+        spec=importlib.util.spec_from_file_location('old_gate_atomic',os.environ['LTDS_OLD_GATE_SOURCE'])
+        old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)
+        with patch.object(old,'canonical_gate_path',return_value=root/'gate'):
+            with old.NodeGate('fixture-v2') as gate:
+                with self.assertRaises(old.GateError):gate.snapshot()

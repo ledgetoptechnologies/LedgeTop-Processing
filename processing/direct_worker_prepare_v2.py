@@ -13,6 +13,10 @@ from .source_spool import SourceSpool
 from . import reference_protocol as p
 
 
+class WorkerPreparationUncertain(RuntimeError):
+    """A node or scratch hold may exist and must not be cleared blindly."""
+
+
 def prepare_signed_job(ledger, *, payload, item, principal, worker, engine_id,
                        coordinator_origin, gate_generation, source_verification,
                        mount_path, mount_id, marker_name, challenge_id,
@@ -47,32 +51,42 @@ def prepare_signed_job(ledger, *, payload, item, principal, worker, engine_id,
     preflight=SourceSpool(ledger.root,mount_path=mount_path,mount_id=mount_id,marker_name=marker_name,
                           safety_floor_bytes=0,require_mount=True)
     receipt=digest[:32]
-    with NodeGate(engine_id) as gate:
-        preflight._assert_mount()
-        state=gate.snapshot()
-        if (state['nodeId']!=normalized['nodeId'] or state['coordinatorOrigin']!=coordinator_origin
-                or state['authorityId']!=normalized['authorityId'] or state['generation']!=gate_generation):
-            raise PolicyConflict('node authority or generation changed')
-        if state['reservation'] is None:
-            gate.reserve_bound(normalized['nodeId'],coordinator_origin,normalized['authorityId'],gate_generation,receipt,
-                dict(id=normalized['jobId'],workerId=normalized['workerId'],
-                     nodeId=normalized['nodeId'],authorityId=normalized['authorityId']))
-        else:
+    # Once gate inspection begins, even an I/O failure may conceal an earlier
+    # committed attempt. Never infer a free node from an unreadable gate.
+    may_be_held=True
+    try:
+        with NodeGate(engine_id) as gate:
+            preflight._assert_mount()
+            state=gate.snapshot()
+            if (state['nodeId']!=normalized['nodeId'] or state['coordinatorOrigin']!=coordinator_origin
+                    or state['authorityId']!=normalized['authorityId'] or state['generation']!=gate_generation):
+                raise PolicyConflict('node authority or generation changed')
             job=dict(id=normalized['jobId'],workerId=normalized['workerId'],
                      nodeId=normalized['nodeId'],authorityId=normalized['authorityId'])
-            held=state['reservation']
-            if (state['generation']!=gate_generation or held['receiptId']!=receipt or held['job']!=job
-                    or held['completionDigest'] is not None):
-                raise PolicyConflict('node has another or uncertain reservation')
-        gate._arm_direct_hold(receipt,digest)
-        scratch.prepare(ledger,normalized,expected_worker=worker,worker_ready=True)
-        directory=ledger.prepare_job_directory(scratch_id)/'direct-source'
-        directory.mkdir(mode=0o700,exist_ok=True)
-        spool=SourceSpool(directory,mount_path=mount_path,mount_id=mount_id,marker_name=marker_name,
-                          safety_floor_bytes=0,require_mount=True)
-        preflight._assert_mount();spool._assert_mount()
-    proof=readiness.issue(ledger,spool,normalized,principal=principal,expected_worker=worker,
-        engine_id=engine_id,coordinator_origin=coordinator_origin,gate_generation=gate_generation,
-        challenge_id=challenge_id,validity_seconds=validity_seconds,issuer_id=issuer_id,
-        key_id=key_id,private_key=private_key)
-    return index,spool,proof
+            if state['reservation'] is None:
+                may_be_held=True
+                gate.reserve_direct_bound(normalized['nodeId'],coordinator_origin,normalized['authorityId'],
+                                          gate_generation,receipt,job,digest)
+            else:
+                held=state['reservation']
+                if (held['receiptId']!=receipt or held['job']!=job or held['completionDigest'] is not None):
+                    raise PolicyConflict('node has another or uncertain reservation')
+                may_be_held=True
+                expected_hold=dict(receiptId=receipt,generation=gate_generation,scratchBindingSha256=digest)
+                if state['schema']!=2 or state['directHold']!=expected_hold:
+                    raise PolicyConflict('direct node hold requires reconciliation')
+            scratch.prepare(ledger,normalized,expected_worker=worker,worker_ready=True)
+            directory=ledger.prepare_job_directory(scratch_id)/'direct-source'
+            directory.mkdir(mode=0o700,exist_ok=True)
+            spool=SourceSpool(directory,mount_path=mount_path,mount_id=mount_id,marker_name=marker_name,
+                              safety_floor_bytes=0,require_mount=True)
+            preflight._assert_mount();spool._assert_mount()
+        proof=readiness.issue(ledger,spool,normalized,principal=principal,expected_worker=worker,
+            engine_id=engine_id,coordinator_origin=coordinator_origin,gate_generation=gate_generation,
+            challenge_id=challenge_id,validity_seconds=validity_seconds,issuer_id=issuer_id,
+            key_id=key_id,private_key=private_key)
+        return index,spool,proof
+    except Exception:
+        if may_be_held:
+            raise WorkerPreparationUncertain('worker preparation requires reconciliation') from None
+        raise
