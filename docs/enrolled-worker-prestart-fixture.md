@@ -1,4 +1,4 @@
-# Typed worker pre-start fixture adaptation (not yet executed)
+# Typed worker pre-start fixture adaptation (preparation tests qualified)
 
 This adapts only the opt-in local full-phase qualifier. It does not install or
 activate workers, touch SSH/NAS/systemd, patch INSTALL_BASE/ownership policy, or
@@ -90,8 +90,8 @@ outer/child retirement and a full named/bind alias zero-reference census.
 
 ## Tests proposed before any actual run
 
-No tests or resources have been started for this source checkpoint; only static
-AST/diff checks are intended initially. First bounded Linux selection:
+The preparation-only selection has passed; seed-volume, actual child-factory
+and full-phase stages remain unexecuted. First bounded Linux selection:
 
 ```text
 tests.test_enrolled_worker_preparation_fixture
@@ -104,6 +104,19 @@ bounded /tmp. These tests seed real dependency/archive artifacts on NEW tmpfs,
 use the actual pure composer/Gate/render_unit/typed review, refuse changed
 bindings, and make no installed or actual factory claim. Missing required
 inputs explicitly skip the preparation class and must not count as coverage.
+
+Frozen source `e83f22d1503b3ec1c3bc86437233bf73133e52d1`, canonical archive
+SHA256 `7cef02c703bae31eec546af981eb1c4c7e44df188e0d027446421a806b30011e`,
+passed **11/11 tests, ZERO skips, 10.090 seconds**. All five preparation-class
+tests ran with real source/dependency artifacts and real pure composer/Gate/
+unit/typed review. Immutable image5d466, one CPU/768MiB, network none, UID10001,
+readonly source/archive, /tmp192MiB, pids64, no socket or host ports. No factory,
+volume, installer, systemd, SSH or full phase was started. Full2,355-byte log
+SHA256 `c3ede83628de44259e420654fe67a65503180227fe53e99e47b9cc00d692ac1e`;
+stdout/stderr and receipt retained privately in the root handoff. Exact owned
+test container5b661e6c exited0/PID0/no OOM, was removed after ownership checks,
+and its task inventory was empty. This source predates the later9ab installer
+changes; final integrated source still needs its own qualification.
 
 Next, only after review/first result, qualify the actual two-child fixture with
 the separately seeded reviewed readonly mounts using
