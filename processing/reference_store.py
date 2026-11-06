@@ -1098,13 +1098,20 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             if not row["result_json"] or row["phase"] not in ("awaiting_acceptance", "completed"):
                 raise Conflict("result is not ready for acceptance")
             submission = json.loads(row['input_json'])
+            # Durable ingress identity takes precedence over possibly damaged
+            # source markers. Direct custody cannot borrow spool/legacy result
+            # acceptance, even if the source row or marker has disappeared.
+            from .source_intake_mode import _check_schema as check_source_mode_schema
+            check_source_mode_schema(db)
+            mode=db.execute('SELECT mode FROM reference_source_intake_modes WHERE job_id=?',(job_id,)).fetchone()
+            if mode is not None and mode['mode'] != 'spool-v1':
+                raise Conflict('source intake mode mismatch')
             source_v2 = 'sourceIntakeVersion' in submission or row['source_state'] is not None
+            if mode is not None and not source_v2:
+                raise Conflict('source intake metadata unavailable')
             if source_v2:
-                # Existing source-bound acceptance is defined only for the
-                # verified coordinator spool. Direct custody has no qualified
-                # receipt yet and cannot borrow that result contract.
-                from .source_intake_mode import require as require_source_mode
-                require_source_mode(db,job_id,'spool-v1')
+                if mode is None:
+                    raise Conflict('source intake mode mismatch')
                 if (type(submission.get('sourceIntakeVersion')) is not int
                         or submission['sourceIntakeVersion'] != 2 or row['source_state'] is None
                         or viewer_receipt is None):
