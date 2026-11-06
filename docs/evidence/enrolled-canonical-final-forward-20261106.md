@@ -74,8 +74,14 @@ The TAR is evidence only, never a restore or lock-authority source.
 
 The unchanged successful harness retired its inner fixtures only after known
 success and worker shutdown; transport task-label container/volume inventories
-were empty. Exact stopped outer and its one artifact volume remain retained
-pending root review; all private evidence is already exported independently.
+were empty. Root independently reviewed the result and revalidated all 277 cold
+files before authorizing exact outer retirement. Fresh image/operation/PID0/
+exit0/no-OOM checks preceded removal of only the stopped outer; a new closed
+full-container named-volume/bind-parent/child alias inventory then proved zero
+references before the single owned artifact volume was removed, without force.
+Both transport and outer task-label container/volume inventories were empty.
+All Windows private/cold evidence remains unchanged; no own runner or resource
+remains active.
 
 This is **local Docker fixture qualification**, with explicit Desktop mount-mode
 and enrolled-identity seams, actual daemon-factory/TLS workers but fixture native
