@@ -40,6 +40,18 @@ plus one derived entry within this budget; it does not establish installed
 upload speed, memory usage, database capacity or support for a 10,000-photo
 job. Oversized inputs must be held explicitly; never truncate an inventory.
 
+**Integration blocker:** the current direct worker closure and receiver use
+`reference_protocol.MAX_OBJECTS = 10,000` across source and derived objects.
+Therefore 10,000 photos plus one derived object exceed that worker limit even
+though the isolated receipt accepts them. The existing reference HTTP default
+and sender receipt limit are 4 MiB; the candidate body alone allows 8 MiB plus
+envelope overhead, and its future route has no negotiated bound. There is no
+working path or demonstrated capacity for that 10,001-object case. Agree and
+implement consistent per-layer count, transfer, persisted metadata and response
+limits (or independently verified paginated commitments), then test real
+admission, closure, response, restart and exact replay end-to-end. Do not raise
+shared V2 limits merely to accommodate this unwired prototype.
+
 For design review, propose a maximum exact relative path length of 1,024 UTF-8
 bytes and 255 bytes per component, subject to the actual participating
 filesystems and the Viewer's existing upload rules. A future path inventory
@@ -72,3 +84,7 @@ ASCII/safe-integer vector; its small canonicalizer is deliberately not a
 general-purpose JCS implementation. Production clients need independently
 qualified RFC 8785 implementations and vectors including Unicode path pages,
 failure/restart boundaries, invalid types, duplicates and trust changes.
+
+The initial six-test run at `4be566a1` used the existing local image, offline:
+`docker run --rm --name ltds-receipt-tests-c7d3205c --network none --read-only --user 10001:10001 --cpus 1 --memory 768m --pids-limit 96 --tmpfs /tmp:rw,nosuid,nodev,size=64m --mount 'type=bind,source=C:/Projects/processing-direct-coordinator-receipt-vectors-20261106,target=/src,readonly' --workdir /src --entrypoint python sha256:bc48c6a81300a7c9b610c6e0f3f4d7cb8aa599075645b2ff1ac1c891dc0ce8c4 -B -m unittest tests.test_direct_coordinator_receipt_candidate`.
+It returned `...... Ran 6 tests in 0.097s OK`; it was a prototype-only test.

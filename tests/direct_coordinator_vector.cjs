@@ -19,4 +19,16 @@ assert.equal(crypto.verify(null,Buffer.concat([Buffer.from(vector.domainHex,'hex
 const changed=structuredClone(unsigned);changed.body.generation++;
 assert.equal(crypto.verify(null,Buffer.concat([Buffer.from(vector.domainHex,'hex'),Buffer.from(canonical(changed))]),
   vector.publicKeyPem,Buffer.from(signature,'base64url')),false);
+const schema=JSON.parse(fs.readFileSync('contracts/direct-coordinator-source-receipt-v1.schema.json','utf8'));
+for(const [pattern,value] of [
+  [schema.properties.signature.pattern,signature],
+  [schema.properties.body.properties.issuedAt.pattern,unsigned.body.issuedAt],
+  [schema.$defs.uuid.pattern,unsigned.body.jobId],
+  [schema.$defs.slug.pattern,unsigned.body.viewerPrincipalId],
+  [schema.$defs.hash.pattern,unsigned.body.sourceManifestSha256],
+]) {
+  const regex=new RegExp(pattern);
+  assert.equal(regex.test(value),true);
+  for(const suffix of ['\n','\r','\u2028','\u2029']) assert.equal(regex.test(value+suffix),false);
+}
 console.log('synthetic Python/Node receipt vector verified');

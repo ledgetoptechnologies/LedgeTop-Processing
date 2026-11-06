@@ -8,7 +8,7 @@
     "protocol": {"const": "ltds.viewer.source-acceptance/v1"},
     "schemaVersion": {"const": 1},
     "issuerId": {"$ref": "#/$defs/slug"}, "keyId": {"$ref": "#/$defs/slug"},
-    "signature": {"type": "string", "pattern": "^[A-Za-z0-9_-]{86}$"},
+    "signature": {"type": "string", "pattern": "^[A-Za-z0-9_-]{86}(?![\\s\\S])"},
     "body": {
       "type": "object", "additionalProperties": false,
       "required": ["receiptId", "operationId", "issuedAt", "coordinatorAuthorityId", "viewerPrincipalId", "viewerDestinationId", "submissionId", "viewerTaskId", "viewerAttemptId", "jobId", "generation", "environment", "intakeProtocol", "mode", "modeRevision", "submissionIntentSha256", "sourceSnapshotSha256", "originalPathInventorySha256", "sourceManifestSha256", "derivedManifestSha256", "engineMappingSha256", "workerClosureReceiptSha256", "sourceObjects", "derivedObjects", "retentionGuarantee"],
@@ -16,7 +16,7 @@
         "receiptId": {"$ref": "#/$defs/uuid"}, "operationId": {"$ref": "#/$defs/uuid"},
         "coordinatorAuthorityId": {"$ref": "#/$defs/uuid"}, "submissionId": {"$ref": "#/$defs/uuid"},
         "viewerTaskId": {"$ref": "#/$defs/uuid"}, "viewerAttemptId": {"$ref": "#/$defs/uuid"}, "jobId": {"$ref": "#/$defs/uuid"},
-        "issuedAt": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"},
+        "issuedAt": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z(?![\\s\\S])"},
         "viewerPrincipalId": {"$ref": "#/$defs/slug"}, "viewerDestinationId": {"$ref": "#/$defs/slug"},
         "generation": {"$ref": "#/$defs/positiveInteger"}, "modeRevision": {"$ref": "#/$defs/positiveInteger"},
         "environment": {"enum": ["production", "staging"]}, "intakeProtocol": {"const": "ltds-direct-intake-v1"}, "mode": {"const": "direct"},
@@ -31,9 +31,9 @@
     }
   },
   "$defs": {
-    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
-    "slug": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
-    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\\s\\S])"},
+    "slug": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\\s\\S])"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])"},
     "positiveInteger": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
     "object": {"type": "object", "additionalProperties": false, "required": ["id", "byteSize", "sha256"], "properties": {"id": {"$ref": "#/$defs/slug"}, "byteSize": {"$ref": "#/$defs/positiveInteger"}, "sha256": {"$ref": "#/$defs/hash"}}}
   }

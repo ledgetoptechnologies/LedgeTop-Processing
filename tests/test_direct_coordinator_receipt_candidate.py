@@ -2,12 +2,14 @@
 import copy
 from contextlib import closing
 import json
+import re
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from processing import direct_coordinator_receipt_candidate as c
+from processing import reference_protocol as protocol
 
 
 # Public RFC 8032 test seed, not a credential and never used outside fixtures.
@@ -58,6 +60,20 @@ class CandidateReceiptTests(unittest.TestCase):
         raw=c.rfc8785.dumps(c.validate_body(value))
         self.assertLess(len(raw),c.MAX_BODY_BYTES);self.assertEqual(len(value['sourceObjects']),10000)
         self.assertGreaterEqual(c.MAX_OBJECTS,10001)
+        # The prototype is NOT a real end-to-end capacity claim.
+        self.assertGreater(len(value['sourceObjects'])+len(value['derivedObjects']),protocol.MAX_OBJECTS)
+        self.assertGreater(c.MAX_BODY_BYTES,protocol.MAX_BODY_BYTES)
+    def test_schema_patterns_reject_trailing_line_terminators(self):
+        schema=json.loads((Path(__file__).resolve().parents[1]/'contracts/direct-coordinator-source-receipt-v1.schema.json').read_text())
+        patterns=[(schema['properties']['signature']['pattern'],self.receipt['signature']),
+                  (schema['properties']['body']['properties']['issuedAt']['pattern'],self.body['issuedAt']),
+                  *[(schema['$defs'][key]['pattern'],value) for key,value in (
+                      ('uuid',self.body['jobId']),('slug',self.body['viewerPrincipalId']),('hash','a'*64))]]
+        for pattern,value in patterns:
+            self.assertIsNotNone(re.search(pattern,value))
+            for suffix in ('\n','\r','\u2028','\u2029'):
+                with self.subTest(pattern=pattern,suffix=repr(suffix)):
+                    self.assertIsNone(re.search(pattern,value+suffix))
     def test_durable_exact_replay_and_conflicting_intent_hold(self):
         with tempfile.TemporaryDirectory() as root:
             path=Path(root)/'candidate.sqlite'
