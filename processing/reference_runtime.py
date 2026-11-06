@@ -409,10 +409,13 @@ class _DynamicAPI:
         from .direct_source_request import authenticate_source_request
         try:
             context = authenticate_source_request(self.control.viewer, connection, headers)
-            context.require_current()
         except (ValueError, OSError):
             return Response(401, {'error': 'unauthorized'})
-        return Response(503, {'error': 'direct_intake_disabled'})
+        try:
+            context.require_current()
+            return Response(503, {'error': 'direct_intake_disabled'})
+        finally:
+            context.invalidate()
 
     def handle(self, method, path, headers, body=b"", *, protected_transport=False):
         if path == '/ltds/worker/v1/direct-source-policy':
