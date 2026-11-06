@@ -50,3 +50,29 @@ Every named task runner is terminal and absent. The exact labelled task volume `
 The new preparation-only helper `7bd22968` and evidence `b14de3da` are selected at `c57c99e8`; its independent review and 14/14 synthetic Linux checks are recorded separately. It has not generated installed credentials or configs.
 
 Rebuild/pin the combined application, prepare actual private bootstrap/final and worker artifacts, verify NAS/Viewer CA and signer configuration, install with the reviewed cutover and activation boundary, and qualify the small real job and concurrent-node queue. Rendered UI, installed maintenance, genuine TreeDar output registration and the full-goal acceptance remain open. Source cleanup remains disabled for the first installed pilot.
+
+## Later fixture and artifact closures
+
+The TreeDar assertion above is superseded only by test-only `07f25a4e`, selected
+at `ae8e259d`. Claude reported all18 cases passing, no skips/failures, 0.898s,
+in a bounded readonly-source Linux fixture. Root reviewed the patch: it first
+establishes a signature-verified ledger fixture before expecting read-pin
+release to permit cleanup, and adds an explicit unsigned-acceptance refusal.
+Production cleanup is unchanged; genuine signatures remain the worker verifier's
+responsibility. This does not establish usable real TreeDar output registration.
+The committed test blob SHA is
+`53a89790531935e07b7139b3c38b1f0fe82930c0ceee159a1b9ede4904801769`;
+Claude's tested CRLF export SHA
+`2cfe2839b5078a59e55d669b666c93bfa8b8e0af0bdb1426368adad8a8611868`
+was independently reproduced from those exact LF blob bytes. Preserve the byte
+representation distinction and the earlier failed run, rather than relabelling
+it as green.
+
+The canonical LF image is now built and staged as recorded in
+`canonical-build-and-pc-staging-20261106.md`. Its current-image forward22 and
+separate rollback30/audit pass, with complete independently revalidated cold
+evidence and retired task resources; see the two canonical cutover receipts.
+The noncircular host/Gate configuration-preparation path `11e470d6` now has19/19
+Linux cases, including actual runtime-to-worker composition. Installed private
+inputs, NAS durability, Viewer application/trust and real job acceptance remain
+open.

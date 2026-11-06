@@ -9,11 +9,15 @@ approval. Runtime acceptance remains incomplete.
 The Viewer findings on `01ff415d` are closed in `ee9e750a`, with exported fixture
 bytes pinned to LF in `ca5eedf3`. Draft Ops #446 now publishes that exact head.
 Processing presentation/recovery is selected at `c3d7eac8`; preparation-only
-runtime configuration tooling follows at `c57c99e8`. Independent selections pass
+runtime configuration tooling now includes the noncircular host/Gate binding
+alternative `11e470d6`, independently reviewed with 19/19 Linux cases passing.
+Independent selections pass
 271 Linux cases, a separate 193-case correction regression, and 25 frozen Viewer
 host cases. Four actual local Viewer photo-result round trips pass across two
-runs; the mixed five-case run still has one existing TreeDar cleanup assertion
-failure, retaining data. See the exact scope and failed runner history in
+runs. The mixed five-case run retained one existing TreeDar cleanup assertion
+failure; its stale unsigned-receipt expectation is corrected by test-only
+`07f25a4e` (selected at `ae8e259d`), with Claude reporting the complete module
+18/18. Production cleanup remains unchanged. See the exact scope and failed runner history in
 [the combined qualification](evidence/coordinated-presentation-pair-20261106.md).
 These overlapping selections are not an aggregate suite or installed acceptance.
 
@@ -38,7 +42,7 @@ not be added together or described as a complete suite.
 | Production/staging queue and ordered per-node routing | Actual Viewer/Python synthetic pairings; 332-test integrated selection | Installed source intake and concurrent two-node jobs; correct user-facing queued/preparing/running witness (see status audit) |
 | Private per-node engine boundary and dynamic flags | Authenticated worker relay and coordinator discovery integrated; 96/96 frozen-source Linux catalog/runtime/factory checks passed at `18750d4` | Install workers and qualify relay on both PCs; verify native engine submission cannot bypass the worker boundary |
 | Durable result return and selective cleanup | Signed ready proof, real Viewer process death/recovery, synthetic 24-hour timer and preserved raw GCP/originals | Installed credentials, NAS durability and actual return to Viewer |
-| Coordinator/worker maintenance | Concrete driver/bundle/transport and guarded first activation integrated; distinct 118-test transport and 98-test activation selections pass; all22 actual local Docker forward phases and separate30-phase rollback plus post-restart stopped-writer custody audit pass | Final rebuilt combined image, real first worker enrollment/activation and installed update/drain/resume; automatic-maintenance follow-on is isolated |
+| Coordinator/worker maintenance | Canonical image `7adf6e6e` is built and hash-verified in the cluster Docker cache. Its actual local Docker forward22 and separate rollback30 plus post-restart custody audit pass; exact test resources are retired | Actual private config/NAS/Viewer trust, real worker installation/activation, and installed drain/update/resume; automatic-maintenance follow-on remains isolated |
 | Long transfer after coordinator outage | Renewal/mint plus scratch and per-receipt delivery fences integrated; 442/442 frozen Linux checks passed at `b467c3b` | Actual coordinator-restart fetching/processing recovery, worker enrollment and connected delivery remain open |
 | Viewer GCP workflow | Corrected curated Viewer `7598858b` passed 158/158 Linux checks and 3/3 actual local Processing/Viewer pairings, including licensed conversion, result acceptance and signed 24-hour cleanup | Installed deployment/return acceptance, NAVD88 geoid qualification and rendered UI acceptance remain open |
 | TreeDar and Gaussian splats | Genuine-LiDAR validation/scaffolding | Typed usable TreeDar output registration and real processing; Gaussian remains disabled |
