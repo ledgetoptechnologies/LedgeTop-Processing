@@ -95,7 +95,8 @@ class StartupPolicy:
 
     def __post_init__(self):
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',self.qualifier_id):raise QualifierError('invalid_qualifier_identity')
-        if self.node_id not in ('main','cluster') or self.expected_engine not in ('odm','odx'):raise QualifierError('explicit_node_and_engine_required')
+        if (type(self.node_id) is not str or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,79}',self.node_id)
+                or self.expected_engine not in ('odm','odx')):raise QualifierError('explicit_node_and_engine_required')
         if self.filesystem_mode!='ephemeral-node-defaults-v1':raise QualifierError('reviewed_filesystem_mode_required')
         if self.launcher_stdout_mode!='node-or-nvm-use-banner-v1':raise QualifierError('reviewed_launcher_stdout_mode_required')
         try:

@@ -49,7 +49,7 @@ class SupervisorPolicy:
     capacity_bytes:int
 
     def __post_init__(self):
-        if self.node_id not in ('main','cluster'):raise SupervisorError('fixed_processing_node_required')
+        _slug(self.node_id)
         for value in (self.channel,self.qualifier_id,self.maintenance_adapter_id):_slug(value)
         _digest(self.current_image_id);_uuid(self.authority_id);_hash(self.qualification_policy_sha256)
         if _integer(self.capacity_bytes)<1:raise SupervisorError('positive_capacity_required')

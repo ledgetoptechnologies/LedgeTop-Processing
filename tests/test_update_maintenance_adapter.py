@@ -78,6 +78,7 @@ class UpdateMaintenanceAdapterTests(unittest.TestCase):
         self.assertEqual(self.host.ingress.opens,1)
         self.assertEqual(self.host.fixture.queue.get_node('cluster')['state'],'active')
         private=json.loads((Path(request['receiptDirectory'])/'update.json').read_text())
+
         for secret in (private['updateToken'],self.api.token,self.operator.token,self.host.ingress.config['backendToken']):
             self.assertNotIn(secret,json.dumps(result))
         before=self.db_hash()
@@ -85,6 +86,17 @@ class UpdateMaintenanceAdapterTests(unittest.TestCase):
                 patch.object(self.host.ingress,'change',side_effect=AssertionError('lookup cannot reload ingress')):
             self.assertEqual(self.adapter.lookup_completion(request),result)
         self.assertEqual(self.db_hash(),before)
+
+    def test_selected_node_must_exist_once_in_actual_coordinator_inventory(self):
+        original=self.api.json
+        for nodes in ([],[{'id':'unconfigured'}],[{'id':'cluster'},{'id':'cluster'}]):
+            def read(method,path,*args,**kwargs):
+                if method=='GET' and path=='/v1/prototype/nodes':return {'nodes':nodes}
+                return original(method,path,*args,**kwargs)
+            with self.subTest(nodes=nodes),patch.object(self.api,'json',side_effect=read):
+                with self.assertRaisesRegex(ValueError,'configured_node_inventory_required'):
+                    self.adapter.inspect_host()
+        self.assertEqual(self.host.adapter.calls,[])
 
     def test_lost_schedule_response_restart_only_reads_exact_owned_receipt(self):
         original=self.operator.json;posts=[]
