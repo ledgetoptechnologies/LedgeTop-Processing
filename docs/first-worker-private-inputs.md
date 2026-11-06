@@ -48,7 +48,7 @@ worker IDs/instances; it has no WorkerDaemon configuration writer, maintenance
 readiness credential, recovery/source/Viewer trust inputs or broker contract.
 Its historical receipt explicitly says worker intake is not configured.
 
-A narrowly scoped generator should read the exact selected private runtime,
+A narrowly scoped generator should read the exact private `final.json` runtime,
 the per-host native credential file and TLS descriptors using owner-private
 bounded nofollow reads. It should compare all public identity/recovery/bundle
 pins before composing bytes, reject any conflicting roles, and write only a NEW

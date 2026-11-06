@@ -163,6 +163,16 @@ class RuntimePreparationTests(unittest.TestCase):
         self.assertEqual(config['viewerReceiptKeys'],json.loads((self.out/'final.json').read_bytes())['viewerReceiptKeys'])
         self.assertFalse(original_config.exists());self.assertFalse(Path(config['stateRoot']).exists())
 
+    def test_prepared_bootstrap_refuses_and_final_composes_with_cleanup_enabled(self):
+        from ops import prepare_reference_worker_config as worker
+        f=self.fixture; self.use_binding(); prep.prepare(self.spec)
+        spec=copy.deepcopy(f.spec); spec['policy'].update(cleanupEnabled=True,engineCleanupEnabled=True)
+        spec['runtime']=f.file('prepared-bootstrap.json',(self.out/'bootstrap.json').read_bytes())
+        with self.assertRaisesRegex(Exception,'final_runtime_selection_required'):worker.prepare(spec,now=f.now)
+        self.assertFalse(Path(spec['outputDirectory']).exists())
+        spec['runtime']=f.file('prepared-final.json',(self.out/'final.json').read_bytes())
+        self.assertTrue(worker.prepare(spec,now=f.now)['preparationOnly'])
+
     def test_colon_dotted_gate_engine_prepares_through_binding(self):
         f=self.fixture; self.assertIn(':',f.engine); self.assertIn('.',f.engine); self.use_binding()
         self.assertTrue(prep.prepare(self.spec)['preparationOnly'])

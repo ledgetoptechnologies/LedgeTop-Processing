@@ -14,7 +14,9 @@ The private specification is bounded to 64 KiB and has these exact fields:
   `<outputDirectory>/worker-config.json`, owner set to the preparer's service UID,
   placeholder config SHA of 64 zeroes, config bytes 1, and the correctly derived
   unit hash. All source/dependency/host/Gate/engine pins are reviewed inputs.
-- `runtime`: descriptor for the exact selected private reference runtime JSON.
+- `runtime`: descriptor for the exact `final.json` written by
+  `ops/prepare_reference_runtime_config.py`: schema 6 with non-empty, valid
+  `viewerReceiptKeys`. Other runtime profiles are unsupported here: see below.
 - `nativeCredential`: `{artifact: descriptor, key: "EXACT_ENV_KEY"}`. Only literal
   unexpanded `KEY=value` input is supported; this is not a shell-env evaluator.
 - `tls`: `{ca: descriptor, certificate: descriptor, privateKey: descriptor}` for
@@ -29,6 +31,14 @@ The private specification is bounded to 64 KiB and has these exact fields:
   `allowedEnvironments`, `cleanupEnabled`, `engineCleanupEnabled`,
   `sourceRangeV2Enabled`, `minimumTlsValiditySeconds`.
 - `outputDirectory`: a NEW literal path beneath an existing owner-private parent.
+
+Runtime selection is exact. `bootstrap.json` (schema 2) has the same worker roles
+but no Viewer receipt pins, so a config built from it could never enable cleanup;
+it is refused. Schemas 3 to 5 remain loadable by the coordinator but are not
+produced by the runtime preparer, so they are refused too. Prepare a `final.json`
+instead of hand-converting one. Empty or invalid receipt keys are refused even
+with cleanup off, so a config hash never pins an empty trust set. All of these
+refusals happen before the output directory exists, so a retry can reuse it.
 
 Every descriptor is exactly `{path, sha256, bytes, ownerUid}`; input files must
 be single-link, mode 0600, nofollow original paths, with exact hash/length/owner.

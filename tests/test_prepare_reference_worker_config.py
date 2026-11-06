@@ -15,9 +15,51 @@ from unittest.mock import patch
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes,serialization
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.x509.oid import NameOID,ExtendedKeyUsageOID
 from ops import prepare_reference_worker_config as prep
 from ops import enroll_reference_worker as install
+
+
+def receipt_keys():
+    public=Ed25519PrivateKey.generate().public_key().public_bytes(serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo).decode('ascii')
+    return {'copy-key':dict(issuerId='copy-issuer',publicKeyPem=public)}
+
+
+class RuntimeSelectionTests(unittest.TestCase):
+    def test_final_profile_returns_validated_receipt_keys(self):
+        keys=receipt_keys()
+        self.assertEqual(prep.selected_runtime_keys(dict(schemaVersion=6,viewerReceiptKeys=keys)),keys)
+
+    def test_every_other_runtime_profile_refuses(self):
+        for schema in (1,2,3,4,5,7,True,'6',None):
+            with self.subTest(schema=schema):
+                with self.assertRaisesRegex(Exception,'final_runtime_selection_required'):
+                    prep.selected_runtime_keys(dict(schemaVersion=schema,viewerReceiptKeys=receipt_keys()))
+        for runtime in (None,[],{}):
+            with self.assertRaisesRegex(Exception,'final_runtime_selection_required'):
+                prep.selected_runtime_keys(runtime)
+
+    def test_missing_empty_or_invalid_receipt_keys_refuse(self):
+        for runtime in (dict(schemaVersion=6),dict(schemaVersion=6,viewerReceiptKeys={}),
+                        dict(schemaVersion=6,viewerReceiptKeys=[])):
+            with self.assertRaisesRegex(Exception,'viewer_receipt_keys_required'):
+                prep.selected_runtime_keys(runtime)
+        with self.assertRaises(Exception):
+            prep.selected_runtime_keys(dict(schemaVersion=6,viewerReceiptKeys={'copy-key':dict(issuerId='copy-issuer',
+                                                                                              publicKeyPem='not a key')}))
+
+    def test_unsuitable_runtime_refuses_before_output_directory(self):
+        spec=dict(runtime={},outputDirectory='/private/new-output')
+        manifest=dict(gate=dict(nodeId='main'))
+        for runtime in (dict(schemaVersion=2),dict(schemaVersion=6,viewerReceiptKeys={})):
+            with self.subTest(schema=runtime['schemaVersion']),\
+                    patch.object(prep,'validate_spec',return_value=manifest),\
+                    patch.object(prep,'pinned',return_value=prep.canonical(runtime)),\
+                    patch.object(prep.os,'mkdir') as mkdir:
+                with self.assertRaises(Exception):prep.prepare(spec,now=datetime.now(timezone.utc))
+                mkdir.assert_not_called()
 
 
 @unittest.skipUnless(os.name=='posix' and os.geteuid()!=0,'owner-private Linux fixture')
@@ -53,7 +95,7 @@ class PrivateWorkerPreparationTests(unittest.TestCase):
             workers=dict(main=dict(bearer='claim-'+'c'*40,workerId='existing-worker',instanceId='original-instance',
                 resultOrigin='https://192.0.2.8:18445',resultBearer='reader-'+'r'*40)),
             recoveryBindings=dict(main=dict(engineId=self.engine,authorityId=self.authority,
-                coordinatorOrigin=self.gate['coordinatorOrigin'],gateGeneration=7,outputBudget=123456)),viewerReceiptKeys={})
+                coordinatorOrigin=self.gate['coordinatorOrigin'],gateGeneration=7,outputBudget=123456)),viewerReceiptKeys=receipt_keys())
         self.ca_key=ec.generate_private_key(ec.SECP256R1());self.ca=self.certificate('CA',self.ca_key,self.ca_key,None,None,ca=True)
         workerkey=ec.generate_private_key(ec.SECP256R1());worker=self.certificate('worker',workerkey,self.ca_key,self.ca,['192.0.2.8','127.0.0.1'])
         coordkey=ec.generate_private_key(ec.SECP256R1());coord=self.certificate('coordinator',coordkey,self.ca_key,self.ca,['192.0.2.9'])
@@ -101,6 +143,23 @@ class PrivateWorkerPreparationTests(unittest.TestCase):
         self.assertFalse(Path(config['stateRoot']).exists());self.assertFalse((self.home/'.config').exists())
         self.assertEqual(stat.S_IMODE(self.output.stat().st_mode),0o700)
         self.assertTrue(all(stat.S_IMODE(p.stat().st_mode)==0o600 for p in self.output.iterdir()))
+
+    def test_cleanup_enabled_final_runtime_passes_real_load_config(self):
+        self.spec['policy'].update(cleanupEnabled=True,engineCleanupEnabled=True)
+        prep.prepare(self.spec,now=self.now)
+        config=json.loads((self.output/'worker-config.json').read_bytes())
+        self.assertEqual(config['viewerReceiptKeys'],self.runtime['viewerReceiptKeys'])
+
+    def test_bootstrap_or_keyless_runtime_refuses_before_output_with_cleanup_on_or_off(self):
+        final=copy.deepcopy(self.runtime)
+        bootstrap={key:final[key] for key in ('listener','viewerBearers','workers','recoveryBindings')}
+        bootstrap.update(schemaVersion=2,streamBudget=dict(maxConcurrent=2,maxObjectBytes=1000))
+        for name,runtime in (('bootstrap',bootstrap),('empty',dict(final,viewerReceiptKeys={}))):
+            for cleanup in (False,True):
+                with self.subTest(runtime=name,cleanup=cleanup):
+                    self.runtime=runtime;self.update_runtime();self.spec['policy']['cleanupEnabled']=cleanup
+                    with self.assertRaises(Exception):prep.prepare(self.spec,now=self.now)
+                    self.assertFalse(self.output.exists())
 
     def test_existing_output_is_never_overwritten(self):
         self.output.mkdir(mode=0o700);p=self.output/'worker-config.json';p.write_bytes(b'original')
