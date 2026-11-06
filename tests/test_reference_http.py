@@ -256,10 +256,14 @@ class ReferenceHTTPTests(unittest.TestCase):
         status, replay, _ = self.request("POST", "/ltds/v1/jobs", self.fixture["submission"])
         self.assertEqual((status, replay), (200, job))
         recovery = '/ltds/v1/jobs/by-submission/' + self.fixture['submission']['submissionId']
-        self.assertEqual(self.request('GET', recovery)[:2], (200, job))
+        status, read, _ = self.request('GET', recovery)
+        self.assertEqual(read.pop('presentation')['state'], 'queued')
+        self.assertEqual((status, read), (200, job))
         self.assertEqual(self.request('GET', recovery, token=PRODUCTION)[0], 404)
         path = "/ltds/v1/jobs/" + job["jobId"]
-        self.assertEqual(self.request("GET", path)[:2], (200, job))
+        status, read, _ = self.request("GET", path)
+        self.assertEqual(read.pop("presentation")["state"], "queued")
+        self.assertEqual((status, read), (200, job))
         self.assertEqual(self.request("GET", path, token=PRODUCTION)[:2], (404, {"error": "not_found"}))
         self.assertEqual(self.request("GET", path + "/results")[0], 409)
         for forbidden in (STAGING, PRODUCTION, "claimToken", "submission", "claim_hash"):

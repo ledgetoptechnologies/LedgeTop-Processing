@@ -37,6 +37,8 @@ from .reference_option_policy import safe_option_definitions, validate_option_va
 from .reference_execution import ExecutionRouter, RouteConflict
 from .reference_parent_guard import validate_claim_fields
 from .reference_worker_hold import HOLD_REASONS, OBSERVING_REASONS, make_request as make_hold_request, validate_ack as validate_hold_ack
+from .reference_presentation import (make_request as make_start_request, timestamp as start_timestamp,
+    validate_ack as validate_start_ack)
 from .scratch_policy import PolicyConflict
 from .treedar_engine import TreeDarHeld
 
@@ -941,6 +943,51 @@ class ReferenceDriver:
             'observation': hold['observation'], 'engineStatusCode': hold['engineStatusCode'],
             'holdReport': self._post_report(job_id, stage, data, 'hold')}
 
+    def _latch_start(self, job_id, stage, data, request_id):
+        """Journal the first sighting of engine output. Display only, so nothing raises.
+
+        Saved before any POST. It feeds no proof, recovery, hold or budget, and a
+        crash before the save just observes again.
+        """
+        try:
+            if 'startWitness' in data or self._kind(job_id) != 'odm':
+                return
+            observed = self.worker.start_witness(job_id)
+            if observed is None:
+                return
+            request = make_start_request(data['claim'], authority_id=self.worker.authority_id,
+                claim_request_id=request_id, witness_id=str(uuid4()), observed=observed,
+                observed_at=start_timestamp(self.clock()))
+            latch = dict(request=request, ack=None, refused=False)
+            self._save(job_id, stage, dict(data, startWitness=latch))
+            data['startWitness'] = latch
+        except Exception:
+            return
+
+    def _flush_start(self, job_id, stage, data):
+        """Send a latched start once per step, held rows included. Never raises.
+
+        DriverHeld here is only _request's word for a 400 to 404. Like a 409 it stops
+        the sending and keeps the latch; anything else tries again next step.
+        """
+        try:
+            record = data.get('startWitness')
+            if record is None or record['ack'] is not None or record['refused']:
+                return
+            try:
+                status, ack = self._request('POST', '/jobs/' + job_id + '/start-witness', record['request'],
+                    claim_token=data['claim']['claimToken'])
+                if status == 200:
+                    record['ack'] = validate_start_ack(ack, record['request'])
+                else:
+                    record['refused'] = True
+            except DriverHeld:
+                record['refused'] = True
+            if record['ack'] is not None or record['refused']:
+                self._save(job_id, stage, data)
+        except Exception:
+            return
+
     def _held_step(self, job_id, stage, data):
         """Read-only while held: an operator's decision is honoured, a task only reported."""
         hold = data['hold']
@@ -1682,6 +1729,7 @@ class ReferenceDriver:
         data = json.loads(row['data'])
         if 'claim' in data:
             self._active_job = job_id
+        self._flush_start(job_id, stage, data)
         if 'hold' in data:
             return self._held_step(job_id, stage, data)
         if 'watch' in data:
@@ -1954,6 +2002,7 @@ class ReferenceDriver:
             if outbox_id is None:
                 if not tree:
                     self._source_started_visible(job_id, data)
+                    self._latch_start(job_id, 'executing', data, request_id)
                 return {'state': 'executing', 'jobId': job_id}
             if tree and adapter.completion(job_id)['kind'] == 'failure':
                 completion = self.failure_outbox.get(outbox_id)
