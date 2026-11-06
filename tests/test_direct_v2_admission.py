@@ -226,6 +226,17 @@ class DirectV2AdmissionTests(unittest.TestCase):
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM direct_v2_reservations').fetchone()[0],0)
             db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?',(original,job['jobId']))
+        # A valid proof cannot bypass durable preparation and the node hold.
+        with self.assertRaisesRegex(Conflict,'not pending'):
+            reservations.reserve(**options)
+        from processing.direct_preparation_client import DirectPreparationClient
+        from processing.direct_preparation_journal import prepare_once
+        client=object.__new__(DirectPreparationClient)
+        client._worker,client._issuer,client._key,client._public=worker,'issuer','key',key.public_key()
+        with patch.object(client,'prepare',return_value=proof):
+            prepare_once(reservations,client,payload=payload,item=item,principal='viewer-staging',
+                challenge_id=challenge,gate_generation=1,capability_fingerprint='a'*64,
+                options_fingerprint=self.options['options_fingerprint'],allowed_odm_options=set())
         with patch('processing.direct_v2_reservation.time.monotonic',side_effect=[0,0,1000]):
             with self.assertRaisesRegex(Conflict,'readiness expired'):reservations.reserve(**options)
         with self.queue._db() as db:

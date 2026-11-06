@@ -209,6 +209,15 @@ class DirectV2Reservations:
             values=(item['reservationId'],item['jobId'],item['nodeId'],authenticated_principal,
                     request_digest,item_bytes,proof_bytes,challenge_id,'receiving')
             if old:
+                from .direct_preparation_journal import verify_schema
+                verify_schema(db)
+                intent=db.execute('SELECT * FROM direct_preparation_intents WHERE reservation_id=?',(item['reservationId'],)).fetchone()
+                if (intent is None or intent['job_id']!=item['jobId'] or intent['node_id']!=item['nodeId']
+                        or intent['principal']!=authenticated_principal or intent['request_digest']!=request_digest
+                        or intent['item_json']!=item_bytes or intent['proof_json']!=proof_bytes
+                        or intent['state']!='proof_observed' or intent['challenge_id']!=challenge_id
+                        or intent['gate_generation']!=gate_generation):
+                    raise Conflict('V2 preparation intent changed')
                 validate_receiving(db,item['reservationId'])
                 saved_node=db.execute('SELECT node_id FROM reference_jobs WHERE job_id=?',(item['jobId'],)).fetchone()
                 if (len(old)!=1 or tuple(old[0])!=values or row['status']!='held'
@@ -218,7 +227,7 @@ class DirectV2Reservations:
                 replayed=True
             else:
                 preparing=row['held_reason']=='direct_preparing'
-                if row['status']!='held' or row['held_reason'] not in ('direct_admission_pending','direct_preparing'):
+                if row['status']!='held' or row['held_reason']!='direct_preparing':
                     raise Conflict('V2 direct job not pending')
                 if preparing:
                     from .direct_preparation_journal import verify_schema
@@ -231,9 +240,7 @@ class DirectV2Reservations:
                             or intent['gate_generation']!=gate_generation or row['node_id']!=item['nodeId']):
                         raise Conflict('V2 preparation intent changed')
                 else:
-                    candidate=self.store._candidate_any_row(db,item['nodeId'])
-                    if candidate is None or candidate['id']!=item['jobId']:
-                        raise Conflict('V2 node not eligible or earlier job takes priority')
+                    raise Conflict('V2 durable preparation required')
                 self.store._quota(db,sum(len(value) for value in (item_bytes,proof_bytes))+
                                   sum(len(value.encode()) for value in values[:5]+values[7:]))
                 if time.monotonic()>=deadline:raise Conflict('V2 worker readiness expired')

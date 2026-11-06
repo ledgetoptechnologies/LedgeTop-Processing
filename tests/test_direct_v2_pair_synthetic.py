@@ -122,6 +122,16 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                     with self.assertRaises(WorkerHoldUncertain):
                         bridge.reserve_and_grant(token,protected_transport=True,request=reservation_request)
                     reserve.assert_not_called()
+                # Existing test fixture has already prepared the synthetic
+                # worker; journal the exact readiness before reservation.
+                from processing.direct_preparation_client import DirectPreparationClient
+                from processing.direct_preparation_journal import prepare_once
+                prep=object.__new__(DirectPreparationClient)
+                prep._worker,prep._issuer,prep._key,prep._public=f.worker,'worker-issuer','worker-key',f.proof_key.public_key()
+                with patch.object(prep,'prepare',return_value=f.readiness):
+                    prepare_once(reservations,prep,payload=f.payload,item=f.item,principal='viewer-staging',
+                        challenge_id=f.challenge,gate_generation=1,capability_fingerprint=opts['capability_fingerprint'],
+                        options_fingerprint=opts['options_fingerprint'],allowed_odm_options=opts['allowed_odm_options'])
                 from processing.direct_worker_sender import DirectDeliveryUncertain
                 original_grant=sender.authorize_reservation
                 def lost_grant(*args,**kwargs):

@@ -39,7 +39,11 @@ class PreparationJournalTests(unittest.TestCase):
             args=dict(payload=f.payload,item=f.item,principal='viewer-staging',challenge_id=f.challenge,gate_generation=1,
                 capability_fingerprint=opts['capability_fingerprint'],options_fingerprint=opts['options_fingerprint'],
                 allowed_odm_options=opts['allowed_odm_options'])
-            with patch.object(client,'prepare',return_value=f.readiness):
+            def assert_pin(**kwargs):
+                with queue._db() as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM coordinator_operation_pins WHERE kind='source-io-admission' AND state='active'").fetchone()[0],1)
+                return f.readiness
+            with patch.object(client,'prepare',side_effect=assert_pin):
                 outcome=prepare_once(reservations,client,**args)
             self.assertEqual(outcome['state'],'proof_observed')
             with self.assertRaises(ValueError):
@@ -92,4 +96,16 @@ class PreparationJournalTests(unittest.TestCase):
                 self.assertEqual(tuple(state),('held','direct_preparing',f.item['nodeId']))
                 self.assertFalse(store._node_has_slot(db,f.item['nodeId']))
             with self.assertRaises(Conflict):queue.operator(job['jobId'],'resolve',dict(note='synthetic',workerStopped=True))
+            from processing.direct_preparation_journal import metadata_bytes,TRIGGERS
+            with queue._db() as db:
+                record=tuple(db.execute('SELECT * FROM direct_preparation_intents').fetchone())
+                db.execute('DROP TRIGGER direct_preparation_no_delete')
+                db.execute('DELETE FROM direct_preparation_intents')
+                db.execute(TRIGGERS['direct_preparation_no_delete'])
+                with self.assertRaisesRegex(Conflict,'count changed'):metadata_bytes(db)
+                db.execute('UPDATE coordinator_identity SET direct_preparation_count=0 WHERE singleton=1')
+                with self.assertRaisesRegex(Conflict,'intent missing'):metadata_bytes(db)
+                db.execute('INSERT INTO direct_preparation_intents VALUES(?,?,?,?,?,?,?,?,?,?)',record)
+                db.execute('UPDATE coordinator_identity SET direct_preparation_count=1 WHERE singleton=1')
+                self.assertGreater(metadata_bytes(db),0)
             queue.close()
