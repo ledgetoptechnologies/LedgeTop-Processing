@@ -29,12 +29,12 @@ def ensure_schema(db):
         db.execute('ALTER TABLE coordinator_identity ADD COLUMN direct_preparation_count INTEGER NOT NULL DEFAULT 0')
     version=db.execute('SELECT direct_preparation_version FROM coordinator_identity WHERE singleton=1').fetchone()[0]
     exists=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='direct_preparation_intents'").fetchone()
-    if type(version) is not int or version not in (0,1) or bool(exists)!=(version==1):
+    if type(version) is not int or version not in (0,2) or bool(exists)!=(version==2):
         raise Conflict('preparation intent schema requires inspection')
     if not exists:
         db.execute(SCHEMA)
         for sql in TRIGGERS.values():db.execute(sql)
-        db.execute('UPDATE coordinator_identity SET direct_preparation_version=1 WHERE singleton=1')
+        db.execute('UPDATE coordinator_identity SET direct_preparation_version=2 WHERE singleton=1')
     verify_schema(db)
 
 def verify_schema(db):
@@ -50,10 +50,13 @@ def metadata_bytes(db):
         'SELECT direct_preparation_version FROM coordinator_identity WHERE singleton=1').fetchone()[0]
     exists=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_preparation_intents'").fetchone()
     if version==0 and not exists:
+        if 'direct_preparation_count' in columns:
+            count=db.execute('SELECT direct_preparation_count FROM coordinator_identity WHERE singleton=1').fetchone()
+            if count is None or type(count[0]) is not int or count[0]!=0:raise Conflict('preparation intent count changed')
         if db.execute("SELECT 1 FROM jobs WHERE held_reason='direct_preparing' LIMIT 1").fetchone():
             raise Conflict('held preparation intent missing')
         return 0
-    if type(version) is not int or version!=1 or not exists:raise Conflict('preparation intent marker changed')
+    if type(version) is not int or version!=2 or not exists:raise Conflict('preparation intent marker changed')
     verify_schema(db)
     count=db.execute('SELECT COUNT(*) FROM direct_preparation_intents').fetchone()[0]
     if 'direct_preparation_count' not in columns:raise Conflict('preparation intent count missing')

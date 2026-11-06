@@ -209,8 +209,8 @@ class DirectV2Reservations:
             values=(item['reservationId'],item['jobId'],item['nodeId'],authenticated_principal,
                     request_digest,item_bytes,proof_bytes,challenge_id,'receiving')
             if old:
-                from .direct_preparation_journal import verify_schema
-                verify_schema(db)
+                from .direct_preparation_journal import metadata_bytes as preparation_metadata_bytes
+                preparation_metadata_bytes(db)
                 intent=db.execute('SELECT * FROM direct_preparation_intents WHERE reservation_id=?',(item['reservationId'],)).fetchone()
                 if (intent is None or intent['job_id']!=item['jobId'] or intent['node_id']!=item['nodeId']
                         or intent['principal']!=authenticated_principal or intent['request_digest']!=request_digest
@@ -230,8 +230,8 @@ class DirectV2Reservations:
                 if row['status']!='held' or row['held_reason']!='direct_preparing':
                     raise Conflict('V2 direct job not pending')
                 if preparing:
-                    from .direct_preparation_journal import verify_schema
-                    verify_schema(db)
+                    from .direct_preparation_journal import metadata_bytes as preparation_metadata_bytes
+                    preparation_metadata_bytes(db)
                     intent=db.execute('SELECT * FROM direct_preparation_intents WHERE reservation_id=?',(item['reservationId'],)).fetchone()
                     if (intent is None or intent['job_id']!=item['jobId'] or intent['node_id']!=item['nodeId']
                             or intent['principal']!=authenticated_principal or intent['request_digest']!=request_digest

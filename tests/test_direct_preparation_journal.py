@@ -58,6 +58,16 @@ class PreparationJournalTests(unittest.TestCase):
                 trusted_source_keys=opts['trusted_source_keys'],capability_fingerprint=opts['capability_fingerprint'],
                 options_fingerprint=opts['options_fingerprint'],allowed_odm_options=opts['allowed_odm_options'])
             self.assertEqual(result['state'],'receiving');self.assertFalse(result['sourceCustodyAccepted'])
+            with queue._db() as db:
+                db.execute('UPDATE coordinator_identity SET direct_preparation_count=0 WHERE singleton=1')
+            from processing.direct_v2_reservation import V2ReservationUncertain
+            with self.assertRaises(V2ReservationUncertain):
+                reservations.reserve(payload=f.payload,authenticated_principal='viewer-staging',item=f.item,
+                    expected_worker=f.worker,readiness_proof=f.readiness,challenge_id=f.challenge,gate_generation=1,
+                    issuer_id='worker-issuer',key_id='worker-key',worker_public_key=f.proof_key.public_key(),
+                    trusted_source_keys=opts['trusted_source_keys'],capability_fingerprint=opts['capability_fingerprint'],
+                    options_fingerprint=opts['options_fingerprint'],allowed_odm_options=opts['allowed_odm_options'])
+            with queue._db() as db:db.execute('UPDATE coordinator_identity SET direct_preparation_count=1 WHERE singleton=1')
             queue.close()
 
     def test_held_node_survives_uncertain_send_without_retransmission(self):
@@ -108,11 +118,16 @@ class PreparationJournalTests(unittest.TestCase):
                 db.execute('INSERT INTO direct_preparation_intents VALUES(?,?,?,?,?,?,?,?,?,?)',record)
                 db.execute('UPDATE coordinator_identity SET direct_preparation_count=1 WHERE singleton=1')
                 self.assertGreater(metadata_bytes(db),0)
+                db.execute('UPDATE coordinator_identity SET direct_preparation_version=1 WHERE singleton=1')
+                with self.assertRaisesRegex(Conflict,'marker changed'):metadata_bytes(db)
+                db.execute('UPDATE coordinator_identity SET direct_preparation_version=2 WHERE singleton=1')
                 db.execute('DROP TABLE direct_preparation_intents')
-                db.execute('UPDATE coordinator_identity SET direct_preparation_version=0,direct_preparation_count=0 WHERE singleton=1')
+                db.execute('UPDATE coordinator_identity SET direct_preparation_version=0 WHERE singleton=1')
+                with self.assertRaisesRegex(Conflict,'count changed'):metadata_bytes(db)
+                db.execute('UPDATE coordinator_identity SET direct_preparation_count=0 WHERE singleton=1')
                 with self.assertRaisesRegex(Conflict,'intent missing'):metadata_bytes(db)
                 db.execute(SCHEMA)
                 for sql in TRIGGERS.values():db.execute(sql)
                 db.execute('INSERT INTO direct_preparation_intents VALUES(?,?,?,?,?,?,?,?,?,?)',record)
-                db.execute('UPDATE coordinator_identity SET direct_preparation_version=1,direct_preparation_count=1 WHERE singleton=1')
+                db.execute('UPDATE coordinator_identity SET direct_preparation_version=2,direct_preparation_count=1 WHERE singleton=1')
             queue.close()
