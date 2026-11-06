@@ -294,5 +294,8 @@ def verify_private_artifacts(bundle, plan, *, config_reader, require_all_qualifi
             result[name]=None;continue
         raw=private_bytes(entry['path'],maximum=1024*1024)
         require(hashlib.sha256(raw).hexdigest()==entry['sha256'],'qualification_artifact_changed')
+        if name == 'workerQualificationSha256':
+            from .worker_prestart_review import validate
+            validate(raw, bundle, plan)
         result[name]=dict(sha256=entry['sha256'],bytes=len(raw))
     return result

@@ -35,6 +35,8 @@ class ConcreteCutoverDriver:
     def global_lock(self,plan):
         require(plan==self.plan,'driver_plan_changed')
         require(all(pin is not None for pin in plan['gates'].values()),'first_cutover_prerequisites_unqualified')
+        from .worker_prestart_review import verify
+        verify(self.bundle, plan)
         return self.host_operation.locked(plan)
 
     def _intent(self,event):
