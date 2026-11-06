@@ -34,7 +34,10 @@ sender index, scalar binding checks and SQLite-guarded input fields. The shared
 quota path uses bounded per-session counters maintained by transaction triggers;
 reopen and completion perform a full object/orphan census. This relies on the
 coordinator owning its database and triggers: same-process code with arbitrary
-schema access is not sandboxed. Recreating a handoff instance for each object
+database or schema access is not sandboxed. Counter transitions and relevant
+object replay are checked on ordinary operations; full census detects surviving
+orphan rows and counter drift at reopen and closure, not every possible
+same-process database modification at the instant it occurs. Recreating a handoff instance for each object
 would repeat the full census and is not a qualified integration. The earlier
 prototype handoff-table schema is refused for inspection, not automatically
 migrated.

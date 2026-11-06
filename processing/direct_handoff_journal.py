@@ -213,7 +213,10 @@ class DirectHandoff:
                            (self.item['reservationId'],)).fetchone()
             if row is None:return dict(state='not_started',sourceCustodyAccepted=False)
             if row['principal']!=self.principal or row['binding']!=self.binding:raise Conflict('direct handoff session changed')
+            verify_census(db)
             counts={r['state']:r['n'] for r in db.execute('SELECT state,count(*) AS n FROM direct_handoff_objects WHERE reservation=? GROUP BY state',
                     (self.item['reservationId'],))}
+            if set(counts)-{'observed','intent'} or sum(counts.values())!=row['object_count']:
+                raise Conflict('direct handoff object census invalid')
             return dict(state=row['state'],observedObjects=counts.get('observed',0),
                         uncertainObjects=counts.get('intent',0),sourceCustodyAccepted=False)

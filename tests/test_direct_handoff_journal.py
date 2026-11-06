@@ -145,6 +145,9 @@ class HandoffTests(unittest.TestCase):
             with self.assertRaisesRegex(sqlite3.IntegrityError,'input locked'):
                 db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?',('{}',self.sender._item['jobId']))
             with self.assertRaisesRegex(sqlite3.IntegrityError,'input locked'):
+                db.execute('UPDATE reference_jobs SET job_id=? WHERE job_id=?',
+                           (str(uuid.uuid4()),self.sender._item['jobId']))
+            with self.assertRaisesRegex(sqlite3.IntegrityError,'input locked'):
                 db.execute('INSERT OR REPLACE INTO reference_jobs SELECT * FROM reference_jobs WHERE job_id=?',
                            (self.sender._item['jobId'],))
 
@@ -172,10 +175,23 @@ class HandoffTests(unittest.TestCase):
                 self.fixture.store._metadata_used_bytes(db)
 
     def test_counter_corruption_is_detected_on_session_reopen(self):
+        from processing.direct_handoff_census import TRIGGERS
         self.sender.put=Mock(return_value=self.observation());self.send()
-        with self.fixture.queue._db() as db:db.execute('UPDATE direct_handoff_sessions SET object_count=0')
+        with self.fixture.queue._db() as db:
+            db.execute('DROP TRIGGER direct_handoff_session_count')
+            db.execute('UPDATE direct_handoff_sessions SET object_count=0')
+            db.execute(TRIGGERS['direct_handoff_session_count'])
         self.handoff=DirectHandoff(self.fixture.store,self.sender,principal='viewer',bearer=self.token)
         with self.assertRaisesRegex(Conflict,'object budget exceeded'):self.send()
+
+    def test_direct_counter_tampering_is_rejected_without_scanning_all_rows(self):
+        import sqlite3
+        self.sender.put=Mock(return_value=self.observation());self.send()
+        with self.fixture.queue._db() as db:
+            for sql in ('UPDATE direct_handoff_sessions SET object_count=0',
+                        'UPDATE direct_handoff_sessions SET object_count=object_count+1'):
+                with self.assertRaisesRegex(sqlite3.IntegrityError,'counter transition invalid'):
+                    db.execute(sql)
 
     def test_replace_cannot_erase_observed_object(self):
         import sqlite3
