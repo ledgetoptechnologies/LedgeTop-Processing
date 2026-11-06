@@ -17,7 +17,7 @@ class WorkerPreparationUncertain(RuntimeError):
     """A node or scratch hold may exist and must not be cleared blindly."""
 
 
-def prepare_signed_job(ledger, *, payload, item, principal, worker, engine_id,
+def _prepare_signed_job(ledger, *, payload, item, principal, worker, engine_id,
                        coordinator_origin, gate_generation, source_verification,
                        mount_path, mount_id, marker_name, challenge_id,
                        issuer_id, key_id, private_key, validity_seconds=30):
@@ -48,8 +48,13 @@ def prepare_signed_job(ledger, *, payload, item, principal, worker, engine_id,
         raise PolicyConflict('signed worker inventory binding changed')
     # Inspect the actual mount/marker and private worker root before taking a
     # durable node hold; recheck the same identities after taking the gate.
-    preflight=SourceSpool(ledger.root,mount_path=mount_path,mount_id=mount_id,marker_name=marker_name,
-                          safety_floor_bytes=0,require_mount=True)
+    try:
+        preflight=SourceSpool(ledger.root,mount_path=mount_path,mount_id=mount_id,marker_name=marker_name,
+                              safety_floor_bytes=0,require_mount=True)
+    except Exception:
+        # An earlier attempt may already have saved the direct hold even if
+        # this retry cannot inspect its mount.
+        raise WorkerPreparationUncertain('worker preparation requires reconciliation') from None
     receipt=digest[:32]
     # Once gate inspection begins, even an I/O failure may conceal an earlier
     # committed attempt. Never infer a free node from an unreadable gate.
@@ -90,3 +95,15 @@ def prepare_signed_job(ledger, *, payload, item, principal, worker, engine_id,
         if may_be_held:
             raise WorkerPreparationUncertain('worker preparation requires reconciliation') from None
         raise
+
+
+def prepare_signed_job(ledger, **kwargs):
+    """Never infer a free node from any failed or unverifiable replay."""
+    try:
+        return _prepare_signed_job(ledger, **kwargs)
+    except WorkerPreparationUncertain:
+        raise
+    except Exception:
+        # Even malformed or unverifiable input may be a retry after an earlier
+        # successful hold; callers must consult exact gate state before reuse.
+        raise WorkerPreparationUncertain('worker preparation requires reconciliation') from None

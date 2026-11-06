@@ -30,13 +30,19 @@ class WorkerPrepareTests(unittest.TestCase):
         _,_,again=prepare_signed_job(f.ledger,**kwargs)
         self.assertEqual(proof,again)
         self.assertEqual(len(index.object_ids(reservation_binding=f.reservation)),3)
+        with self.assertRaises(WorkerPreparationUncertain):
+            prepare_signed_job(f.ledger,**dict(kwargs,mount_id='0'*32))
+        with NodeGate('fixture-v2') as gate:
+            self.assertEqual(gate.snapshot()['schema'],2)
+        with f.ledger._transaction() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
 
     def test_changed_source_or_worker_never_acquires_new_pin(self):
         f,kwargs=self.fixture();payload=copy.deepcopy(f.payload)
         payload['sourceManifest']['objects'][0]['sha256']='0'*64
-        with self.assertRaises(ValueError):prepare_signed_job(f.ledger,**dict(kwargs,payload=payload))
+        with self.assertRaises(WorkerPreparationUncertain):prepare_signed_job(f.ledger,**dict(kwargs,payload=payload))
         wrong=dict(f.worker,workerInstanceId='other')
-        with self.assertRaises(PolicyConflict):prepare_signed_job(f.ledger,**dict(kwargs,worker=wrong))
+        with self.assertRaises(WorkerPreparationUncertain):prepare_signed_job(f.ledger,**dict(kwargs,worker=wrong))
         with f.ledger._transaction() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],0)
 
@@ -47,9 +53,9 @@ class WorkerPrepareTests(unittest.TestCase):
         with patch('processing.node_gate.canonical_gate_path',return_value=root/'gate'):
             with NodeGate('fixture-v2') as gate:
                 gate.provision('cluster','https://127.0.0.1:8443',f.worker['authorityId'])
-            with self.assertRaises(ValueError):prepare_signed_job(ledger,**dict(kwargs,principal='!invalid'))
+            with self.assertRaises(WorkerPreparationUncertain):prepare_signed_job(ledger,**dict(kwargs,principal='!invalid'))
             with NodeGate('fixture-v2') as gate:self.assertIsNone(gate.snapshot()['reservation'])
-            with self.assertRaises(ValueError):prepare_signed_job(ledger,**dict(kwargs,mount_id='0'*32))
+            with self.assertRaises(WorkerPreparationUncertain):prepare_signed_job(ledger,**dict(kwargs,mount_id='0'*32))
             with NodeGate('fixture-v2') as gate:self.assertIsNone(gate.snapshot()['reservation'])
             _,_,proof=prepare_signed_job(ledger,**kwargs)
             with NodeGate('fixture-v2') as gate:
