@@ -382,6 +382,8 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         used += direct_v2_handoff_bytes(db)
         from .direct_v2_reservation_schema import metadata_bytes as direct_v2_reservation_metadata
         used += direct_v2_reservation_metadata(db)
+        from .direct_preparation_journal import metadata_bytes as direct_preparation_metadata
+        used += direct_preparation_metadata(db)
         from .direct_snapshot_page_journal import metadata_bytes as direct_snapshot_metadata
         used += direct_snapshot_metadata(db)
         from .direct_snapshot_page_journal import selected_metadata_bytes

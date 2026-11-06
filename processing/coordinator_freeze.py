@@ -25,7 +25,7 @@ CONTROL_LIMIT = 256 * 1024
 TRANSITION_RESERVE = 2048
 PLAN_FINISH_RESERVE = 8192
 STARTUP_TABLES = frozenset(('coordinator_identity', 'jobs', 'nodes', 'owned_maintenance_schedules',
-    'processing_node_inventory', 'direct_intake_reservations', 'direct_intake_profile_bindings', 'direct_negotiation_candidate', 'direct_v2_reservations', 'direct_handoff_sessions', 'direct_handoff_objects', 'direct_v2_handoff_sessions', 'direct_v2_handoff_objects', 'direct_snapshot_sessions', 'direct_snapshot_pages', 'direct_selected_sessions', 'direct_selected_pages', 'reference_acceptances', 'reference_claims', 'reference_jobs',
+    'processing_node_inventory', 'direct_intake_reservations', 'direct_intake_profile_bindings', 'direct_negotiation_candidate', 'direct_v2_reservations', 'direct_preparation_intents', 'direct_handoff_sessions', 'direct_handoff_objects', 'direct_v2_handoff_sessions', 'direct_v2_handoff_objects', 'direct_snapshot_sessions', 'direct_snapshot_pages', 'direct_selected_sessions', 'direct_selected_pages', 'reference_acceptances', 'reference_claims', 'reference_jobs',
     'reference_outbox', 'reference_recovery_receipts', 'reference_recovery_startup',
     'reference_source_grant_renewals', 'reference_source_grant_tokens', 'reference_source_intakes',
     'reference_source_object_pins', 'reference_source_object_receipts', 'reference_source_range_requests',
@@ -130,6 +130,9 @@ class FreezeGate:
                 verify_fence(db)
                 verify_schema(db)
             columns={row['name'] for row in db.execute('PRAGMA table_info(coordinator_identity)')}
+            if 'direct_preparation_version' in columns:
+                from .direct_preparation_journal import metadata_bytes as preparation_metadata_bytes
+                preparation_metadata_bytes(db)
             if 'direct_v2_handoff_version' in columns:
                 marker=db.execute('SELECT direct_v2_handoff_version FROM coordinator_identity WHERE singleton=1').fetchone()
                 if marker is None or type(marker[0]) is not int or marker[0] not in (0,1):
