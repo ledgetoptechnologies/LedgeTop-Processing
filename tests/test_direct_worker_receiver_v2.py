@@ -26,6 +26,8 @@ from tests import test_reference_source_intake as fixtures
 
 class WorkerV2Tests(unittest.TestCase):
     def setUp(self):
+        clock_patch=patch('processing.direct_worker_receiver_v2.time.time',return_value=110)
+        self.clock=clock_patch.start();self.addCleanup(clock_patch.stop)
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         self.root = Path(temp.name); self.root.chmod(0o700)
         fixture = fixtures.ReferenceSourceIntakeTests(); fixture.setUp()
@@ -82,7 +84,7 @@ class WorkerV2Tests(unittest.TestCase):
             item=self.item,reservation_binding=self.reservation,expected_worker=self.worker,engine_id='fixture-v2',
             coordinator_origin=origin,gate_generation=1,bearer=self.bearer,
             readiness_proof=self.readiness,challenge_id=self.challenge,issuer_id='worker-issuer',
-            key_id='worker-key',public_key=self.proof_key.public_key(),now=110)
+            key_id='worker-key',public_key=self.proof_key.public_key())
 
     def put_zero(self, headers=None):
         return self.boundary.put(headers or self.headers,protected_transport=True,object_id=fixtures.GCP_ID,
@@ -141,6 +143,7 @@ class WorkerV2Tests(unittest.TestCase):
         self.assertTrue(self.put_zero()['replayed'])
 
     def test_fresh_boundary_without_readiness_pin_is_rejected(self):
+        self.clock.return_value=120
         with self.assertRaisesRegex(DirectBoundaryDenied,'readiness proof required'):
             DirectWorkerBoundaryV2(ledger=self.ledger,spool=self.spool,inventory=self.boundary.inventory,
                 item=self.item,reservation_binding=self.reservation,expected_worker=self.worker,
@@ -152,7 +155,16 @@ class WorkerV2Tests(unittest.TestCase):
                 engine_id='fixture-v2',coordinator_origin='https://127.0.0.1:8443',
                 gate_generation=1,bearer=self.bearer,readiness_proof=self.readiness,
                 challenge_id=self.challenge,issuer_id='worker-issuer',key_id='worker-key',
-                public_key=self.proof_key.public_key(),now=120)
+                public_key=self.proof_key.public_key())
+
+    def test_readiness_expired_after_construction_cannot_handover(self):
+        self.clock.return_value=120
+        with self.assertRaises(ValueError):self.put_zero()
+        self.assertIsNotNone(self.boundary._readiness_pin)
+        with NodeGate('fixture-v2') as gate:
+            with self.assertRaisesRegex(GateError,'direct transfer hold'):
+                gate.resolve(self.observation['bindingSha256'][:32],1,old_worker_stopped=True,
+                             coordinator_resolved=True,note='synthetic')
 
     def test_full_v2_closure_requires_raw_and_derived_objects(self):
         from processing.direct_worker_closure_v2 import verify_closure

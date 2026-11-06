@@ -1,7 +1,9 @@
 """Unwired V2 worker receive boundary. No Viewer custody acknowledgement."""
 import hmac
+import copy
 import json
 import threading
+import time
 
 from . import reference_protocol as p
 from .direct_v2_inventory import VerifiedWorkerInventory
@@ -17,7 +19,7 @@ class DirectWorkerBoundaryV2:
     def __init__(self, *, ledger, spool, inventory, item, reservation_binding,
                  expected_worker, engine_id, coordinator_origin, gate_generation, bearer,
                  readiness_proof=None, challenge_id=None, issuer_id=None, key_id=None,
-                 public_key=None, now=None):
+                 public_key=None):
         if (not isinstance(inventory, VerifiedWorkerInventory) or type(bearer) is not str
                 or not 32 <= len(bearer) <= 4096 or not bearer.isascii()
                 or not all(33 <= ord(c) <= 126 for c in bearer)):
@@ -28,9 +30,10 @@ class DirectWorkerBoundaryV2:
         item, _, _ = identity(item, expected_worker=expected_worker)
         from .direct_worker_fence_proof_v2 import verify as verify_readiness, FenceProofRejected
         try:
+            checked_at = time.time()
             verified = verify_readiness(readiness_proof, expected_item=item, expected_worker=expected_worker,
                 challenge_id=challenge_id, gate_generation=gate_generation, issuer_id=issuer_id,
-                key_id=key_id, public_key=public_key, now=now)
+                key_id=key_id, public_key=public_key, now=int(checked_at))
         except (ValueError, TypeError, FenceProofRejected):
             raise DirectBoundaryDenied('verified V2 readiness proof required') from None
         saved = json.loads(inventory._wire)
@@ -47,6 +50,10 @@ class DirectWorkerBoundaryV2:
         self.item, self.reservation, self.worker = item, dict(reservation_binding), dict(expected_worker)
         self.engine_id, self.origin, self.generation, self._bearer = engine_id, coordinator_origin, gate_generation, bearer
         self._readiness_pin = verified['pinId']
+        self._readiness_proof = copy.deepcopy(readiness_proof)
+        self._proof_deadline = time.monotonic() + max(0, verified['expiresAt'] - checked_at)
+        self._proof_binding = dict(challenge_id=challenge_id, issuer_id=issuer_id,
+                                   key_id=key_id, public_key=public_key)
         self._writer_lock = threading.Lock()
 
     def put(self, headers, *, protected_transport, object_id, content_length, content_sha256, reader):
@@ -73,6 +80,14 @@ class DirectWorkerBoundaryV2:
             if self._readiness_pin is None:
                 pin = self.ledger.begin_direct_writer(scratch_id, settings(item, scratch_id))
             else:
+                from .direct_worker_fence_proof_v2 import verify as verify_readiness
+                if time.monotonic() >= self._proof_deadline:
+                    raise DirectBoundaryDenied('V2 readiness proof expired')
+                observed = verify_readiness(self._readiness_proof, expected_item=item,
+                    expected_worker=self.worker, gate_generation=self.generation,
+                    now=int(time.time()), **self._proof_binding)
+                if observed['pinId'] != self._readiness_pin:
+                    raise DirectBoundaryDenied('V2 readiness pin changed')
                 pin = self.ledger._handover_direct_writer(scratch_id, settings(item, scratch_id), self._readiness_pin)
                 # If the subsequent operation fails, the new pin remains held.
                 self._readiness_pin = None
