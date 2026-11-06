@@ -25,7 +25,7 @@ CONTROL_LIMIT = 256 * 1024
 TRANSITION_RESERVE = 2048
 PLAN_FINISH_RESERVE = 8192
 STARTUP_TABLES = frozenset(('coordinator_identity', 'jobs', 'nodes', 'owned_maintenance_schedules',
-    'processing_node_inventory', 'direct_intake_reservations', 'direct_intake_profile_bindings', 'direct_negotiation_candidate', 'direct_handoff_sessions', 'direct_handoff_objects', 'reference_acceptances', 'reference_claims', 'reference_jobs',
+    'processing_node_inventory', 'direct_intake_reservations', 'direct_intake_profile_bindings', 'direct_negotiation_candidate', 'direct_v2_reservations', 'direct_handoff_sessions', 'direct_handoff_objects', 'reference_acceptances', 'reference_claims', 'reference_jobs',
     'reference_outbox', 'reference_recovery_receipts', 'reference_recovery_startup',
     'reference_source_grant_renewals', 'reference_source_grant_tokens', 'reference_source_intakes',
     'reference_source_object_pins', 'reference_source_object_receipts', 'reference_source_range_requests',

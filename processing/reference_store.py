@@ -374,10 +374,8 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                 length(CAST(profile AS BLOB))),0) FROM direct_intake_profile_bindings''').fetchone()[0]
         from .direct_handoff_census import verify_census as direct_handoff_census
         used += direct_handoff_census(db)
-        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_v2_reservations'").fetchone():
-            used += db.execute('''SELECT COALESCE(SUM(length(reservation_id)+length(job_id)+length(node_id)+
-                length(principal)+length(request_digest)+length(item_json)+length(proof_json)+
-                length(challenge_id)+length(state)),0) FROM direct_v2_reservations''').fetchone()[0]
+        from .direct_v2_reservation_schema import metadata_bytes as direct_v2_reservation_metadata
+        used += direct_v2_reservation_metadata(db)
         return used
 
     def _quota(self, db, extra_bytes=0):
