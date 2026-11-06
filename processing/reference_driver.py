@@ -1322,7 +1322,9 @@ class ReferenceDriver:
                 expected_settings=dict(job_id=job_id,generation=data['claim']['generation'],reservation_id=reservation,
                     manifest_sha256=data['claim']['manifestSha256'],input_bytes=data['claim']['submission']['manifest']['totalBytes'],
                     output_budget=self.output_budget,environment=data['claim']['environment'],ttl_seconds=self.transfer_ttl)
-                if settings!=expected_settings or current['job']!=job_id or current['generation']!=data['claim']['generation']:
+                if (settings!=expected_settings or current['job']!=job_id or current['generation']!=data['claim']['generation']
+                        or current['environment']!=data['claim']['environment']
+                        or current['remaining']!=expected_settings['input_bytes']+expected_settings['output_budget']):
                     raise DriverHeld('source_recovery_ledger_changed')
         # Before the transfer nothing is fenced or written; after it, all of it is.
         expected = (False, 0) if phase in ('awaiting_transfer',)+SOURCE_UNRESERVED_PHASES else (True, data['claim']['submission']['manifest']['totalBytes'])

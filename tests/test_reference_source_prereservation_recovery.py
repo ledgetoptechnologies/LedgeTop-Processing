@@ -230,3 +230,29 @@ class PreReservationRecoveryTests(ProcessingHarness):
         self.assertEqual(self.row()[1]['reservation'],reservation)
         self.transport.down=False
         self.run_to_engine()
+
+    def test_changed_hardware_capacity_or_busy_snapshot_refuses_new_reservation(self):
+        _reservation,request=self.pending()
+        capacities=copy.deepcopy(self.store._capacity_snapshot)
+        for change in ({'ready':False},{'maxImages':0},{'taskQueueCount':1}):
+            with self.subTest(change=change):
+                current=copy.deepcopy(capacities)
+                current['cluster'].update(change)
+                self.store.update_fleet_snapshot(current)
+                self.assert_not_changed(request)
+        self.store.update_fleet_snapshot(capacities)
+        self.assertEqual(self.post(request)[0],200)
+
+    def test_other_physical_node_occupant_refuses_recovery(self):
+        _reservation,request=self.pending()
+        self.execute("""INSERT INTO jobs(id,request_id,environment,profile,status,node_id)
+            SELECT 'other-job','other-request',environment,profile,'running',node_id FROM jobs WHERE id=?""",self.job_id)
+        self.assert_not_changed(request)
+
+    def test_expired_local_lease_is_not_replaced(self):
+        reservation=self.unreserved()
+        from tests.test_reference_source_fetch_recovery import stamp
+        self.now[0]=stamp(reservation['expiresAt'])+1
+        self.assertEqual(self.driver.step()['state'],'held')
+        self.assertEqual(self.receipts(),[])
+        self.assertEqual(self.row()[1]['reservation'],reservation)

@@ -170,6 +170,12 @@ class ClaimRecoveryService:
             and (unreserved or reservation is not None)
             and node['state'] in (SOURCE_UNSTARTED_NODE_STATES if unstarted else ('active','scheduled','draining'))
             and (source is not None or not source_range))
+        if unreserved and eligible:
+            # No engine has started; current hardware/options capacity must
+            # still admit this exact claim before reserving it after restart.
+            from .reference_store import PROFILE
+            eligible=(PROFILE in self.queue.node_profiles(node_id)
+                and self.store._node_fits(json.loads(row['input_json']),node_id))
         state=dict(schemaVersion=1,protocol=STATE_PROTOCOL,authorityId=self._authority,coordinatorEpoch=self._epoch,
             claim=claim,physicalBinding=asdict(self.bindings[node_id]),reservation=reservation,
             node=dict(id=node_id,state=node['state'],revision=node['revision'],planId=node['plan_id']),eligible=eligible)
