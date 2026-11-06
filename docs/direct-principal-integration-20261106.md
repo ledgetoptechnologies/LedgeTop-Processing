@@ -117,3 +117,10 @@ after a synthetic process restart. It rejects upload and closure mutations;
 the coordinator treats the presence observation as uncertain instead of a
 durable receipt. A merged run passed 62 tests with four optional skips.
 Automatic transfer recovery and installed host restart remain open.
+
+The candidate coordinator now journals an exact preparation intent and holds
+the node while its request is in flight; reservation requires the journaled
+proof. Missing preparation evidence fails closed on startup or replay. The
+merged synthetic queue/freeze/reservation suite passed 62 tests. Earlier
+unjournaled candidate state needs explicit reconciliation; old-running binary
+fencing, intent retirement and production runtime wiring are not qualified.
