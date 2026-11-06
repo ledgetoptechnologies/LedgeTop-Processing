@@ -743,6 +743,22 @@ class AmbiguousEvidenceTests(ProcessingHarness):
         self.step('execution_pending')
         self.run_to_engine()
 
+    def change_ledger(self, statement):
+        with self.driver.ledger._transaction() as db:
+            db.execute(statement)
+
+    def test_ledger_short_of_its_input_bytes_stays_held(self):
+        self.change_ledger('UPDATE reservations SET allocated=allocated-1')
+        self.assert_stays_held('source_recovery_ledger_changed')
+
+    def test_ledger_not_reserved_stays_held(self):
+        self.change_ledger("UPDATE reservations SET state='uncertain'")
+        self.assert_stays_held('source_recovery_ledger_changed')
+
+    def test_a_registered_result_stays_held(self):
+        with patch.object(self.driver.ledger, 'result_registered', return_value=True):
+            self.assert_stays_held('source_recovery_ledger_changed')
+
     def test_ledger_short_of_its_input_bytes(self):
         stage, data = self.row()
         data['claim']['submission']['manifest']['totalBytes'] += 1
@@ -788,6 +804,22 @@ class AmbiguousEvidenceTests(ProcessingHarness):
         self.store.source_readers().fence(self.job_id, 1, 'recovery-release')
         self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'source_recovery_ineligible'})
         self.assertEqual((self.receipts(), self.transport.starts()), ([], 0))
+
+
+class IrreversibleHoldTests(ProcessingHarness):
+    def test_a_journaled_hold_is_never_retired_or_recovered(self):
+        self.to_fetching()
+        self.restart_coordinator()
+        stage, data = self.row()
+        data['hold'] = dict(holdId=str(fetch_tests.uuid.uuid4()), reasonCode='reservation_expired', reason='reservation_expired',
+            sequence=0, observation=None, engineStatusCode=None, ack=None)
+        self.driver._save(self.job_id, stage, data)
+        self.driver._clear_transfer_watch(self.job_id, stage, self.row()[1])
+        for _ in range(3):
+            self.assertEqual(self.driver.step()['state'], 'held')
+        self.assertEqual(self.row()[1]['hold']['reasonCode'], 'reservation_expired')
+        self.assertNotIn('inputPaths', self.row()[1])
+        self.assertEqual((self.receipts(), self.status()), ([], ('held', 'coordinator_restart')))
 
 
 class PreflightTests(ProcessingHarness):
@@ -901,6 +933,20 @@ class PreflightTests(ProcessingHarness):
         self.restart_coordinator()
         self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'reservation_expired'})
         self.assertEqual((self.receipts(), self.transport.starts()), ([], 0))
+
+    def test_a_fence_before_the_transfer_stays_held(self):
+        self.step('awaiting_grant')
+        self.driver.ledger.begin_transfer(self.row()[1]['reservation']['reservationId'])
+        self.restart_coordinator()
+        self.assert_stays_held('source_recovery_ledger_changed')
+
+    def test_input_paths_before_the_transfer_stay_held(self):
+        self.step('awaiting_grant')
+        stage, data = self.row()
+        data['inputPaths'] = {'object': 'jobs/x/object.input'}
+        self.driver._save(self.job_id, stage, data)
+        self.restart_coordinator()
+        self.assert_stays_held('source_recovery_ledger_changed')
 
     def test_occupied_gate_and_live_task_stay_held(self):
         self.step('awaiting_grant')
