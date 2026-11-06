@@ -6,6 +6,7 @@ context, immutable certificate mapping, bounded backend and network policy.
 """
 import hashlib
 import json
+import math
 import re
 import socket
 import ssl
@@ -72,6 +73,9 @@ def create_snapshot_server(host,port,*,enabled=False,ssl_context=None,client_sco
                 try:self._reply(500,{'error':'request_unavailable'})
                 except (OSError,ssl.SSLError):pass
         def _dispatch(self):
+            with self.server._activity:
+                draining=self.server._draining
+            if draining:self._reply(503,{'error':'snapshot_draining'});return
             match=_PATH.fullmatch(self.path)
             if match is None:self._reply(404,{'error':'not_found'});return
             try:p._uuid(match[1],'reservation');p._uuid(match[2],'snapshot')
@@ -109,14 +113,32 @@ def create_snapshot_server(host,port,*,enabled=False,ssl_context=None,client_sco
         daemon_threads=True;block_on_close=False
         def __init__(self):
             self._local=threading.local();self._slots=threading.BoundedSemaphore(max_connections)
+            self._activity=threading.Condition();self._draining=False;self._active_connections=0
             super().__init__((host,port),Handler)
+        def drain(self,timeout):
+            """Close admission and wait; never terminate an active writer."""
+            if type(timeout) not in (int,float) or not math.isfinite(timeout) or timeout<0:
+                raise ValueError('invalid drain timeout')
+            deadline=time.monotonic()+timeout
+            with self._activity:
+                self._draining=True
+                while self._active_connections:
+                    remaining=deadline-time.monotonic()
+                    if remaining<=0:return False
+                    self._activity.wait(remaining)
+                return True
         def get_request(self):
             connection,address=super().get_request();connection.settimeout(idle_timeout)
             return connection,address
         def process_request(self,request,address):
-            if not self._slots.acquire(blocking=False):self.shutdown_request(request);return
+            with self._activity:
+                if self._draining or not self._slots.acquire(blocking=False):self.shutdown_request(request);return
+                self._active_connections+=1
             try:super().process_request(request,address)
-            except BaseException:self._slots.release();raise
+            except BaseException:
+                with self._activity:
+                    self._active_connections-=1;self._slots.release();self._activity.notify_all()
+                raise
         def process_request_thread(self,request,address):
             from .direct_worker_http import _HeaderDeadline
             wrapped=deadline=None
@@ -135,6 +157,7 @@ def create_snapshot_server(host,port,*,enabled=False,ssl_context=None,client_sco
                 if hasattr(self._local,'scope'):del self._local.scope
                 if hasattr(self._local,'header_deadline'):del self._local.header_deadline
                 self.shutdown_request(wrapped if wrapped is not None else request)
-                self._slots.release()
+                with self._activity:
+                    self._active_connections-=1;self._slots.release();self._activity.notify_all()
         def handle_error(self,*_args):pass
     return Server()

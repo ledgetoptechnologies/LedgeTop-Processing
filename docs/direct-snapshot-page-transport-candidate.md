@@ -7,6 +7,10 @@ service. `create_snapshot_server` requires a server TLS context with
 socket, not a header or caller-provided identity. A missing backend returns 503.
 No trust store, client enrollment, secret lifecycle, certificates, firewall or
 host startup are provisioned by this code.
+The separate `create_snapshot_owner` defaults to disabled and reuses the
+existing owned listener lifecycle. Closing first closes admission and waits for
+active handlers; a timeout leaves the owner draining rather than terminating a
+writer. It is not wired into coordinator startup or an installed updater.
 
 The private POST paths are
 `/internal/v2/reservations/{reservationId}/source-snapshots/{snapshotId}/begin`,
@@ -34,6 +38,7 @@ failure, and online upgrade/rollback are not fenced or qualified.
 Only source pages are inspected; selected pages, GCP evidence and raw GCP source
 are not supported and must remain held. Snapshot-signing key configuration is
 independent of the client certificate registry. No worker custody, content
-availability or Viewer original-release claim is made. The paired test uses a
-real mTLS connection and SQLite journal but synthetic records with mocked
-reservation lookup and final inspector; it is not an actual Viewer integration.
+availability or Viewer original-release claim is made. The end-to-end synthetic
+test uses a real direct reservation, source attestation and inspector, mTLS
+listener and SQLite journal. Its Viewer data and certificates are synthetic;
+it is not an actual Viewer integration.

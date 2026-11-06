@@ -93,4 +93,49 @@ class SnapshotListenerTests(unittest.TestCase):
         page=self.path.rsplit('/',1)[0]+'/pages/0'
         self.assertEqual(self.request(server,cert=self.good,key=self.goodkey,path=page,body=b'x'*(256*1024+1))[0],413)
 
+    def test_drain_waits_for_active_backend_and_blocks_new_connections(self):
+        started=threading.Event();release=threading.Event();outcomes=[]
+        def blocked(*_args):
+            started.set()
+            if not release.wait(3):raise RuntimeError('test backend timeout')
+            return Response(200,{'state':'not_custody'})
+        self.backend._dispatch_from_listener.side_effect=blocked
+        server=self.start()
+        def request():
+            try:outcomes.append(self.request(server,cert=self.good,key=self.goodkey)[0])
+            except Exception as error:outcomes.append(error)
+        thread=threading.Thread(target=request);thread.start()
+        try:
+            self.assertTrue(started.wait(3));self.assertFalse(server.drain(.05))
+            with self.assertRaises((ssl.SSLError,OSError,http.client.HTTPException)):
+                self.request(server,cert=self.good,key=self.goodkey)
+            self.assertEqual(self.backend._dispatch_from_listener.call_count,1)
+        finally:
+            release.set();thread.join(3)
+        self.assertFalse(thread.is_alive());self.assertEqual(outcomes,[200]);self.assertTrue(server.drain(2))
+
+    def test_owner_never_closes_during_active_request(self):
+        from processing.direct_snapshot_service import create_snapshot_owner
+        self.assertIsNone(create_snapshot_owner())
+        started=threading.Event();release=threading.Event();outcomes=[]
+        def blocked(*_args):
+            started.set()
+            if not release.wait(3):raise RuntimeError('test backend timeout')
+            return Response(200,{'state':'not_custody'})
+        self.backend._dispatch_from_listener.side_effect=blocked
+        owner=create_snapshot_owner(enabled=True,host='127.0.0.1',port=0,ssl_context=self.context,
+                                    client_scopes=self.scopes,backend=self.backend)
+        self.addCleanup(lambda:(release.set(),owner.close(3)))
+        server=owner._server;owner.start()
+        def request():
+            try:outcomes.append(self.request(server,cert=self.good,key=self.goodkey)[0])
+            except Exception as error:outcomes.append(error)
+        thread=threading.Thread(target=request);thread.start()
+        try:
+            self.assertTrue(started.wait(3));self.assertFalse(owner.close(.05));self.assertEqual(owner.status(),'draining')
+        finally:
+            release.set();thread.join(3)
+        self.assertFalse(thread.is_alive());self.assertEqual(outcomes,[200])
+        self.assertTrue(owner.close(3));self.assertEqual(owner.status(),'closed')
+
 if __name__=='__main__':unittest.main()
