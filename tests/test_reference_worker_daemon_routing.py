@@ -125,9 +125,9 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
             mountPath='/absent/mount',mountId='a'*32,markerName='.marker')
         loaded=self.load()
         self.assertFalse(loaded['directPreparation']['enabled'])
-        driver,server=self.build(loaded,provision=True)
-        self.assertIs(driver._ssl_context,loaded['directPreparation']['_coordinatorTlsContext'])
-        self.assertIsNot(driver._ssl_context,loaded['directPreparation']['_brokerTlsContext'])
+        _,server=self.build(loaded,provision=True)
+        self.assertNotIn('_coordinatorTlsContext',loaded['directPreparation'])
+        self.assertNotIn('_brokerTlsContext',loaded['directPreparation'])
         self.assertFalse(hasattr(server,'worker_direct_owner'))
 
     def test_enabled_direct_listener_is_composed_but_closed_before_start(self):
@@ -161,7 +161,9 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
             with self.assertRaises(ValueError):daemon.load_config(str(path))
             with self.assertRaises(ValueError):daemon.load_config(str(path),expected_direct_config_sha256='0'*64)
             loaded=daemon.load_config(str(path),expected_direct_config_sha256=digest,expected_direct_credential_sha256=pins)
-        _,server=self.build(loaded,provision=True)
+        driver,server=self.build(loaded,provision=True)
+        self.assertIs(driver._ssl_context,loaded['directPreparation']['_coordinatorTlsContext'])
+        self.assertIsNot(driver._ssl_context,loaded['directPreparation']['_brokerTlsContext'])
         self.assertEqual(server.worker_direct_owner.status(),'not_started')
         server.server_close()
         self.assertEqual(server.worker_direct_owner.status(),'closed')
