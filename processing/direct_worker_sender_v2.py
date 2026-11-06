@@ -117,3 +117,24 @@ class DirectWorkerSenderV2(DirectWorkerSender):
         finally:
             if guard is not None:guard.finish()
             if connection is not None:connection.close()
+
+    def observe(self,object_id):
+        """Retrieve exact durable worker observation; absence is not a negative ACK."""
+        obj=self._inventory.object(object_id,reservation_binding=self._reservation)
+        deadline=time.monotonic()+self._total;connection=guard=None
+        try:
+            connection,guard=self._connect(deadline)
+            connection.request('GET','/direct/v2/objects/'+object_id,headers={**self._headers(),'Content-Length':'0'})
+            result=self._response(connection,deadline)
+            expected=dict(protocol='ltds-direct-local-object-v2',reservationId=self._item['reservationId'],
+                scratchBindingSha256=self._sha,objectId=object_id,byteSize=obj['byteSize'],sha256=obj['sha256'],
+                localObjectDurable=True,sourceCustodyAccepted=False,transferComplete=False,replayed=True)
+            if p.canonical_json(result)!=p.canonical_json(expected):
+                raise DirectDeliveryUncertain('V2 worker observation changed')
+            if not guard.finish():raise DirectDeliveryUncertain('V2 observation outcome uncertain')
+            return result
+        except DirectDeliveryUncertain:raise
+        except Exception:raise DirectDeliveryUncertain('V2 observation outcome uncertain') from None
+        finally:
+            if guard is not None:guard.finish()
+            if connection is not None:connection.close()

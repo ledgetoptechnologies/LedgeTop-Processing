@@ -175,6 +175,9 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
                                           content_length=length,
                                           content_sha256=self.headers.get('Content-SHA256'), reader=body)
                     self._reply(200, result); return
+                if version == 'v2' and self.command == 'GET' and match and length == 0:
+                    result = boundary.observe(headers, protected_transport=True, object_id=match[1])
+                    self._reply(200, result); return
                 if self.command == 'POST' and self.path == '/direct/' + version + '/complete' and length == 0:
                     result = boundary.complete(headers, protected_transport=True)
                     self._reply(200, result); return
@@ -189,6 +192,7 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
 
         do_PUT = _dispatch
         do_POST = _dispatch
+        do_GET = _dispatch
 
     class Server(ThreadingHTTPServer):
         address_family = socket.AF_INET6 if ':' in host else socket.AF_INET

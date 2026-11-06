@@ -31,7 +31,10 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
     def test_lost_local_closure_response_remains_held(self):
         self.run_pair(True)
 
-    def run_pair(self, lose_closure):
+    def test_lost_object_observation_recovers_without_reupload(self):
+        self.run_pair(False,True)
+
+    def run_pair(self, lose_closure, lose_object=False):
         f=fixture.WorkerV2Tests();f.setUp();self.addCleanup(f.doCleanups)
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
@@ -76,7 +79,23 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                 handoff=DirectV2Handoff(store,sender,principal='viewer-staging',bearer=token)
                 for object_id,data in ((source_fixture.GCP_ID,b''),(source_fixture.IMAGE_ID,b'abc'),
                                        ('gcp_'+f.item['attemptId'],b'1,2,3\n')):
-                    observed=handoff.send_object(token,protected_transport=True,object_id=object_id,reader=io.BytesIO(data))
+                    if lose_object:
+                        from processing.direct_worker_sender import DirectDeliveryUncertain
+                        original_put=sender.put
+                        def lose_after_worker_commit(*args,**kwargs):
+                            original_put(*args,**kwargs)
+                            raise DirectDeliveryUncertain('synthetic lost object observation')
+                        with patch.object(sender,'put',side_effect=lose_after_worker_commit):
+                            with self.assertRaises(DirectDeliveryUncertain):
+                                handoff.send_object(token,protected_transport=True,object_id=object_id,reader=io.BytesIO(data))
+                        with queue._db() as db:
+                            self.assertEqual(db.execute('SELECT state FROM direct_v2_handoff_objects').fetchone()[0],'intent')
+                        handoff=DirectV2Handoff(store,sender,principal='viewer-staging',bearer=token)
+                        with patch.object(sender,'put',side_effect=AssertionError('must not reupload')):
+                            observed=handoff.reconcile_object(token,protected_transport=True,object_id=object_id)
+                        lose_object=False
+                    else:
+                        observed=handoff.send_object(token,protected_transport=True,object_id=object_id,reader=io.BytesIO(data))
                     self.assertTrue(observed['localObjectDurable']);self.assertFalse(observed['sourceCustodyAccepted'])
                 if lose_closure:
                     from processing.direct_worker_sender import DirectDeliveryUncertain

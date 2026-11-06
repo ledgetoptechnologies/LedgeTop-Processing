@@ -136,3 +136,29 @@ class DirectWorkerBoundaryV2:
                 expected_binding=self._closure_binding,reservation_binding=self.reservation,
                 verification=self._closure_verification,expected_worker=self.worker,engine_id=self.engine_id,
                 coordinator_origin=self.origin,gate_generation=self.generation,worker_signer=self._closure_signer)
+
+    def observe(self, headers, *, protected_transport, object_id):
+        """Observe an exact durable object; absence or active writers stays uncertain."""
+        from .direct_worker_boundary import DirectWorkerBoundary
+        supplied=DirectWorkerBoundary._header(headers,'Authorization')
+        if (protected_transport is not True or type(supplied) is not str or not supplied.startswith('Bearer ')
+                or not supplied[7:].isascii() or not hmac.compare_digest(supplied[7:],self._bearer)
+                or DirectWorkerBoundary._header(headers,'X-Coordinator-Authority')!=self.item['authorityId']):
+            raise DirectBoundaryDenied('private coordinator authorization required')
+        obj=self.inventory.object(object_id,reservation_binding=self.reservation)
+        with self._writer_lock, NodeGate(self.engine_id) as gate:
+            if self._readiness_pin is not None:raise PolicyConflict('V2 handover not established')
+            item,digest,scratch_id=require_fenced(self.ledger,self.item,expected_worker=self.worker)
+            check_scope(self.ledger,self.spool,item,digest,scratch_id,gate,
+                        coordinator_origin=self.origin,gate_generation=self.generation)
+            gate._arm_direct_hold(digest[:32],digest)
+            path=self.spool.root/self.spool.storage_key(item['jobId'],item['generation'],object_id)
+            if not path.exists():raise PolicyConflict('V2 object outcome uncertain')
+            pin=self.ledger.begin_direct_writer(scratch_id,settings(item,scratch_id))
+            self.spool.verify_object(job_id=item['jobId'],generation=item['generation'],object_id=object_id,
+                                     byte_size=obj['byteSize'],sha256=obj['sha256'])
+            require_fenced(self.ledger,item,expected_worker=self.worker)
+            self.ledger._retire_direct_writer(scratch_id,pin)
+        return dict(protocol='ltds-direct-local-object-v2',reservationId=item['reservationId'],
+            scratchBindingSha256=digest,objectId=object_id,byteSize=obj['byteSize'],sha256=obj['sha256'],
+            localObjectDurable=True,sourceCustodyAccepted=False,transferComplete=False,replayed=True)

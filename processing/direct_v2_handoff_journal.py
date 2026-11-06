@@ -64,6 +64,23 @@ def ensure_schema(db):
     metadata_bytes(db)
 
 
+def full_census(db):
+    metadata_bytes(db)
+    if db.execute('''SELECT 1 FROM direct_v2_handoff_sessions s LEFT JOIN direct_v2_reservations r
+        ON r.reservation_id=s.reservation WHERE r.reservation_id IS NULL LIMIT 1''').fetchone():
+        raise Conflict('V2 handoff reservation missing')
+    if db.execute('''SELECT 1 FROM direct_v2_handoff_objects o LEFT JOIN direct_v2_handoff_sessions s
+        ON s.reservation=o.reservation WHERE s.reservation IS NULL OR typeof(o.object_id)!='text'
+        OR length(o.object_id)<1 OR length(o.object_id)>128 OR typeof(o.byte_size)!='integer' OR o.byte_size<0
+        OR typeof(o.sha256)!='text' OR length(o.sha256)!=64 OR o.state NOT IN ('intent','observed')
+        OR (o.state='observed')!=(o.observation IS NOT NULL)
+        OR (o.observation IS NOT NULL AND (typeof(o.observation)!='blob' OR length(o.observation)>768)) LIMIT 1''').fetchone():
+        raise Conflict('V2 handoff object census invalid')
+    if db.execute('''SELECT 1 FROM direct_v2_handoff_sessions s LEFT JOIN direct_v2_handoff_objects o
+        ON o.reservation=s.reservation GROUP BY s.reservation HAVING count(o.object_id)>(s.allowance-131072)/2048 LIMIT 1''').fetchone():
+        raise Conflict('V2 handoff object count exceeds budget')
+
+
 class DirectV2Handoff:
     """Trusted internal adapter around TLS; the runtime must authenticate callers."""
     def __init__(self,store,sender,*,principal,bearer):
@@ -76,7 +93,7 @@ class DirectV2Handoff:
         self.binding=hashlib.sha256(p.canonical_json(self.item)).hexdigest()
         self.ids=sender._inventory.object_ids(reservation_binding=sender._reservation)
         with self.queue.coordinator_operation('source-io-admission'),self.queue._db() as db:
-            db.execute('BEGIN IMMEDIATE');ensure_schema(db)
+            db.execute('BEGIN IMMEDIATE');ensure_schema(db);full_census(db)
 
     def _auth(self,token,protected_transport):
         if protected_transport is not True or type(token) is not str or not token.isascii() or not hmac.compare_digest(token,self._bearer):
@@ -141,6 +158,7 @@ class DirectV2Handoff:
         with self.queue.coordinator_operation('source-io'):
             with self.queue._db() as db:
                 db.execute('BEGIN IMMEDIATE');state=self._session(db)
+                full_census(db)
                 if state=='closure_observed':
                     from .direct_worker_receipt_v2 import verify
                     saved=db.execute('SELECT closure FROM direct_v2_handoff_sessions WHERE reservation=?',
@@ -168,3 +186,28 @@ class DirectV2Handoff:
                                    (wire,self.item['reservationId'])).rowcount
                 if changed!=1:raise Conflict('V2 closure outcome uncertain')
             return result
+
+    def reconcile_object(self,token,*,protected_transport,object_id):
+        """Recover exact durable observation, never infer absence or reupload."""
+        self._auth(token,protected_transport)
+        obj=self.sender._inventory.object(object_id,reservation_binding=self.sender._reservation)
+        with self.queue.coordinator_operation('source-io'):
+            with self.queue._db() as db:
+                db.execute('BEGIN IMMEDIATE')
+                if self._session(db)!='receiving':raise Conflict('V2 handoff closed')
+                row=db.execute('SELECT * FROM direct_v2_handoff_objects WHERE reservation=? AND object_id=?',
+                               (self.item['reservationId'],object_id)).fetchone()
+                if row is None or (row['byte_size'],row['sha256'])!=(obj['byteSize'],obj['sha256']):
+                    raise Conflict('V2 object intent missing or changed')
+                if row['state']=='observed' and row['observation'] is not None:
+                    return self._verify_observation(json.loads(row['observation']),obj)
+                if row['state']!='intent' or row['observation'] is not None:
+                    raise Conflict('V2 object outcome uncertain')
+            observation=self._verify_observation(self.sender.observe(object_id),obj)
+            wire=p.canonical_json(observation)
+            with self.queue._db() as db:
+                db.execute('BEGIN IMMEDIATE');self._check(db)
+                changed=db.execute("UPDATE direct_v2_handoff_objects SET state='observed',observation=? WHERE reservation=? AND object_id=? AND state='intent' AND observation IS NULL",
+                                   (wire,self.item['reservationId'],object_id)).rowcount
+                if changed!=1:raise Conflict('V2 object observation uncertain')
+            return observation

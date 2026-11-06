@@ -135,8 +135,8 @@ class FreezeGate:
                 if marker is None or type(marker[0]) is not int or marker[0] not in (0,1):
                     raise CoordinatorFrozen('V2 handoff marker requires inspection')
                 if marker[0]==1:
-                    from .direct_v2_handoff_journal import check_schema
-                    check_schema(db)
+                    from .direct_v2_handoff_journal import full_census
+                    full_census(db)
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS coordinator_freeze_state (
                   singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL,
