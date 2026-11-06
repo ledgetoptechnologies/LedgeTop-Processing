@@ -36,7 +36,27 @@ class DirectV2Reservations:
             db.execute('BEGIN IMMEDIATE')
             ensure_schema(db)
 
-    def reserve(self, *, payload, authenticated_principal, item, expected_worker,
+    def reserve(self, **request):
+        """Classify any possibly committed failure as uncertain, never release."""
+        try:
+            return self._reserve(**request)
+        except V2ReservationUncertain:
+            raise
+        except Exception as error:
+            item=request.get('item')
+            if type(item) is not dict or type(item.get('reservationId')) is not str or type(item.get('jobId')) is not str:
+                raise
+            try:
+                with self.queue._db() as db:
+                    saved=db.execute('SELECT 1 FROM direct_v2_reservations WHERE reservation_id=? OR job_id=?',
+                                     (item['reservationId'],item['jobId'])).fetchone()
+            except Exception:
+                raise V2ReservationUncertain('V2 reservation outcome requires reconciliation') from error
+            if saved:
+                raise V2ReservationUncertain('V2 reservation outcome requires reconciliation') from error
+            raise
+
+    def _reserve(self, *, payload, authenticated_principal, item, expected_worker,
                 readiness_proof, challenge_id, gate_generation, issuer_id, key_id, worker_public_key,
                 trusted_source_keys, capability_fingerprint, options_fingerprint, allowed_odm_options):
         """Hold an eligible node for this exact verified V2 source and worker proof."""

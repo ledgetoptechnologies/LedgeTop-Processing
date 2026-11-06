@@ -18,6 +18,14 @@ SCHEMA='''CREATE TABLE direct_v2_reservations (
 
 def _normalized(sql):return ' '.join(sql.split()).replace(' IF NOT EXISTS ',' ')
 
+def marker_version(db):
+    columns={row['name'] for row in db.execute('PRAGMA table_info(coordinator_identity)')}
+    if 'direct_v2_reservation_version' not in columns:return 0
+    row=db.execute('SELECT direct_v2_reservation_version FROM coordinator_identity WHERE singleton=1').fetchone()
+    if row is None or type(row[0]) is not int or row[0] not in (0,1):
+        raise Conflict('direct V2 reservation marker requires inspection')
+    return row[0]
+
 def verify_schema(db):
     row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(TABLE,)).fetchone()
     if row is None or type(row['sql']) is not str or _normalized(row['sql'])!=_normalized(SCHEMA):
@@ -25,16 +33,21 @@ def verify_schema(db):
 
 def ensure_schema(db):
     if not db.in_transaction:raise Conflict('direct V2 schema transaction required')
+    columns={row['name'] for row in db.execute('PRAGMA table_info(coordinator_identity)')}
+    if 'direct_v2_reservation_version' not in columns:
+        db.execute('ALTER TABLE coordinator_identity ADD COLUMN direct_v2_reservation_version INTEGER NOT NULL DEFAULT 0')
+    version=marker_version(db)
     table_exists=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(TABLE,)).fetchone() is not None
     fence_exists=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(FENCE_TABLE,)).fetchone() is not None
     if table_exists:
         verify_schema(db)
-    if table_exists != fence_exists:
+    if table_exists != fence_exists or (version==1)!=table_exists:
         raise Conflict('direct V2 reservation fence mismatch')
     if not table_exists:
         db.execute(FENCE_SCHEMA)
         db.execute('INSERT INTO legacy_fence_requirement(version) VALUES(2)')
         db.execute(SCHEMA)
+        db.execute('UPDATE coordinator_identity SET direct_v2_reservation_version=1 WHERE singleton=1 AND direct_v2_reservation_version=0')
     verify_schema(db)
     verify_fence(db)
 
@@ -48,11 +61,12 @@ def verify_fence(db):
 
 def metadata_bytes(db):
     if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(TABLE,)).fetchone() is None:
-        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(FENCE_TABLE,)).fetchone():
+        if marker_version(db)==1 or db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(FENCE_TABLE,)).fetchone():
             raise Conflict('direct V2 reservation fence mismatch')
         return 0
     verify_schema(db)
     verify_fence(db)
+    if marker_version(db)!=1:raise Conflict('direct V2 reservation fence mismatch')
     if db.execute('''SELECT 1 FROM direct_v2_reservations WHERE
         typeof(reservation_id)!='text' OR typeof(job_id)!='text' OR typeof(node_id)!='text'
         OR typeof(principal)!='text' OR typeof(request_digest)!='text' OR typeof(challenge_id)!='text'

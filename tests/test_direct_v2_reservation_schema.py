@@ -69,4 +69,14 @@ class ReservationSchemaTests(unittest.TestCase):
             db.execute('BEGIN IMMEDIATE')
             with self.assertRaisesRegex(Conflict,'fence mismatch'):schema.ensure_schema(db)
 
+    def test_lost_table_and_fence_are_not_treated_as_first_install(self):
+        with self.f.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');schema.ensure_schema(db)
+            db.execute('DROP TABLE direct_v2_reservations')
+            db.execute('DROP TABLE legacy_fence_requirement')
+        with self.f.queue._db() as db:
+            with self.assertRaisesRegex(Conflict,'fence mismatch'):schema.metadata_bytes(db)
+            db.execute('BEGIN IMMEDIATE')
+            with self.assertRaisesRegex(Conflict,'fence mismatch'):schema.ensure_schema(db)
+
 if __name__=='__main__':unittest.main()

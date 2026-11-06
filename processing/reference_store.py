@@ -588,6 +588,21 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                     if row["phase"] not in ("queued", "waiting_capacity"):
                         continue
                     submission = json.loads(row["input_json"])
+                    if row['status']=='held' and row['held_reason']=='direct_admission_pending':
+                        try:
+                            source=json.loads(row['source_manifest_json'])
+                            derived=json.loads(row['derived_manifest_json'])
+                            total=sum(obj['byteSize'] for manifest in (source,derived) for obj in manifest['objects'])
+                            protocol._integer(total,'direct retained bytes',allow_zero=True)
+                            if (sum(obj['byteSize'] for obj in source['objects'])!=source['totalBytes']
+                                    or source['sha256']!=protocol.digest({k:v for k,v in source.items() if k!='sha256'})
+                                    or derived['sha256']!=protocol.digest({k:v for k,v in derived.items() if k!='sha256'})):
+                                raise ValueError('direct retained inventory changed')
+                            submission['manifest']['totalBytes']=total
+                        except (ValueError,TypeError,KeyError,AttributeError):
+                            # Unknown size remains an ordering barrier; it is
+                            # never a reason to hand the node to a later job.
+                            return item
                     if self._select_node(db, submission, PROFILE, nodes) == node_id:
                         return item
                     continue

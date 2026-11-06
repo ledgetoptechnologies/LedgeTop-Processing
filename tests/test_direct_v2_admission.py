@@ -5,7 +5,7 @@ import base64
 import json
 import time
 import uuid
-from contextlib import closing
+from contextlib import closing, contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -56,6 +56,18 @@ class DirectV2AdmissionTests(unittest.TestCase):
             self.store.max_metadata_bytes=used-attestation_bytes
             with self.assertRaisesRegex(Conflict,'metadata quota'):
                 self.store._quota(db)
+
+    def test_scheduling_counts_full_retained_source_bytes(self):
+        job,_=self.store.submit_source_intake(self.validated,**self.options)
+        pipeline_bytes=self.validated['manifest']['totalBytes']
+        source_bytes=self.validated['sourceManifest']['totalBytes']+sum(
+            obj['byteSize'] for obj in self.validated['derivedManifest']['objects'])
+        self.assertGreater(source_bytes,pipeline_bytes)
+        self.store._configured_node_limits['cluster']['maxInputBytes']=pipeline_bytes
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.assertIsNone(self.store._candidate_any_row(db,'cluster'))
+            self.assertEqual(self.store._candidate_any_row(db,'main')['id'],job['jobId'])
 
     def test_pending_job_reopens_unassigned_without_cluster_node(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -132,6 +144,13 @@ class DirectV2AdmissionTests(unittest.TestCase):
         observation=reservations.reserve(**options)
         self.assertFalse(observation['sourceCustodyAccepted']);self.assertFalse(observation['transferAuthorized'])
         self.assertEqual(observation['nodeId'],'cluster');self.assertTrue(observation['replayed'])
+        original_operation=self.queue.coordinator_operation
+        @contextmanager
+        def failing_teardown(kind):
+            with original_operation(kind):yield
+            raise RuntimeError('synthetic teardown uncertainty')
+        with patch.object(self.queue,'coordinator_operation',side_effect=failing_teardown):
+            with self.assertRaises(V2ReservationUncertain):reservations.reserve(**options)
         self.assertEqual(self.queue.get(job['jobId'])['status'],'held')
         with self.assertRaises(Conflict):
             self.queue.operator(job['jobId'],'resolve',dict(note='synthetic',workerStopped=True))
