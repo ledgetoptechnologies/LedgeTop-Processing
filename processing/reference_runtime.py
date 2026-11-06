@@ -577,7 +577,7 @@ from .coordinator_freeze import runtime_constructor
 class ReferenceRuntime:
     @runtime_constructor
     def __init__(self, queue, config, settings, *, discover=None, discover_capacities=None,
-                 server_factory=None):
+                 server_factory=None, direct_scheduler_settings=None):
         """Construct services around the existing authority; never create a Queue."""
         self.queue, self.config, self.settings = queue, config, settings
         self._server_factory = server_factory or create_reference_http_server
@@ -589,6 +589,7 @@ class ReferenceRuntime:
         self._source_timer_thread = None
         self._source_release_stop = threading.Event()
         self._viewer_transfer_stop = threading.Event()
+        self._direct_preparation_scheduler = None
         try:
             recovery=settings.recovery_bindings
             node_ids = _validate_node_configuration(config, queue.node_ids)
@@ -678,8 +679,31 @@ class ReferenceRuntime:
             discover = discover or (lambda: self._discover_fleet()[0])
             discover_capacities = discover_capacities or self._discover_capacities
             self.api = _DynamicAPI(self.control, config, settings, discover, discover_capacities,discover_fleet)
+            if direct_scheduler_settings is not None:
+                # This is an explicit trusted-process entrypoint, not a public
+                # API or a configuration-file activation path. The caller
+                # must load enrollment from an independently protected source.
+                p._closed(direct_scheduler_settings,('trustedWorkers','enrollment'),'direct scheduler settings')
+                from .direct_preparation_scheduler import DirectPreparationScheduler
+                self._direct_preparation_scheduler=DirectPreparationScheduler(self.store,
+                    trusted_workers=direct_scheduler_settings['trustedWorkers'],
+                    enrollment=direct_scheduler_settings['enrollment'])
         except Exception:
             raise RuntimeConfigurationError("reference TLS runtime initialization failed") from None
+
+    def run_direct_preparation_once(self):
+        """Explicit trusted coordinator step; disabled unless enrolled at construction."""
+        if self._direct_preparation_scheduler is None:
+            raise RuntimeConfigurationError('direct preparation scheduler disabled')
+        if self.api.discover_fleet is not None:
+            discovered,capacities=self.api.discover_fleet()
+        else:
+            discovered,capacities=self.api.discover(),self.api.discover_capacities()
+        snapshot=_available_discovery_snapshot(discovered)
+        self.store.update_fleet_snapshot(capacities,snapshot['nodes'])
+        capability,options,allowed=discovered_policy(snapshot,self.config)
+        return self._direct_preparation_scheduler.run_once(capability_fingerprint=capability,
+            options_fingerprint=options,allowed_odm_options=allowed)
 
     def _discover_fleet(self):
         options, probes = self._worker_catalog.discover()
