@@ -61,7 +61,7 @@ class WorkerClosureSignerV2:
             issuerId=self.issuer_id,keyId=self.key_id,reservationId=closure['reservationId'],
             scratchBindingSha256=binding_sha,localClosureSha256=closure_sha,
             workerClosureReceiptSha256=hashlib.sha256(p.canonical_json(signed_closure)).hexdigest(),
-            retentionFenceActive=True,sourceCustodyAccepted=False,transferComplete=False,processingAuthorized=False)
+            retentionFenceObserved=True,sourceCustodyAccepted=False,transferComplete=False,processingAuthorized=False)
         return dict(body,signature=base64.urlsafe_b64encode(self._key.sign(
             b'LTDS-DIRECT-WORKER-RETENTION-OBSERVATION-V1\0'+p.canonical_json(body))).decode('ascii').rstrip('='))
 
@@ -71,7 +71,7 @@ def verify_retention(receipt,*,signed_closure,expected_closure,issuer_id,key_id,
         reservationId=expected_closure['reservationId'],scratchBindingSha256=expected_closure['scratchBindingSha256'],
         localClosureSha256=hashlib.sha256(p.canonical_json(expected_closure)).hexdigest(),
         workerClosureReceiptSha256=hashlib.sha256(p.canonical_json(signed_closure)).hexdigest(),
-        retentionFenceActive=True,sourceCustodyAccepted=False,transferComplete=False,processingAuthorized=False)
+        retentionFenceObserved=True,sourceCustodyAccepted=False,transferComplete=False,processingAuthorized=False)
     if (type(receipt) is not dict or set(receipt)!=set(expected)|{'signature'}
             or p.canonical_json({k:v for k,v in receipt.items() if k!='signature'})!=p.canonical_json(expected)):
         raise ReceiptRejected('retention observation binding differs')

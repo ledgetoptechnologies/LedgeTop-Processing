@@ -25,7 +25,9 @@ coordinator verifies its pinned worker key, stores the observation within its
 bounded handoff session allowance, and replays verified evidence without the
 worker online. A lost response can be re-observed. This is a historical local
 observation, not proof the worker remains online or that non-ledger writers are
-excluded; custody and execution flags remain false. The journal schema and
+excluded. The wire field is `retentionFenceObserved`, never an active-state
+claim. Custody and execution flags remain false; immutable journal guards and
+a bounded count latch detect deletion. The journal schema and
 marker lack a qualified online migration and older-writer fence and are not
 wired into runtime startup.
 

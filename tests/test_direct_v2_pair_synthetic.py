@@ -104,7 +104,7 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                         with queue._db() as db:
                             self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_v2_retention_observations').fetchone()[0],0)
                     observed=handoff.observe_retention(token,protected_transport=True)
-                    self.assertTrue(observed['retentionFenceActive'])
+                    self.assertTrue(observed['retentionFenceObserved'])
                     self.assertFalse(observed['sourceCustodyAccepted'])
                     self.assertFalse(observed['transferComplete'])
                     self.assertFalse(observed['processingAuthorized'])
@@ -124,11 +124,22 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                         self.assertEqual(restarted.observe_retention(token,protected_transport=True),observed)
                     with self.assertRaises(Conflict):
                         restarted.observe_retention('wrong-viewer-token-012345678901234',protected_transport=True)
-                    # Stored evidence must not become trusted if it is damaged.
+                    # Stored evidence cannot be replaced/deleted, and removing
+                    # its guard makes the coordinator fail closed on replay.
                     with queue._db() as db:
-                        db.execute("UPDATE direct_v2_retention_observations SET observation=? WHERE reservation=?",
-                                   (b'{}',f.item['reservationId']))
-                    with self.assertRaises((Conflict,ValueError)):
+                        with self.assertRaises(sqlite3.IntegrityError):
+                            db.execute("UPDATE direct_v2_retention_observations SET observation=? WHERE reservation=?",
+                                       (b'{}',f.item['reservationId']))
+                        with self.assertRaises(sqlite3.IntegrityError):
+                            db.execute("DELETE FROM direct_v2_retention_observations WHERE reservation=?",(f.item['reservationId'],))
+                        db.execute('DROP TRIGGER direct_v2_retention_no_delete')
+                    with self.assertRaises(Conflict):
+                        restarted.observe_retention(token,protected_transport=True)
+                    from processing.direct_v2_retention_journal import TRIGGERS
+                    with queue._db() as db:
+                        db.execute('DELETE FROM direct_v2_retention_observations WHERE reservation=?',(f.item['reservationId'],))
+                        db.execute(TRIGGERS[2])
+                    with self.assertRaises(Conflict):
                         restarted.observe_retention(token,protected_transport=True)
                 with self.assertRaises(Conflict):
                     handoff.complete('invalid-viewer-token-012345678901234',protected_transport=True)
