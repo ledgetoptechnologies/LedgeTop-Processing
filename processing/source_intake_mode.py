@@ -10,6 +10,7 @@ CREATE = """CREATE TABLE reference_source_intake_modes (
     job_id TEXT NOT NULL PRIMARY KEY REFERENCES reference_source_intakes(job_id),
     mode TEXT NOT NULL CHECK(mode IN ('spool-v1','direct-v2')))"""
 TRIGGERS = {
+    'source_intake_mode_no_replace': "CREATE TRIGGER source_intake_mode_no_replace BEFORE INSERT ON reference_source_intake_modes WHEN EXISTS (SELECT 1 FROM reference_source_intake_modes WHERE job_id=NEW.job_id) BEGIN SELECT RAISE(ABORT,'source intake mode immutable'); END",
     'source_intake_mode_no_update': "CREATE TRIGGER source_intake_mode_no_update BEFORE UPDATE ON reference_source_intake_modes BEGIN SELECT RAISE(ABORT,'source intake mode immutable'); END",
     'source_intake_mode_no_delete': "CREATE TRIGGER source_intake_mode_no_delete BEFORE DELETE ON reference_source_intake_modes BEGIN SELECT RAISE(ABORT,'source intake mode immutable'); END",
 }

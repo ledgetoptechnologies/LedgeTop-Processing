@@ -40,6 +40,8 @@ class SourceIntakeModeTests(unittest.TestCase):
                 db.execute("UPDATE reference_source_intake_modes SET mode='direct-v2'")
             with self.assertRaises(sqlite3.IntegrityError):
                 db.execute('DELETE FROM reference_source_intake_modes')
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("INSERT OR REPLACE INTO reference_source_intake_modes VALUES('legacy','direct-v2')")
         with open_db(self.path) as db:
             mode.initialize(db)
             mode.require(db, 'legacy', 'spool-v1')
