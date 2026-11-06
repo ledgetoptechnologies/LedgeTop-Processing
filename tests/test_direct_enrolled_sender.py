@@ -109,6 +109,29 @@ class EnrolledSenderTests(unittest.TestCase):
                         wrong=io.BytesIO(b'abc')
                         with self.assertRaises(ValueError):handoff.send('unknown-object',wrong)
                         self.assertTrue(wrong.closed)
+                        from processing.direct_worker_sender import DirectDeliveryUncertain
+                        class BadClose(io.BytesIO):
+                            def close(self):
+                                super().close()
+                                raise OSError('synthetic close failure')
+                        failed=BadClose(b'abc')
+                        with self.assertRaises(DirectDeliveryUncertain) as error:
+                            handoff.send('unknown-object',failed)
+                        self.assertIsInstance(error.exception.__cause__,ValueError)
+                        self.assertTrue(failed.closed)
+                        transport_error=DirectDeliveryUncertain('synthetic lost reply')
+                        with patch.object(handoff._handoff,'send_object',side_effect=transport_error):
+                            with self.assertRaises(DirectDeliveryUncertain) as error:
+                                handoff.send(IMAGE_ID,BadClose(b'abc'))
+                        self.assertIs(error.exception.__cause__,transport_error)
+                        first=BadClose(b'abc')
+                        with self.assertRaises(DirectDeliveryUncertain) as error:
+                            handoff.send(IMAGE_ID,first)
+                        self.assertIsInstance(error.exception.__cause__,OSError)
+                        self.assertTrue(first.closed)
+                        replay_bad=BadClose(b'abc')
+                        with self.assertRaises(DirectDeliveryUncertain):handoff.send(IMAGE_ID,replay_bad)
+                        self.assertTrue(replay_bad.closed)
                         for object_id,data in ((IMAGE_ID,b'abc'),('gcp_'+ATTEMPT,b'1,2,3\n')):
                             reader=io.BytesIO(data);observed=handoff.send(object_id,reader)
                             self.assertTrue(reader.closed)

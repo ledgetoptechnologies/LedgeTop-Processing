@@ -217,13 +217,20 @@ class _ReservedDirectTransfer:
         return self._handoff.authorize_worker(self._secret,protected_transport=True)
     def send(self,object_id,reader):
         """Take ownership of one closeable reader, including on refusal."""
+        from .direct_worker_sender import DirectDeliveryUncertain
         close=getattr(reader,'close',None)
         if not callable(close):raise ValueError('closeable source reader required')
+        prior=None
         try:
             self._revalidate()
             return self._handoff.send_object(self._secret,protected_transport=True,object_id=object_id,reader=reader)
+        except BaseException as error:
+            prior=error
+            raise
         finally:
-            close()
+            try:close()
+            except Exception as close_error:
+                raise DirectDeliveryUncertain('source reader close outcome uncertain') from (prior or close_error)
     def complete(self):
         self._revalidate()
         return self._handoff.complete(self._secret,protected_transport=True)
