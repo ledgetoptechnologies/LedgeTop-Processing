@@ -32,6 +32,8 @@ artifact with `schemaVersion:1`,
 `{name,uid,gid,home}`, and gate is
 `{path,sha256,nodeId,authorityId,generation,coordinatorOrigin}`. These follow the
 installer's existing identity/path grammars and canonical original Gate path.
+`dockerEngineId` and the bundle/readiness `engineId` all use the one original
+Gate definition, `processing.node_gate.ENGINE`; node and worker slugs stay narrower.
 The separately pinned copied Gate must match all binding fields and hash.
 No config descriptor, unit hash, source archive or installed receipt is required
 for this input. Both input modes are **preparation evidence**, never proof of

@@ -27,7 +27,7 @@ class ExistingReadinessProbeTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[1]
         self.source_sha = source_digest(source)
         self.config = dict(nodeId='cluster', workerId='worker-cluster', workerInstanceId='instance-cluster',
-            authorityId=str(uuid.uuid4()), engineId='engine', gateGeneration=3, engineVersion='3.8.5',
+            authorityId=str(uuid.uuid4()), engineId='actual.test-engine:abc', gateGeneration=3, engineVersion='3.8.5',
             maintenanceReadiness=dict(schemaVersion=1, bearer='synthetic-private-token-' + 'a'*32,
                 sourceRoot=str(source), sourceSha256=self.source_sha, activation=None))
         path = root/'worker.json'; raw = json.dumps(self.config).encode(); path.write_bytes(raw); path.chmod(0o600)

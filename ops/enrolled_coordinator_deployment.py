@@ -86,7 +86,11 @@ def worker(value, authority):
     expected=value['expected'];closed(expected,WORKER_EXPECTED,'existing_worker_readiness_expectations_required')
     require(expected['nodeId']==value['nodeId'] and expected['authorityId']==authority
             and expected['sourceSha256']==settings['sourceSha256'],'worker_expected_identity_changed')
-    for name in ('nodeId','workerId','workerInstanceId','engineId'):slug(expected[name])
+    for name in ('nodeId','workerId','workerInstanceId'):slug(expected[name])
+    # The physical engine keeps the original Gate grammar; node/worker slugs do not.
+    from processing.node_gate import ENGINE
+    require(type(expected['engineId']) is str and ENGINE.fullmatch(expected['engineId']),
+            'reviewed_worker_identity_required')
     require(type(expected['gateGeneration']) is int and expected['gateGeneration']>=0,'worker_generation_required')
     require(type(expected['engineVersion']) is str and 1<=len(expected['engineVersion'])<=128
             and all(0x21<=ord(c)<=0x7e for c in expected['engineVersion']),'worker_version_required')

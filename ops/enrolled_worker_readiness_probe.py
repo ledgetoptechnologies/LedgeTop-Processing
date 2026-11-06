@@ -17,6 +17,7 @@ import uuid
 from ops.enrolled_coordinator_transport import BoundedSubprocess, canonical, require
 from ops.reference_worker_handover import ReferenceWorkerHandover, SystemdWorkerControl
 from processing import reference_protocol as p
+from processing.node_gate import ENGINE
 
 
 PROTOCOL = 'ltds-enrolled-worker-readiness-probe-v1'
@@ -40,8 +41,11 @@ def validate_request(worker, challenge):
     p._closed(worker['settings'], ReferenceWorkerHandover.FIELDS, 'existing worker settings')
     expected = worker['expected']
     p._closed(expected, EXPECTED, 'existing worker expectations')
-    for key in ('nodeId', 'workerId', 'workerInstanceId', 'engineId'):
+    for key in ('nodeId', 'workerId', 'workerInstanceId'):
         p._slug(expected[key], key)
+    # The physical engine keeps the original Gate grammar; node/worker slugs do not.
+    require(type(expected['engineId']) is str and ENGINE.fullmatch(expected['engineId']),
+            'reviewed_worker_identity_required')
     p._uuid(expected['authorityId'], 'worker authority')
     for key in ('configSha256', 'sourceSha256'):
         p._hash(expected[key], key)
@@ -147,6 +151,7 @@ def serialize_probe(worker, challenge):
     module = module.replace('from ops.enrolled_coordinator_transport import BoundedSubprocess, canonical, require', '')
     module = module.replace('from ops.reference_worker_handover import ReferenceWorkerHandover, SystemdWorkerControl', '')
     module = module.replace('from processing import reference_protocol as p', '')
+    module = module.replace('from processing.node_gate import ENGINE', '')
     # Reuse the reviewed client process-group cleanup without requiring this
     # new controller module to be installed on the existing worker host.
     definitions = ('import selectors,signal,time\nclass TransportHeld(RuntimeError): pass\n' +
@@ -158,7 +163,8 @@ def serialize_probe(worker, challenge):
         'require(_source_digest(worker["settings"]["sourceRoot"])==worker["expected"]["sourceSha256"],"worker_probe_source_changed")\n'
         'sys.path.insert(0,worker["settings"]["sourceRoot"])\n'
         'from ops.reference_worker_handover import ReferenceWorkerHandover,SystemdWorkerControl\n'
-        'from processing import reference_protocol as p\n')
+        'from processing import reference_protocol as p\n'
+        'from processing.node_gate import ENGINE\n')
     tail = ('try:\n' + ''.join(' '+line+'\n' for line in setup.splitlines()) +
             ' print(json.dumps(probe(worker,challenge),sort_keys=True,separators=(",",":")))\n'
             'except BaseException:\n raise RuntimeError("worker_readiness_probe_unavailable") from None\n')

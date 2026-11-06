@@ -23,12 +23,13 @@ BINDING_PROTOCOL = 'ltds-reference-node-preparation-binding-v1'
 
 def node_binding(value):
     """Validate captured host/Gate preparation evidence, never installed proof."""
+    from processing.node_gate import ENGINE, _binding
     install.closed(value, ('schemaVersion', 'protocol', 'host', 'service', 'gate'))
     require(type(value['schemaVersion']) is int and value['schemaVersion'] == 1 and
             value['protocol'] == BINDING_PROTOCOL, 'node_preparation_binding_profile_required')
     host = value['host']; install.closed(host, ('hostname', 'bootId', 'dockerEngineId'))
     require(type(host['hostname']) is str and re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]{0,252}', host['hostname']) and
-            type(host['dockerEngineId']) is str and re.fullmatch('[A-Za-z0-9][A-Za-z0-9:._-]{0,255}', host['dockerEngineId']) and
+            type(host['dockerEngineId']) is str and ENGINE.fullmatch(host['dockerEngineId']) and
             type(host['bootId']) is str and str(uuid.UUID(host['bootId'])) == host['bootId'],
             'original_worker_host_required')
     service = value['service']; install.closed(service, ('name', 'uid', 'gid', 'home'))
@@ -38,7 +39,6 @@ def node_binding(value):
     home = install.absolute(service['home'])
     gate = value['gate']; install.closed(gate, ('path', 'sha256', 'nodeId', 'authorityId', 'generation', 'coordinatorOrigin'))
     install.sha(gate['sha256']); install.integer(gate['generation'], 1)
-    from processing.node_gate import _binding
     require(_binding(gate['nodeId'], gate['coordinatorOrigin'], gate['authorityId'])['coordinatorOrigin'] ==
             gate['coordinatorOrigin'], 'original_gate_origin_required')
     expected = home/'.local/state/LedgeTop-Processing/node-gates'/hashlib.sha256(host['dockerEngineId'].encode()).hexdigest()/'gate.json'

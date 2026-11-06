@@ -47,6 +47,7 @@ def integer(value, minimum=0):
 
 
 def validate_manifest(value):
+    from processing.node_gate import ENGINE,_binding
     closed(value, ('schemaVersion','protocol','operationId','host','service','installationRoot',
                    'source','dependencies','config','unitSha256','gate','engine'))
     require(type(value['schemaVersion']) is int and value['schemaVersion'] == 1 and
@@ -57,7 +58,7 @@ def validate_manifest(value):
     require(all(type(item) is str and 1 <= len(item) <= 256 and '\n' not in item
                 for item in value['host'].values()), 'original_worker_host_required')
     require(re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]{0,252}',value['host']['hostname']) and
-            re.fullmatch('[A-Za-z0-9][A-Za-z0-9:._-]{0,255}',value['host']['dockerEngineId']) and
+            ENGINE.fullmatch(value['host']['dockerEngineId']) and
             str(uuid.UUID(value['host']['bootId']))==value['host']['bootId'],'original_worker_host_required')
     service=value['service'];closed(service, ('name','uid','gid','home'))
     require(type(service['name']) is str and re.fullmatch('[a-z_][a-z0-9_-]{0,31}',service['name']),
@@ -90,7 +91,6 @@ def validate_manifest(value):
             'original_node_required')
     require(type(gate['authorityId']) is str and str(uuid.UUID(gate['authorityId']))==gate['authorityId'],
             'original_authority_required')
-    from processing.node_gate import _binding
     require(_binding(gate['nodeId'],gate['coordinatorOrigin'],gate['authorityId'])['coordinatorOrigin']==gate['coordinatorOrigin'],
             'original_gate_origin_required')
     expected_gate=home/'.local/state/LedgeTop-Processing/node-gates'/hashlib.sha256(value['host']['dockerEngineId'].encode()).hexdigest()/'gate.json'
