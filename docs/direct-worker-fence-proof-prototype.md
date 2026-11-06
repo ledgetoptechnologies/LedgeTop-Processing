@@ -19,11 +19,14 @@ network certificate binding, key enrollment or capability endpoint here.
 This proof observes a fence at issuance; it does **not** establish that all
 software honors the gate. The experimental NodeGate code persists a direct hold
 before creating a readiness or reader pin, and refuses resolve, acknowledgement,
-empty release, new reservation and ownership handover while that marker exists.
-Failure before pin creation and an interrupted writer both remain held. There
-is deliberately no automatic marker removal or usable completion recovery.
-Older executables ignore this marker and may clear the gate, so rollback must
-be fenced independently before any deployment. This does not establish
+empty release, new reservation and ownership handover while that hold exists.
+The hold is part of atomically replaced `gate.json` schema 2, so the reviewed
+schema-1 NodeGate executable rejects it before mutating the gate. A prior
+prototype's separate marker is also refused for inspection, never migrated
+automatically. Failure before pin creation and an interrupted writer remain
+held. There is deliberately no automatic downgrade or usable completion
+recovery. Refusal must be verified for every actually installed old binary and
+all alternate gate writers before deployment. This does not establish
 or that an authenticated caller has initiated the source transfer. An unwired
 local primitive replaces the exact readiness pin with a fresh writer pin in one
 scratch transaction while the caller holds the checked NodeGate. A crash after
@@ -40,3 +43,17 @@ hold reconciliation, authenticated pin handover, trusted clocks and key identity
 endpoint, exact durable replay, expiry/clock-skew policy, fail-closed pin
 recovery, and coordinator transaction binding. Do not release pins on time or
 failure, and do not infer worker availability from a signature alone.
+
+One bounded Linux test loaded the actual `3fa2c5c6` NodeGate source (SHA-256
+`e4080488cc7b131a96722e778dc13680aaff44f23f34d5660d8d5d273a09b6a3`) and
+verified it raises `GateError` on a newly armed schema-2 hold. This is evidence
+for that source version only, not an installed binary or every old path.
+
+Future reconciliation must verify an authenticated, durable exact-reservation
+coordinator decision, prove all old worker processes/readers and engine jobs
+retired, inventory scratch and verify no unknown pins or files, and hold the
+same NodeGate lock while fencing all new writer starts. It must journal its
+decision and handle crashes before any atomic schema downgrade and directory
+fsync. The exact cross-system ordering, restart replay, power-loss behavior and
+proof of no stale process are not implemented; never remove a hold based only
+on expiry, a boolean, an operator note or lost connectivity.

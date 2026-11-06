@@ -1,6 +1,9 @@
 """Disposable local gate/pin tests, not a live coordinator handoff."""
 import copy
 import io
+import json
+import importlib.util
+import os
 import threading
 import unittest
 import uuid
@@ -115,10 +118,27 @@ class FenceProofTests(unittest.TestCase):
 
     def test_corrupt_direct_hold_still_blocks_gate_mutation(self):
         f=self.f;self.issue()
-        (f.root/'gate'/'direct-hold.json').write_text('{broken')
+        path=f.root/'gate'/'gate.json';state=json.loads(path.read_text());state['directHold']['generation']=True
+        path.write_text(json.dumps(state))
         with NodeGate(f.engine) as gate:
-            with self.assertRaisesRegex(GateError,'direct transfer hold'):
+            with self.assertRaisesRegex(GateError,'inspection'):
                 gate.resolve(f.observation['bindingSha256'][:32],1,old_worker_stopped=True,
                     coordinator_resolved=True,note='synthetic')
+
+    def test_old_gate_schema_reader_cannot_accept_direct_hold(self):
+        f=self.f;self.issue()
+        state=json.loads((f.root/'gate'/'gate.json').read_text())
+        self.assertEqual(state['schema'],2)
+        # The actual prior implementation's _load requires schema == 1.
+        self.assertNotEqual(state['schema'],1)
+
+    @unittest.skipUnless(os.environ.get('LTDS_OLD_GATE_SOURCE'),'old gate source fixture not supplied')
+    def test_actual_old_gate_executable_rejects_version_two(self):
+        f=self.f;self.issue()
+        spec=importlib.util.spec_from_file_location('old_node_gate_fixture',os.environ['LTDS_OLD_GATE_SOURCE'])
+        old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)
+        with patch.object(old,'canonical_gate_path',return_value=f.root/'gate'):
+            with old.NodeGate(f.engine) as gate:
+                with self.assertRaises(old.GateError):gate.snapshot()
 
 if __name__=='__main__':unittest.main()

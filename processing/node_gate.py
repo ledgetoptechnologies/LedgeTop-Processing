@@ -170,7 +170,7 @@ class NodeGate:
             if path.is_symlink() or not path.is_file() or path.stat().st_size > 16384:
                 raise ValueError()
             state = json.loads(path.read_bytes())
-            if (not isinstance(state, dict) or state.get('schema') != 1
+            if (not isinstance(state, dict) or type(state.get('schema')) is not int or state.get('schema') not in (1,2)
                     or state.get('engineId') != self.engine_id
                     or type(state.get('generation')) is not int or state['generation'] < 1
                     or not {'nodeId', 'coordinatorOrigin', 'authorityId', 'reservation'} <= state.keys()):
@@ -194,6 +194,18 @@ class NodeGate:
                 if digest is not None and (job is None or not isinstance(digest, str)
                                           or not re.fullmatch('[0-9a-f]{64}', digest)):
                     raise ValueError()
+            if state['schema']==2:
+                direct=state.get('directHold')
+                if (type(direct) is not dict or set(direct)!={'receiptId','generation','scratchBindingSha256'}
+                        or reservation is None or reservation['job'] is None
+                        or direct['receiptId']!=reservation['receiptId']
+                        or type(direct['generation']) is not int or direct['generation']!=state['generation']
+                        or type(direct['scratchBindingSha256']) is not str
+                        or re.fullmatch('[0-9a-f]{64}',direct['scratchBindingSha256']) is None
+                        or direct['receiptId']!=direct['scratchBindingSha256'][:32]):
+                    raise ValueError()
+            elif 'directHold' in state:
+                raise ValueError()
             return state
         except Exception:
             raise GateError('node gate state requires operator inspection') from None
@@ -206,33 +218,31 @@ class NodeGate:
         self._check_lock()
         if os.path.lexists(self.root / 'direct-hold.json'):
             raise GateError('direct transfer hold requires reconciliation')
+        state=self._load()
+        if state is not None and state['schema']==2:
+            raise GateError('direct transfer hold requires reconciliation')
 
     def _arm_direct_hold(self, receipt_id, scratch_binding_sha256):
         """Durably latch a direct reservation before any source writer/pin.
 
         No automatic clearing path exists; verified cross-system recovery must
-        be designed separately. Older executables do not honor this marker.
+        be designed separately. Version 1 readers reject the version 2 state.
         """
         state,reservation=self._reservation(receipt_id)
         if (type(scratch_binding_sha256) is not str or
                 re.fullmatch('[0-9a-f]{64}',scratch_binding_sha256) is None or
                 receipt_id!=scratch_binding_sha256[:32] or reservation['job'] is None):
             raise GateError('direct hold binding invalid')
-        expected=dict(schema=1,receiptId=receipt_id,generation=state['generation'],
-                      scratchBindingSha256=scratch_binding_sha256)
-        path=self.root / 'direct-hold.json'
-        if os.path.lexists(path):
-            try:
-                if path.is_symlink() or not path.is_file() or path.stat().st_size>1024:
-                    raise ValueError()
-                existing=json.loads(path.read_bytes())
-                if (type(existing) is not dict or
-                    json.dumps(existing,sort_keys=True,separators=(',',':'))!=
-                    json.dumps(expected,sort_keys=True,separators=(',',':'))):raise ValueError()
-            except (OSError,ValueError,TypeError):
-                raise GateError('direct transfer hold requires reconciliation') from None
+        expected=dict(receiptId=receipt_id,generation=state['generation'],scratchBindingSha256=scratch_binding_sha256)
+        if os.path.lexists(self.root / 'direct-hold.json'):
+            raise GateError('earlier direct marker requires reconciliation')
+        if state['schema']==2:
+            if state['directHold']!=expected:
+                raise GateError('direct transfer hold requires reconciliation')
             return
-        self._write('direct-hold.json',expected)
+        state['schema']=2
+        state['directHold']=expected
+        self._save(state)
 
     def _write(self, name, value):
         self._check_lock()
