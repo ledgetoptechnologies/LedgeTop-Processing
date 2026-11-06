@@ -1,7 +1,11 @@
 """Synthetic V2 local worker boundary; no runtime listener or custody ACK."""
 import hashlib
+import http.client
 import io
+import json
+import ssl
 import tempfile
+import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -92,3 +96,31 @@ class WorkerV2Tests(unittest.TestCase):
             with self.assertRaises(SourceSpoolError): self.put_zero()
         self.assertTrue(target.exists())
         with self.assertRaisesRegex(PolicyConflict,'active or uncertain'): self.put_zero()
+
+    def test_zero_object_over_bounded_tls_and_replay(self):
+        from ops.qualify_enrolled_phase_transport import configuration_material
+        from processing.direct_worker_http import create_direct_worker_server
+        from processing.reference_tls import verified_client_context
+        material=configuration_material(str(uuid.uuid4()),str(uuid.uuid4()))['configurationFiles']
+        for name in ('fixture-ca.pem','fixture-cert.pem','fixture-key.pem'):
+            (self.root/name).write_bytes(material[name])
+        context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version=ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(str(self.root/'fixture-cert.pem'),str(self.root/'fixture-key.pem'))
+        server=create_direct_worker_server(self.boundary,'127.0.0.1',0,ssl_context=context,idle_timeout=2)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            client_context=verified_client_context(str(self.root/'fixture-ca.pem'))
+            headers=dict(self.headers,**{'Content-SHA256':hashlib.sha256(b'').hexdigest()})
+            for expected_replay in (False,True):
+                connection=http.client.HTTPSConnection('127.0.0.1',server.server_port,context=client_context,timeout=3)
+                try:
+                    connection.request('PUT','/direct/v2/objects/'+fixtures.GCP_ID,body=b'',headers=headers)
+                    response=connection.getresponse();result=json.loads(response.read())
+                    self.assertEqual(response.status,200,result)
+                    self.assertEqual(result['replayed'],expected_replay)
+                    self.assertFalse(result['sourceCustodyAccepted'])
+                finally:connection.close()
+        finally:
+            server.shutdown();server.server_close();thread.join(3)
+            self.assertFalse(thread.is_alive())

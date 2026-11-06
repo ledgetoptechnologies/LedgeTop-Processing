@@ -93,8 +93,10 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
                                 header_deadline=15, max_object_bytes=20 * 1024**3,
                                 max_connections=4):
     """Create a bounded server without starting it or changing live services."""
-    if not isinstance(boundary, DirectWorkerBoundary):
+    from .direct_worker_receiver_v2 import DirectWorkerBoundaryV2
+    if not isinstance(boundary, (DirectWorkerBoundary, DirectWorkerBoundaryV2)):
         raise ValueError('trusted worker boundary required')
+    version = 'v2' if isinstance(boundary, DirectWorkerBoundaryV2) else 'v1'
     if (not isinstance(ssl_context, ssl.SSLContext)
             or ssl_context.protocol != ssl.PROTOCOL_TLS_SERVER
             or ssl_context.minimum_version < ssl.TLSVersion.TLSv1_2):
@@ -166,14 +168,14 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
                 if length > self.server.max_object_bytes:
                     self._reply(413, {'error': 'object_too_large'}); return
                 headers = dict(self.headers.items())
-                match = re.fullmatch(r'/direct/v1/objects/([A-Za-z0-9][A-Za-z0-9_-]{0,127})', self.path)
+                match = re.fullmatch(r'/direct/' + version + r'/objects/([A-Za-z0-9][A-Za-z0-9_-]{0,127})', self.path)
                 if self.command == 'PUT' and match:
                     body = _BoundedReader(self, length, time.monotonic() + self.server.body_deadline)
                     result = boundary.put(headers, protected_transport=True, object_id=match[1],
                                           content_length=length,
                                           content_sha256=self.headers.get('Content-SHA256'), reader=body)
                     self._reply(200, result); return
-                if self.command == 'POST' and self.path == '/direct/v1/complete' and length == 0:
+                if version == 'v1' and self.command == 'POST' and self.path == '/direct/v1/complete' and length == 0:
                     result = boundary.complete(headers, protected_transport=True)
                     self._reply(200, result); return
                 self._reply(404, {'error': 'not_found'})
