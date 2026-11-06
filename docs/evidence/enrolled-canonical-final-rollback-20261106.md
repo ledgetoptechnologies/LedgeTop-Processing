@@ -78,8 +78,15 @@ The TAR is retained evidence, never a restore or lock-authority source.
 
 The explicitly authorized unchanged success-only inner cleanup ran after audit
 success and worker closure. Inner task-label container and volume inventories
-were empty; exact stopped outer and single artifact volume remain retained for
-root independent review. All unknown/failure paths retain resources unchanged.
+were empty. Root independently reviewed the result, accepted audit and all 321
+cold files before exact outer retirement. Fresh full-image/operation/PID0/exit0/
+no-OOM checks preceded removal of only the stopped outer. A new closed FULL
+container inventory independently proved zero named-volume or bind-parent/child
+alias users before the single owned artifact volume was removed without force.
+Both inner and outer task-label container/volume inventories were empty. The
+complete Windows private/cold evidence remains unchanged; no own runner,
+container or volume remains active. All unknown/failure paths retain resources
+until separately reviewed; no further tests/build/deployment were started.
 
 Together with the separate canonical final-image forward, this proves those
 local component paths for the exact image. Explicit fixture limitations remain:
