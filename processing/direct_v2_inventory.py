@@ -30,6 +30,9 @@ def prepare(payload, *, authenticated_principal, environment, capability_fingerp
         viewerTaskId=checked['viewerTaskId'], providerTaskId=checked['providerTaskId'],
         sourceManifest=deepcopy(checked['sourceManifest']),
         derivedManifest=deepcopy(checked['derivedManifest']),
+        pipelineManifest=deepcopy(checked['manifest']), pipeline=deepcopy(checked['pipeline']),
+        capabilityFingerprint=checked['capabilityFingerprint'],
+        sourceAttestation=deepcopy(checked['sourceAttestation']),
         sourceManifestSha256=checked['sourceManifestSha256'],
         derivedManifestSha256=checked['derivedManifestSha256'],
         pipelineManifestSha256=checked['manifestSha256'], pipelineDigest=checked['pipelineDigest'],
@@ -38,5 +41,39 @@ def prepare(payload, *, authenticated_principal, environment, capability_fingerp
         preparedEnvelopeSha256=proof['preparedEnvelopeSha256'],
         activationId=proof['activationId'], sourceCustodyAccepted=False,
         transferAuthorized=False, processingAuthorized=False)
+    # Internal Python-only digest, not a Viewer wire/JCS contract.
     result['inventorySha256'] = protocol.digest(result)
     return result
+
+
+def verify(value, *, expected_binding, **verification):
+    """Reverify the original signed request and exact independently pinned binding.
+
+    The snapshot/envelope digests remain commitments; this does not prove their
+    preimages, current worker fencing, file presence, or durable custody.
+    """
+    binding_fields = ('authorityId', 'principalId', 'environment', 'submissionId',
+        'viewerTaskId', 'providerTaskId', 'sourceManifestSha256', 'derivedManifestSha256',
+        'pipelineManifestSha256', 'pipelineDigest', 'attestationSha256',
+        'sourceSnapshotSha256', 'preparedEnvelopeSha256', 'activationId')
+    protocol._require(type(value) is dict and type(expected_binding) is dict
+        and set(expected_binding) == set(binding_fields), 'worker inventory binding required')
+    protocol._closed(value, ('protocol', 'schemaVersion', 'authorityId', 'principalId', 'environment',
+        'submissionId', 'viewerTaskId', 'providerTaskId', 'sourceManifest', 'derivedManifest',
+        'pipelineManifest', 'pipeline', 'capabilityFingerprint', 'sourceAttestation',
+        'sourceManifestSha256', 'derivedManifestSha256', 'pipelineManifestSha256', 'pipelineDigest',
+        'attestationSha256', 'sourceSnapshotSha256', 'preparedEnvelopeSha256', 'activationId',
+        'sourceCustodyAccepted', 'transferAuthorized', 'processingAuthorized', 'inventorySha256'),
+        'worker inventory')
+    for name in binding_fields:
+        protocol._require(type(value.get(name)) is type(expected_binding[name])
+            and value.get(name) == expected_binding[name], 'worker inventory binding changed')
+    request = dict(schemaVersion=2, submissionId=value['submissionId'],
+        providerTaskId=value['providerTaskId'], viewerTaskId=value['viewerTaskId'],
+        sourceManifest=value['sourceManifest'], derivedManifest=value['derivedManifest'],
+        manifest=value['pipelineManifest'], pipeline=value['pipeline'],
+        capabilityFingerprint=value['capabilityFingerprint'], sourceAttestation=value['sourceAttestation'])
+    checked = prepare(request, **verification)
+    protocol._require(protocol.canonical_json(checked) == protocol.canonical_json(value),
+                      'worker inventory changed')
+    return checked

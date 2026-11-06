@@ -24,6 +24,9 @@ class DirectV2InventoryTests(unittest.TestCase):
         self.assertEqual(result['sourceManifestSha256'], self.payload['sourceManifest']['sha256'])
         self.assertEqual(result['derivedManifestSha256'], self.payload['derivedManifest']['sha256'])
         self.assertEqual(result['pipelineManifestSha256'], self.payload['manifest']['sha256'])
+        self.assertEqual(result['sourceAttestation'], self.payload['sourceAttestation'])
+        self.assertEqual(result['pipelineManifest'], self.payload['manifest'])
+        self.assertEqual(result['pipeline'], self.payload['pipeline'])
         self.assertEqual(len(result['sourceManifest']['objects']), 2)
         self.assertEqual(result['sourceManifest']['objects'][1]['retentionClass'], 'permanent_viewer_hold')
         self.assertEqual(len(result['derivedManifest']['objects']), 1)
@@ -42,6 +45,22 @@ class DirectV2InventoryTests(unittest.TestCase):
         modified['sourceManifest']['objects'][1]['retentionClass'] = 'release_after_acceptance'
         with self.assertRaises(ValueError):
             inventory.prepare(modified, **self.options)
+
+    def test_worker_revalidates_original_proof_and_independent_binding(self):
+        prepared = inventory.prepare(self.payload, **self.options)
+        fields = ('authorityId', 'principalId', 'environment', 'submissionId', 'viewerTaskId',
+            'providerTaskId', 'sourceManifestSha256', 'derivedManifestSha256',
+            'pipelineManifestSha256', 'pipelineDigest', 'attestationSha256',
+            'sourceSnapshotSha256', 'preparedEnvelopeSha256', 'activationId')
+        binding = {key:prepared[key] for key in fields}
+        self.assertEqual(inventory.verify(prepared, expected_binding=binding, **self.options), prepared)
+        changed = copy.deepcopy(prepared)
+        changed['sourceAttestation']['signature'] = 'A' * 86
+        with self.assertRaises(ValueError):
+            inventory.verify(changed, expected_binding=binding, **self.options)
+        binding['sourceSnapshotSha256'] = 'f' * 64
+        with self.assertRaises(ValueError):
+            inventory.verify(prepared, expected_binding=binding, **self.options)
 
 
 if __name__ == '__main__':
