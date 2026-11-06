@@ -147,7 +147,7 @@ class DirectV2Handoff:
                                      (self.item['reservationId'],)).fetchone()['closure']
                     return verify(json.loads(saved),expected_closure=self.sender._expected_closure(),
                         issuer_id=self.sender._issuer,key_id=self.sender._key,public_key=self.sender._public)
-                if state!='receiving':raise Conflict('V2 closure outcome uncertain')
+                if state not in ('receiving','closure_pending'):raise Conflict('V2 closure outcome uncertain')
                 rows=db.execute('SELECT * FROM direct_v2_handoff_objects WHERE reservation=?',
                                 (self.item['reservationId'],)).fetchall()
                 if len(rows)!=len(self.ids):raise Conflict('V2 source inventory incomplete')
@@ -157,8 +157,9 @@ class DirectV2Handoff:
                             (row['byte_size'],row['sha256'])!=(obj['byteSize'],obj['sha256'])):
                         raise Conflict('V2 source inventory incomplete')
                     self._verify_observation(json.loads(row['observation']),obj)
-                db.execute("UPDATE direct_v2_handoff_sessions SET state='closure_pending' WHERE reservation=?",
-                           (self.item['reservationId'],))
+                if state=='receiving':
+                    db.execute("UPDATE direct_v2_handoff_sessions SET state='closure_pending' WHERE reservation=?",
+                               (self.item['reservationId'],))
             result=self.sender.complete();wire=p.canonical_json(result)
             if len(wire)>65536:raise Conflict('V2 closure observation too large')
             with self.queue._db() as db:

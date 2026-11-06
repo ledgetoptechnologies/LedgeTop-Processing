@@ -80,7 +80,6 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                     self.assertTrue(observed['localObjectDurable']);self.assertFalse(observed['sourceCustodyAccepted'])
                 if lose_closure:
                     from processing.direct_worker_sender import DirectDeliveryUncertain
-                    from processing.maintenance import Conflict
                     original=sender.complete
                     def lose_after_worker_commit():
                         original()
@@ -89,8 +88,11 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                         with self.assertRaises(DirectDeliveryUncertain):handoff.complete(token,protected_transport=True)
                     with queue._db() as db:
                         self.assertEqual(db.execute('SELECT state FROM direct_v2_handoff_sessions').fetchone()[0],'closure_pending')
-                    with self.assertRaisesRegex(Conflict,'outcome uncertain'):
-                        handoff.complete(token,protected_transport=True)
+                    handoff=DirectV2Handoff(store,sender,principal='viewer-staging',bearer=token)
+                    recovered=handoff.complete(token,protected_transport=True)
+                    self.assertFalse(recovered['closure']['sourceCustodyAccepted'])
+                    with queue._db() as db:
+                        self.assertEqual(db.execute('SELECT state FROM direct_v2_handoff_sessions').fetchone()[0],'closure_observed')
                     self.assertEqual(queue.get(job['jobId'])['status'],'held')
                     self.assertTrue((f.spool.root.parent/'direct-v2-worker-signed-closure.json').exists())
                     return
