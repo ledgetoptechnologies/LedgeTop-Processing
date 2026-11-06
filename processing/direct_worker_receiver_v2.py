@@ -172,6 +172,11 @@ class DirectWorkerBoundaryV2:
             closure_sha=row['closure_sha']
         return self._closure_signer.retention_observation(signed,binding_sha=digest,closure_sha=closure_sha)
 
+    def retention_challenge(self, headers, *, protected_transport, challenge):
+        """Challenge binds a newly observed local fence; never grants custody."""
+        observation=self.retention(headers,protected_transport=protected_transport)
+        return self._closure_signer.challenged_retention(observation,challenge=challenge)
+
     def observe(self, headers, *, protected_transport, object_id):
         """Observe an exact durable object; absence or active writers stays uncertain."""
         from .direct_worker_boundary import DirectWorkerBoundary

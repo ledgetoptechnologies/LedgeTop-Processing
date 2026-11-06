@@ -176,6 +176,21 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                         saved=db.execute('SELECT closure FROM direct_v2_handoff_sessions WHERE reservation=?',(f.item['reservationId'],)).fetchone()[0]
                     import json
                     signed=json.loads(saved)
+                    from processing.direct_worker_receipt_v2 import verify_retention_challenge
+                    with self.assertRaises(Conflict):
+                        handoff.challenge_retention('wrong-viewer-token-012345678901234',protected_transport=True)
+                    from processing.direct_worker_http import _BoundedReader
+                    original_read=_BoundedReader.read
+                    def fragmented(reader,count=-1):
+                        return original_read(reader,min(count,7))
+                    with patch.object(_BoundedReader,'read',fragmented):
+                        fresh=handoff.challenge_retention(token,protected_transport=True)
+                    self.assertFalse(fresh['sourceCustodyAccepted'])
+                    self.assertFalse(fresh['processingAuthorized'])
+                    with self.assertRaises(ReceiptRejected):
+                        verify_retention_challenge(fresh,challenge='0'*64,signed_closure=signed,
+                            expected_closure=sender._expected_closure(),issuer_id=sender._issuer,
+                            key_id=sender._key,public_key=sender._public)
                     from processing import reference_protocol as protocol
                     old={key:value for key,value in observed.items() if key!='signature'}
                     old['protocol']='ltds-direct-worker-retention-observation-v1';old['schemaVersion']=1
