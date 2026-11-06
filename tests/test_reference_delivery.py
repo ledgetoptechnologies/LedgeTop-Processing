@@ -132,6 +132,27 @@ class ReferenceDeliveryTests(unittest.TestCase):
         with self.assertRaises(Conflict):
             self.receiver.receive(self.envelope, **{**self.identity, 'worker_instance_id': 'other'})
 
+    def test_claim_authentication_precedes_job_dependent_validation_and_replay(self):
+        envelope = copy.deepcopy(self.envelope)
+        payload = envelope['payload']
+        payload['resultManifest']['engineVersions'] = {'treedar': 'test-v1'}
+        result = payload['resultManifest']
+        result['resultManifestSha256'] = digest({k:v for k,v in result.items() if k != 'resultManifestSha256'})
+        payload['resultManifestSha256'] = result['resultManifestSha256']
+        envelope['outboxId'] = digest({k: payload[k] for k in ('jobId', 'generation',
+            'environment', 'inputManifestSha256', 'pipelineDigest', 'resultManifestSha256')})
+        envelope['payloadSha256'] = digest(payload)
+        for identity in ({**self.identity, 'claim_token': 'wrong'},
+                         {**self.identity, 'claim_request_id': 'wrong'},
+                         {**self.identity, 'claim_token': '\N{SNOWMAN}'}):
+            with self.subTest(identity=identity), self.assertRaisesRegex(Conflict, 'persisted claim ownership'):
+                self.receiver.receive(envelope, **identity)
+        self.assertEqual(self.queue.get(self.job['jobId'])['status'], 'running')
+        receipt = self.receiver.receive(self.envelope, **self.identity)
+        with self.assertRaisesRegex(Conflict, 'persisted claim ownership'):
+            self.receiver.receive(self.envelope, **{**self.identity, 'claim_token': 'wrong'})
+        self.assertEqual(self.receiver.receive(self.envelope, **self.identity), receipt)
+
     def test_missing_archive_or_wrong_engine_cannot_complete(self):
         for mutation in ('archive', 'engine'):
             envelope = copy.deepcopy(self.envelope)

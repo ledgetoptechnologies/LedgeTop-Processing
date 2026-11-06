@@ -34,6 +34,12 @@ class DeliveryReceiver:
         binding = {key: payload[key] for key in BINDING}
         if protocol.digest(binding) != envelope['outboxId']:
             raise Conflict('delivery outbox identity mismatch')
+        # The worker transport authenticates its bearer, while persisted claim
+        # ownership gates job-dependent checks and receipt replay. The commit
+        # path repeats this check in its write transaction.
+        self.store.authenticate_worker_result_claim(payload['jobId'], claim_token=claim_token,
+            node_id=node_id, worker_id=worker_id, worker_instance_id=worker_instance_id,
+            claim_request_id=claim_request_id)
         job = self.store.get(payload['jobId'], private=True)
         if (payload['generation'], payload['environment'], payload['inputManifestSha256'],
                 payload['pipelineDigest']) != (job['generation'], job['environment'],

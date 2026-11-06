@@ -955,6 +955,24 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                    (encoded, row["job_id"]))
         return self._public(self._row(db, row["job_id"]))
 
+    @staticmethod
+    def _require_result_claim(db, job_id, *, claim_token, node_id, worker_id,
+                              worker_instance_id, claim_request_id):
+        claim = db.execute('SELECT * FROM reference_claims WHERE request_id=?', (claim_request_id,)).fetchone()
+        if (not claim or (claim['job_id'], claim['node_id'], claim['worker_id'], claim['instance_id']) !=
+                (job_id, node_id, worker_id, worker_instance_id)
+                or type(claim_token) is not str or not claim_token.isascii()
+                or type(claim['token']) is not str or not claim['token'].isascii()
+                or not hmac.compare_digest(claim['token'], claim_token)):
+            raise Conflict('worker result does not match persisted claim ownership')
+
+    def authenticate_worker_result_claim(self, job_id, *, claim_token, node_id, worker_id,
+                                         worker_instance_id, claim_request_id):
+        """Authenticate without exposing job metadata or changing durable state."""
+        with self.queue._db() as db:
+            self._require_result_claim(db, job_id, claim_token=claim_token, node_id=node_id,
+                worker_id=worker_id, worker_instance_id=worker_instance_id, claim_request_id=claim_request_id)
+
     def record_worker_result(self, job_id, result, *, claim_token, node_id, worker_id,
                              worker_instance_id, claim_request_id):
         """Seal a returned terminal result, including a surviving worker's result.
@@ -965,12 +983,9 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         """
         with self.queue._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            self._require_result_claim(db, job_id, claim_token=claim_token, node_id=node_id,
+                worker_id=worker_id, worker_instance_id=worker_instance_id, claim_request_id=claim_request_id)
             row = self._row(db, job_id)
-            claim = db.execute("SELECT * FROM reference_claims WHERE request_id=?", (claim_request_id,)).fetchone()
-            if (not claim or (claim["job_id"], claim["node_id"], claim["worker_id"], claim["instance_id"]) !=
-                    (job_id, node_id, worker_id, worker_instance_id)
-                    or type(claim_token) is not str or not hmac.compare_digest(claim["token"], claim_token)):
-                raise Conflict("worker result does not match persisted claim ownership")
             if row["status"] == "held" and row["held_reason"] != "coordinator_restart":
                 raise Conflict("operator-held worker results require explicit resolution")
             return self._seal_result(db, row, result, allow_recovery=True)
