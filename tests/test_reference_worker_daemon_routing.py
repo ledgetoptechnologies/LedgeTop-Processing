@@ -186,6 +186,12 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
             self.assertTrue(daemon.load_config(str(path),expected_direct_config_sha256=digest)['directPreparation']['enabled'])
             path.write_text(json.dumps(dict(self.config,engineVersion='changed')))
             with self.assertRaises(ValueError):daemon.load_config(str(path),expected_direct_config_sha256=digest)
+            absent=copy.deepcopy(self.config);absent.pop('directPreparation')
+            disabled=copy.deepcopy(self.config);disabled['directPreparation']['enabled']=False
+            for substituted in (absent,disabled):
+                path.write_text(json.dumps(substituted))
+                with self.subTest(substitution='disabled' if 'directPreparation' in substituted else 'absent'):
+                    with self.assertRaises(ValueError):daemon.load_config(str(path),expected_direct_config_sha256=digest)
             # A matching digest does not make an unsafe ancestor trusted.
             unsafe=self.root/'unsafe-config.json';unsafe.write_text(json.dumps(self.config));unsafe.chmod(0o600)
             with self.assertRaises(ValueError):daemon.load_config(str(unsafe),expected_direct_config_sha256=hashlib.sha256(unsafe.read_bytes()).hexdigest())

@@ -324,6 +324,12 @@ def load_config(path, *, expected_direct_config_sha256=None):
             os.close(descriptor)
         if len(raw) > MAX_CONFIG_BYTES:
             raise ValueError('configuration exceeds size limit')
+        if expected_direct_config_sha256 is not None:
+            from processing.direct_protected_transport import _read
+            p._hash(expected_direct_config_sha256,'enrolled worker config digest')
+            protected_raw=_read(path,private=True,maximum=MAX_CONFIG_BYTES)
+            if (protected_raw!=raw or hashlib.sha256(protected_raw).hexdigest()!=expected_direct_config_sha256):
+                raise ValueError('enrolled direct worker configuration changed')
         config = p.decode_submission(raw)
         if type(config) is not dict or not REQUIRED <= set(config) or set(config) - REQUIRED - OPTIONAL:
             raise ValueError('configuration fields differ')
@@ -397,10 +403,8 @@ def load_config(path, *, expected_direct_config_sha256=None):
                 from processing.direct_protected_transport import _read, _sealed
                 # The digest must come from a separately authenticated, immutable
                 # enrollment record, never from this config or an HTTP request.
-                p._hash(expected_direct_config_sha256,'enrolled worker config digest')
-                protected_raw=_read(path,private=True,maximum=MAX_CONFIG_BYTES)
-                if (protected_raw!=raw or hashlib.sha256(protected_raw).hexdigest()!=expected_direct_config_sha256):
-                    raise ValueError('enrolled direct worker configuration changed')
+                if expected_direct_config_sha256 is None:
+                    raise ValueError('enrolled direct worker configuration required')
                 address=ipaddress.ip_address(direct['host'])
                 if not address.is_loopback or type(direct['port']) is not int or not 1<=direct['port']<=65535:
                     raise ValueError('private loopback listener required')
