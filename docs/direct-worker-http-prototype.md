@@ -24,3 +24,15 @@ those contracts and real multi-process/worker failure paths are qualified.
 TLS certificate and bearer management stay with the eventual trusted runtime.
 The tests use a temporary loopback TLS server, a synthetic worker, tmpfs and
 no external network; they do not prove installation or real-data processing.
+
+`DirectWorkerSender` is a separate, unwired coordinator-side client. It uses a
+configured HTTPS worker origin, hostname validation and an explicit CA trust
+store, a scoped bearer, fixed object lengths and local hashes. It validates the
+signed worker closure against the expected full worker binding. Failed or lost
+responses are uncertain and never become Viewer custody acknowledgements; no
+automatic resend occurs. A caller may explicitly retry only after reconciling
+the unchanged job and transfer identity. The local input reader must be trusted
+and bounded by its owner: the network deadline does not interrupt a stalled
+local reader or DNS resolver. There is no coordinator receipt, authentication
+negotiation, job admission, installed client configuration, or verified result
+return in this prototype.
