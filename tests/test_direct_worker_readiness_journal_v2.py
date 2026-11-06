@@ -94,3 +94,10 @@ class ReadinessJournalTests(unittest.TestCase):
             with self.assertRaises(journal.ReadinessIssueUncertain):journal.issue(f.ledger,f.spool,f.item,**kwargs)
         with f.ledger._transaction() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
+
+    def test_initial_fence_read_failure_keeps_prior_pin_uncertain(self):
+        f,kwargs=self.setup_fixture();journal.issue(f.ledger,f.spool,f.item,**kwargs)
+        with patch.object(journal,'require_fenced',side_effect=RuntimeError('scratch unavailable')):
+            with self.assertRaises(journal.ReadinessIssueUncertain):journal.issue(f.ledger,f.spool,f.item,**kwargs)
+        with f.ledger._transaction() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)

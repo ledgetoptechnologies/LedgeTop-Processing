@@ -29,7 +29,12 @@ def issue(ledger, spool, item, *, principal, expected_worker, engine_id,
     p._slug(issuer_id,'issuer');p._slug(key_id,'key')
     if not isinstance(private_key,Ed25519PrivateKey):raise ValueError('worker signing key required')
     if type(validity_seconds) is not int or not 1<=validity_seconds<=60:raise ValueError('invalid readiness lifetime')
-    item,digest,scratch_id=require_fenced(ledger,item,expected_worker=expected_worker)
+    try:
+        item,digest,scratch_id=require_fenced(ledger,item,expected_worker=expected_worker)
+    except Exception:
+        # The journal may already contain a committed issue and retained pin;
+        # inability to inspect scratch is never evidence of an unstarted job.
+        raise ReadinessIssueUncertain('readiness issuance requires reconciliation') from None
     pub=private_key.public_key()
     raw_key=pub.public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)
     request=dict(principal=principal,item=item,worker=expected_worker,engineId=engine_id,
