@@ -58,7 +58,7 @@ def verify_selected(intent, frames, *, source_records, pipeline_manifest):
         if role=='image' and not photo:raise ValueError('unsupported selected image')
         if role=='provider_input' and not AUXILIARY.search(name):raise ValueError('unsupported provider input')
         (photos if photo else inputs).append(source['datasetFileId'])
-    if selected!=photos+inputs:raise ValueError('selected source policy changed')
+    if not photos or selected!=photos+inputs:raise ValueError('selected source policy changed')
     for identifier,obj in zip(selected,objects):
         source=sources.get(identifier)
         if (source is None or source['processingRole'] in ('gcp_source','administrative')

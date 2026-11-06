@@ -76,5 +76,8 @@ class FrameTests(unittest.TestCase):
                           kind=by_id[x]['kind'],mediaType=by_id[x]['mediaType']) for x in ids]
             return verify_selected(intent,wire,source_records=records,pipeline_manifest={'objects':objects})
         self.assertEqual(check(['photo','input'])['selectedCount'],2)
-        for ids in (['input','photo'],['photo'],['photo','input','ignored']):
+        without_photo=records.pop()
+        with self.assertRaises(ValueError):check(['input'])
+        records.append(without_photo)
+        for ids in (['input','photo'],['photo'],['photo','input','ignored'],['input']):
             with self.subTest(ids=ids),self.assertRaises(ValueError):check(ids)
