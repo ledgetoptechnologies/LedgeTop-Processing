@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from processing import direct_negotiation_candidate as n, direct_limits as limits, reference_protocol as p
 
 ID='00000000-0000-4000-8000-000000000001'
@@ -18,12 +19,13 @@ class NegotiationTests(unittest.TestCase):
             environment='staging',manifestSha256='a'*64,derivedManifestSha256='b'*64,
             profile=limits.PROFILE,**self.worker)
         self.cap=dict(profile=limits.PROFILE,maxSource=10000,maxDerived=10000,maxManifestBytes=16*1024*1024,**self.worker)
-    def run_select(self,req=None,cap=None,principal='viewer',worker=None):
+        self.guard=lambda db,req,cap: True # synthetic stub; not deployed freeze/freshness
+    def run_select(self,req=None,cap=None,principal='viewer',worker=None,guard=None):
         with closing(sqlite3.connect(self.path)) as db:
             db.execute('PRAGMA synchronous=FULL')
             return n.negotiate(db,p.canonical_json(self.req if req is None else req),
                 p.canonical_json(self.cap if cap is None else cap),authenticated_principal=principal,
-                authenticated_worker=self.worker if worker is None else worker)
+                authenticated_worker=self.worker if worker is None else worker,admission_guard=self.guard if guard is None else guard)
     def test_selection_persists_exact_replay_and_never_grants_custody(self):
         first=self.run_select();row=json.loads(first)
         self.assertEqual(row['state'],'selected_not_reserved')
@@ -55,10 +57,29 @@ class NegotiationTests(unittest.TestCase):
             db.commit()
             with self.assertRaises(sqlite3.IntegrityError):
                 n.negotiate(db,p.canonical_json(self.req),p.canonical_json(self.cap),
-                    authenticated_principal='viewer',authenticated_worker=self.worker)
+                    authenticated_principal='viewer',authenticated_worker=self.worker,admission_guard=self.guard)
             self.assertEqual(db.execute('SELECT count(*) FROM direct_negotiation_candidate').fetchone()[0],0)
         with closing(sqlite3.connect(self.path)) as db:
             db.execute('DROP TRIGGER fail_insert');db.commit()
         self.assertEqual(json.loads(self.run_select())['state'],'selected_not_reserved')
+
+    def test_guard_rechecked_on_replay_and_refuses_freeze_or_stale_worker(self):
+        first=self.run_select();calls=[]
+        def fail(db,req,cap):
+            calls.append(db.in_transaction);return False
+        with self.assertRaisesRegex(n.NegotiationHeld,'freshness'):
+            self.run_select(guard=fail)
+        self.assertEqual(calls,[True]);self.assertEqual(first,self.run_select())
+        with self.assertRaises(n.NegotiationHeld):self.run_select(guard=False)
+
+    def test_bounded_rows_and_bytes_hold_without_discarding_replay(self):
+        first=self.run_select()
+        next_req=dict(self.req,operationId='00000000-0000-4000-8000-000000000002')
+        with patch.object(n,'MAX_SELECTIONS',1):
+            with self.assertRaisesRegex(n.NegotiationHeld,'capacity'):self.run_select(next_req)
+            self.assertEqual(first,self.run_select())
+        with patch.object(n,'MAX_STORAGE_BYTES',1):
+            with self.assertRaisesRegex(n.NegotiationHeld,'capacity'):self.run_select(next_req)
+            self.assertEqual(first,self.run_select())
 
 if __name__=='__main__':unittest.main()

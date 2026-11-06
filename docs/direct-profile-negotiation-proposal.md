@@ -65,6 +65,16 @@ selection and real reservation must eventually become one crash-consistent
 transaction, or have an independently reviewed recovery protocol; this
 experiment alone is not that transaction.
 
+The selection experiment additionally requires a trusted guard on **every**
+call, including replay, to check freeze and current worker capability within
+its database transaction. Tests use a synthetic guard; no production guard,
+authenticated liveness evidence, coordinator freeze integration or metadata
+census exists yet. Its separate journal holds at 64 rows or 1 MiB of counted
+logical values, keeps existing selections for replay, and does not auto-delete
+them. Those local caps do not account for SQLite overhead, integrate with the
+coordinator's shared quota, or define safe retention. All of those must be
+resolved before any live use; a guard callback alone is not proof of safety.
+
 ## One bounded local measurement
 
 On the current isolated worktree with the snapshot implementation at

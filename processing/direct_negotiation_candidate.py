@@ -13,6 +13,8 @@ MAX_REQUEST_BYTES = 4096
 MAX_CAPABILITY_BYTES = 4096
 MAX_RESPONSE_BYTES = 4096
 MAX_JSON_DEPTH = 4
+MAX_SELECTIONS = 64
+MAX_STORAGE_BYTES = 1024 * 1024
 REQUEST_FIELDS = frozenset(('operationId','principalId','authorityId','nodeId','workerId',
     'workerInstanceId','jobId','attemptId','generation','environment','manifestSha256',
     'derivedManifestSha256','profile'))
@@ -55,11 +57,15 @@ def _decode(raw,maximum):
     except (ValueError,TypeError,UnicodeError,RecursionError):
         raise NegotiationHeld('invalid canonical JSON') from None
 
-def negotiate(db,raw_request,raw_capabilities,*,authenticated_principal,authenticated_worker):
+def negotiate(db,raw_request,raw_capabilities,*,authenticated_principal,authenticated_worker,admission_guard):
     """Persist selection for exact replay, never claims reservation or custody.
 
     Identity arguments are trusted adapter outputs, not request values or
-    caller-provided HTTP headers. Never expose this primitive directly.
+    caller-provided HTTP headers. The trusted guard must check freeze and fresh
+    worker capability *within this same transaction* on every call, including
+    replay; a caller-supplied boolean is insufficient. This experimental hook
+    is not the real coordinator freeze/census integration. Never expose this
+    primitive directly.
     """
     req=_decode(raw_request,MAX_REQUEST_BYTES)
     cap=_decode(raw_capabilities,MAX_CAPABILITY_BYTES)
@@ -78,6 +84,7 @@ def negotiate(db,raw_request,raw_capabilities,*,authenticated_principal,authenti
             if type(cap[field]) is not int or cap[field]<minimum or cap[field]>9007199254740991:raise ValueError()
     except (ValueError,TypeError,KeyError):
         raise NegotiationHeld('identity, capability or profile rejected') from None
+    if not callable(admission_guard):raise NegotiationHeld('trusted admission guard required')
     if db.in_transaction or db.execute('PRAGMA synchronous').fetchone()[0] not in (2,3):
         raise NegotiationHeld('exclusive FULL transaction required')
     cap_hash=hashlib.sha256(raw_capabilities).hexdigest()
@@ -87,12 +94,20 @@ def negotiate(db,raw_request,raw_capabilities,*,authenticated_principal,authenti
     if len(response)>MAX_RESPONSE_BYTES:raise NegotiationHeld('response limit exceeded')
     db.execute('BEGIN IMMEDIATE')
     try:
+        if admission_guard(db,dict(req),dict(cap)) is not True:
+            raise NegotiationHeld('freeze or capability freshness unverified')
         db.execute('''CREATE TABLE IF NOT EXISTS direct_negotiation_candidate (
             principal TEXT NOT NULL, operation TEXT NOT NULL, request BLOB NOT NULL,
             capability BLOB NOT NULL, response BLOB NOT NULL, PRIMARY KEY(principal,operation))''')
         old=db.execute('SELECT request,capability,response FROM direct_negotiation_candidate WHERE principal=? AND operation=?',
                        (req['principalId'],req['operationId'])).fetchone()
         if old is None:
+            count,used=db.execute('''SELECT count(*),coalesce(sum(length(CAST(principal AS BLOB))+
+                length(CAST(operation AS BLOB))+length(request)+length(capability)+length(response)),0)
+                FROM direct_negotiation_candidate''').fetchone()
+            charge=len(req['principalId'].encode())+len(req['operationId'].encode())+len(raw_request)+len(raw_capabilities)+len(response)
+            if count>=MAX_SELECTIONS or used+charge>MAX_STORAGE_BYTES:
+                raise NegotiationHeld('negotiation journal capacity reached')
             db.execute('INSERT INTO direct_negotiation_candidate VALUES(?,?,?,?,?)',
                        (req['principalId'],req['operationId'],raw_request,raw_capabilities,response))
         elif bytes(old[0])!=raw_request or bytes(old[1])!=raw_capabilities or bytes(old[2])!=response:
