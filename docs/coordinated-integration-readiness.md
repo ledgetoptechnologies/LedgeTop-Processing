@@ -46,7 +46,7 @@ not be added together or described as a complete suite.
 | Long transfer after coordinator outage | Renewal/mint plus scratch and per-receipt delivery fences integrated; 442/442 frozen Linux checks passed at `b467c3b` | Actual coordinator-restart fetching/processing recovery, worker enrollment and connected delivery remain open |
 | Viewer GCP workflow | Corrected curated Viewer `7598858b` passed 158/158 Linux checks and 3/3 actual local Processing/Viewer pairings, including licensed conversion, result acceptance and signed 24-hour cleanup | Installed deployment/return acceptance, NAVD88 geoid qualification and rendered UI acceptance remain open |
 | TreeDar and Gaussian splats | Genuine-LiDAR validation/scaffolding | Typed usable TreeDar output registration and real processing; Gaussian remains disabled |
-| Customer/project/task workspace | Historical #406 behavior and hierarchy tests | Current owner/release reconciliation and rendered/deployed acceptance |
+| Customer/project/task workspace | Current `ca5eedf3` frontend builds from the exact offline lock. Actual synthetic in-app browser review verifies customer/group/project placement, task/log navigation and bounded layouts at1280/390/320px; see the rendered review | Installed sign-in/client permissions, actual Reference V2 browser statuses, GCP draft/mark/start follow-up and deployed acceptance |
 
 ### Recovery follow-on under review
 
