@@ -301,10 +301,18 @@ def readiness(instance,planned):
     require(instance['log'].stat().st_size<=262144,'bounded_private_worker_log_required')
     deadline=time.monotonic()+10
     while True:
+        require(process.poll() is None and process_identity(process.pid)==instance['startTime'],
+                'owned_factory_worker_changed')
+        remaining=deadline-time.monotonic()
+        require(remaining>0,'actual_prepared_worker_unready')
         value=invoke(instance['entry'],'probe',dict(worker=planned,challenge=str(uuid.uuid4()),
-            pid=process.pid,startTime=instance['startTime']),instance['home'])
+            pid=process.pid,startTime=instance['startTime']),instance['home'],timeout=min(15,remaining))
+        require(process.poll() is None and process_identity(process.pid)==instance['startTime'],
+                'owned_factory_worker_changed')
+        remaining=deadline-time.monotonic()
+        require(remaining>0,'actual_prepared_worker_unready')
         if value.get('pending') is not True:return value
-        require(time.monotonic()<deadline,'actual_prepared_worker_unready');time.sleep(.02)
+        time.sleep(min(.02,remaining))
 
 
 def stop_worker(instance):

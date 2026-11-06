@@ -39,11 +39,16 @@ def main(mode):
                 require(process_identity(packet['pid'])==packet['startTime'],'actual_fixture_child_changed')
                 return dict(pid=packet['pid'],active='active',substate='running',cgroup='/fixture-child/'+str(packet['pid']),
                             invocationId=packet['worker']['nodeId'],startTime=packet['startTime'])
-        from urllib.error import HTTPError
+        from urllib.error import HTTPError,URLError
         try:value=probe(packet['worker'],packet['challenge'],control=Control())
         except HTTPError as error:
             status=error.code;error.close()
             if status!=503:raise
+            value={'pending':True}
+        except URLError as error:
+            # Local fixture startup only: production probe keeps its masking.
+            reason=error.reason
+            if not isinstance(reason,ConnectionRefusedError) or reason.errno!=111:raise
             value={'pending':True}
         print(json.dumps(value,sort_keys=True,separators=(',',':')))
         return

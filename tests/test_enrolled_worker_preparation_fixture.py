@@ -152,6 +152,44 @@ class FixtureLifecycleUnitTests(unittest.TestCase):
                 w.stop_worker(dict(process=process,startTime='456'))
         process.send_signal.assert_called_once();process.kill.assert_not_called()
 
+    def test_fixture_probe_only_connection_refused_can_wait(self):
+        from urllib.error import URLError,HTTPError
+        from tests.fixtures.enrolled_worker_factory_process import main
+        from types import SimpleNamespace
+        errors=[(URLError(ConnectionRefusedError(111,'private')),True),
+                (URLError(ConnectionResetError(104,'private')),False),
+                (URLError('private'),False),(HTTPError('https://private',401,'private',{},None),False)]
+        for error,pending in errors:
+            with self.subTest(error=type(error).__name__),patch('ops.enrolled_worker_readiness_probe.probe',side_effect=error), \
+                    patch('sys.stdin',SimpleNamespace(buffer=io.BytesIO(b'{"worker":{},"challenge":"fixture"}'))), \
+                    patch('sys.stdout',new_callable=io.StringIO) as output:
+                if pending:
+                    main('probe');self.assertEqual(json.loads(output.getvalue()),{'pending':True})
+                else:
+                    with self.assertRaises(type(error)):main('probe')
+                    self.assertEqual(output.getvalue(),'')
+
+    def test_readiness_wait_is_bounded_and_rechecks_actual_child(self):
+        process=Mock(pid=123);process.poll.return_value=None
+        with tempfile.TemporaryDirectory() as temporary:
+            log=Path(temporary)/'log';log.write_bytes(b'')
+            instance=dict(manifest={},process=process,startTime='456',log=log,entry={},home=Path(temporary))
+            with patch.object(w,'process_identity',return_value='456') as identity, \
+                    patch.object(w.time,'monotonic',side_effect=[0,0,1,1,2]), \
+                    patch.object(w.time,'sleep') as sleep, \
+                    patch.object(w,'invoke',side_effect=[{'pending':True},{'ready':True}]) as invoke:
+                self.assertEqual(w.readiness(instance,{}),{'ready':True})
+                self.assertEqual([c.kwargs['timeout'] for c in invoke.call_args_list],[10,9])
+                sleep.assert_called_once_with(.02);self.assertEqual(identity.call_count,5)
+            with patch.object(w,'process_identity',return_value='456'), \
+                    patch.object(w.time,'monotonic',side_effect=[0,0,11]), \
+                    patch.object(w.time,'sleep') as sleep,patch.object(w,'invoke',return_value={'ready':True}):
+                with self.assertRaisesRegex(RuntimeError,'actual_prepared_worker_unready'):w.readiness(instance,{})
+                sleep.assert_not_called()
+            with patch.object(w,'process_identity',side_effect=['456','changed']),patch.object(w,'invoke') as invoke:
+                with self.assertRaisesRegex(RuntimeError,'owned_factory_worker_changed'):w.readiness(instance,{})
+                invoke.assert_not_called()
+
     def test_transport_diagnostic_excludes_payload_and_handles_nonexception_reason(self):
         from urllib.error import URLError
         secret='private-config-must-never-appear'
