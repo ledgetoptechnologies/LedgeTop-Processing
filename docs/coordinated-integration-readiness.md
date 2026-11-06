@@ -26,12 +26,13 @@ OS-library inventory bytes and interpreter pins were freshly checked readonly on
 both actual PCs on November 6. They remain preparation artifacts, not installed
 workers; see [the refresh evidence](evidence/worker-dependency-refresh-20261106.md).
 
-The separate tests-only delivery process-death candidate `899b8f3e` has its first
-bounded run reported by Claude: 26 cases in65.966s, with15 existing cases passing
-and all11 new cases failing, including the no-death control. Cause is under
-investigation; no successful delivery fault-boundary proof is claimed from that
-run. It is not selected into this candidate. The task container was removed;
-in-container child reap was not independently verified in that first run.
+Delivery process-death corrections are selected through `649b8c0e`. Claude's
+corrected26-case branch run passes; the combined run's26 process cases and16
+Viewer manifest/transfer cases pass, while one nonexistent-module loader error
+is retained. A corrected nonroot targeted TreeDar run passes18/18, and28 actual
+Python/canonical Viewer Node role vectors match. See
+[the precise selections and failed-run history](evidence/integrated-delivery-and-treedar-contract-20261106.md).
+These are separate component checks, not a single green aggregate suite.
 
 The configured-node/early-drain maintenance extension from
 [draft PR #367](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/367)
@@ -42,6 +43,11 @@ staging/qualification and explicit host/interpreter bindings for future nodes.
 See [the combined qualification](evidence/integrated-maintenance-20261106.md).
 It is not installed; timers remain disabled. The already staged image7adf6e6e
 predates this source change and is not relabelled as the combined release image.
+
+New combined image `5d466eb5`, revision `649b8c0e`, is built locally. All99 Python
+files match the frozen source and basic application health returns200. Its new
+actual cutover/rollback qualification and installed staging remain open; see
+[the immutable build receipt](evidence/combined-image-649b-20261106.md).
 
 This section and the remaining-delivery list at the end describe current gates.
 Intermediate checkpoints below are historical; their statements that source
