@@ -76,6 +76,7 @@ class StartupHealthTests(unittest.TestCase):
                 connection=self.connection(status=status);self.mocked(connection)
                 with self.assertRaisesRegex(RuntimeError,'actual_application_health_required'):self.run_script()
                 self.assertEqual(connection.connect.call_count,1)
+                connection.getresponse.return_value.read.assert_not_called()
 
     def test_invalid_json_or_health_never_retried(self):
         for raw in (b'bad',b'{}',b'{"status":"unavailable","mode":"routing_probe"}'):
@@ -89,6 +90,13 @@ class StartupHealthTests(unittest.TestCase):
         self.mocked(connection)
         with self.assertRaises(ConnectionResetError):self.run_script()
         self.assertEqual(connection.connect.call_count,1);self.assertEqual(connection.request.call_count,1)
+
+    def test_nonrefused_connect_errors_never_retried(self):
+        for error in (TimeoutError('timeout'),OSError(errno.EACCES,'denied'),ConnectionResetError('reset')):
+            with self.subTest(error=type(error).__name__):
+                connection=self.connection();connection.connect.side_effect=error;self.mocked(connection)
+                with self.assertRaises(type(error)):self.run_script()
+                self.assertEqual(connection.connect.call_count,1);connection.request.assert_not_called()
 
     def test_process_incarnation_change_holds_before_request(self):
         connection=self.connection();ticks=['1 (init) '+' '.join(['0']*19+[value]) for value in ('123','124')]

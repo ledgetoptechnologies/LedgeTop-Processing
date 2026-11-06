@@ -835,8 +835,9 @@ while True:
    time.sleep(min(.1,remaining))
    continue
   connection.request('GET','/healthz',headers={'Authorization':'Bearer '+token,'Accept':'application/json','Connection':'close'})
-  response=connection.getresponse();raw=response.read(65537)
+  response=connection.getresponse()
   if response.status!=200:raise RuntimeError('actual_application_health_required')
+  raw=response.read(65537)
   if len(raw)>65536 or response.getheader('Content-Encoding','identity')!='identity' or response.getheader('Content-Type','').split(';')[0]!='application/json':raise RuntimeError('operator_rpc_unavailable')
   body=json.loads(raw)
   if type(body) is not dict or body.get('status')!='ok' or body.get('mode')!='routing_probe':raise RuntimeError('invalid_startup_health_body')
