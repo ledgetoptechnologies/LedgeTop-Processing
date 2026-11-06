@@ -72,7 +72,7 @@ class ConfigurationTests(unittest.TestCase):
         from ops.update_service_units import render_configured_units,NAME
         unit=render_configured_units('/opt/processing/source','/home/operator/update.json',raw)[NAME+'.service']
         self.assertIn('ExecStart=/opt/processing/venv/bin/python -B -m ops.update_service tick',unit)
-        with patch('os.geteuid',return_value=1000),patch('pwd.getpwuid',return_value=SimpleNamespace(pw_name='operator')), \
+        with patch('os.geteuid',return_value=1000),patch('pwd.getpwuid',return_value=SimpleNamespace(pw_name='operator',pw_dir=str(self.root))), \
                 patch('socket.gethostname',return_value='gpu-third.example'), \
                 patch.object(module.sys,'executable','/opt/processing/venv/bin/python'):
             module.runtime_identity(parsed)
