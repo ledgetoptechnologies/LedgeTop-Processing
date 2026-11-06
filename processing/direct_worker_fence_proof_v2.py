@@ -52,7 +52,7 @@ def issue_fenced(ledger,spool,item,*,expected_worker,engine_id,coordinator_origi
     with NodeGate(engine_id) as gate:
         check_scope(ledger,spool,item,sha,scratch_id,gate,coordinator_origin=coordinator_origin,gate_generation=gate_generation)
         gate._arm_direct_hold(sha[:32],sha)
-        pin=ledger.begin_direct_writer(scratch_id,scratch_settings(item,scratch_id))
+        pin=ledger.begin_direct_writer(scratch_id,scratch_settings(item,scratch_id),require_unclosed=True)
         # Any later failure or lost reply retains the pin; no expiry frees it.
         require_fenced(ledger,item,expected_worker=expected_worker)
         body=_body(dict(protocol=PROTOCOL,challengeId=challenge_id,scratchBindingSha256=sha,pinId=pin,
