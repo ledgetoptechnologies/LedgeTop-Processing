@@ -118,6 +118,14 @@ class TreeDarDeliveryTests(unittest.TestCase):
             pipelineDigest=self.job['pipelineDigest'],resultManifestSha256=result['resultManifestSha256'],
             acceptedObjectIds=ids,acceptedAt='2026-10-28T10:00:00Z',validationVersion='ltds-reference-v1')
 
+    def verify_copy(self,receipt):
+        """The ledger's half of a verified Viewer copy; signature checks live in the worker tests."""
+        self.ledger.accept_receipt(self.reservation,receipt_id=receipt['receiptId'],
+            storage_receipt_id=receipt['storageReceiptId'],job_id=receipt['jobId'],generation=receipt['generation'],
+            manifest_sha256=receipt['inputManifestSha256'],pipeline_sha256=receipt['pipelineDigest'],
+            result_manifest_sha256=receipt['resultManifestSha256'],accepted_object_ids=receipt['acceptedObjectIds'],
+            viewer_receipt={'synthetic':'signature-verified-by-fixture'},verified_copy=True)
+
     def test_existing_result_wire_ack_frees_only_gate_and_preserves_outputs(self):
         output=self.success()
         identifier=self.delivery.poll(self.job['jobId'])
@@ -150,8 +158,17 @@ class TreeDarDeliveryTests(unittest.TestCase):
         coverage=self.delivery.apply_viewer_acceptance(self.job['jobId'],[receipt])
         self.assertFalse(coverage['fullyAccepted'])
         self.assertEqual(self.ledger.cleanup_candidates(),[])
+        self.verify_copy(receipt)
+        self.assertEqual(self.ledger.cleanup_candidates(),[])
         self.assertEqual(b''.join(stream.chunks()),b'synthetic output')
         self.assertEqual([candidate['id'] for candidate in self.ledger.cleanup_candidates()],[obj['id']])
+
+    def test_unsigned_acceptance_alone_never_makes_output_cleanable(self):
+        self.success();self.delivery.poll(self.job['jobId'])
+        result=json.loads(self.delivery._row(self.job['jobId'])['result'])
+        ids=[item['id'] for item in result['objects']]
+        self.delivery.apply_viewer_acceptance(self.job['jobId'],[self.acceptance(result,ids)])
+        self.assertEqual(self.ledger.cleanup_candidates(),[])
 
     def test_crash_after_projection_before_registration_restarts_idempotently(self):
         self.success()
