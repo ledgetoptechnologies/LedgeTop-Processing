@@ -234,7 +234,7 @@ class PreReservationRecoveryTests(ProcessingHarness):
     def test_changed_hardware_capacity_or_busy_snapshot_refuses_new_reservation(self):
         _reservation,request=self.pending()
         capacities=copy.deepcopy(self.store._capacity_snapshot)
-        for change in ({'ready':False},{'maxImages':0},{'taskQueueCount':1}):
+        for change in ({'ready':False},{'maxInputBytes':1},{'taskQueueCount':1}):
             with self.subTest(change=change):
                 current=copy.deepcopy(capacities)
                 current['cluster'].update(change)
