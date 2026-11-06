@@ -106,7 +106,13 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                 from processing.direct_v2_handoff_journal import DirectV2Handoff
                 from processing.scratch_policy import ScratchLedger, PolicyConflict
                 token='synthetic-viewer-handoff-token-0123456789'
-                bridge=DirectSchedulerBridge(reservations,sender,principal='viewer-staging',bearer=token)
+                with self.assertRaisesRegex(RuntimeError,'bridge is not available'):
+                    DirectSchedulerBridge(reservations,sender,principal='viewer-staging',bearer=token)
+                # Deliberately bypass the unavailable public constructor only
+                # in this synthetic fixture; this is not runtime enrollment.
+                bridge=object.__new__(DirectSchedulerBridge)
+                bridge.reservations,bridge.sender,bridge.principal=reservations,sender,'viewer-staging'
+                bridge.handoff=DirectV2Handoff(store,sender,principal='viewer-staging',bearer=token)
                 handoff=bridge.handoff
                 with self.assertRaises(Conflict):
                     bridge.reserve_and_grant('incorrect-bearer',protected_transport=True,request=reservation_request)

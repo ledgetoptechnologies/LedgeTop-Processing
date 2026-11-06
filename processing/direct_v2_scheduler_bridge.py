@@ -18,11 +18,12 @@ class WorkerHoldUncertain(RuntimeError):
 
 class DirectSchedulerBridge:
     def __init__(self, reservations, sender, *, principal, bearer):
-        if not isinstance(reservations,DirectV2Reservations) or not isinstance(sender,DirectWorkerSenderV2):
-            raise ValueError('enrolled coordinator and worker sender required')
-        p._slug(principal,'source principal')
-        self.reservations,self.sender,self.principal=reservations,sender,principal
-        self.handoff=DirectV2Handoff(reservations.store,sender,principal=principal,bearer=bearer)
+        # There is no enabled, protected endpoint/CA/credential factory or
+        # authenticated caller context yet. An arbitrary externally supplied
+        # sender could transmit its bearer to an unrelated endpoint. Do not
+        # make this bridge constructible by a runtime caller until those
+        # dependencies are implemented and independently qualified.
+        raise RuntimeError('direct scheduler bridge is not available')
 
     def _validate_sender(self):
         pin=self.reservations._workers.get(self.sender._item['nodeId'])
