@@ -474,6 +474,13 @@ class WorkerV2Tests(unittest.TestCase):
 
     @unittest.skipUnless(os.name=='posix','separate Linux worker process required')
     def test_worker_process_kill_restart_observes_without_new_write(self):
+        self.run_worker_process_restart(False)
+
+    @unittest.skipUnless(os.name=='posix','separate Linux worker process required')
+    def test_worker_killed_with_writer_pin_cannot_resume(self):
+        self.run_worker_process_restart(True)
+
+    def run_worker_process_restart(self, kill_during_write):
         from cryptography.hazmat.primitives import serialization
         from ops.qualify_enrolled_phase_transport import configuration_material
         from processing.direct_worker_sender_v2 import DirectWorkerSenderV2
@@ -486,10 +493,10 @@ class WorkerV2Tests(unittest.TestCase):
         config=dict(root=str(self.root),gate=str(self.root/'gate'),spool=str(self.spool.root),
             marker=self.spool.marker.name,payload=self.payload,verification=options,expected=self.expected,
             reservation=self.reservation,item=self.item,worker=self.worker,key=private_key,bearer=self.bearer,
-            proof=self.readiness,challenge=self.challenge,resume=False)
+            proof=self.readiness,challenge=self.challenge,resume=False,block_first=kill_during_write)
         config_path=self.root/'worker-fixture.json'
         script=Path(__file__).parent/'fixtures'/'direct_v2_resume_worker.py'
-        process=None
+        process=None;upload_thread=None
         def start(resume):
             config['resume']=resume;config_path.write_text(json.dumps(config));config_path.chmod(0o600)
             child=subprocess.Popen([sys.executable,str(script),str(config_path)],stdout=subprocess.PIPE,
@@ -511,6 +518,31 @@ class WorkerV2Tests(unittest.TestCase):
                 key_id='worker-key',worker_public_key=self.proof_key.public_key(),idle_timeout=2,total_timeout=5)
         try:
             process,port=start(False)
+            if kill_during_write:
+                sender=make_sender(port);outcomes=[]
+                def upload():
+                    try:sender.put(fixtures.GCP_ID,io.BytesIO(b''))
+                    except Exception as error:outcomes.append(error)
+                upload_thread=threading.Thread(target=upload);upload_thread.start()
+                deadline=time.monotonic()+5
+                while not (self.root/'writer-entered').exists() and time.monotonic()<deadline:time.sleep(.01)
+                self.assertTrue((self.root/'writer-entered').exists())
+                process.kill();process.communicate(timeout=3);process=None;upload_thread.join(5)
+                self.assertFalse(upload_thread.is_alive());self.assertEqual(len(outcomes),1)
+                self.assertIsInstance(outcomes[0],DirectDeliveryUncertain)
+                config['resume']=True;config['block_first']=False
+                config_path.write_text(json.dumps(config));config_path.chmod(0o600)
+                child=subprocess.Popen([sys.executable,str(script),str(config_path)],stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,text=True,env=dict(os.environ,PYTHONPATH=str(Path(__file__).resolve().parents[1])))
+                try:
+                    _,error=child.communicate(timeout=5)
+                    self.assertNotEqual(child.returncode,0)
+                    self.assertIn('handover requires reconciliation',error)
+                finally:
+                    if child.poll() is None:child.kill();child.communicate(timeout=3)
+                with self.ledger._transaction() as db:
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
+                return
             self.assertTrue(make_sender(port).put(fixtures.GCP_ID,io.BytesIO(b''))['localObjectDurable'])
             process.kill();process.communicate(timeout=3);self.assertIsNotNone(process.returncode);process=None
             self.clock.return_value=1000
@@ -520,3 +552,4 @@ class WorkerV2Tests(unittest.TestCase):
         finally:
             if process is not None:
                 process.kill();process.communicate(timeout=3)
+            if upload_thread is not None:upload_thread.join(5)

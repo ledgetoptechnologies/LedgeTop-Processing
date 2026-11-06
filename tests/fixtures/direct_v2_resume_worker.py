@@ -2,6 +2,7 @@
 import json
 import ssl
 import sys
+import time
 from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from processing import direct_v2_inventory as inventory, node_gate
@@ -22,6 +23,11 @@ ledger=ScratchLedger(root/'private'/'ledger.sqlite',root,capacity_probe=lambda _
                      clock=lambda:100,safety_floor_bytes=100)
 spool=SourceSpool(config['spool'],mount_path='/tmp',mount_id='a'*32,marker_name=config['marker'],
                   safety_floor_bytes=0,require_mount=True)
+if config.get('block_first'):
+    def block_receive(**kwargs):
+        (root/'writer-entered').write_text('synthetic pinned writer')
+        while True:time.sleep(1)
+    spool.receive_object=block_receive
 key=serialization.load_pem_private_key(config['key'].encode(),password=None)
 signer=WorkerClosureSignerV2(issuer_id='worker-issuer',key_id='worker-key',identity=config['worker'],private_key=key)
 import processing.direct_worker_receiver_v2 as receiver
