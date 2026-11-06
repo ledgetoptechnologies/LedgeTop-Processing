@@ -4,6 +4,11 @@
 
 The local coordinator image is `ledgetop-processing:qualification-63c8049b-lf-20261106`, immutable image ID `sha256:7adf6e6ece0b1a5a6246cc5af4d8707d146b577b58b9df3ac6d27148032a20b4`, revision label `63c8049b74e4e179e812f67b489f8f67f7d9d8b1`. Docker inspected the same ID after loading the archive on the actual cluster PC. No latest tag, registry publication or runtime replacement was performed.
 
+This is a frozen earlier candidate. Later combined source changes, including
+maintenance selected at162f489c, are not present in this image or source TAR.
+Their release requires new immutable artifacts and corresponding qualification;
+the existing staged files and receipts are not overwritten or relabelled.
+
 Both build context and worker source archive use explicit `git -c core.autocrlf=false archive`. All 99 image Python files match the canonical reviewed source exactly. Their sorted compact relative-path-to-SHA map hashes to `654fceb89d4dc114434053f14bbb503a53763401f458e1a628e2724979e9989d`. The image runs UID10001; installed distributions checked are cryptography50.0.2 and rfc8785 0.1.4.
 
 | Artifact | Bytes | SHA-256 |

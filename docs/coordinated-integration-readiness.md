@@ -33,15 +33,15 @@ investigation; no successful delivery fault-boundary proof is claimed from that
 run. It is not selected into this candidate. The task container was removed;
 in-container child reap was not independently verified in that first run.
 
-The configured-node/early-drain maintenance extension is staged separately in
-[draft PR #367](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/367),
-head `315c87605513d8af0c2f58a74609e49e608a44b7`, against this integration branch.
-Its affected selection has 224 passing Linux cases plus four separately passing
-actual Node probe cases. It preserves an exact job/time boundary before staging
-and qualification, and adds explicit host/interpreter bindings for future nodes.
-It is not selected into this photo candidate or installed; timers remain disabled.
-This source implementation supersedes the earlier design gaps below only on
-that follow-on branch. No branch Actions runs were created for its publication.
+The configured-node/early-drain maintenance extension from
+[draft PR #367](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/367)
+is now selected through `162f489c`, after independent review. The exact combined
+source passes228/228 affected Linux cases in52.476seconds, no skips, including
+the four actual Node probes. It preserves an exact job/time boundary before
+staging/qualification and explicit host/interpreter bindings for future nodes.
+See [the combined qualification](evidence/integrated-maintenance-20261106.md).
+It is not installed; timers remain disabled. The already staged image7adf6e6e
+predates this source change and is not relabelled as the combined release image.
 
 This section and the remaining-delivery list at the end describe current gates.
 Intermediate checkpoints below are historical; their statements that source
@@ -54,10 +54,10 @@ not be added together or described as a complete suite.
 | Production/staging queue and ordered per-node routing | Actual Viewer/Python synthetic pairings; 332-test integrated selection | Installed source intake and concurrent two-node jobs; correct user-facing queued/preparing/running witness (see status audit) |
 | Private per-node engine boundary and dynamic flags | Authenticated worker relay and coordinator discovery integrated; 96/96 frozen-source Linux catalog/runtime/factory checks passed at `18750d4` | Install workers and qualify relay on both PCs; verify native engine submission cannot bypass the worker boundary |
 | Durable result return and selective cleanup | Signed ready proof, real Viewer process death/recovery, synthetic 24-hour timer and preserved raw GCP/originals | Installed credentials, NAS durability and actual return to Viewer |
-| Coordinator/worker maintenance | Canonical image `7adf6e6e` is built and hash-verified in the cluster Docker cache. Its actual local Docker forward22 and separate rollback30 plus post-restart custody audit pass; exact test resources are retired | Actual private config/NAS/Viewer trust, real worker installation/activation, and installed drain/update/resume; automatic-maintenance follow-on remains isolated |
+| Coordinator/worker maintenance | Frozen image `7adf6e6e` passed local Docker forward22 and rollback30/audit. Later configured early-drain changes are selected at `162f489c`, passing228/228 affected cases | New combined image/pins and release qualification, actual private config/NAS/Viewer trust, real worker installation/activation, installed drain/update/resume |
 | Long transfer after coordinator outage | Renewal/mint plus scratch and per-receipt delivery fences integrated; 442/442 frozen Linux checks passed at `b467c3b` | Actual coordinator-restart fetching/processing recovery, worker enrollment and connected delivery remain open |
 | Viewer GCP workflow | Corrected curated Viewer `7598858b` passed 158/158 Linux checks and 3/3 actual local Processing/Viewer pairings, including licensed conversion, result acceptance and signed 24-hour cleanup | Installed deployment/return acceptance, NAVD88 geoid qualification and rendered UI acceptance remain open |
-| TreeDar and Gaussian splats | Genuine-LiDAR validation/scaffolding | Typed usable TreeDar output registration and real processing; Gaussian remains disabled |
+| TreeDar and Gaussian splats | Genuine-LiDAR validation, native stage/publication and typed V2 wire exist; availability remains false | Finish combined execution and typed transport, Viewer LiDAR submission/typed ingestion/readiness, then genuine real processing; Gaussian remains disabled |
 | Customer/project/task workspace | Current `ca5eedf3` frontend builds from the exact offline lock. Actual synthetic in-app browser review verifies customer/group/project placement, task/log navigation and bounded layouts at1280/390/320px; see the rendered review | Installed sign-in/client permissions, actual Reference V2 browser statuses, GCP draft/mark/start follow-up and deployed acceptance |
 
 ### Recovery follow-on under review
@@ -1027,8 +1027,12 @@ are not operational.
    `reopeningStarted` prevents later rollback. Do not interpret conservative
    rejection of new receipt data as permission to delete it for a downgrade.
    Qualify unattended drain/update/health/resume with persisted queues/outboxes.
-6. **TreeDar and future engines:** genuine LAS/LAZ admission and the complete
-   typed output closure still need real runtime qualification. TreeDar stays on
+6. **TreeDar and future engines:** combined execution/typed publication and Viewer
+   LiDAR-only submission, typed ingestion and engine-specific readiness still
+   need implementation, followed by genuine LAS/LAZ runtime qualification. The
+   existing combined driver deliberately holds after preparation, the native
+   publication is not yet an outer transport, and canonical Viewer ca5eedf3
+   still requires ODM assets and refuses schema2 source-ready proofs. TreeDar stays on
    main; Gaussian splats remain disabled. Jobs on one host must not overlap
    between engines. Source release additionally requires authoritative Viewer
    registration and usable-output verification of every required TreeDar role;
