@@ -43,7 +43,7 @@ def _decode(raw, limit):
 
 def verify_snapshot(*, intent_bytes, signature, source_frames, public_key, issuer_id, key_id,
                     snapshot_sha, source_manifest, derived_manifest, task_id, pipeline_sha,
-                    selected_frames=None, pipeline_manifest=None):
+                    selected_frames=None, pipeline_manifest=None, gcp_evidence_frames=None, gcp_file_frames=None):
     """Verify preimage and exact source objects against independently loaded pins.
 
     Does not prove mount/custody, Viewer snapshot status, source release, or a
@@ -56,15 +56,22 @@ def verify_snapshot(*, intent_bytes, signature, source_frames, public_key, issue
         raise ValueError('snapshot identity invalid')
     if any(type(intent[k]) is not int for k in ('sourceFrameBytes','sourceCount','datasetFileCount','selectedCount','selectedFrameBytes')):
         raise ValueError('snapshot count invalid')
-    # GCP evidence includes separately framed content and coordinate metadata;
-    # until those streams have an agreed verifier, hold the entire inspection.
-    if intent['gcp'] is not None or derived_manifest['objects']:
-        raise ValueError('GCP snapshot inspection unsupported')
+    derived_objects=derived_manifest.get('objects')
+    if type(derived_objects) is not list:
+        raise ValueError('derived manifest invalid')
+    generated=intent['gcp'].get('generatedGcp') if type(intent['gcp']) is dict else None
+    if generated is None:
+        if derived_objects:raise ValueError('unbound derived objects')
+    else:
+        expected_derived={'id':f"gcp_{intent['attemptId']}",'name':'gcp_list.txt','byteSize':generated.get('byteSize'),
+            'sha256':generated.get('sha256'),'snapshotAttemptId':intent['attemptId'],'snapshotContentSha256':generated.get('sha256'),
+            'snapshotEvidenceSha256':intent['gcp'].get('evidenceSha256'),'sourceType':'attempt_derived_gcp_list',
+            'retentionClass':'release_after_acceptance','retentionHoldId':None}
+        if derived_objects!=[expected_derived]:raise ValueError('GCP derived manifest changed')
     if (hashlib.sha256(intent_bytes).hexdigest()!=snapshot_sha or intent['issuerId']!=issuer_id
             or intent['keyId']!=key_id or intent['datasetId']!=source_manifest['id']
             or intent['datasetManifestSha256']!=source_manifest['datasetManifestSha256']
-            or intent['taskId']!=task_id or intent['attemptId']!=derived_manifest['attemptId']
-            or intent['inputManifestSha256']!=pipeline_sha):raise ValueError('snapshot binding changed')
+            or intent['taskId']!=task_id or intent['attemptId']!=derived_manifest['attemptId']):raise ValueError('snapshot binding changed')
     try:public_key.verify(signature,SNAPSHOT_DOMAIN+intent_bytes)
     except InvalidSignature:raise ValueError('snapshot signature invalid') from None
     if (type(source_frames) is not bytes or not 0<len(source_frames)<=12*1024*1024
@@ -85,6 +92,13 @@ def verify_snapshot(*, intent_bytes, signature, source_frames, public_key, issue
         for record in page['records']:
             total+=1
             if total>20000 or type(record) is not dict:raise ValueError('source records invalid')
+            if record.get('type')=='attempt_generated_gcp':
+                generated=intent['gcp'].get('generatedGcp') if type(intent['gcp']) is dict else None
+                expected={'type':'attempt_generated_gcp',**generated} if type(generated) is dict else None
+                if record!=expected or record in [r for r in source_records if r.get('type')=='attempt_generated_gcp']:
+                    raise ValueError('generated GCP source record changed')
+                source_records.append(record)
+                continue
             if set(record)!=FILE_FIELDS or record.get('type')!='dataset_file':raise ValueError('source record invalid')
             name=record['relativePath']; identifier=record['datasetFileId']
             if (type(name) is not str or not name or len(name.encode('utf-8'))>4096 or name.startswith('/')
@@ -93,8 +107,6 @@ def verify_snapshot(*, intent_bytes, signature, source_frames, public_key, issue
                     or re.match(r'^[A-Za-z]:',name) or name in paths
                     or identifier in seen or identifier not in objects):raise ValueError('source path invalid')
             obj=objects[identifier]
-            if record['processingRole']=='gcp_source' or obj['sourceType']=='gcp_source_csv':
-                raise ValueError('GCP snapshot inspection unsupported')
             basename=name.rsplit('/',1)[-1].lower()
             if basename in basenames:raise ValueError('source basename duplicated')
             extension=name.rsplit('.',1)[-1].lower() if '.' in name.rsplit('/',1)[-1] else ''
@@ -109,14 +121,20 @@ def verify_snapshot(*, intent_bytes, signature, source_frames, public_key, issue
                     or record['byteSize']<=0 or record['byteSize']!=obj['byteSize'] or record['sha256']!=obj['sha256'] or not valid_media
                     or record['processingRole'] not in ('auto','image','gcp_source','provider_input','administrative')
                     or (record['processingRole']=='gcp_source' and
-                        (obj['sourceType']!='gcp_source_csv' or obj['retentionClass']!='permanent_viewer_hold'))
+                        (obj['sourceType']!='gcp_source_csv' or obj['retentionClass']!='permanent_viewer_hold' or obj.get('retentionHoldId')!=identifier))
                     or (obj['sourceType']=='gcp_source_csv' and record['processingRole']!='gcp_source')):
                 raise ValueError('source object changed')
             seen.add(identifier);paths.add(name);basenames.add(basename);source_records.append(record)
+    gcp_source_ids={record['datasetFileId'] for record in source_records if record.get('type')=='dataset_file' and record.get('processingRole')=='gcp_source'}
+    generated_records=[record for record in source_records if record.get('type')=='attempt_generated_gcp']
+    if gcp_source_ids and not intent['gcp']:raise ValueError('GCP snapshot required for retained GCP source')
+    if intent['gcp'] and (not gcp_source_ids or len(generated_records)!=1):raise ValueError('GCP snapshot source binding incomplete')
+    if bool(intent['gcp'])!=bool(generated_records):raise ValueError('GCP generated source record mismatch')
     if seen!=set(objects) or intent['datasetFileCount']!=len(objects) or intent['sourceCount']!=total:
         raise ValueError('source closure incomplete')
     result={'state':'source_pages_verified_not_custody','sourceSnapshotSha256':snapshot_sha,
             'datasetFileCount':len(seen),'sourceCustodyAccepted':False,'processingAuthorized':False}
+    selected=None
     if selected_frames is not None:
         if type(pipeline_manifest) is not dict or pipeline_manifest.get('sha256')!=pipeline_sha or p.manifest_sha256(pipeline_manifest)!=pipeline_sha:
             raise ValueError('pipeline manifest changed')
@@ -125,4 +143,31 @@ def verify_snapshot(*, intent_bytes, signature, source_frames, public_key, issue
         result['state']='source_and_selected_pages_verified_not_custody'
         result['selectedCount']=selected['selectedCount']
     elif pipeline_manifest is not None:raise ValueError('selected pages unavailable')
+    if intent['gcp'] is not None:
+        if selected is None:raise ValueError('GCP selected pages unavailable')
+        from .direct_selected_gcp_frames import _verify_gcp_chunks_payload,verify_gcp_semantics
+        gcp=intent['gcp'];required_gcp={'evidenceVersion','evidencePageHashes','evidencePageBytes','evidencePageCount',
+            'evidenceByteCount','evidenceSha256','fileVersion','filePageHashes','filePageBytes','filePageCount',
+            'fileByteCount','fileSha256','generatedGcp'}
+        if type(gcp) is not dict or set(gcp)!=required_gcp:raise ValueError('GCP descriptor invalid')
+        attempt_id=intent['attemptId']
+        if (gcp['evidenceVersion'] not in ('ltds-viewer-gcp-evidence-chunks-v1','ltds-viewer-gcp-evidence-chunks-v2')
+                or gcp['fileVersion']!='ltds-viewer-generated-gcp-file-chunks-v1'
+                or type(gcp['evidencePageCount']) is not int or gcp['evidencePageCount']!=len(gcp['evidencePageHashes'])
+                or type(gcp['filePageCount']) is not int or gcp['filePageCount']!=len(gcp['filePageHashes'])):
+            raise ValueError('GCP descriptor invalid')
+        evidence_bytes=_verify_gcp_chunks_payload(gcp_evidence_frames,hashes=gcp['evidencePageHashes'],page_bytes=gcp['evidencePageBytes'],
+            stream_bytes=len(gcp_evidence_frames) if type(gcp_evidence_frames) is bytes else -1,byte_count=gcp['evidenceByteCount'],
+            sha256=gcp['evidenceSha256'],attempt_id=attempt_id,kind='evidence',version=gcp['evidenceVersion'])
+        file_bytes=_verify_gcp_chunks_payload(gcp_file_frames,hashes=gcp['filePageHashes'],page_bytes=gcp['filePageBytes'],
+            stream_bytes=len(gcp_file_frames) if type(gcp_file_frames) is bytes else -1,byte_count=gcp['fileByteCount'],
+            sha256=gcp['fileSha256'],attempt_id=attempt_id,kind='file',evidence_sha256=gcp['evidenceSha256'],version=gcp['fileVersion'])
+        semantic=verify_gcp_semantics(evidence_bytes=evidence_bytes,file_bytes=file_bytes,
+            generated_gcp=gcp['generatedGcp'],source_records=source_records,attempt_id=attempt_id,
+            selected_image_ids=selected['selectedImageIds'])
+        result['gcpState']=semantic['state'];result['gcpCorrespondenceCount']=semantic['correspondenceCount']
+        result['gcpSourceRetentionDeclarationsVerified']=True
+        result['state']='source_selected_gcp_evidence_and_file_verified_not_custody'
+    elif gcp_evidence_frames is not None or gcp_file_frames is not None:
+        raise ValueError('unbound GCP streams')
     return result

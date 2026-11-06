@@ -46,7 +46,7 @@ class SnapshotRealPair(unittest.TestCase):
         intent=dict(protocol='ltds-viewer-held-source-snapshot-v1',snapshotId=snapshot_id,issuerId='snapshot-issuer',keyId='snapshot-key',
             createdAt='2026-11-06T12:00:00.000Z',datasetId=payload['sourceManifest']['id'],
             datasetManifestSha256=payload['sourceManifest']['datasetManifestSha256'],taskId=payload['viewerTaskId'],
-            attemptId=payload['submissionId'],inputManifestSha256=payload['manifest']['sha256'],sourceCount=1,datasetFileCount=1,
+            attemptId=payload['submissionId'],inputManifestSha256=hashlib.sha256(json.dumps([dict(relativePath=record['relativePath'],byteSize=record['byteSize'],sha256=record['sha256'])],separators=(',',':'),ensure_ascii=False).encode()).hexdigest(),sourceCount=1,datasetFileCount=1,
             sourcePageHashes=[hashlib.sha256(PAGE_DOMAIN+frame).hexdigest()],sourceFrameBytes=len(frame)+1,
             selectedCount=1,selectedPageHashes=[hashlib.sha256(b'ltds-viewer-selected-frame-v1\0'+selected).hexdigest()],
             selectedFrameBytes=len(selected)+1,gcp=None)

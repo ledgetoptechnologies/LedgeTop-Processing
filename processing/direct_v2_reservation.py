@@ -56,7 +56,8 @@ class DirectV2Reservations:
             ensure_schema(db)
 
     def inspect_held_snapshot(self, reservation_id, *, authenticated_principal, issuer_id, key_id,
-                              intent_bytes, signature, source_frames, selected_frames=None):
+                              intent_bytes, signature, source_frames, selected_frames=None,
+                              gcp_evidence_frames=None, gcp_file_frames=None):
         """Read-only proof against stored owner/reservation, never an ACK.
 
         Caller authentication and protected transport remain the responsibility
@@ -101,7 +102,8 @@ class DirectV2Reservations:
                 return verify_snapshot(intent_bytes=intent_bytes,signature=signature,source_frames=source_frames,
                     public_key=key,issuer_id=issuer_id,key_id=key_id,snapshot_sha=attestation['proof']['sourceSnapshotSha256'],
                     source_manifest=source,derived_manifest=derived,task_id=stored['viewer_task_id'],pipeline_sha=row['pipeline_manifest_sha'],
-                    selected_frames=selected_frames,pipeline_manifest=manifest)
+                    selected_frames=selected_frames,pipeline_manifest=manifest,
+                    gcp_evidence_frames=gcp_evidence_frames,gcp_file_frames=gcp_file_frames)
             except (ValueError,TypeError,KeyError):raise Conflict('snapshot unavailable') from None
 
     def reserve(self, **request):

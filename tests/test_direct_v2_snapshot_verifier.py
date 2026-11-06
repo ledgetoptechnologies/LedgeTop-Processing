@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 from processing import reference_protocol as p
-from processing.direct_v2_snapshot_verifier import verify_snapshot, SNAPSHOT_DOMAIN, PAGE_DOMAIN
+from processing.direct_v2_snapshot_verifier import verify_snapshot, SNAPSHOT_DOMAIN, PAGE_DOMAIN, _decode
 from processing.direct_v2_reservation import DirectV2Reservations
 from processing.maintenance import Conflict
 
@@ -57,7 +57,7 @@ class SnapshotTests(unittest.TestCase):
         result=self.verify();self.assertEqual(result['state'],'source_pages_verified_not_custody')
         self.assertFalse(result['sourceCustodyAccepted']);self.assertFalse(result['processingAuthorized'])
         self.assertNotIn('paths',result)
-        for field,value in [('snapshot_sha','0'*64),('task_id',RES),('pipeline_sha','d'*64),('key_id','other'),
+        for field,value in [('snapshot_sha','0'*64),('task_id',RES),('key_id','other'),
                             ('source_frames',self.frames.replace(b'flight/',b'other/'))]:
             with self.subTest(field=field),self.assertRaises(ValueError):self.verify(**{field:value})
         with self.assertRaises(ValueError):self.verify(public_key=Ed25519PrivateKey.generate().public_key())
@@ -93,14 +93,106 @@ class SnapshotTests(unittest.TestCase):
     def test_generated_gcp_snapshot_is_explicitly_held(self):
         self.intent['gcp']={'generatedGcp':{'sha256':'a'*64,'byteSize':True}}
         self.prepare()
-        with self.assertRaisesRegex(ValueError,'GCP snapshot inspection unsupported'):self.verify()
+        with self.assertRaisesRegex(ValueError,'GCP derived manifest changed'):self.verify()
 
     def test_raw_gcp_source_without_generated_snapshot_is_explicitly_held(self):
         self.record.update(relativePath='flight/source.csv',kind='auxiliary',mediaType='text/csv',processingRole='gcp_source')
         self.source['objects'][0].update(name='source.csv',sourceType='gcp_source_csv',
             retentionClass='permanent_viewer_hold',retentionHoldId=FILE)
         self.prepare()
-        with self.assertRaisesRegex(ValueError,'GCP snapshot inspection unsupported'):self.verify()
+        with self.assertRaisesRegex(ValueError,'GCP snapshot required'):self.verify()
+
+    @unittest.skipUnless(os.environ.get('LTDS_VIEWER_SOURCE_ROOT'),'actual Viewer source not supplied')
+    def test_actual_viewer_signed_capture_and_gcp_export_pair(self):
+        root=os.environ['LTDS_VIEWER_SOURCE_ROOT']
+        script=r"""
+const crypto=require('node:crypto'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const root=JSON.parse(fs.readFileSync(0,'utf8')).root;
+const {openDatabase}=require(path.join(root,'server/database'));
+const {ProcessingRepository}=require(path.join(root,'server/processingRepository'));
+const {GcpRepository}=require(path.join(root,'server/gcpRepository'));
+const {createHeldSourceSnapshot}=require(path.join(root,'server/heldSourceSnapshot'));
+const {parseGcpInterchange}=require(path.join(root,'server/gcpImport'));
+const {canonicalBytes}=require(path.join(root,'server/referenceProtocol'));
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'direct-gcp-verifier-'));
+try {
+ const db=openDatabase(path.join(dir,'viewer.sqlite')),processing=new ProcessingRepository(db),gcp=new GcpRepository(db);
+ const project=processing.createProject({displayName:'Synthetic verifier fixture'});
+ const dataset=processing.createDataset({projectId:project.id,displayName:'Synthetic flight',storageMode:'managed',rootKey:'datasets',relativePath:crypto.randomUUID()});
+ const image=Buffer.from('synthetic image bytes'),adminImage=Buffer.from('synthetic administrative image bytes'),csv='Name,Easting,Northing,Elevation,Description,Longitude,Latitude,Ellipsoidal height,CS name\nA,903241.652,549596.746,833.164,Hub,-88.100000005,44.500000005,720.437000005,NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)\n',csvBytes=Buffer.from(csv);
+ const files=[{id:'photo-1',relativePath:'photo.jpg',byteSize:image.length,sha256:crypto.createHash('sha256').update(image).digest('hex'),contentType:'image/jpeg',processingRole:'image',metadata:{width:100,height:100}},
+   {id:'admin-photo',relativePath:'admin-photo.jpg',byteSize:adminImage.length,sha256:crypto.createHash('sha256').update(adminImage).digest('hex'),contentType:'image/jpeg',processingRole:'administrative',metadata:{width:100,height:100}},
+   {id:'gcp-file',relativePath:'control.csv',byteSize:csvBytes.length,sha256:crypto.createHash('sha256').update(csvBytes).digest('hex'),contentType:'text/csv',processingRole:'gcp_source'}];
+ const canonical=files.map(({relativePath,byteSize,sha256})=>({relativePath,byteSize,sha256}));
+ processing.finalizeDataset(dataset.id,files,crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex'));
+ const parsed=parseGcpInterchange({format:'emlid-all-columns-v1',content:csv});
+ const set=gcp.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'emlid-all-columns-v1',sourceFileId:'gcp-file',sourceFilename:'control.csv',sourceSha256:files[2].sha256,sourceContent:csv,crs:parsed.crs,elevationUnits:parsed.elevationUnits,provenance:parsed.provenance,points:parsed.points});
+ const provider=processing.upsertProvider({type:'nodeodm',displayName:'Synthetic ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
+ const {privateKey,publicKey}=crypto.generateKeyPairSync('ed25519');
+ const signer={issuerId:'synthetic-issuer',keyId:'synthetic-key',sign:bytes=>crypto.sign(null,bytes,privateKey)};
+ function capture(targetId,displayName) {
+   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName});
+   gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:targetId,pixelX:25.123456785,pixelY:75.000000005,createdBy:'ops:synthetic'});
+   const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{},gcpHeightSource:'ellipsoidal'});
+   const snapshot=createHeldSourceSnapshot(processing,{datasetId:dataset.id,taskId:task.id,attemptId:attempt.id,signer,now:()=> '2026-11-06T12:00:00.000Z'});
+   return {taskId:task.id,attemptId:attempt.id,snapshot};
+ }
+ const cases=[capture('photo-1','Synthetic selected image'),capture('admin-photo','Synthetic administrative image')];
+ const datasetFiles=processing.getDataset(dataset.id,true).files;
+ const sourceManifest={schemaVersion:1,id:dataset.id,datasetManifestSha256:processing.getDataset(dataset.id,true).manifestSha256,
+   totalBytes:datasetFiles.reduce((n,file)=>n+file.byteSize,0),objectCount:datasetFiles.length,objects:datasetFiles.map(file=>({id:file.id,name:path.posix.basename(file.relativePath),byteSize:file.byteSize,sha256:file.sha256,
+     sourceType:file.processingRole==='gcp_source'?'gcp_source_csv':'raw_input',retentionClass:file.processingRole==='gcp_source'?'permanent_viewer_hold':'release_after_acceptance',retentionHoldId:file.processingRole==='gcp_source'?file.id:null}))};
+ const serialized=cases.map(({taskId,attemptId,snapshot})=>{
+   const generated=snapshot.intent.gcp.generatedGcp;
+   const derivedManifest={schemaVersion:1,attemptId,objects:[{id:`gcp_${attemptId}`,name:'gcp_list.txt',byteSize:generated.byteSize,sha256:generated.sha256,snapshotAttemptId:attemptId,
+     snapshotContentSha256:generated.sha256,snapshotEvidenceSha256:snapshot.intent.gcp.evidenceSha256,sourceType:'attempt_derived_gcp_list',retentionClass:'release_after_acceptance',retentionHoldId:null}]};
+   return {intentBytes:canonicalBytes(snapshot.intent).toString('base64'),signature:snapshot.signature.toString('base64'),snapshotSha:snapshot.intentSha256,
+     sourceFrames:snapshot.sourceFrames.toString('base64'),selectedFrames:snapshot.selectedFrames.toString('base64'),gcpEvidenceFrames:snapshot.gcpEvidenceFrames.toString('base64'),gcpFileFrames:snapshot.gcpFileFrames.toString('base64'),
+     derivedManifest,taskId,attemptId};
+ });
+ process.stdout.write(JSON.stringify({cases:serialized,publicKeyPem:publicKey.export({type:'spki',format:'pem'}),sourceManifest}));
+ db.close();
+} finally {fs.rmSync(dir,{recursive:true,force:true});}
+"""
+        result=subprocess.run(['node','-e',script],input=json.dumps({'root':root}),capture_output=True,text=True,check=True,timeout=25)
+        import base64
+        vector=json.loads(result.stdout)
+        def verify_case(case, *, should_pass):
+            raw=base64.b64decode(case['intentBytes']);intent=_decode(raw,1024*1024)
+            source_frames=base64.b64decode(case['sourceFrames']);selected_frames=base64.b64decode(case['selectedFrames'])
+            source_records=[]
+            for line in source_frames[:-1].split(b'\n'):source_records.extend(_decode(line,256*1024)['records'])
+            selected_records=[]
+            for line in selected_frames[:-1].split(b'\n'):selected_records.extend(_decode(line,256*1024)['records'])
+            by_id={r['datasetFileId']:r for r in source_records if r.get('type')=='dataset_file'}
+            pipeline_objects=[]
+            for selected in selected_records:
+                if selected['type']=='dataset_file':
+                    source=by_id[selected['datasetFileId']]
+                    pipeline_objects.append({'id':source['datasetFileId'],'name':source['relativePath'].rsplit('/',1)[-1],
+                        'byteSize':source['byteSize'],'sha256':source['sha256'],'kind':source['kind'],'mediaType':source['mediaType']})
+                else:
+                    generated=intent['gcp']['generatedGcp']
+                    pipeline_objects.append({'id':selected['pageObjectId'],'name':'gcp_list.txt','byteSize':generated['byteSize'],
+                        'sha256':generated['sha256'],'kind':'auxiliary','mediaType':'text/plain'})
+            manifest_payload={'schemaVersion':1,'id':'synthetic-input','revision':1,'totalBytes':sum(x['byteSize'] for x in pipeline_objects),
+                'objectCount':len(pipeline_objects),'inputCounts':{},'objects':pipeline_objects}
+            manifest={**manifest_payload,'sha256':p.digest(manifest_payload)}
+            args=dict(intent_bytes=raw,signature=base64.b64decode(case['signature']),source_frames=source_frames,selected_frames=selected_frames,
+                gcp_evidence_frames=base64.b64decode(case['gcpEvidenceFrames']),gcp_file_frames=base64.b64decode(case['gcpFileFrames']),
+                pipeline_manifest=manifest,public_key=serialization.load_pem_public_key(vector['publicKeyPem'].encode()),issuer_id=intent['issuerId'],key_id=intent['keyId'],
+                snapshot_sha=case['snapshotSha'],source_manifest=vector['sourceManifest'],derived_manifest=case['derivedManifest'],
+                task_id=case['taskId'],pipeline_sha=manifest['sha256'])
+            if should_pass:return verify_snapshot(**args)
+            with self.assertRaisesRegex(ValueError,'selected image binding'):verify_snapshot(**args)
+            return None
+        observed=verify_case(vector['cases'][0],should_pass=True)
+        verify_case(vector['cases'][1],should_pass=False)
+        self.assertEqual(observed['gcpState'],'gcp_evidence_and_generated_file_verified_not_source_csv_reparsed')
+        self.assertEqual(observed['gcpCorrespondenceCount'],1)
+        self.assertTrue(observed['gcpSourceRetentionDeclarationsVerified'])
+        self.assertEqual(observed['state'],'source_selected_gcp_evidence_and_file_verified_not_custody')
+        self.assertFalse(observed['sourceCustodyAccepted']);self.assertFalse(observed['processingAuthorized'])
 
     @unittest.skipUnless(os.environ.get('LTDS_VIEWER_SOURCE_ROOT'),'actual Viewer source not supplied')
     def test_actual_viewer_node_frame_encoder_and_signer(self):
