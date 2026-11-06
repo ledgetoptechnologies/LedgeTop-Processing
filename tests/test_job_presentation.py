@@ -507,6 +507,13 @@ class CoordinatorReportTests(Harness):
             with self.subTest(changes=changes):
                 self.assertEqual(self.post(job, resign(request, **changes)).status, 409)
 
+    def test_wrong_token_with_a_self_consistent_digest_is_refused(self):
+        job, request = self.latched()
+        forged = 'another-claim-token'
+        body = resign(request, claimTokenSha256=hashlib.sha256(forged.encode()).hexdigest())
+        self.assertEqual(self.post(job, body, token=forged).status, 409)
+        self.assertEqual(self.stored_rows(job), [])
+
     def test_wrong_worker_is_refused(self):
         job, request = self.latched()
         with self.queue._db() as db:
