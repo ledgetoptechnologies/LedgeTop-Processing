@@ -64,13 +64,13 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
             self.assertTrue(created);self.assertEqual(job['status'],'held')
             workers={node:dict(identity=dict(f.worker,nodeId=node),issuerId='worker-issuer',keyId='worker-key',
                                publicKey=f.proof_key.public_key()) for node in queue.node_ids}
-            reservation=DirectV2Reservations(store,trusted_workers=workers).reserve(payload=f.payload,
+            reservations=DirectV2Reservations(store,trusted_workers=workers)
+            reservation_request=dict(payload=f.payload,
                 authenticated_principal='viewer-staging',item=f.item,expected_worker=f.worker,
                 readiness_proof=f.readiness,challenge_id=f.challenge,gate_generation=1,
                 issuer_id='worker-issuer',key_id='worker-key',worker_public_key=f.proof_key.public_key(),
                 trusted_source_keys=opts['trusted_source_keys'],capability_fingerprint=opts['capability_fingerprint'],
                 options_fingerprint=opts['options_fingerprint'],allowed_odm_options=opts['allowed_odm_options'])
-            self.assertEqual(reservation['nodeId'],'cluster');self.assertFalse(reservation['sourceCustodyAccepted'])
             material=configuration_material(str(uuid.uuid4()),str(uuid.uuid4()))['configurationFiles']
             for name in ('fixture-ca.pem','fixture-cert.pem','fixture-key.pem'):(root/name).write_bytes(material[name])
             context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2
@@ -102,18 +102,37 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                     inventory=f.index,item=f.item,reservation_binding=f.reservation,expected_worker=f.worker,
                     issuer_id='worker-issuer',key_id='worker-key',worker_public_key=f.proof_key.public_key(),
                     idle_timeout=2,total_timeout=5,client_cert_file=str(cert_path),client_key_file=str(key_path))
+                from processing.direct_v2_scheduler_bridge import DirectSchedulerBridge, WorkerHoldUncertain
                 from processing.direct_v2_handoff_journal import DirectV2Handoff
                 from processing.scratch_policy import ScratchLedger, PolicyConflict
                 token='synthetic-viewer-handoff-token-0123456789'
-                handoff=DirectV2Handoff(store,sender,principal='viewer-staging',bearer=token)
+                with self.assertRaisesRegex(RuntimeError,'bridge is not available'):
+                    DirectSchedulerBridge(reservations,sender,principal='viewer-staging',bearer=token)
+                # Deliberately bypass the unavailable public constructor only
+                # in this synthetic fixture; this is not runtime enrollment.
+                bridge=object.__new__(DirectSchedulerBridge)
+                bridge.reservations,bridge.sender,bridge.principal=reservations,sender,'viewer-staging'
+                bridge.handoff=DirectV2Handoff(store,sender,principal='viewer-staging',bearer=token)
+                handoff=bridge.handoff
+                with self.assertRaises(Conflict):
+                    bridge.reserve_and_grant('incorrect-bearer',protected_transport=True,request=reservation_request)
+                with queue._db() as db:
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_v2_reservations').fetchone()[0],0)
+                with patch.object(sender,'_issuer','wrong-worker'), patch.object(reservations,'reserve') as reserve:
+                    with self.assertRaises(WorkerHoldUncertain):
+                        bridge.reserve_and_grant(token,protected_transport=True,request=reservation_request)
+                    reserve.assert_not_called()
                 from processing.direct_worker_sender import DirectDeliveryUncertain
                 original_grant=sender.authorize_reservation
                 def lost_grant(*args,**kwargs):
                     original_grant(*args,**kwargs)
                     raise DirectDeliveryUncertain('synthetic lost grant reply')
                 with patch.object(sender,'authorize_reservation',side_effect=lost_grant):
-                    with self.assertRaises(DirectDeliveryUncertain):
-                        handoff.authorize_worker(token,protected_transport=True)
+                    with self.assertRaises(WorkerHoldUncertain):
+                        bridge.reserve_and_grant(token,protected_transport=True,request=reservation_request)
+                replay=bridge.resume_committed_grant(token,protected_transport=True)
+                self.assertEqual(replay['nodeId'],'cluster')
+                self.assertFalse(replay['sourceCustodyAccepted'])
                 original_check=handoff._check;checks=[]
                 def lost_postcheck(db):
                     checks.append(True)
