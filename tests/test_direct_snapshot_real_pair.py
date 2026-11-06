@@ -111,6 +111,10 @@ class SnapshotRealPair(unittest.TestCase):
         self.assertEqual(selected_response['state'],'source_and_selected_pages_verified_not_custody')
         self.assertFalse(selected_response['sourceCustodyAccepted'])
         self.assertFalse(selected_response['processingAuthorized'])
+        with queue._db() as db:
+            saved=db.execute('SELECT source_sha,selected_sha,pipeline_sha,observation FROM direct_snapshot_observations').fetchone()
+            self.assertEqual((saved['source_sha'],saved['selected_sha'],saved['pipeline_sha']),(hashlib.sha256(raw).hexdigest(),hashlib.sha256(selected+b'\n').hexdigest(),payload['manifest']['sha256']))
+            self.assertFalse(json.loads(saved['observation'])['sourceCustodyAccepted'])
         status,response=post('complete',b'');self.assertEqual(status,200,response)
         self.assertEqual(response['state'],'source_pages_verified_not_custody')
         self.assertFalse(response['sourceCustodyAccepted']);self.assertFalse(response['processingAuthorized'])
