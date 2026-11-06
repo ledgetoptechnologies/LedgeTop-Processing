@@ -6,6 +6,7 @@ import io
 import json
 import os
 import ssl
+import sqlite3
 import tempfile
 import threading
 import time
@@ -121,7 +122,7 @@ class WorkerV2Tests(unittest.TestCase):
         with self.assertRaisesRegex(PolicyConflict,'active or uncertain'): self.put_zero()
 
     def test_v2_failure_after_hold_before_pin_still_blocks_resolution(self):
-        with patch.object(self.ledger,'_handover_direct_writer',side_effect=RuntimeError('synthetic crash')):
+        with patch.object(self.ledger,'_handover_v2_writer',side_effect=RuntimeError('synthetic crash')):
             with self.assertRaises(RuntimeError):self.put_zero()
         with NodeGate('fixture-v2') as gate:
             with self.assertRaisesRegex(GateError,'direct transfer hold'):
@@ -171,6 +172,56 @@ class WorkerV2Tests(unittest.TestCase):
         self.boundary._proof_deadline=time.monotonic()-1
         with self.assertRaisesRegex(DirectBoundaryDenied,'proof expired'):self.put_zero()
         self.assertIsNotNone(self.boundary._readiness_pin)
+
+    def test_challenge_is_consumed_once_across_boundary_reconstruction(self):
+        self.put_zero()
+        replay=DirectWorkerBoundaryV2(ledger=self.ledger,spool=self.spool,inventory=self.boundary.inventory,
+            item=self.item,reservation_binding=self.reservation,expected_worker=self.worker,
+            engine_id='fixture-v2',coordinator_origin='https://127.0.0.1:8443',gate_generation=1,
+            bearer=self.bearer,readiness_proof=self.readiness,challenge_id=self.challenge,
+            issuer_id='worker-issuer',key_id='worker-key',public_key=self.proof_key.public_key())
+        with self.assertRaisesRegex(PolicyConflict,'challenge already consumed'):
+            replay.put(self.headers,protected_transport=True,object_id=fixtures.GCP_ID,
+                content_length=0,content_sha256=hashlib.sha256(b'').hexdigest(),reader=io.BytesIO(b''))
+
+    def test_expiry_after_atomic_handover_retains_pin_without_reading(self):
+        original=self.ledger._handover_v2_writer
+        def delayed(*args,**kwargs):
+            pin=original(*args,**kwargs);self.clock.return_value=120;return pin
+        reader=io.BytesIO(b'')
+        with patch.object(self.ledger,'_handover_v2_writer',side_effect=delayed):
+            with self.assertRaises(ValueError):
+                self.boundary.put(self.headers,protected_transport=True,object_id=fixtures.GCP_ID,
+                    content_length=0,content_sha256=hashlib.sha256(b'').hexdigest(),reader=reader)
+        self.assertFalse(reader.closed)
+        self.assertFalse((self.spool.root/self.item['jobId']).exists())
+        with self.ledger._transaction() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0],1)
+
+    def test_database_lock_wait_past_expiry_never_handover_or_read(self):
+        lock=sqlite3.connect(self.ledger.path,isolation_level=None,timeout=3)
+        started=threading.Event();proceed=threading.Event();errors=[];reader=io.BytesIO(b'')
+        original=self.ledger._handover_v2_writer
+        def enter(*args,**kwargs):
+            started.set();proceed.wait(2);return original(*args,**kwargs)
+        def upload():
+            try:
+                self.boundary.put(self.headers,protected_transport=True,object_id=fixtures.GCP_ID,
+                    content_length=0,content_sha256=hashlib.sha256(b'').hexdigest(),reader=reader)
+            except Exception as error:errors.append(error)
+        with patch.object(self.ledger,'_handover_v2_writer',side_effect=enter):
+            thread=threading.Thread(target=upload);thread.start()
+            try:
+                self.assertTrue(started.wait(2));lock.execute('BEGIN IMMEDIATE');proceed.set();time.sleep(.1)
+                self.clock.return_value=120
+            finally:
+                proceed.set();lock.rollback();lock.close();thread.join(3)
+        self.assertFalse(thread.is_alive());self.assertEqual(len(errors),1)
+        self.assertFalse(reader.closed)
+        with self.ledger._transaction() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
 
     def test_full_v2_closure_requires_raw_and_derived_objects(self):
         from processing.direct_worker_closure_v2 import verify_closure

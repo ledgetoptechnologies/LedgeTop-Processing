@@ -140,6 +140,15 @@ class ScratchLedger:
                 CREATE TABLE IF NOT EXISTS unstarted_settlements (reservation TEXT PRIMARY KEY, settled_at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS direct_writer_pins (
                   id TEXT PRIMARY KEY, reservation TEXT UNIQUE NOT NULL);
+                CREATE TABLE IF NOT EXISTS direct_v2_readiness_uses (
+                  challenge TEXT PRIMARY KEY, reservation TEXT NOT NULL, proof_sha256 TEXT NOT NULL);
+                CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_replace BEFORE INSERT ON direct_v2_readiness_uses
+                  WHEN EXISTS (SELECT 1 FROM direct_v2_readiness_uses WHERE challenge=NEW.challenge)
+                  BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_update BEFORE UPDATE ON direct_v2_readiness_uses
+                  BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END;
+                CREATE TRIGGER IF NOT EXISTS direct_v2_readiness_no_delete BEFORE DELETE ON direct_v2_readiness_uses
+                  BEGIN SELECT RAISE(ABORT,'V2 readiness journal immutable'); END;
                 CREATE TABLE IF NOT EXISTS reservations (
                   id TEXT PRIMARY KEY, settings TEXT NOT NULL, job TEXT NOT NULL,
                   generation INTEGER NOT NULL, environment TEXT NOT NULL,
@@ -241,6 +250,21 @@ class ScratchLedger:
         except (TypeError,ValueError):raise PolicyConflict('unknown accounting version or ledger policy') from None
         pins=db.execute('SELECT id,reservation FROM direct_writer_pins LIMIT ?',
                         (MAX_DIRECT_WRITER_PINS+1,)).fetchall()
+        used_readiness=db.execute('SELECT challenge,reservation,proof_sha256 FROM direct_v2_readiness_uses LIMIT 4097').fetchall()
+        if len(used_readiness)>4096:raise PolicyConflict('V2 readiness journal capacity exceeded')
+        if used_readiness:
+            if type(observed_config.get('directV2ReadinessVersion')) is not int or observed_config['directV2ReadinessVersion']!=1:
+                raise PolicyConflict('V2 readiness journal marker missing')
+            base['directV2ReadinessVersion']=1
+        elif 'directV2ReadinessVersion' in observed_config:
+            raise PolicyConflict('V2 readiness journal records missing')
+        for used in used_readiness:
+            try: valid = str(uuid.UUID(used['challenge']))==used['challenge']
+            except (ValueError,TypeError,AttributeError):valid=False
+            if (not valid or not re.fullmatch(r'direct-[a-f0-9]{64}',used['reservation'])
+                    or not re.fullmatch(r'[a-f0-9]{64}',used['proof_sha256'])
+                    or db.execute('SELECT 1 FROM reservations WHERE id=?',(used['reservation'],)).fetchone() is None):
+                raise PolicyConflict('V2 readiness journal changed')
         if len(pins)>MAX_DIRECT_WRITER_PINS:raise PolicyConflict('direct writer pin budget exceeded')
         if 'directWriterVersion' in observed_config:
             if type(observed_config['directWriterVersion']) is not int or observed_config['directWriterVersion']!=DIRECT_WRITER_VERSION:
@@ -364,6 +388,7 @@ class ScratchLedger:
             # explicitly qualified control lifecycle can release it.
             outstanding += db.execute("SELECT COALESCE(SUM(bytes),0) FROM control_charges").fetchone()[0]
             outstanding += db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
+            outstanding += db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             free = _integer(self.probe(self.root), "free bytes")
             if free - outstanding - self.floor < total:
                 raise PolicyConflict("insufficient unreserved scratch")
@@ -409,6 +434,7 @@ class ScratchLedger:
             outstanding = db.execute('SELECT COALESCE(SUM(remaining),0) FROM reservations').fetchone()[0]
             outstanding += db.execute('SELECT COALESCE(SUM(bytes),0) FROM control_charges').fetchone()[0]
             outstanding += db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
+            outstanding += db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             free = _integer(self.probe(self.root), 'free bytes')
             if free - outstanding - self.floor < DIRECT_WRITER_PIN_ALLOWANCE:
                 raise PolicyConflict('insufficient unreserved scratch for direct writer pin')
@@ -442,6 +468,40 @@ class ScratchLedger:
             changed=db.execute('UPDATE direct_writer_pins SET id=? WHERE reservation=? AND id=?',
                                (replacement,reservation_id,readiness_pin)).rowcount
             if changed!=1:raise PolicyConflict('direct readiness pin changed')
+            return replacement
+
+    def _handover_v2_writer(self, reservation_id, expected_settings, readiness_pin,
+                            *, challenge_id, proof_sha256, readiness_guard):
+        """Consume one challenge and swap its pin in the same write transaction."""
+        try: valid = type(challenge_id) is str and str(uuid.UUID(challenge_id)) == challenge_id
+        except (ValueError,TypeError,AttributeError):valid=False
+        if (not valid or type(proof_sha256) is not str or not re.fullmatch('[a-f0-9]{64}',proof_sha256)
+                or type(readiness_pin) is not str or not re.fullmatch('[a-f0-9]{32}',readiness_pin)
+                or not callable(readiness_guard)):
+            raise PolicyConflict('V2 readiness identity required')
+        with self._transaction() as db:
+            row=self._reservation(db,reservation_id)
+            if (row['state']!='reserved' or row['allocated']!=0 or row['settings']!=_json(expected_settings)
+                    or not db.execute('SELECT 1 FROM transfer_fences WHERE reservation=?',(reservation_id,)).fetchone()):
+                raise PolicyConflict('V2 scratch fence changed')
+            if db.execute('SELECT 1 FROM direct_v2_readiness_uses WHERE challenge=?',(challenge_id,)).fetchone():
+                raise PolicyConflict('V2 readiness challenge already consumed')
+            if db.execute('SELECT count(*) FROM direct_v2_readiness_uses').fetchone()[0]>=4096:
+                raise PolicyConflict('V2 readiness journal capacity exceeded')
+            outstanding=db.execute('SELECT COALESCE(SUM(remaining),0) FROM reservations').fetchone()[0]
+            outstanding+=db.execute('SELECT COALESCE(SUM(bytes),0) FROM control_charges').fetchone()[0]
+            outstanding+=(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0]
+                          +db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0])*DIRECT_WRITER_PIN_ALLOWANCE
+            if _integer(self.probe(self.root),'free bytes')-outstanding-self.floor < DIRECT_WRITER_PIN_ALLOWANCE:
+                raise PolicyConflict('insufficient scratch for V2 readiness journal')
+            if readiness_guard() is not True:raise PolicyConflict('V2 readiness expired')
+            replacement=uuid.uuid4().hex
+            changed=db.execute('UPDATE direct_writer_pins SET id=? WHERE reservation=? AND id=?',
+                               (replacement,reservation_id,readiness_pin)).rowcount
+            if changed!=1:raise PolicyConflict('V2 readiness pin changed')
+            self._latch(db,directV2ReadinessVersion=1)
+            db.execute('INSERT INTO direct_v2_readiness_uses VALUES(?,?,?)',
+                       (challenge_id,reservation_id,proof_sha256))
             return replacement
 
     def claim_engine_lease(self, reservation_id):

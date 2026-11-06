@@ -1,6 +1,7 @@
 """Unwired V2 worker receive boundary. No Viewer custody acknowledgement."""
 import hmac
 import copy
+import hashlib
 import json
 import threading
 import time
@@ -31,6 +32,7 @@ class DirectWorkerBoundaryV2:
         from .direct_worker_fence_proof_v2 import verify as verify_readiness, FenceProofRejected
         try:
             checked_at = time.time()
+            checked_mono = time.monotonic()
             verified = verify_readiness(readiness_proof, expected_item=item, expected_worker=expected_worker,
                 challenge_id=challenge_id, gate_generation=gate_generation, issuer_id=issuer_id,
                 key_id=key_id, public_key=public_key, now=int(checked_at))
@@ -51,7 +53,7 @@ class DirectWorkerBoundaryV2:
         self.engine_id, self.origin, self.generation, self._bearer = engine_id, coordinator_origin, gate_generation, bearer
         self._readiness_pin = verified['pinId']
         self._readiness_proof = copy.deepcopy(readiness_proof)
-        self._proof_deadline = time.monotonic() + max(0, verified['expiresAt'] - checked_at)
+        self._proof_deadline = checked_mono + max(0, verified['expiresAt'] - checked_at)
         self._proof_binding = dict(challenge_id=challenge_id, issuer_id=issuer_id,
                                    key_id=key_id, public_key=public_key)
         self._writer_lock = threading.Lock()
@@ -81,14 +83,23 @@ class DirectWorkerBoundaryV2:
                 pin = self.ledger.begin_direct_writer(scratch_id, settings(item, scratch_id))
             else:
                 from .direct_worker_fence_proof_v2 import verify as verify_readiness
-                if time.monotonic() >= self._proof_deadline:
-                    raise DirectBoundaryDenied('V2 readiness proof expired')
-                observed = verify_readiness(self._readiness_proof, expected_item=item,
-                    expected_worker=self.worker, gate_generation=self.generation,
-                    now=int(time.time()), **self._proof_binding)
-                if observed['pinId'] != self._readiness_pin:
-                    raise DirectBoundaryDenied('V2 readiness pin changed')
-                pin = self.ledger._handover_direct_writer(scratch_id, settings(item, scratch_id), self._readiness_pin)
+                def check_readiness():
+                    if time.monotonic() >= self._proof_deadline:
+                        raise DirectBoundaryDenied('V2 readiness proof expired')
+                    observed = verify_readiness(self._readiness_proof, expected_item=item,
+                        expected_worker=self.worker, gate_generation=self.generation,
+                        now=int(time.time()), **self._proof_binding)
+                    if observed['pinId'] != self._readiness_pin:
+                        raise DirectBoundaryDenied('V2 readiness pin changed')
+                    return True
+                check_readiness()
+                pin = self.ledger._handover_v2_writer(scratch_id, settings(item, scratch_id), self._readiness_pin,
+                    challenge_id=self._proof_binding['challenge_id'],
+                    proof_sha256=hashlib.sha256(p.canonical_json(self._readiness_proof)).hexdigest(),
+                    readiness_guard=check_readiness)
+                # A blocked transaction can finish too late. Never read or
+                # release its replacement pin when outcome freshness is lost.
+                check_readiness()
                 # If the subsequent operation fails, the new pin remains held.
                 self._readiness_pin = None
             receipt, replay = self.spool.receive_object(job_id=item['jobId'], generation=item['generation'],
