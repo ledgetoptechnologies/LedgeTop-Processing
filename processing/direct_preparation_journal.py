@@ -49,7 +49,10 @@ def metadata_bytes(db):
     version=0 if 'direct_preparation_version' not in columns else db.execute(
         'SELECT direct_preparation_version FROM coordinator_identity WHERE singleton=1').fetchone()[0]
     exists=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_preparation_intents'").fetchone()
-    if version==0 and not exists:return 0
+    if version==0 and not exists:
+        if db.execute("SELECT 1 FROM jobs WHERE held_reason='direct_preparing' LIMIT 1").fetchone():
+            raise Conflict('held preparation intent missing')
+        return 0
     if type(version) is not int or version!=1 or not exists:raise Conflict('preparation intent marker changed')
     verify_schema(db)
     count=db.execute('SELECT COUNT(*) FROM direct_preparation_intents').fetchone()[0]

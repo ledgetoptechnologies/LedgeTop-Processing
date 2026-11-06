@@ -96,7 +96,7 @@ class PreparationJournalTests(unittest.TestCase):
                 self.assertEqual(tuple(state),('held','direct_preparing',f.item['nodeId']))
                 self.assertFalse(store._node_has_slot(db,f.item['nodeId']))
             with self.assertRaises(Conflict):queue.operator(job['jobId'],'resolve',dict(note='synthetic',workerStopped=True))
-            from processing.direct_preparation_journal import metadata_bytes,TRIGGERS
+            from processing.direct_preparation_journal import metadata_bytes,TRIGGERS,SCHEMA
             with queue._db() as db:
                 record=tuple(db.execute('SELECT * FROM direct_preparation_intents').fetchone())
                 db.execute('DROP TRIGGER direct_preparation_no_delete')
@@ -108,4 +108,11 @@ class PreparationJournalTests(unittest.TestCase):
                 db.execute('INSERT INTO direct_preparation_intents VALUES(?,?,?,?,?,?,?,?,?,?)',record)
                 db.execute('UPDATE coordinator_identity SET direct_preparation_count=1 WHERE singleton=1')
                 self.assertGreater(metadata_bytes(db),0)
+                db.execute('DROP TABLE direct_preparation_intents')
+                db.execute('UPDATE coordinator_identity SET direct_preparation_version=0,direct_preparation_count=0 WHERE singleton=1')
+                with self.assertRaisesRegex(Conflict,'intent missing'):metadata_bytes(db)
+                db.execute(SCHEMA)
+                for sql in TRIGGERS.values():db.execute(sql)
+                db.execute('INSERT INTO direct_preparation_intents VALUES(?,?,?,?,?,?,?,?,?,?)',record)
+                db.execute('UPDATE coordinator_identity SET direct_preparation_version=1,direct_preparation_count=1 WHERE singleton=1')
             queue.close()

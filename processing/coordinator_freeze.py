@@ -130,9 +130,8 @@ class FreezeGate:
                 verify_fence(db)
                 verify_schema(db)
             columns={row['name'] for row in db.execute('PRAGMA table_info(coordinator_identity)')}
-            if 'direct_preparation_version' in columns:
-                from .direct_preparation_journal import metadata_bytes as preparation_metadata_bytes
-                preparation_metadata_bytes(db)
+            from .direct_preparation_journal import metadata_bytes as preparation_metadata_bytes
+            preparation_metadata_bytes(db)
             if 'direct_v2_handoff_version' in columns:
                 marker=db.execute('SELECT direct_v2_handoff_version FROM coordinator_identity WHERE singleton=1').fetchone()
                 if marker is None or type(marker[0]) is not int or marker[0] not in (0,1):
