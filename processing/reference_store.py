@@ -1100,6 +1100,11 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             submission = json.loads(row['input_json'])
             source_v2 = 'sourceIntakeVersion' in submission or row['source_state'] is not None
             if source_v2:
+                # Existing source-bound acceptance is defined only for the
+                # verified coordinator spool. Direct custody has no qualified
+                # receipt yet and cannot borrow that result contract.
+                from .source_intake_mode import require as require_source_mode
+                require_source_mode(db,job_id,'spool-v1')
                 if (type(submission.get('sourceIntakeVersion')) is not int
                         or submission['sourceIntakeVersion'] != 2 or row['source_state'] is None
                         or viewer_receipt is None):
