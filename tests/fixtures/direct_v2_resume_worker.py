@@ -50,7 +50,7 @@ boundary=DirectWorkerBoundaryV2(ledger=ledger,spool=spool,inventory=index,item=c
     worker_signer=signer,resume_observation_only=config['resume'])
 context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2
 context.load_cert_chain(str(root/'fixture-cert.pem'),str(root/'fixture-key.pem'))
-server=create_direct_worker_server(boundary,'127.0.0.1',0,ssl_context=context,idle_timeout=2)
+server=create_direct_worker_server(boundary,'127.0.0.1',0,ssl_context=context,idle_timeout=2,allow_ungranted_v2_test_only=True)
 print(server.server_port,flush=True)
 try:server.serve_forever(poll_interval=.05)
 finally:server.server_close()

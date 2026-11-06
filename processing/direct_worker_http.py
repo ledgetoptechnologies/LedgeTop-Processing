@@ -92,12 +92,17 @@ class _HeaderDeadline:
 def create_direct_worker_server(boundary, host, port, *, ssl_context,
                                 idle_timeout=10, body_deadline=120,
                                 header_deadline=15, max_object_bytes=20 * 1024**3,
-                                max_connections=4, client_principals=None, reservation_grant=None):
+                                max_connections=4, client_principals=None, reservation_grant=None,
+                                allow_ungranted_v2_test_only=False):
     """Create a bounded server without starting it or changing live services."""
     from .direct_worker_receiver_v2 import DirectWorkerBoundaryV2
     if not isinstance(boundary, (DirectWorkerBoundary, DirectWorkerBoundaryV2)):
         raise ValueError('trusted worker boundary required')
     version = 'v2' if isinstance(boundary, DirectWorkerBoundaryV2) else 'v1'
+    if type(allow_ungranted_v2_test_only) is not bool:
+        raise ValueError('explicit test-only setting required')
+    if version=='v2' and reservation_grant is None and not allow_ungranted_v2_test_only:
+        raise ValueError('durable V2 reservation grant required')
     if (not isinstance(ssl_context, ssl.SSLContext)
             or ssl_context.protocol != ssl.PROTOCOL_TLS_SERVER
             or ssl_context.minimum_version < ssl.TLSVersion.TLSv1_2):
@@ -191,7 +196,13 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
                             self._reply(400,{'error':'invalid_grant'});return
                         from . import reference_protocol as protocol
                         body=_BoundedReader(self,length,time.monotonic()+self.server.body_deadline)
-                        payload=protocol.decode_submission(body.read(length))
+                        parts=[];remaining=length
+                        while remaining:
+                            chunk=body.read(remaining)
+                            if not chunk:
+                                raise ValueError('incomplete grant body')
+                            parts.append(chunk);remaining-=len(chunk)
+                        payload=protocol.decode_submission(b''.join(parts))
                         result=reservation_grant.authorize(principal,headers,payload)
                         self._reply(200,result);return
                     reservation_grant.require(principal,headers)

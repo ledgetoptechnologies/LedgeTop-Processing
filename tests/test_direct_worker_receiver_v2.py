@@ -418,7 +418,7 @@ class WorkerV2Tests(unittest.TestCase):
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version=ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(str(self.root/'fixture-cert.pem'),str(self.root/'fixture-key.pem'))
-        server=create_direct_worker_server(self.boundary,'127.0.0.1',0,ssl_context=context,idle_timeout=2)
+        server=create_direct_worker_server(self.boundary,'127.0.0.1',0,ssl_context=context,idle_timeout=2,allow_ungranted_v2_test_only=True)
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         try:
             client_context=verified_client_context(str(self.root/'fixture-ca.pem'))
@@ -469,7 +469,7 @@ class WorkerV2Tests(unittest.TestCase):
             (self.root/name).write_bytes(material[name])
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(str(self.root/'fixture-cert.pem'),str(self.root/'fixture-key.pem'))
-        server=create_direct_worker_server(self.boundary,'127.0.0.1',0,ssl_context=context,idle_timeout=2)
+        server=create_direct_worker_server(self.boundary,'127.0.0.1',0,ssl_context=context,idle_timeout=2,allow_ungranted_v2_test_only=True)
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         try:
             sender=DirectWorkerSenderV2(origin='https://127.0.0.1:'+str(server.server_port),
@@ -500,7 +500,7 @@ class WorkerV2Tests(unittest.TestCase):
             (self.root/name).write_bytes(material[name])
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(str(self.root/'fixture-cert.pem'),str(self.root/'fixture-key.pem'))
-        server=create_direct_worker_server(self.boundary,'127.0.0.1',0,ssl_context=context,idle_timeout=2)
+        server=create_direct_worker_server(self.boundary,'127.0.0.1',0,ssl_context=context,idle_timeout=2,allow_ungranted_v2_test_only=True)
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         try:
             sender=DirectWorkerSenderV2(origin='https://127.0.0.1:'+str(server.server_port),

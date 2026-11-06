@@ -11,7 +11,7 @@ import uuid
 from . import reference_protocol as p
 from .direct_worker_boundary import DirectBoundaryDenied
 from .direct_worker_receiver import check_scope
-from .direct_worker_scratch_v2 import require_fenced
+from .direct_worker_scratch_v2 import require_fenced, settings
 from .node_gate import NodeGate
 from .scratch_policy import DIRECT_WRITER_PIN_ALLOWANCE, PolicyConflict
 
@@ -45,6 +45,11 @@ class DirectWorkerGrant:
             check_scope(self.boundary.ledger,self.boundary.spool,item,digest,scratch_id,gate,
                 coordinator_origin=self.boundary.origin,gate_generation=self.boundary.generation)
             with self.boundary.ledger._transaction() as db:
+                row=self.boundary.ledger._reservation(db,scratch_id)
+                if (row['state']!='reserved' or row['allocated']!=0
+                        or json.loads(row['settings'])!=settings(item,scratch_id)
+                        or not db.execute('SELECT 1 FROM transfer_fences WHERE reservation=?',(scratch_id,)).fetchone()):
+                    raise PolicyConflict('V2 scratch fence changed')
                 existing=db.execute('SELECT * FROM direct_worker_grants WHERE reservation=?',(scratch_id,)).fetchone()
                 if existing is not None:
                     if (existing['operation'],existing['principal'],existing['binding_sha'])!=(payload['operationId'],principal,digest):
