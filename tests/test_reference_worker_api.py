@@ -174,7 +174,7 @@ class ReferenceWorkerAPITests(unittest.TestCase):
         before = self.store.get(self.job['jobId'])
         response = self.request('GET', '/next')
         self.assertEqual(response.status, 200)
-        self.assertEqual(response.body['job'], before)
+        self.assertEqual(response.body['job'], {key: value for key, value in before.items() if key != 'presentation'})
         self.assertEqual(response.body['execution'], dict(kind='odm', **{key: before[key] for key in
             ('jobId', 'generation', 'environment', 'manifestSha256', 'pipelineDigest')}))
         self.assertEqual(self.store.get(self.job['jobId']), before)

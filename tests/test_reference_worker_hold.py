@@ -784,10 +784,11 @@ class WorkerHoldTests(unittest.TestCase):
         self.assertNotIn('queueReason', self.public(job))
 
     ADDITIVE = {'queueReason', 'queueMessage', 'holdObservation', 'holdEngineStatusCode'}
+    PROJECTED = {'presentation'}
 
     def legacy(self, record):
         """What a Viewer built before these fields reads from a job record."""
-        return {key: value for key, value in record.items() if key not in self.ADDITIVE}
+        return {key: value for key, value in record.items() if key not in self.ADDITIVE | self.PROJECTED}
 
     def test_old_consumers_see_an_observed_job_exactly_as_before(self):
         job = self.executing()
@@ -796,7 +797,7 @@ class WorkerHoldTests(unittest.TestCase):
         self.long_outage(job)
         after = self.public(job)
         self.assertEqual(self.ADDITIVE, self.ADDITIVE & set(after))
-        self.assertEqual(self.legacy(after), before)
+        self.assertEqual(self.legacy(after), self.legacy(before))
         self.engine_up()
         self.driver.step()
         self.assertEqual(self.public(job), before)

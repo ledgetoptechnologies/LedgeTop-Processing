@@ -7,6 +7,7 @@ from contextlib import closing
 import copy
 import hashlib
 import io
+import itertools
 import json
 import sqlite3
 import time
@@ -21,10 +22,12 @@ from processing.node_gate import GateBusy, NodeGate
 from processing.prototype import Queue
 from processing.reference_control import ReferenceControlAPI
 from processing.reference_driver import DriverHeld, DriverWait, ReferenceDriver
-from processing.reference_engine_worker import ReferenceEngineWorker, WorkerHeld
+from processing.reference_engine_worker import (ReferenceEngineWorker, START_SCAN_LINES, START_SCAN_PAGES,
+    WorkerHeld)
+from processing.reference_logs import MAX_LOG_BYTES
 from processing.reference_store import ReferenceStore
 from processing.reference_worker_hold import make_request as make_hold, report as report_hold, withdraw_claim
-from processing.viewer_service import EngineUnavailable
+from processing.viewer_service import EngineUnavailable, NativeEngine
 from tests import test_reference_driver as fixture
 
 TOKEN, VIEWER = fixture.TOKEN, fixture.VIEWER
@@ -42,11 +45,17 @@ class Harness(unittest.TestCase):
     advance = fixture.ReferenceDriverTests.advance
 
     def setUp(self):
-        self.output, self.posts, self.witness_error = ['first output line'], [], None
+        self.output, self.posts, self.witness_error, self.pages = ['first output line'], [], None, []
         fixture.ReferenceDriverTests.setUp(self)
-        patched = patch.object(self.native, 'output_page', side_effect=lambda job, *, line, limit: (self.output, False))
+        patched = patch.object(self.native, 'output_page', side_effect=self.output_page)
         patched.start()
         self.patches.append(patched)
+
+    def output_page(self, job, *, line, limit):
+        self.pages.append(line)
+        if type(self.output) is not list:
+            return self.output, False
+        return self.output[line:line + limit], line + limit < len(self.output)
 
     def request(self, method, suffix, payload=None, *, claim_token=None):
         if suffix.endswith('/start-witness'):
@@ -149,7 +158,7 @@ class StartWitnessTests(Harness):
         job = self.executing()
         self.output = ['', '   ', 'real line', 'later']
         self.assertEqual(self.witness(job), dict(gateGeneration=1, gateReceiptId=self.worker._row(job['jobId'])['receipt'],
-            nativeStatusCode=20, outputLineCount=4, outputPrefixSha256=hashlib.sha256(b'real line').hexdigest()))
+            nativeStatusCode=20, outputLineCount=2, outputPrefixSha256=hashlib.sha256(b'real line').hexdigest()))
 
     def test_status_20_with_empty_output_is_no_witness(self):
         job = self.executing()
@@ -265,10 +274,167 @@ class StartWitnessTests(Harness):
 
     def test_output_outside_its_bound_or_shape_is_no_witness(self):
         job = self.executing()
-        for output in (['line'] * 9, 'line', None, [b'line'], ['line', 7], ['x' * 300000]):
+        for output in ('line', None, [b'line'], ['line', 7], ['x' * 300000]):
             with self.subTest(output=str(output)[:20]):
                 self.output = output
                 self.assertIsNone(self.witness(job))
+        unbounded = ['line'] * (START_SCAN_LINES + 1)
+        with patch.object(self.native, 'output_page', side_effect=lambda job, *, line, limit: (unbounded, False)):
+            self.assertIsNone(self.witness(job))
+
+    def scan(self, job, limit=50):
+        """Calls until a witness; each one is what one driver step would spend."""
+        for calls in range(1, limit + 1):
+            witnessed = self.witness(job)
+            if witnessed is not None:
+                return calls, witnessed
+        return limit, None
+
+    def test_eight_initial_blanks_do_not_hide_the_first_real_line(self):
+        job = self.executing()
+        self.output = [''] * 8 + ['real line', 'later']
+        witnessed = self.witness(job)
+        self.assertEqual(witnessed['outputPrefixSha256'], hashlib.sha256(b'real line').hexdigest())
+        self.assertEqual(witnessed['outputLineCount'], 2)
+
+    def test_a_blank_run_longer_than_one_call_is_crossed_at_a_bounded_cost(self):
+        job = self.executing()
+        run = START_SCAN_LINES * START_SCAN_PAGES * 3 + 7
+        self.output = ['   '] * run + ['real line']
+        calls, witnessed = self.scan(job)
+        self.assertEqual(witnessed['outputPrefixSha256'], hashlib.sha256(b'real line').hexdigest())
+        self.assertEqual(calls, 4)
+        self.assertLessEqual(len(self.pages), calls * START_SCAN_PAGES)
+
+    def test_line_count_stays_inside_the_unchanged_dto_bound(self):
+        job = self.executing()
+        self.output = ['real line'] * 100
+        self.assertEqual(self.witness(job)['outputLineCount'], 8)
+
+    def test_all_blanks_forever_never_witnesses_and_holds_one_cursor(self):
+        job = self.executing()
+        self.output = [''] * (START_SCAN_LINES * START_SCAN_PAGES * 2 + 1)
+        for _ in range(12):
+            before = len(self.pages)
+            self.assertIsNone(self.witness(job))
+            self.assertLessEqual(len(self.pages) - before, START_SCAN_PAGES)
+            self.assertLessEqual(self.worker._start_scan[1], len(self.output))
+        self.assertEqual(self.worker._start_scan[0], job['jobId'])
+
+    def test_blanks_then_a_line_arriving_at_any_later_time_is_found(self):
+        job = self.executing()
+        self.output = [''] * (START_SCAN_LINES * START_SCAN_PAGES + 3)
+        for _ in range(5):
+            self.assertIsNone(self.witness(job))
+        self.output = self.output + ['real line']
+        self.assertIsNotNone(self.scan(job)[1])
+
+    def test_cursor_past_shrunken_output_restarts_from_the_top(self):
+        job = self.executing()
+        self.output = [''] * (START_SCAN_LINES * START_SCAN_PAGES)
+        self.assertIsNone(self.witness(job))
+        self.assertEqual(self.worker._start_scan[1], START_SCAN_LINES * START_SCAN_PAGES)
+        self.output = ['', 'restored line']
+        witnessed = self.witness(job)
+        self.assertEqual(witnessed['outputPrefixSha256'], hashlib.sha256(b'restored line').hexdigest())
+        self.assertEqual(self.pages[-2:], [START_SCAN_LINES * START_SCAN_PAGES, 0])
+
+    def test_empty_output_from_the_top_ends_the_call_without_spinning(self):
+        job = self.executing()
+        self.output = []
+        self.assertIsNone(self.witness(job))
+        self.assertEqual(self.pages, [0])
+
+    def test_worker_restart_mid_scan_scans_again_within_the_same_bound(self):
+        job = self.executing()
+        self.output = [''] * (START_SCAN_LINES * START_SCAN_PAGES + 5) + ['real line']
+        self.assertIsNone(self.witness(job))
+        self.assertGreater(self.worker._start_scan[1], 0)
+        self.worker = ReferenceEngineWorker(self.worker.path, ledger=self.ledger, outbox=self.outbox, engine=self.native,
+            engine_id='engine', node_id='cluster', authority_id=self.queue.authority_id, coordinator_origin=self.gate_origin,
+            gate_generation=1, worker_id='worker', engine_version='pinned-engine-1', engine_probe=lambda deadline: 'engine')
+        self.assertIsNone(self.worker._start_scan)
+        self.pages.clear()
+        self.assertIsNone(self.witness(job))
+        self.assertEqual(self.pages[0], 0)
+        self.assertLessEqual(len(self.pages), START_SCAN_PAGES)
+        self.assertIsNotNone(self.witness(job))
+
+    def test_cursor_of_another_job_is_not_used(self):
+        job = self.executing()
+        self.worker._start_scan = ('another-job', 7)
+        self.assertIsNotNone(self.witness(job))
+        self.assertEqual(self.pages, [0])
+
+    def test_status_10_never_reads_or_moves_the_cursor(self):
+        job = self.executing(code=10)
+        self.assertIsNone(self.witness(job))
+        self.assertEqual(self.pages, [])
+        self.assertIsNone(self.worker._start_scan)
+
+    def test_failed_second_status_keeps_the_found_line_for_the_next_call(self):
+        job = self.executing()
+        self.output = [''] * 5 + ['real line']
+        self.scripted_info(job, [{'uuid': job['jobId'], 'status': {'code': code}} for code in (20, 10)])
+        self.assertIsNone(self.witness(job))
+        self.assertEqual(self.worker._start_scan, (job['jobId'], 5))
+
+    def oversized_engine(self, chunks):
+        """The real NativeEngine read, over a response that never stops giving bytes."""
+        sent = [0]
+
+        class Reply:
+            status = 200
+            headers = {'Content-Type': 'application/json'}
+
+            def __init__(self, url):
+                self.url, self.first = url, True
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def geturl(self):
+                return self.url
+
+            def read(self, size):
+                data = next(chunks)[:size]
+                sent[0] += len(data)
+                return data
+
+        class Opener:
+            @staticmethod
+            def open(request, timeout):
+                return Reply(request.full_url)
+        return sent, patch('processing.viewer_service.build_opener', return_value=Opener), patch.object(
+            self.native, 'output_page', side_effect=lambda job, *, line, limit: NativeEngine.output_page(
+                self.native, job, line=line, limit=limit))
+
+    def test_oversized_response_stops_at_the_byte_bound_and_is_no_witness(self):
+        job = self.executing()
+        one_line = itertools.chain([b'["'], itertools.repeat(b'x' * 4096))
+        sent, opener, reader = self.oversized_engine(one_line)
+        with opener, reader, self.assertRaises(EngineUnavailable):
+            self.witness(job)
+        self.assertLessEqual(sent[0], MAX_LOG_BYTES)
+
+    def test_a_response_longer_than_the_page_is_cut_after_its_prefix(self):
+        job = self.executing()
+        lines = itertools.chain([b'["real line"'], itertools.repeat(b',"more output"' * 200))
+        sent, opener, reader = self.oversized_engine(lines)
+        with opener, reader:
+            witnessed = self.witness(job)
+        self.assertEqual(witnessed['outputPrefixSha256'], hashlib.sha256(b'real line').hexdigest())
+        self.assertLessEqual(sent[0], 4 * 4096)
+
+    def test_oversized_output_never_stops_polling_or_holds(self):
+        job = self.executing()
+        sent, opener, reader = self.oversized_engine(itertools.chain([b'["'], itertools.repeat(b'x' * 4096)))
+        with opener, reader:
+            self.assertEqual(self.driver.step(), {'state': 'executing', 'jobId': job['jobId']})
+        self.assertNotIn('hold', self.row(job)[1])
 
     def test_engine_identity_is_checked_after_the_reads_too(self):
         job = self.executing()

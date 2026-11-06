@@ -3,6 +3,7 @@
 Harness and processes come from test_reference_source_fetch_process_restart. Here
 FileEngine's status and output are scripted, since its default is always 20.
 """
+import hashlib
 import json
 import os
 import unittest
@@ -94,6 +95,19 @@ class WitnessProcessTests(unittest.TestCase):
         for _ in range(3):
             self.assertEqual(self.step(worker)['state'], 'executing')
         self.assertIsNone(self.latch())
+
+    def test_killed_mid_scan_of_a_long_blank_run_scans_again_and_finds_the_line(self):
+        self.spawn('coordinator')
+        worker = self.spawn('worker')
+        self.script(code=20, output=[''] * 500 + ['real line'])
+        self.executing(worker)
+        self.assertEqual(self.step(worker)['state'], 'executing')
+        self.assertIsNone(self.latch())
+        self.kill(worker)
+        worker = self.spawn('worker')
+        for _ in range(3):
+            self.assertEqual(self.step(worker)['state'], 'executing')
+        self.assertEqual(self.latch()['request']['outputPrefixSha256'], hashlib.sha256(b'real line').hexdigest())
 
     def test_both_processes_killed_keep_one_row_and_never_charge_recovery(self):
         coordinator = self.spawn('coordinator')

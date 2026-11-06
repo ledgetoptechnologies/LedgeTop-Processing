@@ -118,7 +118,9 @@ class ReferenceAPITests(unittest.TestCase):
         replay = self.request("POST", "/jobs", self.fixture["submission"])
         self.assertEqual((replay.status, replay.body["jobId"]), (200, job["jobId"]))
         path = "/jobs/" + job["jobId"]
-        self.assertEqual(self.request("GET", path).body, job)
+        read = self.request("GET", path).body
+        self.assertEqual(read.pop("presentation")["state"], "queued")
+        self.assertEqual(read, job)
         for suffix, method in (("", "GET"), ("/results", "GET"), ("/acceptance", "POST")):
             response = self.request(method, path + suffix, {}, token=PRODUCTION)
             self.assertEqual((response.status, response.body), (404, {"error": "not_found"}))

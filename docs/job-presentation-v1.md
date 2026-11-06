@@ -2,9 +2,9 @@
 
 **Status: unqualified.** This wire is not qualified until root and the Viewer
 owner have reviewed this final DTO and cross-language fixtures, and real NodeODM
-output timing has passed as an installed check. Until then, `limit=8` and the
-blank-line rule are provisional. The Viewer owner must also agree the wording
-below before release.
+output timing has passed as an installed check. Until then, the scan bounds and the
+blank-line rule are provisional. The Viewer owner must also agree the wording below
+before release.
 
 This is display only. Internal phase, claim, gate, custody, budgets and recovery
 are unchanged. No witness, retry or projection lifts a hold or changes a budget.
@@ -13,15 +13,29 @@ Code: `processing/reference_presentation.py`.
 
 ## What a witness means
 
-A start witness is historical evidence that this attempt was seen started. It is
-not a heartbeat, a job status, an engine incarnation or a maintenance signal, and
-it does not show uninterrupted CPU work.
+A start witness means **engine command output was observed** for this attempt:
+native status 20, then non-blank task output, then status 20 again. On a fresh task,
+non-blank output normally comes from the child's stdout or stderr, and init logging
+does not append to task output.
+
+It does not prove that ODM initialized successfully, because the output is launcher
+or shell output (`run.sh`, `shell:true`). It is not a heartbeat, a job status, an
+engine incarnation or a maintenance signal, and it does not show current or
+uninterrupted CPU work.
+
+Known exceptions, from the NodeODM source:
+
+- Timeout text is appended after `dateStarted` (`TaskManager:325-327`), so it can
+  appear with no child output.
+- `config.test` branches generate output without a spawn. `config.test` is false on
+  both current native containers, which closes this exception for those containers
+  only. Any other container must be checked.
 
 **Activity is historical, and current activity is unknown.** There is no
 `activity` field in v1. Whatever `state: processing` or `processingConfirmedAt`
-suggests about activity describes the past. The Viewer must say processing was
-observed or confirmed, and must not imply it is happening now. Dead-worker and
-maintenance visibility remain a separate monitoring requirement.
+suggests about activity describes the past. The Viewer must say engine output was
+observed, and must not imply work is happening now. Dead-worker and maintenance
+visibility remain a separate monitoring requirement.
 
 ## Public projection
 
@@ -37,12 +51,16 @@ POST replies and every worker reply omit it. The source phase stays at `$.phase`
 |---|---|---|
 | `schemaVersion` | int, `1` | |
 | `protocol` | `ltds-job-presentation-v1` | |
-| `state` | `queued`, `preparing`, `processing` or `null` | `null` means another state dominates; see below |
-| `processingConfirmedAt` | `YYYY-MM-DDTHH:MM:SS.mmmZ` or `null` | When this coordinator first durably accepted the witness |
+| `state` | `queued`, `preparing`, `processing` or `null` | `null` means another state dominates; see below. `processing` means engine command output was observed, not that work is current |
+| `processingConfirmedAt` | `YYYY-MM-DDTHH:MM:SS.mmmZ` or `null` | When this coordinator first durably accepted the observation that engine command output existed |
 
-`processingConfirmedAt` is coordinator time. It is neither engine spawn time nor
-worker time, and a report delayed by a coordinator outage makes it late. It may
-stay populated while `state` is `null`, as history only.
+`processingConfirmedAt` is coordinator time. It is neither engine spawn time, nor
+worker time, nor proof of successful ODM initialization, and a report delayed by a
+coordinator outage makes it late. It may stay populated while `state` is `null`, as
+history only.
+
+The object is closed: an extra field makes it malformed. `processing` requires a
+time, and `queued` and `preparing` require `null`.
 
 ### Precedence, first match wins
 
@@ -64,7 +82,7 @@ stay populated while `state` is `null`, as history only.
 | running | queued, waiting_capacity | none | `preparing` | reservation |
 | running | awaiting_transfer, fetching | none | `preparing` | transfer |
 | running | processing | none | `preparing` | engine preparation |
-| running | processing | yes | `processing` | observed started |
+| running | processing | yes | `processing` | engine output observed |
 
 Any other combination is `null`.
 
@@ -83,6 +101,14 @@ malformed `protocol`, `schemaVersion`, `state` or time, like this:
 Native and legacy provider behaviour is separate and unchanged. The coordinator
 omits the field when a stored latch fails validation, because a damaged latch
 proves nothing either way.
+
+### Shared fixtures
+
+`tests/fixtures/job-presentation-v1.json` covers precedence, malformed,
+attempt/generation and disconnected cases, and is pinned to LF so its SHA-256 is
+stable. Coordinator cases are checked against the real projection.
+`tests/test_job_presentation_fixtures.py` holds a short reference reader for the rule
+above. `display` in the fixtures is a proposed label, not a wire field.
 
 ## Worker to coordinator
 
@@ -103,7 +129,7 @@ transport is required. The body is closed and at most 2 KiB.
 | `inputManifestSha256`, `pipelineDigest`, `claimTokenSha256` | SHA-256 hex |
 | `gateReceiptId` | 32 lowercase hex |
 | `nativeStatusCode` | int, exactly `20` |
-| `outputLineCount` | int, 1 to 8, lines in the first output page |
+| `outputLineCount` | int, 1 to 8, lines seen from the first non-blank line, capped at 8 |
 | `outputPrefixSha256` | SHA-256 hex of the first non-blank line; text is never sent |
 | `observedAt` | `YYYY-MM-DDTHH:MM:SS.mmmZ`, worker clock |
 | `witnessSha256` | digest of all fields above; the coordinator recomputes it |
@@ -139,11 +165,33 @@ values.
   is null and the bound job is this job;
 - the row phase is `commit_pending` or `processing`;
 - `/task/{uuid}/info` names the exact UUID with integer code 20;
-- the first output page, at most 8 lines, has a non-blank line;
+- a bounded forward scan of the output finds a non-blank line (see below);
 - a second `/info` still reports 20;
 - the engine identity matches before and after.
 
 `processingTime`, `engine_started` and the row phase never stand in for these.
+
+### Output scan
+
+NodeODM appends blank strings for whitespace chunks, and its output route ignores
+`limit` and returns the whole suffix from `line`. So the worker does not sample line
+0. It reads pages of at most 200 lines, at most 2 pages per observation, from a
+cursor private to the worker. The cursor is never sent, and the DTO is unchanged.
+
+- **Bytes:** each read stops after the page plus one lookahead line, and refuses a
+  prefix over 256 KiB, so a long response is never read whole. The engine still
+  builds the whole suffix for each request, which this cannot bound.
+- **Blanks:** a run of blanks of any length is crossed a bounded step at a time, so it
+  cannot hide a later line. State stays one integer however long the run is.
+- **All blanks:** the scan reaches the end, restarts from line 0 and never witnesses.
+- **Shrinking output:** an empty page past line 0 means the end or output that shrank.
+  The two look alike, so the cursor resets to 0 in the same observation.
+- **Worker restart:** the cursor is in memory and is lost, so the scan starts again
+  from line 0 within the same bounds. A saved latch is unaffected.
+- **Status not 20:** no output is read and the cursor does not move.
+- **Second status read fails:** the cursor stays on the line found.
+- **One line over 256 KiB:** that read fails each time, so the scan stops there and the
+  job shows `preparing`. It fails towards no witness and never stops polling.
 
 The driver saves `data['startWitness']` with the exact request before any POST,
 then sends it once per step, including on held rows. Failures never stop polling or
@@ -166,8 +214,8 @@ of those checks already refuses that.
 ## Known limits
 
 - **Restored output:** status 20 with output restored after a NodeODM restart cannot
-  be rejected, because the worker cannot see an engine restart. The live check
-  decides whether this matters.
+  be rejected, because the worker cannot see an engine restart, so the output may be
+  earlier output for this task. The live check decides whether this matters.
 - **Gate evidence is worker-attested.** The coordinator has no gate data, so it
   checks digest consistency, not the receipt.
 - **A dead worker leaves `processing` displayed** until something else changes. Only
@@ -187,5 +235,5 @@ of those checks already refuses that.
 ## Installed acceptance still owed
 
 On real NodeODM, record `/info` and `/output` from commit through child start and
-after a NodeODM restart: first output relative to 10 to 20, whether any line precedes
-the child, whether output is restored, and whether the first line can be blank.
+after a NodeODM restart: first output relative to 10 to 20, whether any non-blank line
+precedes the child, whether output is restored, and how long a blank run can be.

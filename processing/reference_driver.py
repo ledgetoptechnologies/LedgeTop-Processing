@@ -946,7 +946,7 @@ class ReferenceDriver:
             'holdReport': self._post_report(job_id, stage, data, 'hold')}
 
     def _latch_start(self, job_id, stage, data, request_id):
-        """Journal the first sighting of a started task. Display only, so nothing raises.
+        """Journal the first sighting of engine output. Display only, so nothing raises.
 
         Saved before any POST. It feeds no proof, recovery, hold or budget, and a
         crash before the save just observes again.

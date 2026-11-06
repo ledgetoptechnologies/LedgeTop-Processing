@@ -78,7 +78,8 @@ class FileEngine(NativeEngine):
     def output_page(self, identifier, *, line, limit):
         """Output exists only once a commit was sent, like a task that really began."""
         default = ['synthetic output'] if 'commit' in self.log.read_text().split() else []
-        return self.script().get('output', default), False
+        output = self.script().get('output', default)
+        return output[line:line + limit], line + limit < len(output)
 
     def read(self, route, **_kwargs):
         if route == '/info':

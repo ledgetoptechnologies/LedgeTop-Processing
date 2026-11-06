@@ -1,0 +1,2149 @@
+{
+ "cases": [
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "terminal"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "failed"
+   },
+   "name": "rank2-failed-witnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": true
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "terminal"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "cancelled"
+   },
+   "name": "rank2-cancelled-witnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": true
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "terminal"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "succeeded"
+   },
+   "name": "rank2-succeeded-witnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": true
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "held"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": "coordinator_restart",
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "held",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "held"
+   },
+   "name": "rank3-restart-hold-witnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": true
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "held"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "held"
+   },
+   "name": "rank3-operator-hold-witnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": true
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "held"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": "source_receipt_held",
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "held",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "queueReason": "source_receipt_held",
+    "status": "held"
+   },
+   "name": "rank3-source-hold-witnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": true
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "queue_message"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "queueReason": "node_lost",
+    "status": "running"
+   },
+   "name": "rank4-node_lost-witnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": true
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "queue_message"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "queueReason": "engine_task_missing",
+    "status": "running"
+   },
+   "name": "rank4-engine_task_missing-witnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": true
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "queue_message"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "queueReason": "source_receiving",
+    "status": "running"
+   },
+   "name": "rank4-source_receiving-witnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": true
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "error"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": "some_error",
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "running"
+   },
+   "name": "rank5-error-witnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": true
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "delivery"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "waiting_for_delivery",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "running"
+   },
+   "name": "rank6-waiting_for_delivery-witnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": true
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "delivery"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "awaiting_acceptance",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "running"
+   },
+   "name": "rank6-awaiting_acceptance-witnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": true
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "delivery"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "completed",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "running"
+   },
+   "name": "rank6-completed-witnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": true
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "terminal"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "failed"
+   },
+   "name": "rank2-failed-unwitnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "terminal"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "cancelled"
+   },
+   "name": "rank2-cancelled-unwitnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "terminal"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "succeeded"
+   },
+   "name": "rank2-succeeded-unwitnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "held"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": "coordinator_restart",
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "held",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "held"
+   },
+   "name": "rank3-restart-hold-unwitnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "held"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "held"
+   },
+   "name": "rank3-operator-hold-unwitnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "held"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": "source_receipt_held",
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "held",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "queueReason": "source_receipt_held",
+    "status": "held"
+   },
+   "name": "rank3-source-hold-unwitnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "queue_message"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "queueReason": "node_lost",
+    "status": "running"
+   },
+   "name": "rank4-node_lost-unwitnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "queue_message"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "queueReason": "engine_task_missing",
+    "status": "running"
+   },
+   "name": "rank4-engine_task_missing-unwitnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "queue_message"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "queueReason": "source_receiving",
+    "status": "running"
+   },
+   "name": "rank4-source_receiving-unwitnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "error"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": "some_error",
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "running"
+   },
+   "name": "rank5-error-unwitnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "delivery"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "waiting_for_delivery",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "running"
+   },
+   "name": "rank6-waiting_for_delivery-unwitnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "delivery"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "awaiting_acceptance",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "running"
+   },
+   "name": "rank6-awaiting_acceptance-unwitnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "delivery"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "completed",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "running"
+   },
+   "name": "rank6-completed-unwitnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "queued"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "queued"
+    },
+    "status": "queued"
+   },
+   "name": "rank7-queued-queued",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "queued"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "waiting_capacity",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "queued"
+    },
+    "status": "queued"
+   },
+   "name": "rank7-queued-waiting_capacity",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "preparing"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "preparing"
+    },
+    "status": "running"
+   },
+   "name": "rank7-running-queued",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "preparing"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "waiting_capacity",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "preparing"
+    },
+    "status": "running"
+   },
+   "name": "rank7-running-waiting_capacity",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "preparing"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "awaiting_transfer",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "preparing"
+    },
+    "status": "running"
+   },
+   "name": "rank7-running-awaiting_transfer",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "preparing"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "fetching",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "preparing"
+    },
+    "status": "running"
+   },
+   "name": "rank7-running-fetching",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "preparing"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "preparing"
+    },
+    "status": "running"
+   },
+   "name": "rank7-running-processing",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": false
+  },
+  {
+   "expected": {
+    "confirmedAt": "2026-11-05T10:00:01.000Z",
+    "display": "processing_confirmed"
+   },
+   "group": "precedence",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "running"
+   },
+   "name": "rank7-running-processing-witnessed",
+   "reachable": true,
+   "retained": null,
+   "source": "coordinator",
+   "witness": true
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "status": "running"
+   },
+   "name": "malformed-absent",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-absent",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": null,
+    "status": "running"
+   },
+   "name": "malformed-null",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": null,
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-null",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": "processing",
+    "status": "running"
+   },
+   "name": "malformed-not-an-object",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": "processing",
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-not-an-object",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {},
+    "status": "running"
+   },
+   "name": "malformed-empty-object",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {},
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-empty-object",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v2",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "running"
+   },
+   "name": "malformed-unknown-protocol",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v2",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-unknown-protocol",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 2,
+     "state": "processing"
+    },
+    "status": "running"
+   },
+   "name": "malformed-schema-version-2",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 2,
+     "state": "processing"
+    },
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-schema-version-2",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": "1",
+     "state": "processing"
+    },
+    "status": "running"
+   },
+   "name": "malformed-schema-version-string",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": "1",
+     "state": "processing"
+    },
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-schema-version-string",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": true,
+     "state": "processing"
+    },
+    "status": "running"
+   },
+   "name": "malformed-schema-version-true",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": true,
+     "state": "processing"
+    },
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-schema-version-true",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "running"
+    },
+    "status": "running"
+   },
+   "name": "malformed-unknown-state",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "running"
+    },
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-unknown-state",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1
+    },
+    "status": "running"
+   },
+   "name": "malformed-state-missing",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1
+    },
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-state-missing",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "running"
+   },
+   "name": "malformed-time-missing",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-time-missing",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "running"
+   },
+   "name": "malformed-time-without-milliseconds",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-time-without-milliseconds",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000+00:00",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "running"
+   },
+   "name": "malformed-time-with-offset",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000+00:00",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-time-with-offset",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-13-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "running"
+   },
+   "name": "malformed-time-not-a-date",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": "2026-13-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-time-not-a-date",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": 1,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "running"
+   },
+   "name": "malformed-time-number",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": 1,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-time-number",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "activity": "running",
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "running"
+   },
+   "name": "malformed-extra-field",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "activity": "running",
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-extra-field",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "running"
+   },
+   "name": "malformed-processing-without-time",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-processing-without-time",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "preparing"
+    },
+    "status": "running"
+   },
+   "name": "malformed-preparing-with-time",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "preparing"
+    },
+    "status": "queued"
+   },
+   "name": "malformed-queued-job-preparing-with-time",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "held"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": "coordinator_restart",
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "held",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "running"
+    },
+    "status": "held"
+   },
+   "name": "malformed-held-still-held",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "terminal"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "completed",
+    "status": "succeeded"
+   },
+   "name": "malformed-terminal-still-terminal",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "delivery"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "awaiting_acceptance",
+    "presentation": {},
+    "status": "running"
+   },
+   "name": "malformed-delivery-still-delivery",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "queue_message"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "queueReason": "node_lost",
+    "status": "running"
+   },
+   "name": "malformed-queue-reason-still-shown",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "malformed",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "mystery",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": null
+    },
+    "status": "running"
+   },
+   "name": "null-state-with-no-dominating-field",
+   "reachable": true,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": "2026-11-05T10:00:01.000Z",
+    "display": "processing_confirmed"
+   },
+   "group": "attempt-generation",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "status": "running"
+   },
+   "name": "retained-same-attempt-generation",
+   "reachable": true,
+   "retained": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "generation": 1,
+    "processingConfirmedAt": "2026-11-05T10:00:01.000Z"
+   },
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": "2026-11-05T10:00:01.000Z",
+    "display": "processing_confirmed"
+   },
+   "group": "attempt-generation",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "running"
+    },
+    "status": "running"
+   },
+   "name": "retained-malformed-same-attempt",
+   "reachable": true,
+   "retained": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "generation": 1,
+    "processingConfirmedAt": "2026-11-05T10:00:01.000Z"
+   },
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "attempt-generation",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 2,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "status": "running"
+   },
+   "name": "retained-other-generation",
+   "reachable": true,
+   "retained": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "generation": 1,
+    "processingConfirmedAt": "2026-11-05T10:00:01.000Z"
+   },
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "status_unavailable"
+   },
+   "group": "attempt-generation",
+   "job": {
+    "attemptId": "44444444-4444-4444-8444-444444444444",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "status": "running"
+   },
+   "name": "retained-other-attempt",
+   "reachable": true,
+   "retained": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "generation": 1,
+    "processingConfirmedAt": "2026-11-05T10:00:01.000Z"
+   },
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "held"
+   },
+   "group": "attempt-generation",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": "coordinator_restart",
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "held",
+    "status": "held"
+   },
+   "name": "retained-never-beats-held",
+   "reachable": true,
+   "retained": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "generation": 1,
+    "processingConfirmedAt": "2026-11-05T10:00:01.000Z"
+   },
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "queue_message"
+   },
+   "group": "attempt-generation",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "queueReason": "node_lost",
+    "status": "running"
+   },
+   "name": "retained-never-beats-queue-reason",
+   "reachable": true,
+   "retained": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "generation": 1,
+    "processingConfirmedAt": "2026-11-05T10:00:01.000Z"
+   },
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "disconnected"
+   },
+   "group": "disconnected",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "presentation": {
+     "processingConfirmedAt": "2026-11-05T10:00:01.000Z",
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "processing"
+    },
+    "status": "running"
+   },
+   "name": "disconnected-with-cached-processing",
+   "reachable": false,
+   "retained": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "generation": 1,
+    "processingConfirmedAt": "2026-11-05T10:00:01.000Z"
+   },
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "disconnected"
+   },
+   "group": "disconnected",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "queued",
+    "presentation": {
+     "processingConfirmedAt": null,
+     "protocol": "ltds-job-presentation-v1",
+     "schemaVersion": 1,
+     "state": "queued"
+    },
+    "status": "queued"
+   },
+   "name": "disconnected-with-cached-queued",
+   "reachable": false,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  },
+  {
+   "expected": {
+    "confirmedAt": null,
+    "display": "disconnected"
+   },
+   "group": "disconnected",
+   "job": {
+    "attemptId": "22222222-2222-4222-8222-222222222222",
+    "error": null,
+    "generation": 1,
+    "jobId": "11111111-1111-4111-8111-111111111111",
+    "phase": "processing",
+    "status": "running"
+   },
+   "name": "disconnected-with-nothing",
+   "reachable": false,
+   "retained": null,
+   "source": "viewer",
+   "witness": null
+  }
+ ],
+ "displays": [
+  "disconnected",
+  "terminal",
+  "held",
+  "queue_message",
+  "error",
+  "delivery",
+  "queued",
+  "preparing",
+  "processing_confirmed",
+  "status_unavailable"
+ ],
+ "fixture": "ltds-job-presentation-v1-public",
+ "notes": [
+  "display is a proposed label for the behaviour in docs/job-presentation-v1.md, not a wire field.",
+  "processing_confirmed means engine command output was observed. It is historical and current activity is unknown.",
+  "retained is a latch the Viewer validated earlier, and it is only usable for the same attempt and generation."
+ ],
+ "schemaVersion": 1,
+ "status": "unqualified until root and the Viewer owner review the final DTO"
+}

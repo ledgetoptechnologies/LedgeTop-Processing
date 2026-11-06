@@ -24,6 +24,13 @@ from .node_gate import NodeGate, GateError
 from .scratch_policy import LeaseLapsed
 from .engine_ingress_guard import local_engine_identity
 from . import reference_native_archive as native_archive
+from .reference_presentation import MAX_OUTPUT_LINES
+
+# NodeODM appends blank strings and its output route ignores limit, so a witness
+# scans forward in bounded pages instead of sampling line 0. Each read is already
+# cut to a prefix by reference_logs.read_output_prefix.
+START_SCAN_LINES = 200
+START_SCAN_PAGES = 2
 
 
 class WorkerHeld(ValueError):
@@ -99,6 +106,8 @@ class ReferenceEngineWorker:
         except ValueError:
             raise ValueError('invalid pinned Viewer receipt keys') from None
         self.version, self.allowed_options = engine_version, frozenset(allowed_odm_options)
+        # (job, next line). One integer in memory: a restart simply scans again.
+        self._start_scan = None
         with self._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS executions (
                 job TEXT PRIMARY KEY, identity TEXT NOT NULL, receipt TEXT NOT NULL,
@@ -184,15 +193,43 @@ class ReferenceEngineWorker:
         code = status.get('code') if type(status) is dict else None
         return type(info) is dict and info.get('uuid') == job_id and type(code) is int and code == 20
 
-    def start_witness(self, job_id):
-        """One bracketed sighting of this exact task started, else None. Read-only.
+    def _first_real_output(self, job_id):
+        """(line, lines seen from it) for the first non-blank output, else None.
 
-        Status 20 can precede the child and output can be restored history, so both
-        are required, and status is read on either side of the output. Output is
-        hashed and never leaves here. processingTime and engine_started are not read.
-        A failure to observe proves nothing, and the caller treats it as no sighting.
+        Carries on from the last call, at most START_SCAN_PAGES pages at a time, so a
+        run of blanks of any length neither hides a later line nor costs more per
+        call. An empty page past line 0 means the end of the output or output that
+        shrank. The two look alike, so the scan restarts from 0 and loses nothing.
         """
         from . import reference_logs as logs
+        job, line = self._start_scan or (job_id, 0)
+        line = line if job == job_id else 0
+        for _ in range(START_SCAN_PAGES):
+            output, _more = self.engine.output_page(job_id, line=line, limit=START_SCAN_LINES)
+            if (type(output) is not list or len(output) > START_SCAN_LINES
+                    or any(type(text) is not str for text in output)
+                    or len(p.canonical_json(output)) > logs.MAX_LOG_BYTES):
+                return None
+            found = next((index for index, text in enumerate(output) if text.strip()), None)
+            if found is not None:
+                self._start_scan = (job_id, line + found)
+                return output[found], min(len(output) - found, MAX_OUTPUT_LINES)
+            if not output and line == 0:
+                break
+            line = line + len(output) if output else 0
+        self._start_scan = (job_id, line)
+        return None
+
+    def start_witness(self, job_id):
+        """One bracketed sighting of this task's command output, else None. Read-only.
+
+        The rule is status 20, then non-blank output, then status 20. Status 20 can
+        precede the child and output can be restored history, so neither stands
+        alone. This shows command output existed, not that ODM initialized or is
+        running. Output is hashed and never leaves here. processingTime and
+        engine_started are not read. A failure to observe proves nothing, and the
+        caller treats it as no sighting.
+        """
         p._slug(job_id, 'job ID')
         with NodeGate(self.engine_id) as gate:
             state = gate.snapshot()
@@ -207,17 +244,12 @@ class ReferenceEngineWorker:
             self._verify_local_engine()
             if not self._started_status(job_id):
                 return None
-            output, _more = self.engine.output_page(job_id, line=0, limit=8)
-            if (type(output) is not list or not 1 <= len(output) <= 8
-                    or any(type(line) is not str for line in output)
-                    or len(p.canonical_json(output)) > logs.MAX_LOG_BYTES):
-                return None
-            first = next((line for line in output if line.strip()), None)
-            if first is None or not self._started_status(job_id):
+            seen = self._first_real_output(job_id)
+            if seen is None or not self._started_status(job_id):
                 return None
             self._verify_local_engine()
             return dict(gateGeneration=state['generation'], gateReceiptId=row['receipt'], nativeStatusCode=20,
-                outputLineCount=len(output), outputPrefixSha256=hashlib.sha256(first.encode('utf-8')).hexdigest())
+                outputLineCount=seen[1], outputPrefixSha256=hashlib.sha256(seen[0].encode('utf-8')).hexdigest())
 
     def _verify_local_engine(self):
         try:

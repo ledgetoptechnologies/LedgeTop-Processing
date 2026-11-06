@@ -3,8 +3,9 @@
 Display only. Nothing here reads or writes phase, claim, gate, custody, budgets or
 recovery, and no report lifts a hold. The one durable effect is a single
 acknowledged reference_outbox row per job, which is never sent. It is historical
-start evidence: it says this attempt was once seen started, not that it is
-running now, so it carries no heartbeat, engine incarnation or maintenance state.
+evidence that engine command output was observed for this attempt. It does not
+prove ODM initialized or is running now, so it carries no heartbeat, engine
+incarnation or maintenance state.
 
 Two clocks stay apart. observedAt is the worker's own observation, kept attributed
 and never published. acceptedAt is this coordinator's first durable acceptance,
