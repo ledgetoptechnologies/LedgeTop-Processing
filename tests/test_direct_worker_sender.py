@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from ops.qualify_enrolled_phase_transport import configuration_material
 from processing.direct_worker_sender import DirectDeliveryRejected, DirectDeliveryUncertain, DirectWorkerSender
+from processing.direct_worker_sender import _SocketDeadline
 from tests import test_direct_worker_http as http_fixture
 
 
@@ -62,6 +63,17 @@ class DirectWorkerSenderTests(unittest.TestCase):
         with self.assertRaises(DirectDeliveryRejected):
             self.make_sender(max_object_bytes=1).put('object-1',io.BytesIO(self.fixture.f.data))
         self.assertFalse((self.fixture.f.spool.root/self.fixture.f.item['jobId']).exists())
+
+    def test_expired_guard_makes_buffered_denial_uncertain(self):
+        original = _SocketDeadline.finish
+        def expired(guard):
+            original(guard)  # cancel actual watchdog, then emulate late observation
+            return False
+        sender=self.make_sender(bearer='wrong-but-valid-length-token-0123456789')
+        with patch.object(_SocketDeadline,'finish',expired):
+            with self.assertRaises(DirectDeliveryUncertain):
+                sender.put('object-1',io.BytesIO(self.fixture.f.data))
+            with self.assertRaises(DirectDeliveryUncertain):sender.complete()
 
     def test_lost_object_and_closure_response_requires_explicit_exact_replay(self):
         original=self.sender._response

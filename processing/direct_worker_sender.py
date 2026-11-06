@@ -222,7 +222,10 @@ class DirectWorkerSender:
                 raise DirectDeliveryUncertain('worker object observation changed')
             if not guard.finish():raise DirectDeliveryUncertain('worker delivery outcome uncertain')
             return result
-        except DirectDeliveryRejected:raise
+        except DirectDeliveryRejected:
+            if guard is None or not guard.finish():
+                raise DirectDeliveryUncertain('worker delivery outcome uncertain') from None
+            raise
         except DirectDeliveryUncertain:raise
         except Exception:raise DirectDeliveryUncertain('worker delivery outcome uncertain') from None
         finally:
@@ -249,7 +252,10 @@ class DirectWorkerSender:
                                            key_id=self._key,public_key=self._public)
             if not guard.finish():raise DirectDeliveryUncertain('worker closure outcome uncertain')
             return verified
-        except DirectDeliveryRejected:raise
+        except DirectDeliveryRejected:
+            if guard is None or not guard.finish():
+                raise DirectDeliveryUncertain('worker closure outcome uncertain') from None
+            raise
         except DirectDeliveryUncertain:raise
         except Exception:raise DirectDeliveryUncertain('worker closure outcome uncertain') from None
         finally:
