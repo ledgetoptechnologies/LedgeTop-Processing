@@ -129,6 +129,26 @@ class DirectV2Handoff:
             raise Conflict('V2 worker observation changed')
         return value
 
+    def authorize_worker(self,token,*,protected_transport):
+        """Send the committed reservation's challenge as its stable operation ID.
+
+        The handoff session and reservation commit before network I/O. A lost
+        reply is retried with the same operation; the worker journals replay.
+        """
+        self._auth(token,protected_transport)
+        with self.queue.coordinator_operation('source-io'):
+            with self.queue._db() as db:
+                db.execute('BEGIN IMMEDIATE')
+                if self._session(db)!='receiving':raise Conflict('V2 handoff closed')
+                reserved=validate_receiving(db,self.item['reservationId'])
+                operation_id=reserved['challenge_id']
+            result=self.sender.authorize_reservation(operation_id)
+            with self.queue._db() as db:
+                db.execute('BEGIN IMMEDIATE');self._check(db)
+                if validate_receiving(db,self.item['reservationId'])['challenge_id']!=operation_id:
+                    raise Conflict('V2 grant outcome uncertain')
+            return result
+
     def send_object(self,token,*,protected_transport,object_id,reader):
         self._auth(token,protected_transport)
         obj=self.sender._inventory.object(object_id,reservation_binding=self.sender._reservation)

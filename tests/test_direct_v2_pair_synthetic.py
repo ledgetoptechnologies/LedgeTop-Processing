@@ -11,6 +11,8 @@ import tempfile
 import threading
 import unittest
 import uuid
+import hashlib
+import datetime
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
@@ -72,18 +74,48 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
             for name in ('fixture-ca.pem','fixture-cert.pem','fixture-key.pem'):(root/name).write_bytes(material[name])
             context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2
             context.load_cert_chain(str(root/'fixture-cert.pem'),str(root/'fixture-key.pem'))
-            server=create_direct_worker_server(f.boundary,'127.0.0.1',0,ssl_context=context,idle_timeout=2,allow_ungranted_v2_test_only=True)
+            from cryptography import x509
+            from cryptography.hazmat.primitives import hashes,serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            from cryptography.x509.oid import NameOID
+            now=datetime.datetime.now(datetime.timezone.utc)
+            client_key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+            name=x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,'synthetic-coordinator')])
+            cert=(x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(client_key.public_key())
+                .serial_number(x509.random_serial_number()).not_valid_before(now-datetime.timedelta(minutes=1))
+                .not_valid_after(now+datetime.timedelta(days=1)).add_extension(x509.BasicConstraints(ca=True,path_length=None),critical=True)
+                .sign(client_key,hashes.SHA256()))
+            cert_path=root/'client.pem'; key_path=root/'client.key'
+            cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+            key_path.write_bytes(client_key.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption()))
+            key_path.chmod(0o600)
+            context.load_verify_locations(cafile=str(cert_path));context.verify_mode=ssl.CERT_REQUIRED
+            from processing.direct_worker_grant_v2 import DirectWorkerGrant
+            server=create_direct_worker_server(f.boundary,'127.0.0.1',0,ssl_context=context,idle_timeout=2,
+                client_principals={hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest():'coord-a'},
+                reservation_grant=DirectWorkerGrant(f.boundary,coordinator_principal='coord-a'))
             thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
             try:
                 sender=DirectWorkerSenderV2(origin='https://127.0.0.1:'+str(server.server_port),
                     connect_ip='127.0.0.1',ca_file=str(root/'fixture-ca.pem'),bearer=f.bearer,
                     inventory=f.index,item=f.item,reservation_binding=f.reservation,expected_worker=f.worker,
                     issuer_id='worker-issuer',key_id='worker-key',worker_public_key=f.proof_key.public_key(),
-                    idle_timeout=2,total_timeout=5)
+                    idle_timeout=2,total_timeout=5,client_cert_file=str(cert_path),client_key_file=str(key_path))
                 from processing.direct_v2_handoff_journal import DirectV2Handoff
                 from processing.scratch_policy import ScratchLedger, PolicyConflict
                 token='synthetic-viewer-handoff-token-0123456789'
                 handoff=DirectV2Handoff(store,sender,principal='viewer-staging',bearer=token)
+                from processing.direct_worker_sender import DirectDeliveryUncertain
+                original_grant=sender.authorize_reservation
+                def lost_grant(*args,**kwargs):
+                    original_grant(*args,**kwargs)
+                    raise DirectDeliveryUncertain('synthetic lost grant reply')
+                with patch.object(sender,'authorize_reservation',side_effect=lost_grant):
+                    with self.assertRaises(DirectDeliveryUncertain):
+                        handoff.authorize_worker(token,protected_transport=True)
+                saved=handoff.authorize_worker(token,protected_transport=True)
+                self.assertEqual(saved['operationId'],f.challenge)
+                self.assertFalse(saved['sourceCustodyAccepted'])
                 def assert_retained_after_reopen():
                     scratch_id=f.observation['scratchReservationId']
                     reopened=ScratchLedger(f.root/'private'/'ledger.sqlite',f.root,
