@@ -125,7 +125,9 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
             mountPath='/absent/mount',mountId='a'*32,markerName='.marker')
         loaded=self.load()
         self.assertFalse(loaded['directPreparation']['enabled'])
-        _,server=self.build(loaded,provision=True)
+        driver,server=self.build(loaded,provision=True)
+        self.assertIs(driver._ssl_context,loaded['directPreparation']['_coordinatorTlsContext'])
+        self.assertIsNot(driver._ssl_context,loaded['directPreparation']['_brokerTlsContext'])
         self.assertFalse(hasattr(server,'worker_direct_owner'))
 
     def test_enabled_direct_listener_is_composed_but_closed_before_start(self):
@@ -191,11 +193,20 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
             pins['coordinatorCA']=hashlib.sha256(Path(self.config['caFile']).read_bytes()).hexdigest()
             with self.assertRaises(ValueError):daemon.load_config(str(path))
             with self.assertRaises(ValueError):daemon.load_config(str(path),expected_direct_config_sha256='0'*64)
-            loaded=daemon.load_config(str(path),expected_direct_config_sha256=digest,expected_direct_credential_sha256=pins)
+            other=configuration_material(str(uuid.uuid4()),str(uuid.uuid4()))['configurationFiles']
+            for name in ('fixture-ca.pem','fixture-cert.pem','fixture-key.pem'):(root/('other-'+name)).write_bytes(other[name])
+            def separate_system_trust():
+                context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                context.load_verify_locations(cadata=other['fixture-ca.pem'].decode('ascii'))
+                return context
+            with patch('ops.reference_worker_daemon.ssl.create_default_context',side_effect=separate_system_trust):
+                loaded=daemon.load_config(str(path),expected_direct_config_sha256=digest,expected_direct_credential_sha256=pins)
             self.assertTrue(loaded['directPreparation']['enabled'])
             pinned=loaded['directPreparation']['_coordinatorTlsContext']
+            broker_tls=loaded['directPreparation']['_brokerTlsContext']
             self.assertEqual(pinned.cert_store_stats()['x509_ca'],1)
-            def handshake(cert,key,expect_ok):
+            self.assertEqual(broker_tls.cert_store_stats()['x509_ca'],2)
+            def handshake(context,cert,key,expect_ok):
                 server_tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);server_tls.load_cert_chain(str(cert),str(key))
                 left,right=socket.socketpair();errors=[]
                 def server_side():
@@ -205,17 +216,16 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
                 thread=threading.Thread(target=server_side);thread.start()
                 try:
                     if expect_ok:
-                        with pinned.wrap_socket(right,server_hostname='127.0.0.1'):pass
+                        with context.wrap_socket(right,server_hostname='127.0.0.1'):pass
                     else:
-                        with self.assertRaises(ssl.SSLError):pinned.wrap_socket(right,server_hostname='127.0.0.1')
+                        with self.assertRaises(ssl.SSLError):context.wrap_socket(right,server_hostname='127.0.0.1')
                 finally:
                     right.close();thread.join(5)
                 self.assertFalse(thread.is_alive())
                 if expect_ok:self.assertEqual(errors,[])
-            handshake(root/'fixture-cert.pem',root/'fixture-key.pem',True)
-            other=configuration_material(str(uuid.uuid4()),str(uuid.uuid4()))['configurationFiles']
-            for name in ('fixture-cert.pem','fixture-key.pem'):(root/('other-'+name)).write_bytes(other[name])
-            handshake(root/'other-fixture-cert.pem',root/'other-fixture-key.pem',False)
+            handshake(pinned,root/'fixture-cert.pem',root/'fixture-key.pem',True)
+            handshake(pinned,root/'other-fixture-cert.pem',root/'other-fixture-key.pem',False)
+            handshake(broker_tls,root/'other-fixture-cert.pem',root/'other-fixture-key.pem',True)
             upload=copy.deepcopy(self.config)
             upload['directPreparation']['observationUpload']=dict(port=20001,bearer='u'*40)
             path.write_text(json.dumps(upload));upload_digest=hashlib.sha256(path.read_bytes()).hexdigest()

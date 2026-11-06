@@ -180,7 +180,7 @@ class ReferenceDriver:
                  failure_outbox, worker_instance_id, cleanup_executor=None, engine_cleanup=None,
                  allowed_environments=('production', 'staging'), clock=time.time,
                  execution_router=None, provenance_client=None, state_owner=None,combined_policy=None,combined_runtime_probe=None,
-                 source_range_v2_enabled=False):
+                 source_range_v2_enabled=False, coordinator_ssl_context=None):
         self._combined_policy=combined_policy;self._combined_policy_initial=combined_policy;self.combined_preparation=None;self._combined_preparation_initial=None;self._active_step=None;self._active_job=None
         if combined_policy is not None:
             from .reference_combined_preparation import CombinedPreparationPolicy
@@ -232,6 +232,10 @@ class ReferenceDriver:
         if (not isinstance(ssl_context, ssl.SSLContext) or not ssl_context.check_hostname
                 or ssl_context.verify_mode != ssl.CERT_REQUIRED):
             raise ValueError('verified worker TLS context required')
+        coordinator_ssl_context = ssl_context if coordinator_ssl_context is None else coordinator_ssl_context
+        if (not isinstance(coordinator_ssl_context, ssl.SSLContext) or not coordinator_ssl_context.check_hostname
+                or coordinator_ssl_context.verify_mode != ssl.CERT_REQUIRED):
+            raise ValueError('verified coordinator TLS context required')
         if (type(worker_bearer) is not str or not 16 <= len(worker_bearer) <= 4096
                 or not all(0x21 <= ord(char) <= 0x7e for char in worker_bearer)):
             raise ValueError('invalid private worker credential')
@@ -250,7 +254,7 @@ class ReferenceDriver:
             self.source_range_client = SourceRangeClient(broker.origin,
                 self.path.parent / 'source-range-progress.sqlite',
                 ssl_context=ssl_context, clock=clock, renewal_origin=self.origin,
-                renewal_headers=self._source_renewal_headers)
+                renewal_headers=self._source_renewal_headers,renewal_ssl_context=coordinator_ssl_context)
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if any(path.is_symlink() for path in (self.path, *self.path.parents)):
             raise ValueError('private worker journal required')
@@ -269,8 +273,8 @@ class ReferenceDriver:
                 os.fchmod(descriptor, 0o600)
         finally:
             os.close(descriptor)
-        self._open = build_opener(ProxyHandler({}), _NoRedirects(), HTTPSHandler(context=ssl_context)).open
-        self._initial_open=self._open;self._ssl_context=ssl_context
+        self._open = build_opener(ProxyHandler({}), _NoRedirects(), HTTPSHandler(context=coordinator_ssl_context)).open
+        self._initial_open=self._open;self._ssl_context=coordinator_ssl_context
         with self._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS driver_jobs (
               created INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT UNIQUE NOT NULL,
@@ -333,7 +337,7 @@ class ReferenceDriver:
                 db.execute('UPDATE driver_engine_pin SET pin=? WHERE singleton=1', (worker.version,))
             db.execute('INSERT OR IGNORE INTO driver_engine_pin VALUES(1,?)', (worker.version,))
         self.sender = ReferenceSender(outbox, self.origin, bearer_token=worker_bearer,
-            claim_binding_provider=self._claim_binding, ssl_context=ssl_context, timeout=10)
+            claim_binding_provider=self._claim_binding, ssl_context=coordinator_ssl_context, timeout=10)
         if combined_policy is not None:
             from .reference_combined_preparation import CombinedParentPreparation
             self.combined_preparation=CombinedParentPreparation(self,combined_policy,runtime_probe=combined_runtime_probe)

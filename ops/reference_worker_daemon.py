@@ -418,6 +418,12 @@ def load_config(path, *, expected_direct_config_sha256=None, expected_direct_cre
                 if coordinator_context.verify_mode!=ssl.CERT_REQUIRED or not coordinator_context.check_hostname:
                     raise ValueError('verified coordinator TLS required')
                 direct['_coordinatorTlsContext']=coordinator_context
+                # Broker endpoints may use a separate public/system CA; add
+                # the verified bytes to system trust without reopening a path.
+                broker_context=ssl.create_default_context()
+                broker_context.minimum_version=max(broker_context.minimum_version,ssl.TLSVersion.TLSv1_2)
+                broker_context.load_verify_locations(cadata=coordinator_ca.decode('ascii'))
+                direct['_brokerTlsContext']=broker_context
                 address=ipaddress.ip_address(direct['host'])
                 if not address.is_loopback or type(direct['port']) is not int or not 1<=direct['port']<=65535:
                     raise ValueError('private loopback listener required')
@@ -506,8 +512,10 @@ def _build_worker(config,owner,resources):
                 config['nodeId'], config['authorityId'], config['gateCoordinatorOrigin'].rstrip('/'), config['gateGeneration']):
             raise ValueError('preprovisioned physical gate differs')
     direct_settings=config.get('directPreparation')
-    client_tls = (direct_settings['_coordinatorTlsContext'] if direct_settings and direct_settings['enabled']
+    client_tls = (direct_settings['_brokerTlsContext'] if direct_settings and direct_settings['enabled']
                   else verified_client_context(config['caFile']))
+    coordinator_tls = (direct_settings['_coordinatorTlsContext'] if direct_settings and direct_settings['enabled']
+                       else client_tls)
     parsed = urlsplit(config['engineOrigin'])
     if (parsed.scheme not in ('http','https') or not ipaddress.ip_address(parsed.hostname).is_loopback
             or parsed.username is not None or parsed.password is not None or parsed.path not in ('','/')
@@ -575,7 +583,7 @@ def _build_worker(config,owner,resources):
                 manager.assert_active(candidate)
         router = ExecutionRouter(root/'execution-routes.sqlite', worker, tree_worker, failure_outbox=failures)
     driver = ReferenceDriver(worker, ledger, outbox, broker, config['coordinatorOrigin'], config['workerBearer'],
-        state_path=root / 'driver.sqlite', ssl_context=client_tls, output_budget=config['outputBudget'],
+        state_path=root / 'driver.sqlite', ssl_context=client_tls, coordinator_ssl_context=coordinator_tls, output_budget=config['outputBudget'],
         transfer_ttl=config['transferTtl'], safety_floor=config['safetyFloor'], failure_outbox=failures,
         worker_instance_id=config['workerInstanceId'], allowed_environments=tuple(config['allowedEnvironments']),
         execution_router=router, provenance_client=provenance,state_owner=owner,
