@@ -22,6 +22,22 @@ def hashed(raw):return hashlib.sha256(raw).hexdigest()
 
 @unittest.skipUnless(os.name=='posix' and os.geteuid()==0,'synthetic root-owned Linux installation')
 class FirstWorkerEnrollmentTests(unittest.TestCase):
+    def test_versioned_receipt_binds_dependencies_and_tls_without_exposing_values(self):
+        installer=install.Installer(self.manifest,boundary=self.boundary)
+        installer.prepare();receipt=installer.enroll()
+        self.assertEqual(receipt['installedTreeSchemaVersion'],1)
+        self.assertEqual(receipt['installedTreeSha256'],installer.observe_installed_tree())
+        self.assertNotIn('synthetic-private-token',json.dumps(receipt))
+        key=Path(json.loads(self.config_data)['serverKeyFile']);key.write_bytes(b'changed synthetic key')
+        with self.assertRaisesRegex(Exception,'installed_tree_receipt_changed'):installer.inspect()
+
+    def test_legacy_receipt_is_not_given_new_activation_authority(self):
+        installer=install.Installer(self.manifest,boundary=self.boundary)
+        installer.prepare();installer.enroll();state=installer._state()
+        state['receipt'].pop('installedTreeSha256');state['receipt'].pop('installedTreeSchemaVersion');installer._save(state)
+        receipt=installer.enroll()
+        self.assertNotIn('installedTreeSha256',receipt);self.assertNotIn('installedTreeSchemaVersion',receipt)
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.base=Path(self.temp.name);os.chown(self.base,0,10001);self.base.chmod(0o750)

@@ -1,6 +1,7 @@
 """Portable synthetic activation boundaries; no systemd, SSH or host effects."""
 import copy
 import os
+import tempfile
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -265,6 +266,49 @@ class ServiceSourceContractTests(unittest.TestCase):
         worker,manifest=service_fixture();boundary=a.ControllerActivationBoundary.__new__(a.ControllerActivationBoundary)
         boundary.manifest=manifest;boundary.worker=worker;boundary.installed={}
         with self.assertRaisesRegex(TransportHeld,'bound_installed_tree'):boundary._installation({})
+
+
+@unittest.skipUnless(os.name=='posix','real private journal durability on Linux')
+class PrivateJournalTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name);self.root.chmod(0o700);self.plan,self.expected=fixture()
+        self.worker={'nodeId':'main','settings':{'sourceRoot':'/preexisting'}}
+        self.expected['workerSha256']=digest(self.worker);self.executions=[];self.observations=[]
+        driver=ConcreteCutoverDriver.__new__(ConcreteCutoverDriver);driver.plan=self.plan;driver.root=self.root
+        driver.bundle={'workers':[self.worker]};driver.global_lock=lambda plan:nullcontext();self.driver=driver
+        test=self
+        class Boundary:
+            def preflight(self,*args):return True
+            def guard(self,*args,**kwargs):return True
+            def execute(self,expected,current):
+                test.assertEqual(test.agent.journal.read()['pending'],current);test.executions.append(current['action'])
+            def observe(self,expected,current):
+                test.observations.append(current['action']);return {'syntheticAcceptedFor':current['requestId']}
+            def verify(self,*args):return True
+        self.boundary=Boundary();self.agent=a.FirstWorkerActivation(self.root,self.expected,boundary=self.boundary,driver=self.driver)
+
+    def test_lost_journal_ack_reuses_exact_immutable_effect_without_dispatch(self):
+        self.agent.prepare();self.agent.advance();write=self.agent.journal.write
+        def fail_terminal(state):
+            if state['phase']=='ready':raise OSError('synthetic failed journal fsync')
+            return write(state)
+        with patch.object(self.agent.journal,'write',side_effect=fail_terminal):
+            with self.assertRaises(OSError):self.agent.advance()
+        restarted=a.FirstWorkerActivation(self.root,self.expected,boundary=self.boundary,driver=self.driver)
+        result=restarted.inspect();self.assertEqual(result['phase'],'ready')
+        self.assertEqual(self.executions,['reload','start']);self.assertEqual(self.observations,['reload','start'])
+        self.assertEqual(a.read_activation(self.root,self.expected),result)
+
+    def test_missing_once_registered_journal_holds_main_rollback(self):
+        self.agent.prepare();self.agent.journal.path.unlink()
+        with self.assertRaisesRegex(TransportHeld,'registered_activation_journal_missing'):self.driver.guard_activation_rollback()
+
+    def test_deleted_accepted_proof_is_not_replaced_from_ready_flag(self):
+        self.agent.prepare();self.agent.advance();done=self.agent.advance()
+        token=a.effect_intent(done['events'][-1]['intent'])
+        (self.root/a.PrivateProofs.name(token)).unlink()
+        with self.assertRaisesRegex(TransportHeld,'missing_or_changed'):a.read_activation(self.root,self.expected)
 
 
 if __name__=='__main__':unittest.main()
