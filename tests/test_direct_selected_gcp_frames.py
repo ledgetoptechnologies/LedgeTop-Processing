@@ -18,8 +18,8 @@ class FrameTests(unittest.TestCase):
         with open(os.environ['LTDS_VIEWER_FRAME_VECTOR'],'r',encoding='utf-8') as stream: vector=json.load(stream)
         selected=vector['selected'];wire=base64.b64decode(selected['bytes'])
         intent={'selectedPageHashes':selected['hashes'],'selectedFrameBytes':len(wire),'selectedCount':1}
-        source=[{'type':'dataset_file','datasetFileId':'img','relativePath':'a.jpg','processingRole':'image','byteSize':3,'sha256':'a'*64}]
-        manifest={'objects':[{'id':'img','name':'a.jpg','byteSize':3,'sha256':'a'*64}]}
+        source=[{'type':'dataset_file','datasetFileId':'img','relativePath':'a.jpg','processingRole':'image','byteSize':3,'sha256':'a'*64,'kind':'image','mediaType':'image/jpeg'}]
+        manifest={'objects':[{'id':'img','name':'a.jpg','byteSize':3,'sha256':'a'*64,'kind':'image','mediaType':'image/jpeg'}]}
         self.assertFalse(verify_selected(intent,wire,source_records=source,pipeline_manifest=manifest)['sourceCustodyAccepted'])
         for kind in ('evidence','file'):
             v=vector[kind];raw=base64.b64decode(v['bytes'])
@@ -34,12 +34,15 @@ class FrameTests(unittest.TestCase):
         raw,sha=frame(page,SELECTED_DOMAIN);wire=raw+b'\n'
         intent={'selectedPageHashes':[sha],'selectedFrameBytes':len(wire),'selectedCount':1}
         source=[{'type':'dataset_file','datasetFileId':'img','relativePath':'flight/a.jpg',
-                 'processingRole':'image','byteSize':3,'sha256':'a'*64}]
-        manifest={'objects':[{'id':'img','name':'a.jpg','byteSize':3,'sha256':'a'*64}]}
+                 'processingRole':'image','byteSize':3,'sha256':'a'*64,'kind':'image','mediaType':'image/jpeg'}]
+        manifest={'objects':[{'id':'img','name':'a.jpg','byteSize':3,'sha256':'a'*64,'kind':'image','mediaType':'image/jpeg'}]}
         result=verify_selected(intent,wire,source_records=source,pipeline_manifest=manifest)
         self.assertFalse(result['sourceCustodyAccepted'])
         changed=copy.deepcopy(manifest);changed['objects'][0]['id']='other'
         with self.assertRaises(ValueError):verify_selected(intent,wire,source_records=source,pipeline_manifest=changed)
+        for field,value in (('kind','auxiliary'),('mediaType','image/png')):
+            changed=copy.deepcopy(manifest);changed['objects'][0][field]=value
+            with self.assertRaises(ValueError):verify_selected(intent,wire,source_records=source,pipeline_manifest=changed)
         with self.assertRaises(ValueError):verify_selected(intent,wire+b'x',source_records=source,pipeline_manifest=manifest)
 
     def test_chunk_domains_and_truncation(self):
