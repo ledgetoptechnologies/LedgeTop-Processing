@@ -4,7 +4,27 @@ This record describes the review branch
 `codex/viewer-accepted-copy-integration-candidate-20261103`. It is not a deployment
 approval. Runtime acceptance remains incomplete.
 
-## Current release boundary (November 5 restart resumption)
+## Current release boundary (November 6 integration review)
+
+The source-only Viewer presentation candidate `01ff415d` is **not ready to
+publish**: independent review found incompatible receiving-response validation,
+a disconnect path that fails to clear its historical witness, and an unrelated
+ambiguous-upload deferral regression. The Viewer owner is preparing corrections;
+the published draft Ops #446 head remains `76f7c112`. The exact review and passing
+three-case accepted-copy cross-language check are recorded in
+[the presentation integration review](evidence/viewer-presentation-review-20261106.md).
+Do not confuse the passing receipt verifier with a successful source submission
+or full end-to-end acceptance.
+
+The configured-node/early-drain maintenance extension is staged separately in
+[draft PR #367](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/367),
+head `315c87605513d8af0c2f58a74609e49e608a44b7`, against this integration branch.
+Its affected selection has 224 passing Linux cases plus four separately passing
+actual Node probe cases. It preserves an exact job/time boundary before staging
+and qualification, and adds explicit host/interpreter bindings for future nodes.
+It is not selected into this photo candidate or installed; timers remain disabled.
+This source implementation supersedes the earlier design gaps below only on
+that follow-on branch. No branch Actions runs were created for its publication.
 
 This section and the remaining-delivery list at the end describe current gates.
 Intermediate checkpoints below are historical; their statements that source
