@@ -94,4 +94,3 @@ class PreparationListenerTests(unittest.TestCase):
         status,reply=f.request(server,cert=f.good,key=f.goodkey,path=path,body=payload)
         self.assertEqual(status,503);self.assertEqual(reply['error'],'direct_preparation_disabled')
         self.assertEqual(len(calls),1)
-
