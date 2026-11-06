@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import unittest
 
-from processing.viewer_acceptance_receipt import ViewerReceiptRejected
+from processing.viewer_acceptance_receipt import ViewerReceiptRejected, verify_viewer_acceptance_receipt
 from processing.viewer_copy_receipt_v2 import verify_viewer_copy_receipt_v2
 
 
@@ -51,6 +51,16 @@ class ViewerCopyReceiptV2Tests(unittest.TestCase):
         self.assertEqual(verified.receipt["protocol"], "ltds-viewer-accepted-copy-v2")
         self.assertEqual(verified.receipt["acceptedObjectIds"],
             [item["id"] for item in self.fixture["resultManifest"]["objects"]])
+
+    def test_actual_v2_copy_receipt_cannot_use_legacy_push_verifier(self):
+        # The JavaScript-signed source-bound receipt is valid for V2, but the
+        # legacy push sender only calls the V1 verifier; it must not own V2.
+        self.verify()
+        with self.assertRaises(ViewerReceiptRejected):
+            verify_viewer_acceptance_receipt(self.fixture['viewerReceipt'],
+                trusted_keys=self.trusted_keys, expected=self.fixture['expected'],
+                result_manifest=self.fixture['resultManifest'],
+                accepted_object_ids=self.fixture['acceptance']['acceptedObjectIds'])
 
     def test_rejects_changed_server_owned_binding(self):
         expected = copy.deepcopy(self.fixture["expected"])
