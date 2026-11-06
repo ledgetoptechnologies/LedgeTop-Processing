@@ -62,6 +62,12 @@ def verify_closure(ledger,spool,manifest,item,*,derived_ids,expected_worker,engi
         localClosureComplete=True,sourceCustodyAccepted=False,processingAuthorized=False)
     with NodeGate(engine_id) as gate:
         check_scope(ledger,spool,item,sha,scratch_id,gate,coordinator_origin=coordinator_origin,gate_generation=gate_generation)
+        receipt_parent=spool.root.parent
+        if (receipt_parent!=spool.mount_path and spool.mount_path not in receipt_parent.parents):
+            raise PolicyConflict('direct closure receipt outside verified mount')
+        spool._assert_mount()
+        if receipt_parent.stat().st_dev!=spool._mount_identity[0]:
+            raise PolicyConflict('direct closure receipt mount changed')
         # A premature completion request with obviously absent objects must not
         # strand the transfer. This metadata-only probe is advisory; the later
         # pinned hash checks are authoritative and fail closed on any race.
@@ -83,7 +89,10 @@ def verify_closure(ledger,spool,manifest,item,*,derived_ids,expected_worker,engi
                 found.add(entry.name)
         if found!=names:raise PolicyConflict('direct closure incomplete')
         spool._fsync_directory(directory)
-        _persist_receipt(spool.root.parent,result)
+        spool._assert_mount()
+        _persist_receipt(receipt_parent,result)
+        spool._assert_mount()
         require_fenced(ledger,item,expected_worker=expected_worker)
+        spool._assert_mount()
         ledger._retire_direct_writer(scratch_id,pin)
     return result

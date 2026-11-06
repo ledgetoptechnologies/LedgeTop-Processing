@@ -341,6 +341,10 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         from .source_release import metadata_bytes as source_release_metadata_bytes
         used += source_release_metadata_bytes(db)
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_intake_reservations'").fetchone():
+            columns={row['name'] for row in db.execute('PRAGMA table_info(direct_intake_reservations)')}
+            if columns!={'reservation_id','job_id','attempt_id','generation','environment','authority_id',
+                         'manifest_sha','derived_manifest_sha','node_id','worker_id','instance_id','state'}:
+                raise Conflict('direct reservation schema requires inspection')
             used += db.execute('''SELECT COALESCE(SUM(length(reservation_id)+length(job_id)+length(attempt_id)
                 +length(CAST(generation AS TEXT))+length(environment)+length(authority_id)+length(manifest_sha)+length(derived_manifest_sha)
                 +length(node_id)+length(worker_id)+length(instance_id)+length(state)),0)

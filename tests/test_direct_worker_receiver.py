@@ -263,5 +263,22 @@ class DirectClosureTests(unittest.TestCase):
         with self.assertRaisesRegex(PolicyConflict,'active or uncertain'):
             self.f.ledger.settle_unstarted(self.f.observation['scratchReservationId'],transfer_ended=True)
 
+    def test_closure_receipt_cannot_escape_verified_mount(self):
+        self.upload();self.f.spool.mount_path=self.f.spool.root
+        with self.assertRaisesRegex(PolicyConflict,'outside verified mount'):self.close_source()
+        self.assertFalse((self.f.spool.root.parent/'direct-source-closure.json').exists())
+
+    def test_mount_identity_change_after_receipt_retains_pin(self):
+        self.upload();original=direct_worker_closure._persist_receipt
+        def replace_after_publication(*args):
+            original(*args)
+            self.f.spool._marker_identity=(-1,-1)
+        with patch.object(direct_worker_closure,'_persist_receipt',side_effect=replace_after_publication):
+            with self.assertRaisesRegex(SourceSpoolError,'spool_mount_changed'):self.close_source()
+        self.assertTrue((self.f.spool.root.parent/'direct-source-closure.json').is_file())
+        self.f.ledger=self.f.open_ledger()
+        with self.assertRaisesRegex(PolicyConflict,'active or uncertain'):
+            self.f.ledger.settle_unstarted(self.f.observation['scratchReservationId'],transfer_ended=True)
+
 
 if __name__=='__main__':unittest.main()

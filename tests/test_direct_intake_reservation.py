@@ -176,5 +176,15 @@ class DirectIntakeTests(unittest.TestCase):
                                           expected_worker=worker,worker_ready=True)
         with self.assertRaises(Conflict):self.direct.reserve(**dict(request,derived_manifest_sha='b'*64))
 
+    def test_old_direct_schema_is_refused_as_inspection_not_migrated(self):
+        with self.queue._db() as db:
+            db.execute('DROP TABLE direct_intake_reservations')
+            db.execute('''CREATE TABLE direct_intake_reservations (
+                reservation_id TEXT,job_id TEXT,attempt_id TEXT,generation INTEGER,
+                environment TEXT,authority_id TEXT,manifest_sha TEXT,node_id TEXT,
+                worker_id TEXT,instance_id TEXT,state TEXT)''')
+            with self.assertRaisesRegex(Conflict,'schema requires inspection'):
+                self.store._metadata_used_bytes(db)
+
 
 if __name__ == '__main__': unittest.main()
