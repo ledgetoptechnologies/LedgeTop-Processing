@@ -93,6 +93,9 @@ class PreReservationRecoveryTests(ProcessingHarness):
         self.assertEqual(len(before),1)
         self.restart_coordinator()
         self.new_worker()
+        # This fixture's attach_worker intentionally empties options; normal
+        # startup discovers them before admitting/replaying a claim.
+        self.driver._refresh_options()
         if routed:
             self.driver.execution_router=ExecutionRouter(self.root/'routes.sqlite',self.driver.worker,
                 failure_outbox=self.driver.failure_outbox)
