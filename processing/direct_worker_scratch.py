@@ -47,12 +47,16 @@ def scratch_identity(value, *, expected_worker):
     return item, sha, 'direct-' + sha
 
 
+def scratch_settings(item, scratch_id):
+    return dict(job_id=item['jobId'], generation=item['generation'], reservation_id=scratch_id,
+        manifest_sha256=item['manifestSha256'], input_bytes=item['inputBytes'],
+        output_budget=item['outputBudget'], environment=item['environment'], ttl_seconds=item['ttlSeconds'])
+
+
 def require_fenced(ledger, value, *, expected_worker):
     """Check the exact persisted scratch binding; never create or renew it."""
     item, sha, scratch_id = scratch_identity(value, expected_worker=expected_worker)
-    expected = dict(job_id=item['jobId'], generation=item['generation'], reservation_id=scratch_id,
-        manifest_sha256=item['manifestSha256'], input_bytes=item['inputBytes'],
-        output_budget=item['outputBudget'], environment=item['environment'], ttl_seconds=item['ttlSeconds'])
+    expected = scratch_settings(item, scratch_id)
     with ledger._transaction() as db:
         row = ledger._reservation(db, scratch_id)
         if (row['state'] != 'reserved' or row['allocated'] != 0

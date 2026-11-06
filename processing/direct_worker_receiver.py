@@ -8,7 +8,7 @@ coordinator nor Viewer is authorized by constructing this object.
 from pathlib import Path
 
 from . import reference_protocol as p
-from .direct_worker_scratch import require_fenced
+from .direct_worker_scratch import require_fenced, scratch_settings
 from .node_gate import NodeGate, _binding as gate_binding
 from .scratch_policy import PolicyConflict
 
@@ -57,6 +57,8 @@ def receive(ledger, spool, manifest, item, *, expected_worker, engine_id,
     expected_gate = gate_binding(item['nodeId'], coordinator_origin, item['authorityId'])
     if type(gate_generation) is not int or gate_generation < 1:
         raise ValueError('positive gate generation required')
+    if not callable(getattr(reader, 'close', None)) or getattr(reader, 'closed', None) is not False:
+        raise ValueError('owned open source reader required')
     with NodeGate(engine_id) as gate:
         state = gate.snapshot(); reservation = state['reservation']
         if (state['generation'] != gate_generation
@@ -64,10 +66,16 @@ def receive(ledger, spool, manifest, item, *, expected_worker, engine_id,
                 or reservation is None or reservation['receiptId'] != expected_receipt
                 or reservation['job'] != expected_job or reservation['completionDigest'] is not None):
             raise PolicyConflict('direct node gate binding changed')
-        require_fenced(ledger, item, expected_worker=expected_worker)
+        pin = ledger.begin_direct_writer(scratch_id, scratch_settings(item, scratch_id))
+        # On any exception, including a close failure or process death, retain
+        # the pin. Inspection/recovery must prove the reader has retired.
         receipt, replay = spool.receive_object(job_id=item['jobId'], generation=item['generation'],
             object_id=obj['id'], byte_size=obj['byteSize'], sha256=obj['sha256'], reader=reader)
+        reader.close()
+        if getattr(reader, 'closed', None) is not True:
+            raise PolicyConflict('direct source reader retirement uncertain')
         require_fenced(ledger, item, expected_worker=expected_worker)
+        ledger._retire_direct_writer(scratch_id, pin)
     return dict(protocol='ltds-direct-local-object-v1', reservationId=item['reservationId'],
         scratchBindingSha256=sha, jobId=item['jobId'], attemptId=item['attemptId'],
         generation=item['generation'], nodeId=item['nodeId'], objectId=obj['id'],

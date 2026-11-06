@@ -49,3 +49,16 @@ physical gate creation/handover, transfer lifetime, bounded concurrency,
 complete source/derived closure, quota reconciliation and network protocol are
 not implemented. Its tests use real NodeGate and a real Linux tmpfs mount, but
 do not qualify any installed disk, host, network or power-loss guarantee.
+
+The receiver installs a durable, bounded direct-writer pin atomically with the
+scratch-fence check before reading. Generic unstarted settlement, allocation
+accounting, engine lease and engine-state transitions reject while pinned. The
+pin is retired only after the synchronous reader's `close` returns and reports
+closed; an exception, uncertain close or process death retains it across restart
+for inspection. No automatic reconciliation or release is implemented. This
+prototype assumes a trusted owned reader; the future network adapter must prove
+reader ownership and retirement rather than accepting a caller assertion.
+The first writer permanently latches a ledger version marker. The exact earlier
+`649b` scratch source was tested to reject the ledger after retirement; that
+does not qualify rollback across all old versions. Pin metadata size/space
+precharge and production upgrade/rollback handling remain open.

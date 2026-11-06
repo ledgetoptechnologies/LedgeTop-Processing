@@ -32,11 +32,14 @@ import stat
 import time
 import secrets
 import unicodedata
+import uuid
 
 
 MAX_INTEGER = 2**53 - 1
 ACCOUNTING_VERSION = 1
 TRANSFER_FENCE_VERSION = 1
+DIRECT_WRITER_VERSION = 1
+MAX_DIRECT_WRITER_PINS = 64
 FENCED_LEASE = float(MAX_INTEGER)
 CONTROL_SCHEMA='''CREATE TABLE IF NOT EXISTS control_charges (
  reservation TEXT PRIMARY KEY,charge_id TEXT NOT NULL UNIQUE,scope TEXT NOT NULL,
@@ -131,6 +134,8 @@ class ScratchLedger:
                 CREATE TABLE IF NOT EXISTS job_environments (job TEXT PRIMARY KEY, environment TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS transfer_fences (reservation TEXT PRIMARY KEY, started_at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS unstarted_settlements (reservation TEXT PRIMARY KEY, settled_at REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS direct_writer_pins (
+                  id TEXT PRIMARY KEY, reservation TEXT UNIQUE NOT NULL);
                 CREATE TABLE IF NOT EXISTS reservations (
                   id TEXT PRIMARY KEY, settings TEXT NOT NULL, job TEXT NOT NULL,
                   generation INTEGER NOT NULL, environment TEXT NOT NULL,
@@ -228,6 +233,25 @@ class ScratchLedger:
         config=db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
         count=db.execute('SELECT COUNT(*) FROM control_charges').fetchone()[0]
         if config is None:raise PolicyConflict('accounting configuration missing')
+        try: observed_config=json.loads(config[0])
+        except (TypeError,ValueError):raise PolicyConflict('unknown accounting version or ledger policy') from None
+        pins=db.execute('SELECT id,reservation FROM direct_writer_pins LIMIT ?',
+                        (MAX_DIRECT_WRITER_PINS+1,)).fetchall()
+        if len(pins)>MAX_DIRECT_WRITER_PINS:raise PolicyConflict('direct writer pin budget exceeded')
+        if 'directWriterVersion' in observed_config:
+            if type(observed_config['directWriterVersion']) is not int or observed_config['directWriterVersion']!=DIRECT_WRITER_VERSION:
+                raise PolicyConflict('unknown direct writer version')
+            base['directWriterVersion']=DIRECT_WRITER_VERSION
+        elif pins:
+            raise PolicyConflict('direct writer fence marker missing')
+        for pin in pins:
+            if (not re.fullmatch(r'[a-f0-9]{32}',pin['id'])
+                    or not re.fullmatch(r'direct-[a-f0-9]{64}',pin['reservation'])):
+                raise PolicyConflict('direct writer pin identity changed')
+            row=db.execute('SELECT state,expires FROM reservations WHERE id=?',(pin['reservation'],)).fetchone()
+            if (row is None or row['state']!='reserved' or row['expires']!=FENCED_LEASE
+                    or not db.execute('SELECT 1 FROM transfer_fences WHERE reservation=?',(pin['reservation'],)).fetchone()):
+                raise PolicyConflict('direct writer pin reservation changed')
         if db.execute('SELECT 1 FROM transfer_fences LIMIT 1').fetchone():
             base['transferFenceVersion']=TRANSFER_FENCE_VERSION
             if db.execute('SELECT 1 FROM transfer_fences f LEFT JOIN reservations r ON r.id=f.reservation WHERE r.id IS NULL OR r.expires!=? LIMIT 1',(FENCED_LEASE,)).fetchone():
@@ -364,6 +388,30 @@ class ScratchLedger:
                 raise PolicyConflict("allocation outside reservation")
             self._fence(db, reservation_id, now)
 
+    def begin_direct_writer(self, reservation_id, expected_settings):
+        """Fence one direct reader before any bytes; prior crashes remain held."""
+        if not isinstance(reservation_id,str) or not re.fullmatch(r'direct-[a-f0-9]{64}',reservation_id):
+            raise PolicyConflict('direct reservation identity required')
+        with self._transaction() as db:
+            row=self._reservation(db,reservation_id)
+            if (row['state']!='reserved' or row['allocated']!=0 or row['settings']!=_json(expected_settings)
+                    or not db.execute('SELECT 1 FROM transfer_fences WHERE reservation=?',(reservation_id,)).fetchone()):
+                raise PolicyConflict('direct scratch fence changed')
+            if db.execute('SELECT 1 FROM direct_writer_pins WHERE reservation=?',(reservation_id,)).fetchone():
+                raise PolicyConflict('direct writer already active or uncertain')
+            if db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0]>=MAX_DIRECT_WRITER_PINS:
+                raise PolicyConflict('direct writer pin budget exceeded')
+            pin=uuid.uuid4().hex
+            self._latch(db,directWriterVersion=DIRECT_WRITER_VERSION)
+            db.execute('INSERT INTO direct_writer_pins VALUES(?,?)',(pin,reservation_id))
+            return pin
+
+    def _retire_direct_writer(self, reservation_id, pin):
+        """Internal seam after the exact source reader is verified closed."""
+        with self._transaction() as db:
+            if db.execute('DELETE FROM direct_writer_pins WHERE id=? AND reservation=?',(pin,reservation_id)).rowcount!=1:
+                raise PolicyConflict('direct writer retirement uncertain')
+
     def claim_engine_lease(self, reservation_id):
         """Before any gate or prepared commit: refuse a lapsed lease with nothing
         committed, else fence a live one so it cannot lapse before engine_started."""
@@ -371,6 +419,8 @@ class ScratchLedger:
             now = self._now(db)
             self._expire(db, now)
             row = self._reservation(db, reservation_id)
+            if db.execute('SELECT 1 FROM direct_writer_pins WHERE reservation=?',(reservation_id,)).fetchone():
+                raise PolicyConflict('direct writer is active or uncertain')
             if self._lapsed(row, now):
                 raise LeaseLapsed("lease expired before engine mutation")
             if row["state"] == "reserved":
@@ -395,6 +445,8 @@ class ScratchLedger:
             row = db.execute("SELECT * FROM reservations WHERE id=?", (reservation_id,)).fetchone()
             if row is None:
                 return None
+            if db.execute('SELECT 1 FROM direct_writer_pins WHERE reservation=?',(reservation_id,)).fetchone():
+                raise PolicyConflict('direct writer is active or uncertain')
             if row["state"] == "reserved":
                 db.execute("UPDATE reservations SET state='terminal',terminal_at=?,remaining=0 WHERE id=?", (now, reservation_id))
                 db.execute("INSERT INTO unstarted_settlements VALUES(?,?)", (reservation_id, now))
@@ -433,6 +485,8 @@ class ScratchLedger:
         with self._transaction() as db:
             self._expire(db, self._now(db))
             row = self._reservation(db, reservation_id)
+            if db.execute('SELECT 1 FROM direct_writer_pins WHERE reservation=?',(reservation_id,)).fetchone():
+                raise PolicyConflict('direct writer is active or uncertain')
             delta = allocated_bytes - row["allocated"]
             if row["state"] not in ("reserved", "engine_started", "uncertain") or not 0 <= delta <= row["remaining"]:
                 raise PolicyConflict("allocation outside reservation")
@@ -548,6 +602,8 @@ class ScratchLedger:
             now = self._now(db)
             self._expire(db, now)
             row = self._reservation(db, reservation_id)
+            if db.execute('SELECT 1 FROM direct_writer_pins WHERE reservation=?',(reservation_id,)).fetchone():
+                raise PolicyConflict('direct writer is active or uncertain')
             if lease_lapsed(row, now):
                 raise PolicyConflict("lease expired before engine mutation")
             if row["state"] == "expired" or (row["state"] == "terminal" and state != "terminal"):
