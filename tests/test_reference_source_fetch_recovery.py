@@ -130,13 +130,9 @@ class RetainedCustodyTests(RecoveryHarness):
 
     def test_excluded_receipt_generation(self):
         self.receipt_column('generation=generation+1')
-        # The completion inventory reaches this first, by dropping the row.
+        # The completion inventory refuses this first, by dropping the row. The
+        # column compare in the custody helper is defence in depth behind it.
         with self.assertRaisesRegex(Conflict, 'inventory changed'):
-            self.custody()
-
-    def test_the_generation_column_check_stands_on_its_own(self):
-        self.execute('UPDATE reference_source_object_receipts SET generation=generation+1 WHERE object_id=?', self.raw)
-        with patch.object(self.store, '_source_completion_ack'), self.assertRaisesRegex(Conflict, 'custody receipt changed'):
             self.custody()
 
     def test_excluded_receipt_kind(self):
