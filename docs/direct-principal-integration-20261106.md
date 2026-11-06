@@ -53,6 +53,9 @@ detects missing or modified observation history. It has a 4,096-record lifetime
 ceiling and refuses new observations at capacity until a safe archival scheme
 is qualified. The merged check ran 79 tests with four old-code fixture skips.
 
-The current direct TLS listener does not authenticate a client certificate.
-The per-boundary bearer is not an installed coordinator identity; do not use
-this candidate as a runtime coordinator-to-worker authorization grant.
+The opt-in direct listener can require a pinned client certificate, but its
+mapped principal is not yet bound to a reservation or enrolled runtime
+configuration. The bearer alone is not an installed coordinator identity; do
+not treat allowlisting as per-job authorization. The merged synthetic check ran
+56 tests with three older-code fixture skips; the mTLS-specific handler fixture
+does not establish an authenticated V2 reservation or installed behavior.

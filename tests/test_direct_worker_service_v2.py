@@ -64,9 +64,10 @@ class WorkerListenerSettingsTest(unittest.TestCase):
         path = self.write(self.config())
         with patch('processing.direct_worker_service_v2.DirectWorkerBoundaryV2') as boundary, \
              patch('processing.direct_worker_service_v2.create_direct_worker_server') as server:
-            result = create_listener(path, boundary_kwargs={'ledger': object()}, tls_context=object())
+            result = create_listener(path, boundary_kwargs={'ledger': object()}, tls_context=object(), client_principals={'a'*64:'coordinator'})
             boundary.assert_called_once()
-            server.assert_called_once_with(boundary.return_value, '127.0.0.1', 18181, ssl_context=unittest.mock.ANY)
+            server.assert_called_once_with(boundary.return_value, '127.0.0.1', 18181, ssl_context=unittest.mock.ANY,
+                                           client_principals={'a'*64:'coordinator'})
             self.assertIsInstance(result, ListenerOwner)
             self.assertTrue(result.close(0))
             server.return_value.server_close.assert_called_once()

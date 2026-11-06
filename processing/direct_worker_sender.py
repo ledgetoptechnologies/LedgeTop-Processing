@@ -72,10 +72,11 @@ class DirectWorkerSender:
     def __init__(self, *, origin, connect_ip, ca_file, bearer, manifest, item, derived_ids,
                  expected_worker, issuer_id, key_id, worker_public_key,
                  max_object_bytes=20*1024**3, response_limit=65536,
-                 idle_timeout=10, total_timeout=120):
+                 idle_timeout=10, total_timeout=120, client_cert_file=None, client_key_file=None):
         self._configure_transport(origin=origin, connect_ip=connect_ip, ca_file=ca_file, bearer=bearer,
             max_object_bytes=max_object_bytes, response_limit=response_limit,
-            idle_timeout=idle_timeout, total_timeout=total_timeout)
+            idle_timeout=idle_timeout, total_timeout=total_timeout,
+            client_cert_file=client_cert_file, client_key_file=client_key_file)
         p._slug(issuer_id,'issuer');p._slug(key_id,'key')
         if not isinstance(worker_public_key,Ed25519PublicKey):raise ValueError('pinned worker public key required')
         self._item,self._sha,_=scratch_identity(item,expected_worker=expected_worker)
@@ -83,7 +84,8 @@ class DirectWorkerSender:
         self._issuer,self._key,self._public=issuer_id,key_id,worker_public_key
 
     def _configure_transport(self, *, origin, connect_ip, ca_file, bearer,
-                             max_object_bytes, response_limit, idle_timeout, total_timeout):
+                             max_object_bytes, response_limit, idle_timeout, total_timeout,
+                             client_cert_file=None, client_key_file=None):
         if (type(origin) is not str or not origin.isascii()
                 or any(ord(char)<33 or ord(char)==127 for char in origin)):
             raise ValueError('exact HTTPS worker origin required')
@@ -112,6 +114,13 @@ class DirectWorkerSender:
         context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.minimum_version=ssl.TLSVersion.TLSv1_2
         context.load_verify_locations(cafile=str(ca))
+        if (client_cert_file is None) != (client_key_file is None):
+            raise ValueError('client certificate and key both required')
+        if client_cert_file is not None:
+            from .reference_runtime import _file
+            cert, _ = _file(client_cert_file, private=False)
+            key, _ = _file(client_key_file, private=True)
+            context.load_cert_chain(str(cert), str(key))
         if context.verify_mode!=ssl.CERT_REQUIRED or not context.check_hostname:raise ValueError('verified TLS required')
         self._context,self._host,self._port=context,parsed.hostname,port
         self._address=address

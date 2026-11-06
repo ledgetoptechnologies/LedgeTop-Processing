@@ -6,6 +6,7 @@ must supply the actual worker boundary and its authenticated coordinator bearer.
 """
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import hashlib
 import math
 import re
 import socket
@@ -91,7 +92,7 @@ class _HeaderDeadline:
 def create_direct_worker_server(boundary, host, port, *, ssl_context,
                                 idle_timeout=10, body_deadline=120,
                                 header_deadline=15, max_object_bytes=20 * 1024**3,
-                                max_connections=4):
+                                max_connections=4, client_principals=None):
     """Create a bounded server without starting it or changing live services."""
     from .direct_worker_receiver_v2 import DirectWorkerBoundaryV2
     if not isinstance(boundary, (DirectWorkerBoundary, DirectWorkerBoundaryV2)):
@@ -101,6 +102,16 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
             or ssl_context.protocol != ssl.PROTOCOL_TLS_SERVER
             or ssl_context.minimum_version < ssl.TLSVersion.TLSv1_2):
         raise ValueError('TLS server context with TLS 1.2 minimum required')
+    if client_principals is not None:
+        from . import reference_protocol as protocol
+        if (ssl_context.verify_mode != ssl.CERT_REQUIRED or type(client_principals) is not dict
+                or not 1 <= len(client_principals) <= 64):
+            raise ValueError('required mutual TLS and client mappings required')
+        for fingerprint, principal in client_principals.items():
+            if type(fingerprint) is not str or not re.fullmatch(r'[a-f0-9]{64}', fingerprint):
+                raise ValueError('invalid client certificate fingerprint')
+            protocol._slug(principal, 'client principal')
+        client_principals = dict(client_principals)
     if (type(host) is not str or type(port) is not int or not 0 <= port <= 65535
             or any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
                    for v in (idle_timeout, body_deadline, header_deadline))
@@ -262,6 +273,15 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
                 deadline = _HeaderDeadline(wrapped, header_deadline)
                 self._local.header_deadline = deadline
                 wrapped.do_handshake()
+                if client_principals is not None:
+                    certificate = wrapped.getpeercert(binary_form=True)
+                    fingerprint = hashlib.sha256(certificate).hexdigest() if certificate else ''
+                    principal = client_principals.get(fingerprint)
+                    if principal is None:
+                        return
+                    # Trusted request-local identity for a future grant endpoint;
+                    # never derive this from an HTTP header.
+                    self._local.peer_principal = principal
                 self.finish_request(wrapped, client_address)
             except Exception:
                 self.handle_error(request, client_address)
