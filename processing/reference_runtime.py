@@ -379,8 +379,11 @@ class _DynamicAPI:
                         return Response(503,{'error':'engine_capacity_unavailable'})
                     if unreserved:
                         try:
-                            options=self.discover()
-                            capacities=self.discover_capacities()
+                            if self.discover_fleet is None:
+                                options=self.discover()
+                                capacities=self.discover_capacities()
+                            else:
+                                options,capacities=self.discover_fleet()
                             worker.store.update_fleet_snapshot(capacities,options['nodes'])
                         except Exception:
                             return Response(503,{'error':'engine_capacity_unavailable'})
