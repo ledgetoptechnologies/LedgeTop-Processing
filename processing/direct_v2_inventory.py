@@ -5,6 +5,8 @@ manifests. Raw retained inputs absent from the engine manifest remain in the
 inventory and must receive durable custody before any future acknowledgement.
 """
 from copy import deepcopy
+import json
+from types import MappingProxyType
 
 from . import reference_protocol as protocol
 from .reference_source_intake import validate_source_intake
@@ -96,3 +98,53 @@ def worker_object(value, object_id, *, expected_binding, **verification):
         objectId=obj['id'], byteSize=obj['byteSize'], sha256=obj['sha256'],
         retentionClass=obj['retentionClass'], retentionHoldId=obj['retentionHoldId'],
         sourceCustodyAccepted=False, transferAuthorized=False, processingAuthorized=False)
+
+
+_CONSTRUCTION_TOKEN = object()
+
+
+class VerifiedWorkerInventory:
+    """Immutable process-local index, never a worker authorization or receipt.
+
+    The trusted caller must check the durable reservation/fence on each use.
+    Reverify the signed original with independent current pins before closure.
+    """
+    __slots__ = ('_wire', '_binding_wire', '_objects')
+
+    def __init__(self, checked, binding, token=None):
+        if token is not _CONSTRUCTION_TOKEN:
+            raise ValueError('verified worker inventory factory required')
+        object.__setattr__(self, '_wire', protocol.canonical_json(checked))
+        object.__setattr__(self, '_binding_wire', protocol.canonical_json(binding))
+        index = {}
+        for kind, manifest in (('source', checked['sourceManifest']), ('derived', checked['derivedManifest'])):
+            for obj in manifest['objects']:
+                if obj['id'] in index:
+                    raise ValueError('worker inventory duplicate object')
+                index[obj['id']] = (kind, obj['byteSize'], obj['sha256'],
+                                    obj['retentionClass'], obj['retentionHoldId'])
+        object.__setattr__(self, '_objects', MappingProxyType(index))
+
+    def __setattr__(self, name, value):
+        raise AttributeError('verified worker inventory is immutable')
+
+    def object(self, object_id):
+        protocol._slug(object_id, 'source object id')
+        value = self._objects.get(object_id)
+        protocol._require(value is not None, 'worker inventory object not found')
+        kind, size, sha256, retention, hold = value
+        return dict(protocol='ltds-direct-worker-object-v2', objectKind=kind,
+            objectId=object_id, byteSize=size, sha256=sha256, retentionClass=retention,
+            retentionHoldId=hold, sourceCustodyAccepted=False, transferAuthorized=False,
+            processingAuthorized=False)
+
+    def revalidate_for_closure(self, *, expected_binding, **verification):
+        protocol._require(protocol.canonical_json(expected_binding) == self._binding_wire,
+                          'worker inventory reservation changed')
+        return verify(json.loads(self._wire), expected_binding=expected_binding, **verification)
+
+
+def prepare_worker_index(value, *, expected_binding, **verification):
+    """Verify once and index exact V2 objects against independently pinned state."""
+    checked = verify(value, expected_binding=expected_binding, **verification)
+    return VerifiedWorkerInventory(checked, expected_binding, _CONSTRUCTION_TOKEN)

@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import unittest
+from unittest.mock import patch
 
 from processing import direct_v2_inventory as inventory
 from processing import reference_protocol as protocol
@@ -84,6 +85,23 @@ class DirectV2InventoryTests(unittest.TestCase):
         self.assertFalse(obj['sourceCustodyAccepted'])
         with self.assertRaises(ValueError):
             inventory.worker_object(prepared, 'unknown-id', expected_binding=binding, **self.options)
+
+        with patch.object(inventory, 'validate_source_intake', wraps=inventory.validate_source_intake) as validator:
+            index = inventory.prepare_worker_index(prepared, expected_binding=binding, **self.options)
+            self.assertEqual(validator.call_count, 1)
+            prepared['sourceManifest']['objects'][1]['byteSize'] = 100
+            self.assertEqual(index.object(fixtures.GCP_ID), obj)
+            self.assertEqual(index.object(fixtures.GCP_ID), obj)
+            self.assertEqual(validator.call_count, 1)
+            with self.assertRaises(AttributeError): index._wire = b'forged'
+            self.assertEqual(index.revalidate_for_closure(expected_binding=binding, **self.options)
+                             ['sourceManifest']['objects'][1]['byteSize'], 0)
+            self.assertEqual(validator.call_count, 2)
+            changed = dict(binding, sourceSnapshotSha256='f'*64)
+            with self.assertRaises(ValueError):
+                index.revalidate_for_closure(expected_binding=changed, **self.options)
+        with self.assertRaises(ValueError):
+            inventory.VerifiedWorkerInventory(prepared, binding)
 
 
 if __name__ == '__main__':
