@@ -132,6 +132,68 @@ class ViewerResultManifestTests(unittest.TestCase):
         self.assertIn('final_test_predictions', [item['role'] for item in
             derive_viewer_result_manifest(value, **self._identity())['objects']])
 
+    def _report_count_case(self, count, *, combined=True):
+        value = copy.deepcopy(self.internal)
+        value['objects'] = [item for item in value['objects'] if item['role'] != 'report']
+        if not combined:
+            value['engineVersions'] = {'treedar': 'treedar-test'}
+            value['objects'] = [item for item in value['objects'] if item['role'] != 'odm_archive']
+        for index in range(count):
+            value['objects'].insert(index, dict(id=f'report-{index}', role='report', byteSize=3,
+                sha256=hashlib.sha256(b'abc').hexdigest()))
+        value['resultManifestSha256'] = protocol.digest({key: item for key, item in value.items()
+            if key != 'resultManifestSha256'})
+        return value
+
+    def _wire_without_deriving(self, internal):
+        # Independently form valid-digest V2 bytes so invalid-role tests reach
+        # the direct validator even when derive correctly refuses them first.
+        value = copy.deepcopy(internal)
+        value.update(schemaVersion=2, protocol='ltds-reference-result-v2')
+        value['resultManifestSha256'] = protocol.digest({key: item for key, item in value.items()
+            if key != 'resultManifestSha256'})
+        return value
+
+    def test_combined_two_reports_derive_and_validate_exact_order_digest_and_acceptance(self):
+        internal = self._report_count_case(2)
+        derived = derive_viewer_result_manifest(internal, **self._identity())
+        self.assertEqual(derived, self._wire_without_deriving(internal))
+        self.assertEqual(validate_viewer_result_manifest(derived, **self._identity()), derived)
+        self.assertEqual(derived['objects'], internal['objects'])
+        acceptance = self._acceptance(derived)
+        self.assertEqual(validate_viewer_acceptance(acceptance, result_manifest=derived,
+            input_manifest_sha256=self.job['manifestSha256']), acceptance)
+        with self.assertRaises(ViewerManifestRejected):
+            validate_viewer_acceptance(self._acceptance(derived, ids=list(reversed(acceptance['acceptedObjectIds']))),
+                result_manifest=derived, input_manifest_sha256=self.job['manifestSha256'])
+
+    def test_invalid_report_counts_refuse_derive_and_direct_validator(self):
+        for combined, count in ((False, 2), (True, 0), (True, 3)):
+            with self.subTest(combined=combined, reports=count):
+                internal = self._report_count_case(count, combined=combined)
+                with self.assertRaises(ViewerManifestRejected):
+                    derive_viewer_result_manifest(internal, **self._identity())
+                with self.assertRaises(ViewerManifestRejected):
+                    validate_viewer_result_manifest(self._wire_without_deriving(internal), **self._identity())
+
+    def test_combined_two_reports_do_not_relax_other_required_role_multiplicity(self):
+        from processing.viewer_result_manifest import TREEDAR_REQUIRED_ROLES
+        for role in sorted(TREEDAR_REQUIRED_ROLES - {'report'}):
+            for duplicate in (False, True):
+                with self.subTest(role=role, duplicate=duplicate):
+                    internal = self._report_count_case(2)
+                    original = next(item for item in internal['objects'] if item['role'] == role)
+                    if duplicate:
+                        internal['objects'].append(dict(original, id='duplicate-required-role'))
+                    else:
+                        internal['objects'].remove(original)
+                    internal['resultManifestSha256'] = protocol.digest({key: item for key, item in internal.items()
+                        if key != 'resultManifestSha256'})
+                    with self.assertRaises(ViewerManifestRejected):
+                        derive_viewer_result_manifest(internal, **self._identity())
+                    with self.assertRaises(ViewerManifestRejected):
+                        validate_viewer_result_manifest(self._wire_without_deriving(internal), **self._identity())
+
     def test_v2_validator_requires_the_same_minimum_tree_outputs_as_viewer(self):
         value = copy.deepcopy(self.viewer)
         value['objects'] = [item for item in value['objects'] if item['role'] != 'ground_model']

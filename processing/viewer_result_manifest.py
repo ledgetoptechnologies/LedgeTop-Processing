@@ -42,7 +42,7 @@ def _validate_v2_roles(roles, engines):
         _need(role in TREEDAR_ROLES or ("odm" in engines and role == "odm_archive"),
               "viewer_v2_role_unsupported")
     counts = {role: roles.count(role) for role in set(roles)}
-    _need(all(counts.get(role) == 1 for role in TREEDAR_REQUIRED_ROLES),
+    _need(all(counts.get(role) == 1 for role in TREEDAR_REQUIRED_ROLES if role != "report"),
           "viewer_v2_required_role_missing")
     _need(counts.get("report", 0) in ((1, 2) if "odm" in engines else (1,)),
           "viewer_v2_report_closure_invalid")
