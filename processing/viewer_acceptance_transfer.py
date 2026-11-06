@@ -250,6 +250,12 @@ class ViewerAcceptanceTransfer:
         if job["environment"] not in ("production", "staging"):
             raise ViewerTransferUnavailable("viewer_job_binding_unavailable")
         submission, source_result_manifest = job["submission"], job["resultManifest"]
+        # Source-bound jobs are accepted through Viewer's pull/copy-ACK path.
+        # This legacy sender verifies V1 receipts and cannot establish their
+        # source/attempt binding, so never contact Viewer for such a job.
+        if ("sourceIntakeVersion" in job
+                or type(submission) is dict and "sourceIntakeVersion" in submission):
+            raise ViewerTransferUnavailable("viewer_source_bound_pull_required")
         if (type(submission) is not dict or type(submission.get("manifest")) is not dict
                 or submission["manifest"].get("sha256") != job["manifestSha256"]
                 or protocol.manifest_sha256(submission["manifest"]) != job["manifestSha256"]):

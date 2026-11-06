@@ -171,6 +171,16 @@ class ViewerAcceptanceTransferTests(unittest.TestCase):
             secret=SECRET, trusted_receipt_keys=self.signer.trusted_keys, result_proxy=self.proxy,
             opener=self.viewer, chunk_bytes=2)
 
+    def test_source_bound_job_never_contacts_legacy_push_receiver(self):
+        for field in ('job', 'submission'):
+            job = copy.deepcopy(self.job)
+            target = job if field == 'job' else job['submission']
+            target['sourceIntakeVersion'] = 2
+            with self.subTest(field=field), self.assertRaisesRegex(
+                    ViewerTransferUnavailable, 'viewer_source_bound_pull_required'):
+                self.client.transfer(job, self.acceptance)
+        self.assertEqual(self.viewer.calls, [])
+
     def test_service_auth_matches_viewer_node_golden_vector(self):
         headers = _service_auth_headers(SECRET.encode(), "synthetic-service", "PUT",
             "/api/v1/reference/v1/acceptances/receipt-test/objects/result-test?offset=7",

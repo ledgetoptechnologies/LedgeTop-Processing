@@ -1,9 +1,11 @@
 """Durable retry/lease integration for the Viewer acceptance outbox."""
 import copy
 import hashlib
+import json
 import unittest
 import uuid
 
+from processing.maintenance import Conflict
 from processing.reference_store import ReferenceStore
 from processing.reference_viewer_transfer_worker import ReferenceViewerTransferWorker
 from processing.viewer_acceptance_transfer import ViewerTransferUnavailable
@@ -35,6 +37,48 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
             trusted_receipt_keys=self.signer.trusted_keys, clock=lambda: self.clock_value)
 
     def tearDown(self): self.fixture.tearDown()
+
+    def test_source_bound_jobs_are_not_discovered_or_leased_by_legacy_push(self):
+        # Even an outbox left by an earlier release must remain untouched.
+        self.store.ensure_viewer_transfer(self.job['jobId'])
+        with self.fixture.queue._db() as db:
+            row = db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?', (self.job['jobId'],)).fetchone()
+            body = json.loads(row['input_json'])
+            body['sourceIntakeVersion'] = 2
+            db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?', (json.dumps(body), self.job['jobId']))
+        self.assertIsNone(self.store.claim_viewer_transfer(now=self.clock_value))
+        with self.assertRaises(Conflict):
+            self.store.ensure_viewer_transfer(self.job['jobId'])
+        self.assertEqual(self.worker.run_once(), {'state': 'idle'})
+        self.assertEqual(self.sender.calls, [])
+        self.assertEqual(self.store.viewer_transfer_status(self.job['jobId'])['attempts'], 0)
+
+    def test_source_bound_pending_job_stays_available_for_viewer_pull(self):
+        with self.fixture.queue._db() as db:
+            row = db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?', (self.job['jobId'],)).fetchone()
+            body = json.loads(row['input_json'])
+            body['sourceIntakeVersion'] = 2
+            db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?', (json.dumps(body), self.job['jobId']))
+        self.assertEqual(self.store.pending_viewer_transfer_jobs(), [])
+        self.assertEqual(self.worker.run_once(), {'state': 'idle'})
+        self.assertEqual(self.store.get(self.job['jobId'])['phase'], 'awaiting_acceptance')
+        self.assertIsNone(self.store.viewer_transfer_status(self.job['jobId']))
+
+    def test_source_bound_job_does_not_block_legacy_push_queue(self):
+        other = str(uuid.uuid4())
+        with self.fixture.queue._db() as db:
+            row = db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?', (self.job['jobId'],)).fetchone()
+            body = json.loads(row['input_json'])
+            body['sourceIntakeVersion'] = 2
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,?,?,?)",
+                       (other, other, 'staging', 'reference-pipeline-v1', 'succeeded'))
+            db.execute('''INSERT INTO reference_jobs(job_id,submission_id,request_digest,environment,input_json,
+                manifest_sha,pipeline_digest,generation,phase,result_json,created_at)
+                SELECT ?,?,request_digest,environment,?,manifest_sha,pipeline_digest,generation,phase,result_json,'2000-01-01'
+                FROM reference_jobs WHERE job_id=?''', (other, other, json.dumps(body), self.job['jobId']))
+        self.sender.fail = False
+        self.assertEqual(self.worker.run_once(), {'state': 'accepted', 'jobId': self.job['jobId']})
+        self.assertIsNone(self.store.viewer_transfer_status(other))
 
     def test_stable_outbox_retries_and_signed_acceptance_completes_job(self):
         first = self.worker.run_once()

@@ -1102,6 +1102,10 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             row = self._row(db, job_id)
             if not row['result_json'] or row['phase'] not in ('awaiting_acceptance', 'completed'):
                 raise Conflict('result is not ready for Viewer transfer')
+            submission = json.loads(row['input_json'])
+            if (type(submission) is not dict or 'sourceIntakeVersion' in submission
+                    or row['source_state'] is not None):
+                raise Conflict('source-bound jobs use the Viewer pull acceptance path')
             result = json.loads(row['result_json'])
             try:
                 viewer_manifest = derive_viewer_result_manifest(result, job_id=job_id,
@@ -1168,6 +1172,8 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         with self.queue._db() as db:
             rows = db.execute('''SELECT r.job_id FROM reference_jobs r
                 WHERE r.phase='awaiting_acceptance' AND r.result_json IS NOT NULL
+                AND CASE WHEN json_valid(r.input_json) THEN json_type(r.input_json, '$.sourceIntakeVersion') IS NULL ELSE 0 END
+                AND NOT EXISTS (SELECT 1 FROM reference_source_intakes s WHERE s.job_id=r.job_id)
                 AND NOT EXISTS (SELECT 1 FROM reference_viewer_transfers t WHERE t.job_id=r.job_id)
                 ORDER BY r.created_at,r.job_id LIMIT ?''', (limit,)).fetchall()
             return [row['job_id'] for row in rows]
@@ -1178,9 +1184,12 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             raise ValueError('invalid Viewer transfer lease')
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute('''SELECT job_id,receipt_id,acceptance_json,viewer_manifest_json,attempts FROM reference_viewer_transfers
-                WHERE completed_at IS NULL AND next_attempt<=? AND (lease_until IS NULL OR lease_until<=?)
-                ORDER BY next_attempt,created_at,job_id LIMIT 1''', (now, now)).fetchone()
+            row = db.execute('''SELECT t.job_id,t.receipt_id,t.acceptance_json,t.viewer_manifest_json,t.attempts
+                FROM reference_viewer_transfers t JOIN reference_jobs r ON r.job_id=t.job_id
+                WHERE t.completed_at IS NULL AND t.next_attempt<=? AND (t.lease_until IS NULL OR t.lease_until<=?)
+                AND CASE WHEN json_valid(r.input_json) THEN json_type(r.input_json, '$.sourceIntakeVersion') IS NULL ELSE 0 END
+                AND NOT EXISTS (SELECT 1 FROM reference_source_intakes s WHERE s.job_id=r.job_id)
+                ORDER BY t.next_attempt,t.created_at,t.job_id LIMIT 1''', (now, now)).fetchone()
             if row is None:
                 return None
             token = secrets.token_urlsafe(24)
