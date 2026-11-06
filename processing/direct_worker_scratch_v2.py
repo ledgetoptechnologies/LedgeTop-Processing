@@ -10,7 +10,8 @@ DOMAIN = b'LTDS-DIRECT-WORKER-SCRATCH-BINDING-V2\0'
 FIELDS = frozenset(('reservationId', 'jobId', 'attemptId', 'generation', 'environment',
     'authorityId', 'nodeId', 'workerId', 'workerInstanceId', 'sourceManifestSha256',
     'derivedManifestSha256', 'pipelineManifestSha256', 'inventorySha256', 'inputBytes',
-    'outputBudget', 'ttlSeconds'))
+    'objectCount', 'overheadBytesPerObject', 'outputBudget', 'ttlSeconds'))
+MIN_OBJECT_OVERHEAD = 65536
 
 
 def binding(value, *, expected_worker):
@@ -24,8 +25,14 @@ def binding(value, *, expected_worker):
     p._environment(value['environment'])
     for key in ('generation', 'ttlSeconds'):
         p._integer(value[key], key)
+    p._integer(value['objectCount'], 'object count')
+    p._integer(value['overheadBytesPerObject'], 'object overhead')
+    if value['overheadBytesPerObject'] < MIN_OBJECT_OVERHEAD:
+        raise ValueError('V2 per-object disk overhead reservation too small')
     for key in ('inputBytes', 'outputBudget'):
         p._integer(value[key], key, allow_zero=True)
+    p._integer(value['inputBytes'] + value['objectCount'] * value['overheadBytesPerObject'],
+               'V2 reserved input bytes')
     if (type(expected_worker) is not dict or set(expected_worker) !=
             {'authorityId', 'nodeId', 'workerId', 'workerInstanceId'}
             or any(value[key] != expected_worker[key] for key in expected_worker)):
@@ -41,7 +48,8 @@ def identity(value, *, expected_worker):
 
 def settings(item, scratch_id):
     return dict(job_id=item['jobId'], generation=item['generation'], reservation_id=scratch_id,
-        manifest_sha256=item['inventorySha256'], input_bytes=item['inputBytes'],
+        manifest_sha256=item['inventorySha256'], input_bytes=(item['inputBytes'] +
+            item['objectCount'] * item['overheadBytesPerObject']),
         output_budget=item['outputBudget'], environment=item['environment'], ttl_seconds=item['ttlSeconds'])
 
 
@@ -60,7 +68,8 @@ def prepare(ledger, value, *, expected_worker, worker_ready):
     """Reserve/fence exact V2 bytes; caller must separately prove node readiness."""
     item, digest, scratch_id = identity(value, expected_worker=expected_worker)
     row = ledger.reserve(job_id=item['jobId'], generation=item['generation'], reservation_id=scratch_id,
-        manifest_sha256=item['inventorySha256'], input_bytes=item['inputBytes'],
+        manifest_sha256=item['inventorySha256'], input_bytes=(item['inputBytes'] +
+            item['objectCount'] * item['overheadBytesPerObject']),
         output_budget=item['outputBudget'], environment=item['environment'],
         ttl_seconds=item['ttlSeconds'], worker_ready=worker_ready)
     if row['state'] != 'reserved' or row['allocated'] != 0:

@@ -1,8 +1,10 @@
 """Synthetic V2 local worker boundary; no runtime listener or custody ACK."""
 import hashlib
 import http.client
+import importlib.util
 import io
 import json
+import os
 import ssl
 import tempfile
 import threading
@@ -49,7 +51,7 @@ class WorkerV2Tests(unittest.TestCase):
             derivedManifestSha256=prepared['derivedManifestSha256'],
             pipelineManifestSha256=prepared['pipelineManifestSha256'],inventorySha256=prepared['inventorySha256'],
             inputBytes=sum(x['byteSize'] for name in ('sourceManifest','derivedManifest') for x in prepared[name]['objects']),
-            outputBudget=100,ttlSeconds=10)
+            objectCount=3,overheadBytesPerObject=65536,outputBudget=100,ttlSeconds=10)
         self.ledger = ScratchLedger(self.root/'private'/'ledger.sqlite',self.root,
             capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
         self.observation = scratch.prepare(self.ledger,self.item,expected_worker=self.worker,worker_ready=True)
@@ -78,6 +80,10 @@ class WorkerV2Tests(unittest.TestCase):
             content_length=0,content_sha256=hashlib.sha256(b'').hexdigest(),reader=io.BytesIO(b''))
 
     def test_zero_object_auth_durable_replay_and_no_custody(self):
+        with self.ledger._transaction() as db:
+            row=self.ledger._reservation(db,self.observation['scratchReservationId'])
+            self.assertEqual(json.loads(row['settings'])['input_bytes'],
+                             self.item['inputBytes'] + 3*65536)
         with self.assertRaises(DirectBoundaryDenied):
             self.put_zero({'Authorization':'Bearer wrong','X-Coordinator-Authority':self.worker['authorityId']})
         result=self.put_zero(); self.assertTrue(result['localObjectDurable'])
@@ -101,6 +107,44 @@ class WorkerV2Tests(unittest.TestCase):
             with self.assertRaises(SourceSpoolError): self.put_zero()
         self.assertTrue(target.exists())
         with self.assertRaisesRegex(PolicyConflict,'active or uncertain'): self.put_zero()
+
+    def test_v2_failure_after_hold_before_pin_still_blocks_resolution(self):
+        with patch.object(self.ledger,'begin_direct_writer',side_effect=RuntimeError('synthetic crash')):
+            with self.assertRaises(RuntimeError):self.put_zero()
+        with NodeGate('fixture-v2') as gate:
+            with self.assertRaisesRegex(GateError,'direct transfer hold'):
+                gate.resolve(self.observation['bindingSha256'][:32],1,old_worker_stopped=True,
+                             coordinator_resolved=True,note='synthetic')
+
+    def test_v2_signed_readiness_holds_gate_and_transfers_pin_to_writer(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from processing import direct_worker_fence_proof_v2 as proof
+        key=Ed25519PrivateKey.generate();challenge=str(uuid.uuid4())
+        observation=proof.issue_fenced(self.ledger,self.spool,self.item,expected_worker=self.worker,
+            engine_id='fixture-v2',coordinator_origin='https://127.0.0.1:8443',gate_generation=1,
+            challenge_id=challenge,issued_at=100,expires_at=120,issuer_id='worker-issuer',
+            key_id='worker-key',private_key=key)
+        kwargs=dict(expected_item=self.item,expected_worker=self.worker,challenge_id=challenge,
+            gate_generation=1,issuer_id='worker-issuer',key_id='worker-key',public_key=key.public_key())
+        pin=proof.verify(observation,now=110,**kwargs)['pinId']
+        with self.assertRaises(proof.FenceProofRejected):proof.verify(observation,now=120,**kwargs)
+        with NodeGate('fixture-v2') as gate:
+            with self.assertRaisesRegex(GateError,'direct transfer hold'):
+                gate.resolve(self.observation['bindingSha256'][:32],1,old_worker_stopped=True,
+                             coordinator_resolved=True,note='synthetic')
+        self.boundary._readiness_pin=pin
+        self.assertTrue(self.put_zero()['localObjectDurable'])
+        self.assertIsNone(self.boundary._readiness_pin)
+        self.assertTrue(self.put_zero()['replayed'])
+
+    @unittest.skipUnless(os.environ.get('LTDS_OLD_GATE_SOURCE'),'old gate source fixture not supplied')
+    def test_old_gate_refuses_v2_upload_hold(self):
+        self.put_zero()
+        spec=importlib.util.spec_from_file_location('old_gate_v2',os.environ['LTDS_OLD_GATE_SOURCE'])
+        old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)
+        with patch.object(old,'canonical_gate_path',return_value=self.root/'gate'):
+            with old.NodeGate('fixture-v2') as gate:
+                with self.assertRaises(old.GateError):gate.snapshot()
 
     def test_zero_object_over_bounded_tls_and_replay(self):
         from ops.qualify_enrolled_phase_transport import configuration_material
