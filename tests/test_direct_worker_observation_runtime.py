@@ -71,6 +71,17 @@ class ObservationRuntimeTests(unittest.TestCase):
                                  ('POST','/direct/v2/retention-challenge',b'a'*64)):
             status,_=tls.request(upload,cert=tls.good,key=tls.goodkey,method=method,path=path,body=body,headers=f.headers)
             self.assertEqual(status,403)
+        # A replaced FIFO cannot block the handler or its eventual drain.
+        object_path=spool.root/spool.storage_key(f.item['jobId'],f.item['generation'],GCP_ID)
+        saved_path=object_path.with_name(object_path.name+'.saved')
+        object_path.rename(saved_path)
+        try:
+            os.mkfifo(object_path,0o600)
+            status,_=tls.request(upload,cert=tls.good,key=tls.goodkey,method='GET',path='/direct/v2/objects/'+GCP_ID,
+                                 body=b'',headers=f.headers)
+            self.assertEqual(status,409)
+        finally:
+            object_path.unlink();saved_path.rename(object_path)
         # Terminate the task-owned listener and rebuild it in a fresh process.
         self.assertTrue(owner.close(3))
         from cryptography.hazmat.primitives import serialization

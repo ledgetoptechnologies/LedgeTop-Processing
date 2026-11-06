@@ -180,7 +180,7 @@ class SourceSpool:
     def _hash_file(self, path: Path, expected_size: int, expected_sha256: str,
                    *, expected_links: int = 1) -> bool:
         try:
-            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
                          | getattr(os, "O_BINARY", 0))
             try:
                 info = os.fstat(fd)

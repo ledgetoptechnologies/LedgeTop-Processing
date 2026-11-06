@@ -69,7 +69,7 @@ class ObservationOwner:
             self.owner,self.binding=owner,binding
 
     def status(self):
-        with self.lock:return 'running' if self.owner is None else self.owner.status()
+        with self.lock:return 'closed' if self.closed else 'running' if self.owner is None else self.owner.status()
     def close(self,timeout):
         with self.lock:
             self.closed=True
@@ -81,6 +81,6 @@ class CombinedOwner:
     def start(self):self.control.start()
     def status(self):
         a,b=self.control.status(),self.observation.status()
-        return 'failed' if 'failed' in (a,b) else a
+        return 'failed' if a=='failed' or (a=='running' and b!='running') else a
     def close(self,timeout):
         return self.control.close(timeout) and self.observation.close(timeout)

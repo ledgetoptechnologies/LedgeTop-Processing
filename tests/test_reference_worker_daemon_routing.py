@@ -483,6 +483,16 @@ class WorkerDaemonRoutingTests(unittest.TestCase):
         finally:release.set();thread.join(3)
         self.assertEqual(result,[0])
 
+    def test_observation_listener_unexpected_close_marks_service_unhealthy(self):
+        from processing.direct_worker_observation_owner import CombinedOwner
+        control=SimpleNamespace(status=lambda:'running')
+        for state in ('closed','draining','failed'):
+            with self.subTest(state=state):
+                owner=CombinedOwner(control,SimpleNamespace(status=lambda:state))
+                service=daemon.WorkerService(SimpleNamespace(),SimpleNamespace(worker_direct_owner=owner),poll_seconds=.1)
+                service._state='ready'
+                self.assertEqual(service.health()['state'],'failed')
+
     def test_direct_listener_failure_immediately_marks_service_unhealthy(self):
         server=SimpleNamespace(worker_direct_owner=SimpleNamespace(status=lambda:'failed'))
         service=daemon.WorkerService(SimpleNamespace(),server,poll_seconds=60)
