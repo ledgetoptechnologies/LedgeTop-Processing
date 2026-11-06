@@ -409,6 +409,9 @@ class Queue(Maintenance):
             row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
             if not row:
                 raise Conflict("unknown job")
+            if (action == 'resolve' and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_intake_reservations'").fetchone()
+                    and db.execute('SELECT 1 FROM direct_intake_reservations WHERE job_id=?', (identifier,)).fetchone()):
+                raise Conflict('direct intake requires custody reconciliation')
             if action == "hold" and (row["status"] == "running" or
                                      (row["status"] == "held" and row['held_reason'] == 'coordinator_restart')):
                 status = "held"

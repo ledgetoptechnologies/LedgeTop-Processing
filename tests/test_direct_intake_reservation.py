@@ -12,6 +12,7 @@ from processing.direct_intake_reservation import DirectIntakeReservations
 from processing.maintenance import Conflict
 from processing.prototype import Queue
 from processing.reference_store import ReferenceStore
+from processing.coordinator_freeze import CoordinatorFrozen
 
 
 class DirectIntakeTests(unittest.TestCase):
@@ -115,6 +116,40 @@ class DirectIntakeTests(unittest.TestCase):
                        (json.dumps(data), request['job_id']))
         with self.assertRaises(Conflict): self.direct.reserve(**request)
         self.assertEqual(self.queue.get(request['job_id'])['status'], 'held')
+
+    def test_ordinary_worker_cannot_discover_direct_job_or_bypass_it(self):
+        direct = self.submit(); later = self.submit(direct=False)
+        self.assertIsNone(self.store.next_for_node('cluster'))
+        self.assertIsNone(self.store.claim(direct['job_id'], node_id='cluster', worker_id='worker',
+            worker_instance_id='instance', claim_request_id='ordinary-claim'))
+        self.assertIsNone(self.store.claim(later['job_id'], node_id='cluster', worker_id='worker',
+            worker_instance_id='instance', claim_request_id='later-claim'))
+        self.assertEqual(self.direct.reserve(**direct)['nodeId'], 'cluster')
+
+    def test_generic_operator_resolve_cannot_release_direct_slot(self):
+        request = self.submit(); self.direct.reserve(**request)
+        with self.assertRaisesRegex(Conflict, 'custody reconciliation'):
+            self.queue.operator(request['job_id'], 'resolve', {'note': 'test', 'workerStopped': True})
+        self.assertEqual(self.queue.get(request['job_id'])['status'], 'held')
+
+    def test_coordinator_freeze_refuses_new_direct_reservation(self):
+        request = self.submit()
+        gate = self.queue._coordinator_freeze
+        gate.transition(dict(requestId=str(uuid.uuid4()), planId=str(uuid.uuid4()),
+            action='intent', expectedRevision=gate.status()['revision'], startupId=self.queue.startup_id),
+            owner_secret='synthetic-owner')
+        with self.assertRaises(CoordinatorFrozen): self.direct.reserve(**request)
+        self.assertEqual(self.queue.get(request['job_id'])['status'], 'queued')
+
+    def test_reservation_metadata_is_in_existing_shared_quota(self):
+        request = self.submit()
+        with self.queue._db() as db: before = self.store._metadata_used_bytes(db)
+        self.direct.reserve(**request)
+        with self.queue._db() as db:
+            after = self.store._metadata_used_bytes(db)
+            self.assertGreater(after, before)
+            self.store.max_metadata_bytes = after - 1
+            with self.assertRaisesRegex(Conflict, 'metadata quota'): self.store._quota(db)
 
 
 if __name__ == '__main__': unittest.main()

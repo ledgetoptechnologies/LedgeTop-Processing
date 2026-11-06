@@ -340,6 +340,11 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         used += freeze_metadata_bytes(db)
         from .source_release import metadata_bytes as source_release_metadata_bytes
         used += source_release_metadata_bytes(db)
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_intake_reservations'").fetchone():
+            used += db.execute('''SELECT COALESCE(SUM(length(reservation_id)+length(job_id)+length(attempt_id)
+                +length(CAST(generation AS TEXT))+length(environment)+length(authority_id)+length(manifest_sha)
+                +length(node_id)+length(worker_id)+length(instance_id)+length(state)),0)
+                FROM direct_intake_reservations''').fetchone()[0]
         return used
 
     def _quota(self, db, extra_bytes=0):
@@ -622,8 +627,14 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
 
     def _candidate_row(self, db, node_id):
         candidate = self._candidate_any_row(db, node_id)
-        return (self._row(db, candidate["id"])
-                if candidate is not None and candidate["profile"] == PROFILE else None)
+        if candidate is None or candidate['profile'] != PROFILE:
+            return None
+        row = self._row(db, candidate['id'])
+        # Keep its position as a queue barrier, but never advertise it to an
+        # ordinary worker before a direct-custody handoff exists.
+        if 'directIntakeVersion' in json.loads(row['input_json']):
+            return None
+        return row
 
     def _required_node(self, submission):
         """Return the first configured capacity-compatible node, ignoring load."""

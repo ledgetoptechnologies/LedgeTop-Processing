@@ -25,9 +25,9 @@ class DirectIntakeReservations:
             for value in worker.values():
                 protocol._slug(value, 'worker binding')
             self.workers[node] = dict(worker)
-        # Prototype only: production schema integration must also extend the
-        # coordinator freeze/custody table inventory and metadata accounting.
-        with self.queue._db() as db:
+        # This prototype is not mounted by the runtime. Table creation itself
+        # participates in the freeze gate, as does every reservation.
+        with self.queue._coordinator_freeze.operation('source-io-admission'), self.queue._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS direct_intake_reservations (
                 reservation_id TEXT PRIMARY KEY, job_id TEXT UNIQUE NOT NULL,
                 attempt_id TEXT NOT NULL, generation INTEGER NOT NULL,
@@ -48,7 +48,7 @@ class DirectIntakeReservations:
         protocol._hash(manifest_sha, 'manifest digest')
         if type(generation) is not int or generation < 1:
             raise ValueError('positive generation required')
-        with self.queue._db() as db:
+        with self.queue._coordinator_freeze.operation('source-io-admission'), self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             prior = db.execute('SELECT * FROM direct_intake_reservations WHERE reservation_id=? OR job_id=?',
                                (reservation_id, job_id)).fetchall()
