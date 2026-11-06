@@ -40,3 +40,9 @@ worker observed, not proof of current reachability, filesystem isolation,
 survival of disk rollback, Viewer custody acceptance, or processing approval.
 The merged observation and spool-fence check ran 54 tests with three skipped
 old-code fixtures. Journal corruption and old-writer handling require review.
+
+An opt-in local listener owner is included for integration: it reports listener
+failures and drains active uploads before bounded shutdown. The merged focused
+run covered 42 tests with three old-code fixture skips, including a real TLS V2
+upload and drain. It is not connected to a host service or scheduler, and its
+status is not proof of worker readiness.
