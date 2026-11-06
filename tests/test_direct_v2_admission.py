@@ -19,8 +19,8 @@ class DirectV2AdmissionTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.queue=Queue(self.temp.name,node_ids=('cluster','main'),reference_enabled=True);self.addCleanup(self.queue.close)
-        self.queue.allowed_profiles.add(PROFILE);self.store=ReferenceStore(self.queue)
         self.fixture=fixtures.ReferenceSourceIntakeTests();self.fixture.setUp()
+        self.queue.allowed_profiles.add(PROFILE);self.store=ReferenceStore(self.queue,source_routing_keys=self.fixture.trusted_keys)
         self.fixture.authority_id=self.queue.authority_id
         self.validated=self.fixture.validate()
         self.options=dict(capability_fingerprint='a'*64,
@@ -66,9 +66,32 @@ class DirectV2AdmissionTests(unittest.TestCase):
         self.store._configured_node_limits['cluster']['maxInputBytes']=pipeline_bytes
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            opts=dict(trusted_source_keys=self.fixture.trusted_keys,authority_id=self.queue.authority_id)
-            self.assertIsNone(self.store._candidate_any_row(db,'cluster',**opts))
-            self.assertEqual(self.store._candidate_any_row(db,'main',**opts)['id'],job['jobId'])
+            self.assertIsNone(self.store._candidate_any_row(db,'cluster'))
+            self.assertEqual(self.store._candidate_any_row(db,'main')['id'],job['jobId'])
+
+    def test_mixed_queue_bypasses_direct_job_that_cannot_fit_small_node(self):
+        import copy
+        from pathlib import Path
+        from processing import reference_protocol as p
+        large,_=self.store.submit_source_intake(self.validated,**self.options)
+        self.store._configured_node_limits['cluster']['maxInputBytes']=9
+        raw=copy.deepcopy(json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())['submission'])
+        raw['submissionId']=str(uuid.uuid4());obj=raw['manifest']['objects'][0];obj['byteSize']=3
+        raw['manifest'].update(objects=[obj],objectCount=1,totalBytes=3,
+            inputCounts=dict(images=1,lidarObjects=0,points=0))
+        raw['manifest']['sha256']=p.manifest_sha256(raw['manifest'])
+        small,_=self.store.submit(p.validate_submission(raw,environment='staging',
+            capability_fingerprint=raw['capabilityFingerprint']))
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.assertEqual(self.store._candidate_any_row(db,'cluster')['id'],small['jobId'])
+            self.assertEqual(self.store._candidate_any_row(db,'main')['id'],large['jobId'])
+        # Missing authoritative trust remains a barrier, rather than letting
+        # attacker-controlled sizes decide routing.
+        self.store._source_routing_keys=None
+        with self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.assertEqual(self.store._candidate_any_row(db,'cluster')['id'],large['jobId'])
 
     def test_rehashed_tampered_source_remains_queue_barrier(self):
         from processing import reference_protocol as p
@@ -91,8 +114,7 @@ class DirectV2AdmissionTests(unittest.TestCase):
                  attestation['attestationSha256'],p.digest(request),job['jobId']))
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
-            self.assertEqual(self.store._candidate_any_row(db,'main',trusted_source_keys=self.fixture.trusted_keys,
-                                                          authority_id=self.queue.authority_id)['id'],job['jobId'])
+            self.assertEqual(self.store._candidate_any_row(db,'main')['id'],job['jobId'])
 
     def test_pending_job_reopens_unassigned_without_cluster_node(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -61,6 +61,11 @@ class DirectV2Reservations:
                 trusted_source_keys, capability_fingerprint, options_fingerprint, allowed_odm_options):
         """Hold an eligible node for this exact verified V2 source and worker proof."""
         from .direct_worker_scratch_v2 import identity
+        if self.store._source_routing_keys is None:
+            raise Conflict('protected source routing trust unavailable')
+        # Use only the immutable registry loaded with the store; request
+        # arguments must never substitute routing/signing authority.
+        trusted_source_keys=self.store._source_routing_keys
         item,_,_=identity(item,expected_worker=expected_worker)
         pinned=self._workers.get(item['nodeId'])
         def key_bytes(key):
@@ -144,8 +149,7 @@ class DirectV2Reservations:
             else:
                 if row['status']!='held' or row['held_reason']!='direct_admission_pending':
                     raise Conflict('V2 direct job not pending')
-                candidate=self.store._candidate_any_row(db,item['nodeId'],trusted_source_keys=trusted_source_keys,
-                                                        authority_id=self.queue.authority_id)
+                candidate=self.store._candidate_any_row(db,item['nodeId'])
                 if candidate is None or candidate['id']!=item['jobId']:
                     raise Conflict('V2 node not eligible or earlier job takes priority')
                 self.store._quota(db,sum(len(value) for value in (item_bytes,proof_bytes))+

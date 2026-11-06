@@ -57,13 +57,17 @@ def _reason(value):
 class ReferenceStore(ReferenceSourceIntakeMethods):
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
                  *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
-                 main_node_id=None, node_limits=None, node_option_validator=None):
+                 main_node_id=None, node_limits=None, node_option_validator=None,
+                 source_routing_keys=None):
         if PROFILE not in queue.allowed_profiles:
             raise ValueError("reference queue profile is disabled")
         for value in (max_queued_jobs, max_metadata_bytes):
             if type(value) is not int or value < 1:
                 raise ValueError("metadata quotas must be positive integers")
         self.queue = queue
+        from .viewer_source_attestation import ValidatedSourceKeys, validate_trusted_keys
+        self._source_routing_keys = (source_routing_keys if isinstance(source_routing_keys,ValidatedSourceKeys)
+            else validate_trusted_keys(source_routing_keys) if source_routing_keys is not None else None)
         self.max_queued_jobs = max_queued_jobs
         self.max_metadata_bytes = max_metadata_bytes
         for value in (local_max_photos, local_max_input_bytes):
@@ -556,7 +560,7 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                 "pipeline": {"odm": {"options": options},
                              "treedar": {"requested": False}}}
 
-    def _candidate_any_row(self, db, node_id, *, trusted_source_keys=None, authority_id=None):
+    def _candidate_any_row(self, db, node_id):
         """First globally ordered, profile-eligible job this free node can run.
 
         Reference and native Viewer schedulers share this selector inside their
@@ -590,7 +594,7 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                     submission = json.loads(row["input_json"])
                     if row['status']=='held' and row['held_reason']=='direct_admission_pending':
                         try:
-                            if trusted_source_keys is None or authority_id != self.queue.authority_id:
+                            if self._source_routing_keys is None:
                                 raise ValueError('trusted direct source keys unavailable')
                             source=json.loads(row['source_manifest_json'])
                             derived=json.loads(row['derived_manifest_json'])
@@ -618,8 +622,8 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                                     or protocol.digest(original)!=row['source_request_digest']):
                                 raise ValueError('direct retained inventory changed')
                             from .viewer_source_attestation import validate_and_verify
-                            validate_and_verify(attestation,trusted_keys=trusted_source_keys,
-                                authority_id=authority_id,environment=row['environment'],
+                            validate_and_verify(attestation,trusted_keys=self._source_routing_keys,
+                                authority_id=self.queue.authority_id,environment=row['environment'],
                                 submission_id=submission['submissionId'],provider_task_id=row['provider_task_id'],
                                 attempt_id=submission['submissionId'],viewer_task_id=row['viewer_task_id'],
                                 source_manifest_sha256=source['sha256'],derived_manifest_sha256=derived['sha256'],

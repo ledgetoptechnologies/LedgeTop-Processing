@@ -32,7 +32,7 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                 db.execute('CREATE TABLE coordinator_identity(singleton INTEGER PRIMARY KEY,authority_id TEXT NOT NULL)')
                 db.execute('INSERT INTO coordinator_identity VALUES(1,?)',(f.worker['authorityId'],))
             queue=Queue(root,reference_enabled=True);self.addCleanup(queue.close)
-            queue.allowed_profiles.add(PROFILE);store=ReferenceStore(queue)
+            queue.allowed_profiles.add(PROFILE);store=ReferenceStore(queue,source_routing_keys=f.options['trusted_source_keys'])
             opts=f.options
             validated=validate_source_intake(f.payload,environment='staging',
                 capability_fingerprint=opts['capability_fingerprint'],options_fingerprint=opts['options_fingerprint'],
