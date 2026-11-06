@@ -46,7 +46,7 @@ def effect_evidence(root,current):
     if not os.path.lexists(path):return None
     raw=private_bytes(path,maximum=262144);value=decode(raw,262144)
     require(type(value) is dict and set(value)=={'schemaVersion','intentSha256','dispatch','facts'}
-            and value['schemaVersion']==1 and value['intentSha256']==digest(token) and value['dispatch'] is None
+            and type(value['schemaVersion']) is int and value['schemaVersion']==1 and value['intentSha256']==digest(token) and value['dispatch'] is None
             and type(value['facts']) is dict,'activation_effect_evidence_changed')
     return value['facts'],__import__('hashlib').sha256(raw).hexdigest()
 
@@ -56,7 +56,7 @@ def registered_binding(root,operation,node):
     if not os.path.lexists(path):return None
     value=decode(private_bytes(path,maximum=16384),16384)
     require(type(value) is dict and set(value)=={'schemaVersion','intentSha256','dispatch','facts'}
-            and value['schemaVersion']==1 and value['intentSha256']==digest(token) and value['dispatch'] is None,
+            and type(value['schemaVersion']) is int and value['schemaVersion']==1 and value['intentSha256']==digest(token) and value['dispatch'] is None,
             'activation_registration_corrupt')
     result=binding(value['facts'])
     require(result['operationId']==operation and result['nodeId']==node,'activation_registration_owner_changed')
@@ -279,7 +279,10 @@ class ControllerActivationBoundary:
         require(type(self.installed.get('installedTreeSchemaVersion')) is int and self.installed['installedTreeSchemaVersion']==1
                 and type(self.installed.get('installedTreeSha256')) is str and
                 re.fullmatch('[a-f0-9]{64}',self.installed['installedTreeSha256']),'first_activation_requires_bound_installed_tree')
-        require(self.installed==wanted and digest(self.installed)==expected['installReceiptSha256']
+        require(type(self.installed.get('schemaVersion')) is int and self.installed['schemaVersion']==1
+                and all(type(self.installed.get(name)) is bool for name in
+                        ('unitInstalled','serviceStartIssued','serviceEnableIssued','engineMutationIssued'))
+                and self.installed==wanted and digest(self.installed)==expected['installReceiptSha256']
                 and digest(self.ingress)==expected['ingressPolicySha256']
                 and digest(self.native_inventory)==expected['nativeInventorySha256']
                 and digest(m)==expected['manifestSha256'] and digest(w)==expected['workerSha256']
@@ -340,14 +343,14 @@ class ControllerActivationBoundary:
 
     def _packet(self,packet,source,request):
         fields={'schemaVersion','protocol','operationId','requestId','hostBindingSha256','sourceSha256','process','bodySucceeded','result'}
-        require(type(packet) is dict and set(packet)==fields and packet['schemaVersion']==1
+        require(type(packet) is dict and set(packet)==fields and type(packet['schemaVersion']) is int and packet['schemaVersion']==1
                 and packet['protocol']=='ltds-cutover-ssh-exec-v1' and packet['operationId']==self.driver.plan['operationId']
                 and packet['requestId']==request and packet['hostBindingSha256']==digest(self.worker)
                 and packet['sourceSha256']==__import__('hashlib').sha256(source).hexdigest()
                 and packet['bodySucceeded'] is True and type(packet['process']) is dict
                 and set(packet['process'])=={'pid','startTicks','retired'} and packet['process']['retired'] is True
-                and type(packet['process']['pid']) is int and packet['process']['pid']>0
-                and type(packet['process']['startTicks']) is str and packet['process']['startTicks'].isdigit(),
+                and type(packet['process']['pid']) is int and 0<packet['process']['pid']<2**31
+                and type(packet['process']['startTicks']) is str and re.fullmatch('[0-9]{1,32}',packet['process']['startTicks']),
                 'exact_retired_activation_ssh_body_required')
         return packet['result']
 
@@ -359,7 +362,8 @@ class ControllerActivationBoundary:
 
     def _service_result(self,result,action,request):
         require(type(result) is dict and set(result)=={'schemaVersion','protocol','challenge','action','workerSha256',
-                'manifestSha256','managerEnvironmentSha256','ingress','native','process'} and result['schemaVersion']==1
+                'manifestSha256','managerEnvironmentSha256','ingress','native','process'}
+                and type(result['schemaVersion']) is int and result['schemaVersion']==1
                 and result['protocol']=='ltds-first-worker-service-v1' and result['challenge']==request
                 and result['action']==action and result['workerSha256']==digest(self.worker)
                 and result['manifestSha256']==digest(self.manifest),'closed_activation_service_observation_required')
