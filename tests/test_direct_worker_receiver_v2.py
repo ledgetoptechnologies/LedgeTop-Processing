@@ -47,6 +47,7 @@ class WorkerV2Tests(unittest.TestCase):
             attemptId=prepared['submissionId'],generation=1,environment='staging',**self.worker)
         index = inventory.prepare_worker_index(prepared, expected_binding=expected,
             reservation_binding=self.reservation, **options)
+        self.index,self.expected,self.options=index,expected,options
         self.item = dict(self.reservation, sourceManifestSha256=prepared['sourceManifestSha256'],
             derivedManifestSha256=prepared['derivedManifestSha256'],
             pipelineManifestSha256=prepared['pipelineManifestSha256'],inventorySha256=prepared['inventorySha256'],
@@ -71,9 +72,16 @@ class WorkerV2Tests(unittest.TestCase):
                 nodeId='cluster',authorityId=self.worker['authorityId']))
         self.bearer='synthetic-coordinator-token-0123456789'
         self.headers={'Authorization':'Bearer '+self.bearer,'X-Coordinator-Authority':self.worker['authorityId']}
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from processing import direct_worker_fence_proof_v2 as proof
+        self.proof_key=Ed25519PrivateKey.generate();self.challenge=str(uuid.uuid4())
+        self.readiness=proof.issue_fenced(self.ledger,self.spool,self.item,expected_worker=self.worker,
+            engine_id='fixture-v2',coordinator_origin=origin,gate_generation=1,challenge_id=self.challenge,
+            issued_at=100,expires_at=120,issuer_id='worker-issuer',key_id='worker-key',private_key=self.proof_key)
         self.boundary = DirectWorkerBoundaryV2(ledger=self.ledger,spool=self.spool,inventory=index,
             item=self.item,reservation_binding=self.reservation,expected_worker=self.worker,engine_id='fixture-v2',
-            coordinator_origin=origin,gate_generation=1,bearer=self.bearer)
+            coordinator_origin=origin,gate_generation=1,bearer=self.bearer,
+            readiness_pin=self.readiness['body']['pinId'])
 
     def put_zero(self, headers=None):
         return self.boundary.put(headers or self.headers,protected_transport=True,object_id=fixtures.GCP_ID,
@@ -109,7 +117,7 @@ class WorkerV2Tests(unittest.TestCase):
         with self.assertRaisesRegex(PolicyConflict,'active or uncertain'): self.put_zero()
 
     def test_v2_failure_after_hold_before_pin_still_blocks_resolution(self):
-        with patch.object(self.ledger,'begin_direct_writer',side_effect=RuntimeError('synthetic crash')):
+        with patch.object(self.ledger,'_handover_direct_writer',side_effect=RuntimeError('synthetic crash')):
             with self.assertRaises(RuntimeError):self.put_zero()
         with NodeGate('fixture-v2') as gate:
             with self.assertRaisesRegex(GateError,'direct transfer hold'):
@@ -117,17 +125,11 @@ class WorkerV2Tests(unittest.TestCase):
                              coordinator_resolved=True,note='synthetic')
 
     def test_v2_signed_readiness_holds_gate_and_transfers_pin_to_writer(self):
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
         from processing import direct_worker_fence_proof_v2 as proof
-        key=Ed25519PrivateKey.generate();challenge=str(uuid.uuid4())
-        observation=proof.issue_fenced(self.ledger,self.spool,self.item,expected_worker=self.worker,
-            engine_id='fixture-v2',coordinator_origin='https://127.0.0.1:8443',gate_generation=1,
-            challenge_id=challenge,issued_at=100,expires_at=120,issuer_id='worker-issuer',
-            key_id='worker-key',private_key=key)
-        kwargs=dict(expected_item=self.item,expected_worker=self.worker,challenge_id=challenge,
-            gate_generation=1,issuer_id='worker-issuer',key_id='worker-key',public_key=key.public_key())
-        pin=proof.verify(observation,now=110,**kwargs)['pinId']
-        with self.assertRaises(proof.FenceProofRejected):proof.verify(observation,now=120,**kwargs)
+        kwargs=dict(expected_item=self.item,expected_worker=self.worker,challenge_id=self.challenge,
+            gate_generation=1,issuer_id='worker-issuer',key_id='worker-key',public_key=self.proof_key.public_key())
+        pin=proof.verify(self.readiness,now=110,**kwargs)['pinId']
+        with self.assertRaises(proof.FenceProofRejected):proof.verify(self.readiness,now=120,**kwargs)
         with NodeGate('fixture-v2') as gate:
             with self.assertRaisesRegex(GateError,'direct transfer hold'):
                 gate.resolve(self.observation['bindingSha256'][:32],1,old_worker_stopped=True,
@@ -136,6 +138,31 @@ class WorkerV2Tests(unittest.TestCase):
         self.assertTrue(self.put_zero()['localObjectDurable'])
         self.assertIsNone(self.boundary._readiness_pin)
         self.assertTrue(self.put_zero()['replayed'])
+
+    def test_fresh_boundary_without_readiness_pin_is_rejected(self):
+        with self.assertRaisesRegex(DirectBoundaryDenied,'readiness pin required'):
+            DirectWorkerBoundaryV2(ledger=self.ledger,spool=self.spool,inventory=self.boundary.inventory,
+                item=self.item,reservation_binding=self.reservation,expected_worker=self.worker,
+                engine_id='fixture-v2',coordinator_origin='https://127.0.0.1:8443',
+                gate_generation=1,bearer=self.bearer)
+
+    def test_full_v2_closure_requires_raw_and_derived_objects(self):
+        from processing.direct_worker_closure_v2 import verify_closure
+        args=dict(expected_binding=self.expected,reservation_binding=self.reservation,
+            verification=self.options,expected_worker=self.worker,engine_id='fixture-v2',
+            coordinator_origin='https://127.0.0.1:8443',gate_generation=1)
+        self.put_zero()
+        with self.assertRaisesRegex(PolicyConflict,'closure incomplete'):
+            verify_closure(self.ledger,self.spool,self.index,self.item,**args)
+        for object_id,content in ((fixtures.IMAGE_ID,b'abc'),('gcp_'+self.item['attemptId'],b'1,2,3\n')):
+            self.boundary.put(self.headers,protected_transport=True,object_id=object_id,
+                content_length=len(content),content_sha256=hashlib.sha256(content).hexdigest(),
+                reader=io.BytesIO(content))
+        result=verify_closure(self.ledger,self.spool,self.index,self.item,**args)
+        self.assertEqual((result['sourceObjectCount'],result['derivedObjectCount']),(2,1))
+        self.assertTrue(result['localClosureComplete'])
+        self.assertFalse(result['sourceCustodyAccepted']);self.assertFalse(result['processingAuthorized'])
+        self.assertEqual(verify_closure(self.ledger,self.spool,self.index,self.item,**args),result)
 
     @unittest.skipUnless(os.environ.get('LTDS_OLD_GATE_SOURCE'),'old gate source fixture not supplied')
     def test_old_gate_refuses_v2_upload_hold(self):

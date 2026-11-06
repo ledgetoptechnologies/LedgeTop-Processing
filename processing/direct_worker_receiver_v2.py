@@ -21,9 +21,11 @@ class DirectWorkerBoundaryV2:
                 or not 32 <= len(bearer) <= 4096 or not bearer.isascii()
                 or not all(33 <= ord(c) <= 126 for c in bearer)):
             raise DirectBoundaryDenied('invalid V2 worker configuration')
-        if readiness_pin is not None and (type(readiness_pin) is not str or
-                                          not re.fullmatch('[a-f0-9]{32}', readiness_pin)):
-            raise DirectBoundaryDenied('invalid V2 readiness pin')
+        # Construction is internal and remains unwired. Every fresh boundary
+        # requires the exact durable readiness pin; restart without a qualified
+        # handover record fails closed rather than inferring continuation.
+        if type(readiness_pin) is not str or not re.fullmatch('[a-f0-9]{32}', readiness_pin):
+            raise DirectBoundaryDenied('V2 readiness pin required')
         item, _, _ = identity(item, expected_worker=expected_worker)
         saved = json.loads(inventory._wire)
         if (p.canonical_json(reservation_binding) != inventory._reservation_wire

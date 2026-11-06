@@ -141,6 +141,11 @@ class VerifiedWorkerInventory:
             retentionHoldId=hold, sourceCustodyAccepted=False, transferAuthorized=False,
             processingAuthorized=False)
 
+    def object_ids(self, *, reservation_binding):
+        protocol._require(protocol.canonical_json(reservation_binding) == self._reservation_wire,
+                          'worker inventory reservation changed')
+        return tuple(self._objects)
+
     def revalidate_for_closure(self, *, expected_binding, reservation_binding, **verification):
         protocol._require(protocol.canonical_json(expected_binding) == self._binding_wire,
                           'worker inventory reservation changed')
