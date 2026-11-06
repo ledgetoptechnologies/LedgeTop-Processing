@@ -64,6 +64,13 @@ synthetic run passed 96 tests with three fixture skips. Dynamic worker
 enrollment, credential provisioning, actual runtime wiring, process-death
 recovery and the public Viewer route remain unfinished.
 
+The internal reserved-transfer candidate now uses the pinned worker sender,
+closes its source reader and journals a signed local worker closure. A
+root-supervised synthetic TLS test passed with the service running as UID/GID
+10001 and no supplementary groups. Local closure is not Viewer custody; the
+authenticated source reader, full runtime wiring, revocation and recovery
+remain unqualified.
+
 A separate opt-in private mTLS snapshot listener and bounded page journal are
 included as a candidate. A synthetic integration test exercises an actual
 signed source attestation, direct reservation and source-only inspector. It is

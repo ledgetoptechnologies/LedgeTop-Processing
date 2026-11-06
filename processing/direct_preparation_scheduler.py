@@ -27,8 +27,12 @@ class DirectPreparationScheduler:
         clients={};policies={}
         for node in self.queue.node_ids:
             entry=enrollment[node]
-            p._closed(entry,('configPath','configSha256','credentialSha256','gateGeneration','outputBudget','ttlSeconds'),
+            fields=('configPath','configSha256','credentialSha256','gateGeneration','outputBudget','ttlSeconds')
+            if type(entry) is dict and 'transfer' in entry:fields+=('transfer',)
+            p._closed(entry,fields,
                       'protected scheduler enrollment')
+            if 'transfer' in entry:
+                p._closed(entry['transfer'],('configPath','configSha256','credentialSha256'),'protected transfer enrollment')
             p._integer(entry['gateGeneration'],'gate generation')
             p._integer(entry['outputBudget'],'output budget',allow_zero=True)
             p._integer(entry['ttlSeconds'],'reservation ttl')
@@ -151,3 +155,82 @@ class DirectPreparationScheduler:
             allowed_odm_options=allowed_odm_options)
         return {'reservationId':reserved['reservationId'],'nodeId':node,'state':'receiving',
                 'sourceCustodyAccepted':False,'processingAuthorized':False}
+
+    def open_reserved_transfer(self,reservation_id,*,allowed_odm_options):
+        """Open an exact protected worker handoff; caller supplies source bytes.
+
+        This trusted-process entrypoint does not prove Viewer snapshot paths,
+        acknowledge custody, open a public API, or start processing.
+        """
+        import secrets
+        from .direct_v2_reservation_schema import validate_receiving
+        from .direct_v2_inventory import prepare_worker_index
+        from .direct_protected_transport import prepare_enrolled_sender
+        from .direct_v2_handoff_journal import DirectV2Handoff
+        p._uuid(reservation_id,'reservation')
+        with self.queue.coordinator_operation('source-io-admission'),self.queue._db() as db:
+            db.execute('BEGIN')
+            saved=validate_receiving(db,reservation_id)
+            item=json.loads(saved['item_json']);node=item['nodeId'];job=self.store._row(db,item['jobId'])
+            source=json.loads(job['source_manifest_json']);derived=json.loads(job['derived_manifest_json'])
+            attestation=json.loads(job['source_attestation_json']);submission=json.loads(job['input_json'])
+            payload=dict(schemaVersion=2,submissionId=submission['submissionId'],providerTaskId=job['provider_task_id'],
+                viewerTaskId=job['viewer_task_id'],sourceManifest=source,derivedManifest=derived,
+                manifest=submission['manifest'],pipeline=submission['pipeline'],
+                capabilityFingerprint=submission['capabilityFingerprint'],sourceAttestation=attestation)
+            principal=saved['principal']
+        self.revalidate_enrollment(node)
+        transfer=self._enrollment[node].get('transfer')
+        if transfer is None:raise Conflict('protected transfer enrollment unavailable')
+        verification=dict(authenticated_principal=principal,environment=item['environment'],
+            capability_fingerprint=submission['capabilityFingerprint'],
+            options_fingerprint=submission['pipeline']['odm']['optionsFingerprint'],
+            allowed_odm_options=allowed_odm_options,trusted_source_keys=self.store._source_routing_keys,
+            authority_id=self.queue.authority_id)
+        checked=prepare_inventory(payload,**verification)
+        binding_fields=('authorityId','principalId','environment','submissionId','viewerTaskId','providerTaskId',
+            'sourceManifestSha256','derivedManifestSha256','pipelineManifestSha256','pipelineDigest',
+            'attestationSha256','sourceSnapshotSha256','preparedEnvelopeSha256','activationId')
+        expected={key:checked[key] for key in binding_fields}
+        reservation={key:item[key] for key in ('reservationId','jobId','attemptId','generation','authorityId',
+            'environment','nodeId','workerId','workerInstanceId')}
+        index=prepare_worker_index(checked,expected_binding=expected,reservation_binding=reservation,**verification)
+        sender=prepare_enrolled_sender(transfer['configPath'],node,expected_config_sha256=transfer['configSha256'],
+            expected_credential_sha256=transfer['credentialSha256'],reservations=self.reservations,
+            inventory=index,item=item,reservation_binding=reservation)
+        secret=secrets.token_urlsafe(32)
+        return _ReservedDirectTransfer(DirectV2Handoff(self.store,sender,principal=principal,bearer=secret),secret,self,node)
+
+
+class _ReservedDirectTransfer:
+    """Internal journal handle; observations do not grant source custody."""
+    def __init__(self,handoff,secret,scheduler,node):
+        self._handoff,self._secret,self._scheduler,self._node=handoff,secret,scheduler,node
+    def _revalidate(self):
+        from .direct_protected_transport import load_enrolled_transport
+        self._scheduler.revalidate_enrollment(self._node)
+        transfer=self._scheduler._enrollment[self._node]['transfer']
+        load_enrolled_transport(transfer['configPath'],self._node,expected_config_sha256=transfer['configSha256'],
+                                expected_credential_sha256=transfer['credentialSha256'])
+    def authorize(self):
+        self._revalidate()
+        return self._handoff.authorize_worker(self._secret,protected_transport=True)
+    def send(self,object_id,reader):
+        """Take ownership of one closeable reader, including on refusal."""
+        from .direct_worker_sender import DirectDeliveryUncertain
+        close=getattr(reader,'close',None)
+        if not callable(close):raise ValueError('closeable source reader required')
+        prior=None
+        try:
+            self._revalidate()
+            return self._handoff.send_object(self._secret,protected_transport=True,object_id=object_id,reader=reader)
+        except BaseException as error:
+            prior=error
+            raise
+        finally:
+            try:close()
+            except Exception as close_error:
+                raise DirectDeliveryUncertain('source reader close outcome uncertain') from (prior if prior is not None else close_error)
+    def complete(self):
+        self._revalidate()
+        return self._handoff.complete(self._secret,protected_transport=True)
