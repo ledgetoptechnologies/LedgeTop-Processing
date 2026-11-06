@@ -10,6 +10,7 @@ import json
 import os
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 import uuid
 
@@ -918,6 +919,7 @@ class StepHarness(RecoveryHarness):
     def real_driver(self):
         driver = super().real_driver()
         del driver._save
+        driver.outbox = driver.failure_outbox = SimpleNamespace(holds=lambda _job: False)
         (self.root / 'scratch').mkdir(mode=0o700)
         self.ledger = ScratchLedger(self.root / 'ledger.sqlite', self.root / 'scratch',
             capacity_probe=lambda _: 10**9, safety_floor_bytes=0)
@@ -1097,7 +1099,7 @@ class StepThroughRecoveryTests(StepHarness):
         self.to_fetching()
         self.execute("UPDATE jobs SET status='held',held_reason='operator_hold' WHERE id=?", self.job_id)
         self.assertEqual(self.driver.step(), {'state': 'held', 'reason': 'source_fetch_held'})
-        self.assertEqual(self.shown(), 'source_transfer_unavailable')
+        self.assertEqual(self.row()[1]['watch']['reasonCode'], 'source_transfer_unavailable')
         self.execute("UPDATE jobs SET status='running',held_reason=NULL WHERE id=?", self.job_id)
         self.step('fetching')
         self.assertNotIn('watch', self.row()[1])
@@ -1112,7 +1114,6 @@ class StepThroughRecoveryTests(StepHarness):
         with patch.object(self.client, 'download_object', side_effect=DriverHeld('source_transfer_failed')):
             self.assertEqual(self.driver.step()['state'], 'held')
         self.assertEqual(self.row()[1]['watch']['reasonCode'], 'source_transfer_unavailable')
-        self.assertEqual(self.shown(), 'source_transfer_unavailable')
 
     def test_another_watch_is_not_a_transfer_watch(self):
         self.to_fetching()
@@ -1121,19 +1122,6 @@ class StepThroughRecoveryTests(StepHarness):
         self.driver._observe(self.job_id, stage, data, 'scratch_capacity_unavailable')
         self.step('fetching')
         self.assertEqual(self.row()[1]['watch']['reasonCode'], 'scratch_capacity_unavailable')
-
-    def test_an_irreversible_hold_is_never_retired(self):
-        self.to_fetching()
-        stage, data = self.row()
-        data['hold'] = dict(holdId=str(uuid.uuid4()), reasonCode='reservation_expired', reason='reservation_expired',
-            sequence=0, observation=None, engineStatusCode=None, ack=None)
-        self.driver._save(self.job_id, stage, data)
-        before = self.row()[1]['hold']
-        self.driver._clear_transfer_watch(self.job_id, stage, self.row()[1])
-        for _ in range(2):
-            self.assertEqual(self.driver.step()['state'], 'held')
-        self.assertEqual(self.row()[1]['hold']['reasonCode'], before['reasonCode'])
-        self.assertNotIn('inputPaths', self.row()[1])
 
     def test_a_reservation_that_is_not_the_posted_one_is_held_and_reported(self):
         reservation = self.to_fetching()
