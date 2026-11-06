@@ -62,7 +62,19 @@ def main(mode):
     driver._request=request
     stop=threading.Event()
     signal.signal(signal.SIGTERM,lambda *_:stop.set())
-    raise SystemExit(daemon.WorkerService(driver,server,poll_seconds=0.1).run(stop))
+    service=daemon.WorkerService(driver,server,poll_seconds=0.1)
+    result=service.run(stop)
+    if result:
+        # Closed service state/reason only; exceptions/configuration never enter logs.
+        health=service.health()
+        allowed={'listener_thread_exited','listener_thread_failed','driver_thread_failed',
+                 'worker_service_failed','listener_drain_failed'}
+        reason=health.get('reason')
+        print(json.dumps(dict(scope='local-fixture-service-failure',
+            reason=reason if reason in allowed else 'unclassified_service_failure',
+            driverAlive=health.get('driverAlive') is True,listenerAlive=health.get('listenerAlive') is True)),
+            file=sys.stderr,flush=True)
+    raise SystemExit(result)
 
 
 if __name__=='__main__':main(sys.argv[1])

@@ -152,6 +152,23 @@ class FixtureLifecycleUnitTests(unittest.TestCase):
                 w.stop_worker(dict(process=process,startTime='456'))
         process.send_signal.assert_called_once();process.kill.assert_not_called()
 
+    def test_probe_diagnostic_program_is_valid_and_retains_production_masking(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home=Path(temporary)
+            def run(argv,**kwargs):
+                program=argv[-1]
+                compile(program,'<fixture-probe>','exec')
+                self.assertIn('exceptionType',program)
+                self.assertIn('traceback.extract_tb',program)
+                self.assertNotIn('str(e)',program)
+                self.assertNotIn('repr(e)',program)
+                self.assertEqual(kwargs['error_limit'],4096)
+                raise RuntimeError('command_read_unavailable')
+            with patch.object(w.BoundedSubprocess,'run',side_effect=run):
+                with self.assertRaisesRegex(RuntimeError,'command_read_unavailable'):
+                    w.invoke({'root':'/opt/example'},'probe',{},home)
+            self.assertEqual(list(home.iterdir()),[])
+
     def test_wrong_planned_manifest_never_probes_child(self):
         with patch.object(w,'invoke') as invoke:
             with self.assertRaisesRegex(RuntimeError,'planned_worker_fixture_changed'):

@@ -179,9 +179,29 @@ def process_identity(pid):
 def invoke(entry,mode,payload,home,*,timeout=15):
     source=str(Path(entry['root'])/'source');python=str(Path(entry['root'])/'venv/bin/python')
     body='import sys;sys.path.insert(0,'+repr(source)+');from tests.fixtures.enrolled_worker_factory_process import main;main('+repr(mode)+')'
-    result=BoundedSubprocess().run(['/usr/bin/env','-i',*[key+'='+value for key,value in clean_environment(home).items()],
+    diagnostic=None
+    if mode=='probe':
+        diagnostic=Path(home)/('probe-'+str(uuid.uuid4()))
+        body=('import os,json,traceback;from pathlib import Path;'+body.split(';from tests.',1)[0]+
+            ';from ops.qualify_enrolled_worker_preparation import write_private,process_identity;'+
+            'd=Path('+repr(str(diagnostic))+');'+
+            'write_private(d.with_suffix(".start.json"),json.dumps(dict(pid=os.getpid(),startTime=process_identity(os.getpid()))).encode())\n'+
+            'try:\n from tests.fixtures.enrolled_worker_factory_process import main;main("probe")\n'+
+            'except BaseException as e:\n'+
+            ' frames=[dict(file=Path(f.filename).name,line=f.lineno,function=f.name) for f in traceback.extract_tb(e.__traceback__)[-8:]]\n'+
+            ' raw=json.dumps(dict(exceptionType=type(e).__name__[:80],frames=frames)).encode()\n'+
+            ' write_private(d.with_suffix(".stderr.json"),raw[:4096]);raise\n')
+    try:
+        result=BoundedSubprocess().run(['/usr/bin/env','-i',*[key+'='+value for key,value in clean_environment(home).items()],
         python,'-I','-B','-c',body],input_bytes=canonical(payload),
-        timeout=timeout,output_limit=65536,error_limit=4096)
+            timeout=timeout,output_limit=65536,error_limit=4096)
+    finally:
+        if diagnostic is not None and diagnostic.with_suffix('.start.json').exists():
+            start=decode(private_bytes(diagnostic.with_suffix('.start.json'),maximum=1024))
+            try:process_identity(start['pid']);retired=False
+            except FileNotFoundError:retired=True
+            except Exception:retired=False
+            write_private(diagnostic.with_suffix('.retirement.json'),canonical(dict(**start,retired=retired)))
     return decode(result)
 
 
