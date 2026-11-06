@@ -122,6 +122,85 @@ class PreparedWorkerFixtureTests(unittest.TestCase):
         with self.assertRaises(Exception):self.prepare('cluster')
 
 
+class StrictFixtureTlsTests(unittest.TestCase):
+    def material(self):
+        return configuration_material(str(uuid.uuid4()),str(uuid.uuid4()))['configurationFiles']
+
+    def handshake(self,files,*,hostname='127.0.0.1',trust=None):
+        import ssl
+        from processing.reference_tls import verified_client_context
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            for name,raw in files.items():
+                if name in ('fixture-ca.pem','fixture-cert.pem','fixture-key.pem'):(root/name).write_bytes(raw)
+            ca=root/'trust.pem';ca.write_bytes(trust or files['fixture-ca.pem'])
+            client=verified_client_context(str(ca))
+            # Explicit strict flag also qualifies runtimes predating Python3.13's default.
+            client.verify_flags|=ssl.VERIFY_X509_STRICT
+            self.assertEqual(client.verify_mode,ssl.CERT_REQUIRED);self.assertTrue(client.check_hostname)
+            server=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server.load_cert_chain(str(root/'fixture-cert.pem'),str(root/'fixture-key.pem'))
+            ci,co,si,so=[ssl.MemoryBIO() for _ in range(4)]
+            c=client.wrap_bio(ci,co,server_hostname=hostname);v=server.wrap_bio(si,so,server_side=True)
+            done=set()
+            for _ in range(32):
+                for name,obj in (('client',c),('server',v)):
+                    try:obj.do_handshake();done.add(name)
+                    except ssl.SSLWantReadError:pass
+                if co.pending:si.write(co.read())
+                if so.pending:ci.write(so.read())
+                if len(done)==2:return
+            self.fail('strict handshake exceeded bounded turns')
+
+    def test_actual_fixture_chain_completes_production_context_strict_handshake(self):
+        from cryptography import x509
+        files=self.material();ca=x509.load_pem_x509_certificate(files['fixture-ca.pem'])
+        leaf=x509.load_pem_x509_certificate(files['fixture-cert.pem'])
+        self.assertNotEqual(leaf.subject,leaf.issuer)
+        self.assertTrue(ca.extensions.get_extension_for_class(x509.KeyUsage).value.key_cert_sign)
+        self.assertEqual(leaf.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier).value.key_identifier,
+                         ca.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value.digest)
+        self.handshake(files)
+
+    def test_wrong_ca_is_rejected_by_strict_handshake(self):
+        import ssl
+        with self.assertRaises(ssl.SSLCertVerificationError):
+            self.handshake(self.material(),trust=self.material()['fixture-ca.pem'])
+
+    def test_ca_without_signing_usage_is_rejected_by_strict_handshake(self):
+        import ssl
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes,serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        files=self.material();original=x509.load_pem_x509_certificate(files['fixture-ca.pem'])
+        old_leaf=x509.load_pem_x509_certificate(files['fixture-cert.pem'])
+        key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+        builder=(x509.CertificateBuilder().subject_name(original.subject).issuer_name(original.subject)
+                 .public_key(key.public_key()).serial_number(x509.random_serial_number())
+                 .not_valid_before(original.not_valid_before_utc).not_valid_after(original.not_valid_after_utc))
+        ca=(builder.add_extension(x509.BasicConstraints(ca=True,path_length=0),critical=True)
+            .add_extension(x509.KeyUsage(digital_signature=True,content_commitment=False,key_encipherment=False,
+                data_encipherment=False,key_agreement=False,key_cert_sign=False,crl_sign=False,
+                encipher_only=False,decipher_only=False),critical=True)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()),critical=False)
+            .sign(key,hashes.SHA256()))
+        builder=(x509.CertificateBuilder().subject_name(old_leaf.subject).issuer_name(ca.subject)
+                 .public_key(old_leaf.public_key()).serial_number(x509.random_serial_number())
+                 .not_valid_before(old_leaf.not_valid_before_utc).not_valid_after(old_leaf.not_valid_after_utc))
+        for extension in old_leaf.extensions:
+            value=(x509.AuthorityKeyIdentifier.from_issuer_public_key(key.public_key())
+                   if isinstance(extension.value,x509.AuthorityKeyIdentifier) else extension.value)
+            builder=builder.add_extension(value,critical=extension.critical)
+        files['fixture-ca.pem']=ca.public_bytes(serialization.Encoding.PEM)
+        files['fixture-cert.pem']=builder.sign(key,hashes.SHA256()).public_bytes(serialization.Encoding.PEM)
+        with self.assertRaises(ssl.SSLCertVerificationError):self.handshake(files)
+
+    def test_wrong_hostname_is_rejected_by_strict_handshake(self):
+        import ssl
+        with self.assertRaises(ssl.SSLCertVerificationError):
+            self.handshake(self.material(),hostname='unplanned.invalid')
+
+
 class FixtureLifecycleUnitTests(unittest.TestCase):
     def test_source_archive_is_exact_complete_tree_not_just_declared_hash(self):
         with tempfile.TemporaryDirectory() as temporary:
