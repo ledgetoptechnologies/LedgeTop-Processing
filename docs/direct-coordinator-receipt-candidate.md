@@ -63,8 +63,12 @@ replay under a different profile. The actual route must separately enforce
 wire bounds before allocation and provide a verified pagination/response
 contract; the existing 4 MiB sender must not be silently bypassed. Full
 10,001-object durable transfer, disk quota, restart and resource-use tests
-remain outstanding; manifest validation currently rescans the inventory for
-each object and needs performance qualification or redesign.
+remain outstanding. The isolated boundary snapshots a validated manifest and
+indexes objects once; its local completion revalidates the complete inventory.
+This avoids repeated manifest scans within that boundary, but has not been
+profiled or qualified at scale. The 16 MiB check canonicalizes an already
+parsed object: it is not a network allocation defense. A future listener must
+enforce raw byte and nesting limits before parsing and reject duplicate keys.
 
 For design review, propose a maximum exact relative path length of 1,024 UTF-8
 bytes and 255 bytes per component, subject to the actual participating

@@ -6,7 +6,9 @@ the upstream binding and provision the private mounted SourceSpool; neither a
 coordinator nor Viewer is authorized by constructing this object.
 """
 import hashlib
+import json
 from pathlib import Path
+from types import MappingProxyType
 
 from . import reference_protocol as p
 from .direct_worker_scratch import require_fenced, scratch_settings
@@ -83,13 +85,44 @@ def _object(manifest, item, object_id, derived_ids=None):
     return objects[object_id]
 
 
+class _PreparedManifest:
+    """Private, validated snapshot; not a durable authorization or custody proof."""
+    def __init__(self, manifest, item, derived_ids):
+        if type(manifest) is not dict or type(manifest.get('objects')) is not list or not manifest['objects']:
+            raise PolicyConflict('direct manifest invalid')
+        # Validate the whole snapshot exactly once, including digest, names and limits.
+        _object(manifest,item,manifest['objects'][0]['id'],derived_ids)
+        if derived_digest(manifest,derived_ids) != item['derivedManifestSha256']:
+            raise PolicyConflict('direct derived inventory changed')
+        self._manifest_bytes=p.canonical_json(manifest)
+        self._item_bytes=p.canonical_json(item)
+        self._derived=tuple(derived_ids)
+        self._index=MappingProxyType({obj['id']:MappingProxyType(dict(obj)) for obj in manifest['objects']})
+
+    def object(self,item,object_id):
+        if p.canonical_json(item)!=self._item_bytes or type(object_id) is not str:
+            raise PolicyConflict('direct prepared binding changed')
+        try:return dict(self._index[object_id])
+        except KeyError:raise PolicyConflict('direct manifest object missing') from None
+
+    def snapshot(self,item):
+        if p.canonical_json(item)!=self._item_bytes:
+            raise PolicyConflict('direct prepared binding changed')
+        return json.loads(self._manifest_bytes), list(self._derived)
+
+
 def receive(ledger, spool, manifest, item, *, expected_worker, engine_id,
-            coordinator_origin, gate_generation, object_id, reader, derived_ids=None):
+            coordinator_origin, gate_generation, object_id, reader, derived_ids=None, _prepared=None):
     """Durably publish one object; no complete-source or Viewer ACK is issued."""
     item, sha, scratch_id = require_fenced(ledger, item, expected_worker=expected_worker)
-    obj = _object(manifest, item, object_id, derived_ids if derived_ids is not None else [])
-    if derived_digest(manifest, derived_ids if derived_ids is not None else []) != item['derivedManifestSha256']:
-        raise PolicyConflict('direct derived inventory changed')
+    if _prepared is None:
+        obj = _object(manifest, item, object_id, derived_ids if derived_ids is not None else [])
+        if derived_digest(manifest, derived_ids if derived_ids is not None else []) != item['derivedManifestSha256']:
+            raise PolicyConflict('direct derived inventory changed')
+    elif isinstance(_prepared,_PreparedManifest):
+        obj = _prepared.object(item,object_id)
+    else:
+        raise PolicyConflict('invalid direct prepared manifest')
     if not callable(getattr(reader, 'close', None)) or getattr(reader, 'closed', None) is not False:
         raise ValueError('owned open source reader required')
     with NodeGate(engine_id) as gate:

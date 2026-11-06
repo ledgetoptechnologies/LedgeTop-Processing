@@ -65,6 +65,17 @@ class DirectWorkerBoundaryTests(unittest.TestCase):
         self.assertFalse(signed['closure']['sourceCustodyAccepted'])
         self.assertFalse(signed['closure']['processingAuthorized'])
 
+    def test_prepared_manifest_reused_and_original_mutation_cannot_change_binding(self):
+        from processing import direct_worker_receiver
+        original=copy.deepcopy(self.f.manifest['objects'][0])
+        self.f.manifest['objects'][0]['sha256']='f'*64
+        with patch.object(direct_worker_receiver,'_object',side_effect=AssertionError('unexpected rescan')):
+            observation=self.boundary.put(self.headers,protected_transport=True,object_id='object-1',
+                content_length=original['byteSize'],content_sha256=original['sha256'],reader=io.BytesIO(self.f.data))
+            self.assertTrue(observation['localObjectDurable'])
+        self.boundary.item['generation']+=1
+        with self.assertRaises(PolicyConflict):self.put('derived-1',self.f.derived_data)
+
     def test_exact_signed_receipt_is_durable_and_replays_after_restart(self):
         self.upload();first=self.complete()
         self.assertFalse(first['closure']['sourceCustodyAccepted']);self.assertFalse(first['closure']['processingAuthorized'])

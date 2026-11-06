@@ -8,7 +8,7 @@ import copy
 import hmac
 
 from .direct_worker_closure import verify_closure
-from .direct_worker_receiver import _object, receive
+from .direct_worker_receiver import _PreparedManifest, receive
 from .direct_worker_receipt import WorkerClosureSigner
 from .direct_worker_scratch import scratch_identity
 
@@ -27,8 +27,9 @@ class DirectWorkerBoundary:
             raise DirectBoundaryDenied('worker signer identity changed')
         scratch_identity(item,expected_worker=expected_worker)
         self.ledger,self.spool=ledger,spool
-        self.manifest,self.item=copy.deepcopy(manifest),copy.deepcopy(item)
-        self.derived_ids,self.worker=copy.deepcopy(derived_ids),copy.deepcopy(expected_worker)
+        self.item=copy.deepcopy(item)
+        self.worker=copy.deepcopy(expected_worker)
+        self._prepared=_PreparedManifest(copy.deepcopy(manifest),self.item,copy.deepcopy(derived_ids))
         self.engine_id,self.origin,self.generation=engine_id,coordinator_origin,gate_generation
         self._bearer,self.signer=bearer,signer
 
@@ -49,16 +50,17 @@ class DirectWorkerBoundary:
 
     def put(self,headers,*,protected_transport,object_id,content_length,content_sha256,reader):
         self._authorize(headers,protected_transport)
-        obj=_object(self.manifest,self.item,object_id,self.derived_ids)
+        obj=self._prepared.object(self.item,object_id)
         if (type(content_length) is not int or content_length!=obj['byteSize']
                 or content_sha256!=obj['sha256']):
             raise DirectBoundaryDenied('direct object metadata mismatch')
-        return receive(self.ledger,self.spool,self.manifest,self.item,expected_worker=self.worker,
+        return receive(self.ledger,self.spool,None,self.item,expected_worker=self.worker,
             engine_id=self.engine_id,coordinator_origin=self.origin,gate_generation=self.generation,
-            object_id=object_id,reader=reader,derived_ids=self.derived_ids)
+            object_id=object_id,reader=reader,_prepared=self._prepared)
 
     def complete(self,headers,*,protected_transport):
         self._authorize(headers,protected_transport)
-        return verify_closure(self.ledger,self.spool,self.manifest,self.item,derived_ids=self.derived_ids,
+        manifest,derived_ids=self._prepared.snapshot(self.item)
+        return verify_closure(self.ledger,self.spool,manifest,self.item,derived_ids=derived_ids,
             expected_worker=self.worker,engine_id=self.engine_id,coordinator_origin=self.origin,
             gate_generation=self.generation,worker_signer=self.signer)
