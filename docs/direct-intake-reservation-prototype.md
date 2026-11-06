@@ -16,7 +16,7 @@ engine while direct custody is incomplete. The internal queue state is `held`;
 it must not be exposed as a completed upload, processing status or result.
 
 Before any runtime wiring, implement and verify an authenticated worker-side
-scratch reservation and durable per-object transfer receipts; crash recovery,
+physical-node gate, durable per-object transfer receipts; crash recovery,
 stream/fallback and cancellation reconciliation; safe releases; coordinator
 freeze, custody/migration and complete metadata/disk accounting for this table;
 durable pinned worker inventory and fresh health; a Viewer receiving/waiting
@@ -25,3 +25,13 @@ no bytes may be acknowledged or processing started merely because this node
 slot exists. A worker or coordinator disconnect must retain the source at the
 Viewer or in qualified cluster-local spool until verified custody. No production
 resource, customer data, deployed service or V2 behavior is changed here.
+
+The separate unwired `direct_worker_scratch.prepare` prototype derives a local
+scratch reservation identity from the complete supplied binding, then uses
+`ScratchLedger.reserve` and its durable pre-transfer fence. A crash between
+those transactions must never result in a byte transfer; an unfenced reservation
+can expire, while a fenced one remains held across restart. Its return value is
+only a local capacity observation: it neither authenticates the caller nor proves
+physical node-gate ownership, accepts a source object, permits transfer, or
+acknowledges custody. A verified caller, durable receiver, capacity/mount
+identity, reconciliation and cleanup proof remain necessary before any wiring.
