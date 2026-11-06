@@ -623,10 +623,18 @@ def _build_worker(config,owner,resources):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True, help='owner-private JSON settings file')
+    parser.add_argument('--direct-enrollment', help='optional root-owned direct worker enrollment record')
     args = parser.parse_args(argv)
     server = None
     try:
-        config = load_config(args.config)
+        enrollment=None
+        if args.direct_enrollment is not None:
+            from .worker_direct_enrollment import load as load_direct_enrollment
+            enrollment=load_direct_enrollment(args.direct_enrollment,config_path=args.config)
+        config = load_config(args.config,expected_direct_config_sha256=(enrollment['configSha256'] if enrollment else None))
+        if enrollment is not None:
+            from .worker_direct_enrollment import require_identity
+            require_identity(enrollment,config)
         driver, server = build_worker(config)
         stop = threading.Event()
         for name in ('SIGINT','SIGTERM'):
