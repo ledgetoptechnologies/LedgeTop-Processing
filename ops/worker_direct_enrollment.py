@@ -4,7 +4,7 @@ from pathlib import PurePosixPath
 from processing import reference_protocol as p
 from processing.direct_protected_transport import _read
 
-PROTOCOL='ltds-worker-direct-enrollment-v2'
+PROTOCOL='ltds-worker-direct-enrollment-v3'
 
 
 def load(path, *, config_path):
@@ -15,13 +15,13 @@ def load(path, *, config_path):
     value=p.decode_submission(raw,max_bytes=16384)
     p._closed(value,('schemaVersion','protocol','configPath','configSha256',
         'authorityId','nodeId','workerId','workerInstanceId','credentialSha256'),'worker direct enrollment')
-    if type(value['schemaVersion']) is not int or value['schemaVersion']!=2 or value['protocol']!=PROTOCOL:
+    if type(value['schemaVersion']) is not int or value['schemaVersion']!=3 or value['protocol']!=PROTOCOL:
         raise ValueError('worker direct enrollment version invalid')
     if (type(config_path) is not str or not config_path.startswith('/')
             or str(PurePosixPath(config_path))!=config_path or value['configPath']!=config_path):
         raise ValueError('worker direct config identity changed')
     p._hash(value['configSha256'],'worker config digest')
-    p._closed(value['credentialSha256'],('certificate','privateKey','clientCA','signingKey'),'direct credential digests')
+    p._closed(value['credentialSha256'],('certificate','privateKey','clientCA','signingKey','coordinatorCA'),'direct credential digests')
     for digest in value['credentialSha256'].values():p._hash(digest,'direct credential digest')
     p._uuid(value['authorityId'],'worker authority')
     for field in ('nodeId','workerId','workerInstanceId'):p._slug(value[field],field)

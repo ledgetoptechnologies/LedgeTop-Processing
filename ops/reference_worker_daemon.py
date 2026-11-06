@@ -406,9 +406,18 @@ def load_config(path, *, expected_direct_config_sha256=None, expected_direct_cre
                 # enrollment record, never from this config or an HTTP request.
                 if expected_direct_config_sha256 is None:
                     raise ValueError('enrolled direct worker configuration required')
-                p._closed(expected_direct_credential_sha256,('certificate','privateKey','clientCA','signingKey'),
+                p._closed(expected_direct_credential_sha256,('certificate','privateKey','clientCA','signingKey','coordinatorCA'),
                           'enrolled direct credential digests')
                 for digest in expected_direct_credential_sha256.values():p._hash(digest,'direct credential digest')
+                coordinator_ca=_read(config['caFile'],private=False)
+                if hashlib.sha256(coordinator_ca).hexdigest()!=expected_direct_credential_sha256['coordinatorCA']:
+                    raise ValueError('enrolled coordinator CA changed')
+                coordinator_context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                coordinator_context.minimum_version=ssl.TLSVersion.TLSv1_2
+                coordinator_context.load_verify_locations(cadata=coordinator_ca.decode('ascii'))
+                if coordinator_context.verify_mode!=ssl.CERT_REQUIRED or not coordinator_context.check_hostname:
+                    raise ValueError('verified coordinator TLS required')
+                direct['_coordinatorTlsContext']=coordinator_context
                 address=ipaddress.ip_address(direct['host'])
                 if not address.is_loopback or type(direct['port']) is not int or not 1<=direct['port']<=65535:
                     raise ValueError('private loopback listener required')
@@ -496,7 +505,9 @@ def _build_worker(config,owner,resources):
         if (state['nodeId'], state['authorityId'], state['coordinatorOrigin'], state['generation']) != (
                 config['nodeId'], config['authorityId'], config['gateCoordinatorOrigin'].rstrip('/'), config['gateGeneration']):
             raise ValueError('preprovisioned physical gate differs')
-    client_tls = verified_client_context(config['caFile'])
+    direct_settings=config.get('directPreparation')
+    client_tls = (direct_settings['_coordinatorTlsContext'] if direct_settings and direct_settings['enabled']
+                  else verified_client_context(config['caFile']))
     parsed = urlsplit(config['engineOrigin'])
     if (parsed.scheme not in ('http','https') or not ipaddress.ip_address(parsed.hostname).is_loopback
             or parsed.username is not None or parsed.password is not None or parsed.path not in ('','/')

@@ -5,6 +5,7 @@ is started here, and incomplete or uncertain worker holds are never released.
 """
 import json
 import hashlib
+import os
 import uuid
 from . import reference_protocol as p
 from .direct_preparation_client import DirectPreparationClient
@@ -13,6 +14,8 @@ from .direct_v2_inventory import prepare as prepare_inventory
 from .direct_v2_reservation import DirectV2Reservations
 from .maintenance import Conflict
 from .reference_store import PROFILE
+
+def _unprivileged():return os.name=='posix' and os.geteuid()!=0
 
 
 class DirectPreparationScheduler:
@@ -40,6 +43,8 @@ class DirectPreparationScheduler:
     @classmethod
     def from_protected_file(cls,store,path):
         """Build only from an owner-protected local enrollment file."""
+        if not _unprivileged():
+            raise ValueError('unprivileged coordinator service required')
         from .direct_protected_transport import _read
         from cryptography.hazmat.primitives import serialization
         raw=_read(path,private=False,maximum=1024*1024,trusted_uids={0})
@@ -59,7 +64,7 @@ class DirectPreparationScheduler:
     def revalidate_enrollment(self,node):
         """Reopen exact protected bytes and credentials before use."""
         from .direct_protected_transport import _read
-        if self._enrollment_path is None or node not in self._clients:
+        if not _unprivileged() or self._enrollment_path is None or node not in self._clients:
             raise Conflict('protected scheduler enrollment unavailable')
         if hashlib.sha256(_read(self._enrollment_path,private=False,maximum=1024*1024,trusted_uids={0})).hexdigest()!=self._enrollment_sha:
             raise Conflict('protected scheduler enrollment changed')

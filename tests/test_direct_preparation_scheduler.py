@@ -84,6 +84,10 @@ class SchedulerTest(unittest.TestCase):
                         enrollment_file.write_text(json.dumps(dict(schemaVersion=1,trustedWorkers=worker_wire,enrollment=enrollment)))
                         enrollment_file.chmod(0o600)
                         if os.geteuid()==0:
+                            with self.assertRaisesRegex(ValueError,'unprivileged'):
+                                DirectPreparationScheduler.from_protected_file(store,str(enrollment_file))
+                            privilege_patch=patch('processing.direct_preparation_scheduler._unprivileged',return_value=True)
+                            privilege_patch.start();self.addCleanup(privilege_patch.stop)
                             os.chown(enrollment_file,10001,10001)
                             with self.assertRaises(ValueError):
                                 DirectPreparationScheduler.from_protected_file(store,str(enrollment_file))

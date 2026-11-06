@@ -11,7 +11,10 @@ bytes. The candidate daemon can obtain that digest through an explicit
 `--direct-enrollment` record whose file and every ancestor are root-owned and
 not writable by group or other users. It validates the enrolled worker identity
 and exact certificate, private-key, client-CA and signer bytes before
-constructing the service. The v2 record refuses v1 without migration.
+constructing the service. The v3 record also pins the coordinator CA bytes;
+older v1/v2 records are refused without reviewed migration. Direct-enabled
+worker policy connections use only that CA in a separately constructed TLS
+context, with hostname verification, rather than system trust roots.
 Enrollment creation, unit installation, mandatory
 service-unit enrollment, old-process/old-binary rollback fencing and host ownership
 verification are not implemented. Removing the enrollment flag or running an old
