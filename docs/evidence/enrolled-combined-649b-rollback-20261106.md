@@ -58,9 +58,16 @@ bytes/hash/operation/baseline. Original TAR independently revalidated: 202 files
 TAR is evidence only, never a restore source or substitute lock authority.
 
 Known-success inner cleanup followed accepted audit and worker closure;
-inner task-label container/volume inventories were empty. Exact stopped outer
-and one owned artifact volume remain for independent root review. Windows
-evidence is retained independently; no new build/test/deployment is implied.
+inner task-label container/volume inventories were empty. Root independently
+reviewed result/audit and rehashed all 321 proof files before authorizing exact
+retirement. Fresh full-image/operation/PID0/exit0/no-OOM checks preceded removal
+of only that stopped outer; a NEW FULL closed all-container named-volume and
+bind-parent/child alias census proved zero references before the exact single
+owned artifact volume was removed without force. Both task-label container and
+volume inventories were empty afterward. Cold proof and source archive remain
+untouched; no own runner/container/volume is active and no new resource started.
+No new build/test/deployment or later ops-only prestart-gate qualification is
+implied by this receipt.
 
 Scope remains local Docker fixture identity/Desktop mount seams, synthetic
 original/native-engine/coordinator transport, real daemon-factory/TLS workers
