@@ -104,11 +104,21 @@ class ReferenceRoutingTests(unittest.TestCase):
                 worker_instance_id='instance-' + node, claim_request_id=request)
 
         self.assertIsNone(attempt(first, 'main', 'first-main'))
-        self.assertEqual(attempt(first, 'cluster', 'first-cluster')['nodeId'], 'cluster')
-        self.assertEqual(attempt(second, 'main', 'second-main')['nodeId'], 'main')
+        first_claim = attempt(first, 'cluster', 'first-cluster')
+        second_claim = attempt(second, 'main', 'second-main')
+        self.assertEqual(first_claim['nodeId'], 'cluster')
+        self.assertEqual(second_claim['nodeId'], 'main')
         self.assertIsNone(attempt(large, 'cluster', 'large-cluster'))
         self.assertIsNone(attempt(large, 'main', 'large-main'))
         self.assertEqual(self.queue.get(large['jobId'])['status'], 'queued')
+        # This exercises scheduler slot release only; it does not represent
+        # engine completion or Viewer result delivery.
+        self.queue.complete(first['jobId'], {'claimToken': first_claim['claimToken'],
+            'status': 'succeeded', 'result': {}})
+        self.assertIsNone(attempt(large, 'cluster', 'large-cluster-free'))
+        self.queue.complete(second['jobId'], {'claimToken': second_claim['claimToken'],
+            'status': 'succeeded', 'result': {}})
+        self.assertEqual(attempt(large, 'main', 'large-main-free')['nodeId'], 'main')
 
 
 if __name__ == '__main__':
