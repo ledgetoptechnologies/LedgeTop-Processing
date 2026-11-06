@@ -107,8 +107,18 @@ def observation_metadata_bytes(db):
     for row in rows:
         if (any(type(row[k]) is not str or not re.fullmatch('[a-f0-9]{64}',row[k]) for k in ('source_sha','selected_sha','pipeline_sha'))
                 or type(row['observation']) is not bytes or not 1<=len(row['observation'])<=4096):raise Conflict('snapshot observation invalid')
-        parent=db.execute('SELECT snapshot,principal,environment FROM direct_snapshot_sessions WHERE reservation=?',(row['reservation'],)).fetchone()
-        if parent is None or tuple(parent)!=(row['snapshot'],row['principal'],row['environment']):raise Conflict('snapshot observation parent changed')
+        parent=db.execute('SELECT snapshot,principal,environment,intent FROM direct_snapshot_sessions WHERE reservation=?',(row['reservation'],)).fetchone()
+        if (parent is None or tuple(parent)[:3]!=(row['snapshot'],row['principal'],row['environment'])
+                or hashlib.sha256(parent['intent']).hexdigest()!=row['source_sha']):raise Conflict('snapshot observation parent changed')
+        try:
+            intent=_decode(parent['intent'],MAX_INTENT_BYTES);observation=_decode(row['observation'],4096)
+            if (type(observation) is not dict or set(observation)!={'state','sourceSnapshotSha256','datasetFileCount','selectedCount','sourceCustodyAccepted','processingAuthorized'}
+                    or observation['state']!='source_and_selected_pages_verified_not_custody'
+                    or observation['sourceSnapshotSha256']!=row['source_sha']
+                    or type(observation['datasetFileCount']) is not int or observation['datasetFileCount']!=intent['datasetFileCount']
+                    or type(observation['selectedCount']) is not int or observation['selectedCount']!=intent['selectedCount']
+                    or observation['sourceCustodyAccepted'] is not False or observation['processingAuthorized'] is not False):raise ValueError()
+        except (TypeError,ValueError,KeyError):raise Conflict('snapshot observation invalid') from None
     return count*OBS_ALLOWANCE
 
 def ensure_observations(db):
@@ -344,6 +354,8 @@ class SnapshotPageJournal:
                     metadata_bytes(db);selected_metadata_bytes(db);ensure_observations(db)
                     parent=db.execute('SELECT snapshot,principal,environment,intent,signature FROM direct_snapshot_sessions WHERE reservation=?',(reservation,)).fetchone()
                     if parent is None or tuple(parent)!=(snapshot,principal,environment,raw,signature):raise Conflict('snapshot identity changed')
+                    saved_source=db.execute('SELECT page FROM direct_snapshot_pages WHERE reservation=? ORDER BY page_index',(reservation,)).fetchall()
+                    if b''.join(x['page']+b'\n' for x in saved_source)!=frames:raise Conflict('source pages changed')
                     saved_frames=db.execute('SELECT page FROM direct_selected_pages WHERE reservation=? ORDER BY page_index',(reservation,)).fetchall()
                     if hashlib.sha256(b''.join(x['page']+b'\n' for x in saved_frames)).hexdigest()!=selected_sha:raise Conflict('selected pages changed')
                     pipeline_sha=row['pipeline_manifest_sha']
