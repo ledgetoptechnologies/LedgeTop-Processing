@@ -2,6 +2,7 @@
 import tempfile
 import unittest
 import base64
+import json
 import time
 import uuid
 from contextlib import closing
@@ -108,7 +109,20 @@ class DirectV2AdmissionTests(unittest.TestCase):
             readiness_proof=proof,challenge_id=challenge,gate_generation=1,issuer_id='issuer',key_id='key',
             worker_public_key=key.public_key(),trusted_source_keys=self.fixture.trusted_keys,
             capability_fingerprint='a'*64,options_fingerprint=self.options['options_fingerprint'],allowed_odm_options=set())
-        reservations=DirectV2Reservations(self.store)
+        reservations=DirectV2Reservations(self.store,trusted_workers={
+            node:dict(identity=dict(worker,nodeId=node),issuerId='issuer',keyId='key',publicKey=key.public_key())
+            for node in self.queue.node_ids})
+        with self.assertRaisesRegex(Conflict,'not pinned'):
+            reservations.reserve(**dict(options,worker_public_key=Ed25519PrivateKey.generate().public_key()))
+        with self.queue._db() as db:
+            original=db.execute('SELECT input_json FROM reference_jobs WHERE job_id=?',(job['jobId'],)).fetchone()[0]
+            changed=json.loads(original);changed['manifest']['inputCounts']['images']=0
+            db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?',(p.canonical_json(changed).decode(),job['jobId']))
+        with self.assertRaisesRegex(Conflict,'metadata changed'):
+            reservations.reserve(**options)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM direct_v2_reservations').fetchone()[0],0)
+            db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?',(original,job['jobId']))
         observation=reservations.reserve(**options)
         self.assertFalse(observation['sourceCustodyAccepted']);self.assertFalse(observation['transferAuthorized'])
         self.assertEqual(observation['nodeId'],'cluster');self.assertTrue(reservations.reserve(**options)['replayed'])

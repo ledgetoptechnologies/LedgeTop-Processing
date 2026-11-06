@@ -1,6 +1,9 @@
 """Unwired V2 coordinator node reservation; never a custody acknowledgement."""
 import json
 import time
+from types import MappingProxyType
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from . import direct_v2_inventory, direct_worker_fence_proof_v2
 from . import reference_protocol as p
@@ -8,9 +11,26 @@ from .maintenance import Conflict
 from .source_intake_mode import require as require_mode
 
 
+class V2ReservationUncertain(RuntimeError):
+    """A reservation may have committed and requires exact reconciliation."""
+
+
 class DirectV2Reservations:
-    def __init__(self, store):
+    def __init__(self, store, *, trusted_workers):
         self.store,self.queue=store,store.queue
+        if type(trusted_workers) is not dict or set(trusted_workers)!=set(self.queue.node_ids):
+            raise ValueError('complete pinned V2 worker inventory required')
+        pinned={}
+        for node,value in trusted_workers.items():
+            p._closed(value,('identity','issuerId','keyId','publicKey'),'pinned V2 worker')
+            identity=value['identity'];p._closed(identity,('authorityId','nodeId','workerId','workerInstanceId'),'worker identity')
+            p._require(identity['authorityId']==self.queue.authority_id and identity['nodeId']==node,
+                       'pinned V2 worker authority changed')
+            for key in ('nodeId','workerId','workerInstanceId'):p._slug(identity[key],key)
+            p._slug(value['issuerId'],'issuer');p._slug(value['keyId'],'key')
+            if not isinstance(value['publicKey'],Ed25519PublicKey):raise ValueError('pinned V2 worker key required')
+            pinned[node]=(dict(identity),value['issuerId'],value['keyId'],value['publicKey'])
+        self._workers=MappingProxyType(pinned)
         with self.queue.coordinator_operation('source-io-admission'),self.queue._db() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS direct_v2_reservations (
                 reservation_id TEXT PRIMARY KEY,job_id TEXT UNIQUE NOT NULL,node_id TEXT UNIQUE NOT NULL,
@@ -23,6 +43,13 @@ class DirectV2Reservations:
         """Hold an eligible node for this exact verified V2 source and worker proof."""
         from .direct_worker_scratch_v2 import identity
         item,_,_=identity(item,expected_worker=expected_worker)
+        pinned=self._workers.get(item['nodeId'])
+        def key_bytes(key):
+            return key.public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)
+        if (pinned is None or pinned[0]!=expected_worker or pinned[1]!=issuer_id or pinned[2]!=key_id
+                or not isinstance(worker_public_key,Ed25519PublicKey)
+                or key_bytes(pinned[3])!=key_bytes(worker_public_key)):
+            raise Conflict('V2 worker identity or key is not pinned')
         checked=direct_v2_inventory.prepare(payload,authenticated_principal=authenticated_principal,
             environment=item['environment'],capability_fingerprint=capability_fingerprint,
             options_fingerprint=options_fingerprint,allowed_odm_options=allowed_odm_options,
@@ -49,6 +76,16 @@ class DirectV2Reservations:
         proof=direct_worker_fence_proof_v2.verify(readiness_proof,now=int(wall),**proof_args)
         deadline=mono+max(0,proof['expiresAt']-wall)
         request_digest=p.digest(payload);item_bytes=p.canonical_json(item);proof_bytes=p.canonical_json(readiness_proof)
+        from .reference_source_intake_canonical import pipeline_digest as v2_pipeline_digest
+        from .reference_limits import V2_SOURCE_INTAKE_BYTES
+        pipeline_payload={key:payload[key] for key in ('submissionId','manifest','pipeline','capabilityFingerprint')}
+        pipeline_payload['schemaVersion']=1
+        normalized=p.validate_submission(pipeline_payload,environment=item['environment'],
+            capability_fingerprint=capability_fingerprint,options_fingerprint=options_fingerprint,
+            allowed_odm_options=allowed_odm_options,available_engines=('odm','treedar'),
+            max_body_bytes=V2_SOURCE_INTAKE_BYTES)
+        normalized['pipelineDigest']=v2_pipeline_digest(normalized['pipeline'])
+        normalized['sourceIntakeVersion']=2
         if len(item_bytes)>8192 or len(proof_bytes)>8192:raise Conflict('V2 reservation metadata exceeds bounds')
         with self.queue.coordinator_operation('source-io-admission'),self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -56,37 +93,58 @@ class DirectV2Reservations:
             direct_worker_fence_proof_v2.verify(readiness_proof,now=int(time.time()),**proof_args)
             require_mode(db,item['jobId'],'direct-v2')
             row=self.store._row(db,item['jobId'])
-            source=db.execute('SELECT request_digest FROM reference_source_intakes WHERE job_id=?',(item['jobId'],)).fetchone()
+            source=db.execute('''SELECT request_digest,source_manifest_json,derived_manifest_json,source_attestation_json
+                FROM reference_source_intakes WHERE job_id=?''',(item['jobId'],)).fetchone()
             if (row is None or source is None or source['request_digest']!=request_digest
                     or row['generation']!=item['generation'] or row['environment']!=item['environment']
                     or row['source_state']!='receiving' or row['derived_state']!='receiving'):
                 raise Conflict('V2 direct admission changed')
+            try:
+                same=(p.canonical_json(json.loads(row['input_json']))==p.canonical_json(normalized)
+                    and row['manifest_sha']==checked['pipelineManifestSha256']
+                    and row['pipeline_digest']==checked['pipelineDigest']
+                    and p.canonical_json(json.loads(source['source_manifest_json']))==p.canonical_json(payload['sourceManifest'])
+                    and p.canonical_json(json.loads(source['derived_manifest_json']))==p.canonical_json(payload['derivedManifest'])
+                    and p.canonical_json(json.loads(source['source_attestation_json']))==p.canonical_json(payload['sourceAttestation']))
+            except (ValueError,TypeError,KeyError):same=False
+            if not same:raise Conflict('V2 signed admission metadata changed')
             old=db.execute('SELECT * FROM direct_v2_reservations WHERE reservation_id=? OR job_id=?',
                            (item['reservationId'],item['jobId'])).fetchall()
             values=(item['reservationId'],item['jobId'],item['nodeId'],authenticated_principal,
                     request_digest,item_bytes,proof_bytes,challenge_id,'receiving')
             if old:
-                if len(old)!=1 or tuple(old[0])!=values or row['status']!='held' or row['node_id']!=item['nodeId']:
+                saved_node=db.execute('SELECT node_id FROM reference_jobs WHERE job_id=?',(item['jobId'],)).fetchone()
+                if (len(old)!=1 or tuple(old[0])!=values or row['status']!='held'
+                        or row['held_reason']!='direct_v2_receiving' or row['node_id']!=item['nodeId']
+                        or saved_node is None or saved_node['node_id']!=item['nodeId']):
                     raise Conflict('V2 reservation replay changed')
-                return dict(reservationId=item['reservationId'],nodeId=item['nodeId'],state='receiving',
-                            replayed=True,sourceCustodyAccepted=False,transferAuthorized=False)
-            if row['status']!='held' or row['held_reason']!='direct_admission_pending':
-                raise Conflict('V2 direct job not pending')
-            candidate=self.store._candidate_any_row(db,item['nodeId'])
-            if candidate is None or candidate['id']!=item['jobId']:
-                raise Conflict('V2 node not eligible or earlier job takes priority')
-            self.store._quota(db,sum(len(value) for value in (item_bytes,proof_bytes))+
-                              sum(len(value.encode()) for value in values[:5]+values[7:]))
-            if time.monotonic()>=deadline:raise Conflict('V2 worker readiness expired')
+                replayed=True
+            else:
+                if row['status']!='held' or row['held_reason']!='direct_admission_pending':
+                    raise Conflict('V2 direct job not pending')
+                candidate=self.store._candidate_any_row(db,item['nodeId'])
+                if candidate is None or candidate['id']!=item['jobId']:
+                    raise Conflict('V2 node not eligible or earlier job takes priority')
+                self.store._quota(db,sum(len(value) for value in (item_bytes,proof_bytes))+
+                                  sum(len(value.encode()) for value in values[:5]+values[7:]))
+                if time.monotonic()>=deadline:raise Conflict('V2 worker readiness expired')
+                direct_worker_fence_proof_v2.verify(readiness_proof,now=int(time.time()),**proof_args)
+                try:db.execute('INSERT INTO direct_v2_reservations VALUES(?,?,?,?,?,?,?,?,?)',values)
+                except Exception as error:
+                    import sqlite3
+                    if isinstance(error,sqlite3.IntegrityError):raise Conflict('V2 node or job already reserved') from None
+                    raise
+                changed=db.execute("UPDATE jobs SET node_id=?,held_reason='direct_v2_receiving' WHERE id=? AND status='held' AND held_reason='direct_admission_pending'",
+                                   (item['nodeId'],item['jobId'])).rowcount
+                if changed!=1:raise Conflict('V2 direct admission changed')
+                db.execute('UPDATE reference_jobs SET node_id=? WHERE job_id=?',(item['nodeId'],item['jobId']))
+                replayed=False
+        # The transaction has committed: expiration now is uncertain, not a
+        # safe rejection or reason to release its durable reservation.
+        try:
+            if time.monotonic()>=deadline:raise ValueError('expired')
             direct_worker_fence_proof_v2.verify(readiness_proof,now=int(time.time()),**proof_args)
-            try:db.execute('INSERT INTO direct_v2_reservations VALUES(?,?,?,?,?,?,?,?,?)',values)
-            except Exception as error:
-                import sqlite3
-                if isinstance(error,sqlite3.IntegrityError):raise Conflict('V2 node or job already reserved') from None
-                raise
-            changed=db.execute("UPDATE jobs SET node_id=?,held_reason='direct_v2_receiving' WHERE id=? AND status='held' AND held_reason='direct_admission_pending'",
-                               (item['nodeId'],item['jobId'])).rowcount
-            if changed!=1:raise Conflict('V2 direct admission changed')
-            db.execute('UPDATE reference_jobs SET node_id=? WHERE job_id=?',(item['nodeId'],item['jobId']))
-            return dict(reservationId=item['reservationId'],nodeId=item['nodeId'],state='receiving',
-                        replayed=False,sourceCustodyAccepted=False,transferAuthorized=False)
+        except (ValueError,TypeError):
+            raise V2ReservationUncertain('V2 reservation committed; reconcile exact state') from None
+        return dict(reservationId=item['reservationId'],nodeId=item['nodeId'],state='receiving',
+                    replayed=replayed,sourceCustodyAccepted=False,transferAuthorized=False)
