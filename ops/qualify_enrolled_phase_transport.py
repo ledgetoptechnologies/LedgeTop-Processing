@@ -60,7 +60,13 @@ def post_restart_stopped_writer_audit(driver,state,operation):
             'exact_restarted_original_required')
     require(holder is not None,'existing_original_lease_holder_required')
     driver._stopped(holder)
-    intent=dict(intentId=str(uuid.uuid5(uuid.UUID(driver.plan['operationId']),'post-restart-stopped-writer-audit')))
+    intent=dict(schemaVersion=1,operationId=driver.plan['operationId'],planSha256=driver.plan_sha,
+        intentId=str(uuid.uuid5(uuid.UUID(driver.plan['operationId']),'post-restart-stopped-writer-audit')),
+        purpose='post-restart-stopped-writer-audit')
+    custody=driver._custody()
+    # Validate the actual immutable evidence contract before any stop/start.
+    # An incomplete request must fail here, not after successful physical IO.
+    custody.artifacts.name('projection',intent,None)
     private_write(Path(operation)/'post-restart-audit-intent.json',json.dumps(dict(
         schemaVersion=1,operationId=driver.plan['operationId'],intentId=intent['intentId'],
         originalId=original['Id'],originalStartedAt=original['State']['StartedAt'],
@@ -84,7 +90,7 @@ def post_restart_stopped_writer_audit(driver,state,operation):
     context=driver._context('holder',state)
     before=driver.boundary('holder',context)
     binding=driver._binding(state,'rollback-final')
-    reference=driver._custody().projection(driver._prior(state,'capture-full-custody')['reference'],
+    reference=custody.projection(driver._prior(state,'capture-full-custody')['reference'],
         intent,phase='rollback-final',binding=binding,context=context)
     driver.docker.stop(current['Id'])
     released=driver._find('holder');driver._stopped(released)

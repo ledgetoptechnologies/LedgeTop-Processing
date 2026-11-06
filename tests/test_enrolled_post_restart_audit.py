@@ -3,12 +3,14 @@ import copy
 from datetime import datetime,timezone
 from pathlib import Path
 import tempfile
+import os
 import unittest
 import uuid
 from unittest.mock import Mock,patch
 
 from ops.qualify_enrolled_phase_transport import post_restart_stopped_writer_audit
 from ops.enrolled_coordinator_transport import TransportHeld,require
+from ops.enrolled_coordinator_custody_ops import PrivateArtifacts,CustodyHeld
 
 
 class PostRestartAuditTests(unittest.TestCase):
@@ -16,7 +18,7 @@ class PostRestartAuditTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name)
         self.original=dict(Id='original',Image='legacy',State=dict(Running=True,Pid=100,StartedAt='2026-11-05T00:00:00Z',ExitCode=0,OOMKilled=False))
         self.holder=dict(Id='holder',Image='candidate',State=dict(Running=False,Pid=0,StartedAt='2026-11-04T00:00:00Z',ExitCode=0,OOMKilled=False))
-        self.calls=[];self.driver=Mock();self.driver.plan={'operationId':str(uuid.uuid4())}
+        self.calls=[];self.driver=Mock();self.driver.plan={'operationId':str(uuid.uuid4())};self.driver.plan_sha='a'*64
         self.driver._original.side_effect=lambda:copy.deepcopy(self.original)
         self.driver._find.side_effect=lambda role:copy.deepcopy(self.holder)
         def stopped(item):require(not item['State']['Running'] and item['State']['Pid']==0 and item['State']['ExitCode']==0 and not item['State']['OOMKilled'],'graceful_stop_required')
@@ -65,7 +67,7 @@ class PostRestartAuditTests(unittest.TestCase):
         def lost(identity):self.calls.append(('start',identity));raise OSError('unknown start')
         self.driver.docker.start.side_effect=lost
         with self.assertRaisesRegex(OSError,'unknown start'):self.run_audit()
-        self.assertEqual(self.calls,[('stop','original'),('start','holder')]);self.driver._custody.assert_not_called()
+        self.assertEqual(self.calls,[('stop','original'),('start','holder')]);self.driver._custody.return_value.projection.assert_not_called()
 
     def test_rollback_not_terminal_or_admitted_never_mutates(self):
         for bad in ({'phase':'final-ready'},{'admissionOpened':True},{'pending':{'action':'unknown'}}):
@@ -85,6 +87,32 @@ class PostRestartAuditTests(unittest.TestCase):
         self.driver.docker.start.side_effect=stale
         with self.assertRaisesRegex(TransportHeld,'fresh_original_holder_incarnation_required'):self.run_audit()
         self.driver.boundary.assert_not_called();self.assertEqual(self.calls,[('stop','original'),('start','holder')])
+
+    @unittest.skipUnless(hasattr(os,'geteuid') and hasattr(os,'O_DIRECTORY'),'actual Linux private artifacts')
+    def test_actual_private_artifact_contract_retains_bound_audit_receipt(self):
+        self.root.chmod(0o700)
+        artifacts=PrivateArtifacts(self.root,self.driver.plan['operationId'],self.driver.plan_sha)
+        self.driver._custody.return_value.artifacts=artifacts
+        def retain(reference,intent,**kwargs):
+            self.projection(reference,intent,**kwargs)
+            proof=artifacts.retain('projection',intent,None,{'syntheticBoundaryOnly':True})
+            document=artifacts.load(proof,'projection')
+            self.assertEqual(document['operationId'],self.driver.plan['operationId'])
+            self.assertEqual(document['planSha256'],self.driver.plan_sha)
+            return proof
+        self.driver._custody.return_value.projection.side_effect=retain
+        result=self.run_audit();self.assertEqual(result['projectionReference']['kind'],'projection')
+        self.assertTrue(result['holderReleased'])
+
+    @unittest.skipUnless(hasattr(os,'geteuid'),'actual Linux private artifacts')
+    def test_actual_artifact_wrong_operation_or_plan_refused_before_any_mutation(self):
+        self.root.chmod(0o700)
+        for operation,plan in ((str(uuid.uuid4()),self.driver.plan_sha),(self.driver.plan['operationId'],'b'*64)):
+            with self.subTest(operation=operation,plan=plan):
+                self.driver._custody.return_value.artifacts=PrivateArtifacts(self.root,operation,plan)
+                with self.assertRaisesRegex(CustodyHeld,'original_intent_artifact_required'):self.run_audit()
+                self.assertEqual(self.calls,[])
+                self.assertFalse((self.root/'post-restart-audit-intent.json').exists())
 
 
 if __name__=='__main__':unittest.main()
