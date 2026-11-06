@@ -153,6 +153,26 @@ class ReferenceDeliveryTests(unittest.TestCase):
             self.receiver.receive(self.envelope, **{**self.identity, 'claim_token': 'wrong'})
         self.assertEqual(self.receiver.receive(self.envelope, **self.identity), receipt)
 
+    def test_changed_claim_between_precheck_and_seal_does_not_release_or_acknowledge(self):
+        original_get = self.store.get
+
+        def change_claim_after_read(*args, **kwargs):
+            job = original_get(*args, **kwargs)
+            with self.queue._db() as db:
+                db.execute('UPDATE reference_claims SET token=? WHERE request_id=?',
+                           ('replacement-token', self.identity['claim_request_id']))
+            return job
+
+        with patch.object(self.store, 'get', side_effect=change_claim_after_read):
+            with self.assertRaisesRegex(Conflict, 'persisted claim ownership'):
+                self.receiver.receive(self.envelope, **self.identity)
+        self.assertEqual(self.queue.get(self.job['jobId'])['status'], 'running')
+        self.assertEqual(self.store.get(self.job['jobId'])['phase'], 'processing')
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_worker_receipts').fetchone()[0], 0)
+            self.assertIsNone(db.execute('SELECT result_json FROM reference_jobs WHERE job_id=?',
+                                         (self.job['jobId'],)).fetchone()[0])
+
     def test_missing_archive_or_wrong_engine_cannot_complete(self):
         for mutation in ('archive', 'engine'):
             envelope = copy.deepcopy(self.envelope)
