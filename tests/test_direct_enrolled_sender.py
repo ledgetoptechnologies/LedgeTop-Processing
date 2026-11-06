@@ -2,9 +2,15 @@
 import hashlib
 import io
 import json
+import os
+import sqlite3
+import tempfile
 import threading
 import unittest
 import uuid
+from contextlib import closing
+from pathlib import Path
+from unittest.mock import patch
 from cryptography.hazmat.primitives import serialization
 from processing.direct_protected_transport import prepare_enrolled_sender
 from processing.direct_v2_reservation import DirectV2Reservations
@@ -14,6 +20,7 @@ from tests import test_direct_protected_transport as protected_fixture
 from tests import test_direct_snapshot_http as tls_fixture
 from tests import test_direct_worker_receiver_v2 as worker_fixture
 
+@unittest.skipUnless(os.environ.get('LTDS_SECURE_TEST_ROOT'),'dedicated private mount required')
 class EnrolledSenderTests(unittest.TestCase):
     def test_pinned_sender_grants_and_streams_to_actual_mtls_boundary(self):
         f=worker_fixture.WorkerV2Tests();f.setUp();self.addCleanup(f.doCleanups)
@@ -42,7 +49,7 @@ class EnrolledSenderTests(unittest.TestCase):
             sender=prepare_enrolled_sender(str(secure.config),'cluster',expected_config_sha256=sha(secure.config),
                 expected_credential_sha256=pins,reservations=registry,inventory=f.index,item=f.item,
                 reservation_binding=f.reservation)
-            grant=sender.authorize_reservation(str(uuid.uuid4()))
+            grant=sender.authorize_reservation(f.challenge)
             self.assertFalse(grant['sourceCustodyAccepted'])
             from tests.test_reference_source_intake import GCP_ID
             observed=sender.put(GCP_ID,io.BytesIO(b''))
@@ -51,6 +58,55 @@ class EnrolledSenderTests(unittest.TestCase):
                 prepare_enrolled_sender(str(secure.config),'cluster',expected_config_sha256=sha(secure.config),
                     expected_credential_sha256=dict(pins,bearer='0'*64),reservations=registry,inventory=f.index,
                     item=f.item,reservation_binding=f.reservation)
+            # Exercise the coordinator's exact durable reservation-to-handoff
+            # path against the same real mTLS boundary. The preparation proof
+            # is the already-created synthetic fixture, not a live prep call.
+            from processing.prototype import Queue
+            from processing.reference_store import ReferenceStore,PROFILE
+            from processing.reference_source_intake import validate_source_intake
+            from processing.direct_preparation_scheduler import DirectPreparationScheduler
+            from processing.direct_preparation_journal import prepare_once
+            with tempfile.TemporaryDirectory() as directory:
+                with closing(sqlite3.connect(Path(directory)/'jobs.sqlite3')) as db,db:
+                    db.execute('CREATE TABLE coordinator_identity(singleton INTEGER PRIMARY KEY,authority_id TEXT NOT NULL)')
+                    db.execute('INSERT INTO coordinator_identity VALUES(1,?)',(f.worker['authorityId'],))
+                queue=Queue(directory,reference_enabled=True);queue.allowed_profiles.add(PROFILE)
+                try:
+                    store=ReferenceStore(queue,source_routing_keys=f.options['trusted_source_keys']);opts=f.options
+                    checked=validate_source_intake(f.payload,**{k:v for k,v in opts.items() if k!='authenticated_principal'})
+                    store.submit_source_intake(checked,capability_fingerprint=opts['capability_fingerprint'],
+                        options_fingerprint=opts['options_fingerprint'],allowed_odm_options=opts['allowed_odm_options'],
+                        source_spool=None,trusted_source_keys=opts['trusted_source_keys'],authority_id=opts['authority_id'],
+                        ingress_mode='direct-v2',authenticated_principal='viewer-staging')
+                    # Each node has a separate signed registry identity. The
+                    # synthetic upload endpoint is used for cluster only.
+                    config=json.loads(secure.config.read_text());config['directWorkers']['nodes']['main']=secure.node
+                    secure.config.write_text(json.dumps(config));secure.config.chmod(0o600)
+                    transfer=dict(configPath=str(secure.config),configSha256=sha(secure.config),credentialSha256=pins)
+                    enrolled={n:dict(**transfer,gateGeneration=1,outputBudget=100,ttlSeconds=10,transfer=dict(transfer)) for n in queue.node_ids}
+                    workers={n:dict(identity=dict(f.worker,nodeId=n),issuerId='worker-issuer',keyId='worker-key',
+                        publicKeyPem=secure.node['workerPublicKeyPem']) for n in queue.node_ids}
+                    enrolled_file=secure.root/'scheduler-enrollment.json'
+                    enrolled_file.write_text(json.dumps(dict(schemaVersion=1,trustedWorkers=workers,enrollment=enrolled)));enrolled_file.chmod(0o600)
+                    with patch('processing.direct_preparation_scheduler._unprivileged',return_value=True):
+                        scheduler=DirectPreparationScheduler.from_protected_file(store,str(enrolled_file))
+                        with patch.object(scheduler._clients['cluster'],'prepare',return_value=f.readiness):
+                            prepare_once(scheduler.reservations,scheduler._clients['cluster'],payload=f.payload,item=f.item,
+                                principal='viewer-staging',challenge_id=f.challenge,gate_generation=1,
+                                capability_fingerprint=opts['capability_fingerprint'],options_fingerprint=opts['options_fingerprint'],
+                                allowed_odm_options=opts['allowed_odm_options'])
+                        scheduler.reservations.reserve(payload=f.payload,authenticated_principal='viewer-staging',item=f.item,
+                            expected_worker=f.worker,readiness_proof=f.readiness,challenge_id=f.challenge,gate_generation=1,
+                            issuer_id='worker-issuer',key_id='worker-key',worker_public_key=f.proof_key.public_key(),
+                            trusted_source_keys=opts['trusted_source_keys'],capability_fingerprint=opts['capability_fingerprint'],
+                            options_fingerprint=opts['options_fingerprint'],allowed_odm_options=opts['allowed_odm_options'])
+                        handoff=scheduler.open_reserved_transfer(f.item['reservationId'],allowed_odm_options=set())
+                        self.assertFalse(handoff.authorize()['sourceCustodyAccepted'])
+                        sent=handoff.send(GCP_ID,io.BytesIO(b''))
+                        self.assertTrue(sent['localObjectDurable']);self.assertFalse(sent['sourceCustodyAccepted'])
+                        secure.config.write_text(secure.config.read_text()+' ')
+                        with self.assertRaises(ValueError):handoff.authorize()
+                finally:queue.close()
         finally:
             server.shutdown();server.server_close();thread.join(5)
         self.assertFalse(thread.is_alive())

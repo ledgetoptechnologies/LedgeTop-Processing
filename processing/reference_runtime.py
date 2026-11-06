@@ -713,6 +713,14 @@ class ReferenceRuntime:
         return self._direct_preparation_scheduler.run_once(capability_fingerprint=capability,
             options_fingerprint=options,allowed_odm_options=allowed,revalidate_policy=current_policy)
 
+    def open_direct_reserved_transfer(self,reservation_id):
+        """Open exact internal handoff; never grants Viewer custody."""
+        if self._direct_preparation_scheduler is None:
+            raise RuntimeConfigurationError('direct preparation scheduler disabled')
+        snapshot=_available_discovery_snapshot(self.api.discover())
+        _,_,allowed=discovered_policy(snapshot,self.config)
+        return self._direct_preparation_scheduler.open_reserved_transfer(reservation_id,allowed_odm_options=allowed)
+
     def _discover_fleet(self):
         options, probes = self._worker_catalog.discover()
         capacities = {}
