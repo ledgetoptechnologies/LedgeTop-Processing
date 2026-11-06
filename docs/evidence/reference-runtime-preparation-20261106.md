@@ -33,3 +33,26 @@ and fsync-failure retention with retry refusal. This is preparation behavior
 proof only. Actual existing signing-key availability, Viewer's provider and
 trust application, UID10001 staged TLS readability, mounted spool/marker,
 physical custody and live runtime activation remain separate prerequisites.
+
+## First-install binding follow-up
+
+Exact source `11e470d6` ran the same class with its five additional cases:
+**19 passed, zero skipped, zero failures**, 0.347 seconds, exit0. The actual
+runtime→worker composer sequence produced real config/unit hashes from the
+documented pre-install intent without any prerequisite worker config file.
+Manifest compatibility produced identical runtime/Viewer bytes. Negative cases
+covered binding profile/identity/path/hash mismatches and independent copied
+Gate pinning. No input was represented as installed or fresh custody proof.
+
+The archive used explicit `git -c core.autocrlf=false archive`; SHA256:
+`04f078a3ceac330e89059965d4ac575605802400f0f42eeff206257194115efe`.
+Log SHA256:
+`553d03854baaacc268b98dcccfd5b4db09237699b9a3fd5b5d05b9203db7e4f3`.
+Task-owned temporary directory:
+`ltds-runtime-prep-11e-5345261394264b58b2fe53426c63af57`.
+
+The same pinned image, real UID10001/passwd fixture, bounded readonly/no-network/
+no-socket setup above was used. Only the exact19-case class ran. Container
+`ltds-runtime-prep-11e-53452613` and its task-label inventory were both verified
+empty after terminal; no volumes were created. All installed/live proof limits
+above remain unchanged. No further tests or Docker actions were taken.
