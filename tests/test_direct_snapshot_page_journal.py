@@ -77,6 +77,27 @@ class SnapshotJournalTests(unittest.TestCase):
         with self.queue._db() as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM coordinator_operation_pins WHERE kind='source-io-admission' AND state='active'").fetchone()[0],0)
 
+    def test_selected_journal_restarts_and_holds_missing_history(self):
+        selected=p.canonical_json(dict(version='ltds-viewer-selected-frames-v1',index=0,records=[
+            dict(type='dataset_file',ordinal=0,pageObjectId='img',datasetFileId='img')]))
+        self.snapshot.intent['selectedPageHashes']=[hashlib.sha256(b'ltds-viewer-selected-frame-v1\0'+selected).hexdigest()]
+        self.snapshot.intent['selectedFrameBytes']=len(selected)+1
+        self.snapshot.prepare()
+        self.row['source_attestation_json']=json.dumps({'proof':{'sourceSnapshotSha256':self.snapshot.sha}})
+        self.begin=p.canonical_json({'intentBase64url':b64(self.snapshot.raw),'signatureBase64url':b64(self.snapshot.signature)})
+        self.assertEqual(self.call('begin',self.begin).status,200)
+        self.assertEqual(self.call('pages/0',self.snapshot.frames[:-1]).status,200)
+        self.assertEqual(self.call('selected-pages/0',selected,scope=('other','staging')).status,409)
+        self.assertEqual(self.call('selected-pages/0',selected).status,200)
+        self.queue.close();self.queue=Queue(self.root,reference_enabled=True);self.addCleanup(self.queue.close)
+        self.store=ReferenceStore(self.queue);self.reservations.store=self.store;self.reservations.queue=self.queue
+        self.api=SnapshotPageJournal(self.store,self.reservations)
+        self.assertEqual(self.call('selected-pages/0',selected).status,200)
+        self.assertEqual(self.call('complete-selected').status,200)
+        self.assertEqual(self.reservations.inspect_held_snapshot.call_args.kwargs['selected_frames'],selected+b'\n')
+        with self.queue._db() as db:db.execute('DROP TRIGGER direct_selected_pages_no_delete')
+        self.assertEqual(self.call('complete-selected').status,409)
+
     def test_noncanonical_encoding_wrong_key_and_quota_hold(self):
         data=json.loads(self.begin);data['intentBase64url']+='='
         self.assertEqual(self.call('begin',p.canonical_json(data)).status,409)

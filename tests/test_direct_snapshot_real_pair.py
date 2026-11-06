@@ -40,13 +40,16 @@ class SnapshotRealPair(unittest.TestCase):
         record=dict(type='dataset_file',datasetFileId=image['id'],relativePath='flight/'+image['name'],
                     byteSize=image['byteSize'],sha256=image['sha256'],processingRole='image',mediaType='image/jpeg',kind='image')
         frame=p.canonical_json(dict(version='ltds-viewer-source-frames-v1',index=0,records=[record]))
+        selected=p.canonical_json(dict(version='ltds-viewer-selected-frames-v1',index=0,records=[
+            dict(type='dataset_file',ordinal=0,pageObjectId=image['id'],datasetFileId=image['id'])]))
         snapshot_id=str(uuid.uuid4())
         intent=dict(protocol='ltds-viewer-held-source-snapshot-v1',snapshotId=snapshot_id,issuerId='snapshot-issuer',keyId='snapshot-key',
             createdAt='2026-11-06T12:00:00.000Z',datasetId=payload['sourceManifest']['id'],
             datasetManifestSha256=payload['sourceManifest']['datasetManifestSha256'],taskId=payload['viewerTaskId'],
             attemptId=payload['submissionId'],inputManifestSha256=payload['manifest']['sha256'],sourceCount=1,datasetFileCount=1,
             sourcePageHashes=[hashlib.sha256(PAGE_DOMAIN+frame).hexdigest()],sourceFrameBytes=len(frame)+1,
-            selectedCount=1,selectedPageHashes=['d'*64],selectedFrameBytes=10,gcp=None)
+            selectedCount=1,selectedPageHashes=[hashlib.sha256(b'ltds-viewer-selected-frame-v1\0'+selected).hexdigest()],
+            selectedFrameBytes=len(selected)+1,gcp=None)
         raw=p.canonical_json(intent);snapshot_key=Ed25519PrivateKey.generate();signature=snapshot_key.sign(SNAPSHOT_DOMAIN+raw)
         proof=copy.deepcopy(signed['sourceAttestation']['proof']);proof['sourceSnapshotSha256']=hashlib.sha256(raw).hexdigest()
         message=attest.DOMAIN+p.canonical_json(proof)
@@ -99,9 +102,28 @@ class SnapshotRealPair(unittest.TestCase):
         begin=p.canonical_json(dict(intentBase64url=b64(raw),signatureBase64url=b64(signature)))
         self.assertEqual(post('begin',begin)[0],200)
         self.assertEqual(post('pages/0',frame)[0],200)
+        self.assertEqual(post('complete-selected',b'')[0],409)
+        self.assertEqual(post('selected-pages/0',selected)[0],200)
+        self.assertEqual(post('selected-pages/0',selected)[0],200)
+        self.assertEqual(post('selected-pages/0',selected+b'x')[0],409)
+        selected_status,selected_response=post('complete-selected',b'')
+        self.assertEqual(selected_status,200,selected_response)
+        self.assertEqual(selected_response['state'],'source_and_selected_pages_verified_not_custody')
+        self.assertFalse(selected_response['sourceCustodyAccepted'])
+        self.assertFalse(selected_response['processingAuthorized'])
         status,response=post('complete',b'');self.assertEqual(status,200,response)
         self.assertEqual(response['state'],'source_pages_verified_not_custody')
         self.assertFalse(response['sourceCustodyAccepted']);self.assertFalse(response['processingAuthorized'])
+        checked=reservations.inspect_held_snapshot(binding['reservationId'],authenticated_principal='viewer-staging',
+            issuer_id='snapshot-issuer',key_id='snapshot-key',intent_bytes=raw,signature=signature,
+            source_frames=frame+b'\n',selected_frames=selected+b'\n')
+        self.assertEqual(checked['state'],'source_and_selected_pages_verified_not_custody')
+        self.assertEqual(checked['selectedCount'],1)
+        from processing.maintenance import Conflict
+        with self.assertRaises(Conflict):
+            reservations.inspect_held_snapshot(binding['reservationId'],authenticated_principal='viewer-staging',
+                issuer_id='snapshot-issuer',key_id='snapshot-key',intent_bytes=raw,signature=signature,
+                source_frames=frame+b'\n',selected_frames=selected+b'x\n')
         self.assertEqual(queue.get(job['jobId'])['status'],'held')
         self.assertEqual(post('complete',b'')[1],response)
 

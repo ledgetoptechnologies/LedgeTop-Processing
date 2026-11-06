@@ -79,6 +79,12 @@ tests with three external-fixture skips. This is not a physical SQLite/WAL disk
 quota, and old journal migration, safe 24-hour retirement and large-workload
 performance remain unqualified.
 
+The private candidate can receive selected pages and verify their signed
+ordering against the stored non-GCP source and pipeline; its result remains
+non-custodial. An integrated synthetic run passed 36 tests with five optional
+fixture skips. GCP/derived evidence, actual Viewer transport, and installed
+restart and old-writer fencing remain unqualified.
+
 The worker readiness prototype can journal a request and replay an unexpired
 proof while its exact pin remains present. Uncertain failures retain the pin;
 no automatic reclaim is authorized. An integrated run passed 100 tests with

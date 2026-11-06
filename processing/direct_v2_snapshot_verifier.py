@@ -42,7 +42,8 @@ def _decode(raw, limit):
     except (ValueError,TypeError,UnicodeError,RecursionError):raise ValueError('invalid signed snapshot') from None
 
 def verify_snapshot(*, intent_bytes, signature, source_frames, public_key, issuer_id, key_id,
-                    snapshot_sha, source_manifest, derived_manifest, task_id, pipeline_sha):
+                    snapshot_sha, source_manifest, derived_manifest, task_id, pipeline_sha,
+                    selected_frames=None, pipeline_manifest=None):
     """Verify preimage and exact source objects against independently loaded pins.
 
     Does not prove mount/custody, Viewer snapshot status, source release, or a
@@ -73,6 +74,7 @@ def verify_snapshot(*, intent_bytes, signature, source_frames, public_key, issue
     if type(page_hashes) is not list or len(lines)!=len(page_hashes) or not 1<=len(lines)<=64:
         raise ValueError('source page count changed')
     objects={o['id']:o for o in source_manifest['objects']}; seen=set(); paths=set(); basenames=set(); total=0
+    source_records=[]
     for index,line in enumerate(lines):
         page=_decode(line,256*1024)
         if (type(page) is not dict or set(page)!={'version','index','records'}
@@ -110,8 +112,17 @@ def verify_snapshot(*, intent_bytes, signature, source_frames, public_key, issue
                         (obj['sourceType']!='gcp_source_csv' or obj['retentionClass']!='permanent_viewer_hold'))
                     or (obj['sourceType']=='gcp_source_csv' and record['processingRole']!='gcp_source')):
                 raise ValueError('source object changed')
-            seen.add(identifier);paths.add(name);basenames.add(basename)
+            seen.add(identifier);paths.add(name);basenames.add(basename);source_records.append(record)
     if seen!=set(objects) or intent['datasetFileCount']!=len(objects) or intent['sourceCount']!=total:
         raise ValueError('source closure incomplete')
-    return {'state':'source_pages_verified_not_custody','sourceSnapshotSha256':snapshot_sha,
+    result={'state':'source_pages_verified_not_custody','sourceSnapshotSha256':snapshot_sha,
             'datasetFileCount':len(seen),'sourceCustodyAccepted':False,'processingAuthorized':False}
+    if selected_frames is not None:
+        if type(pipeline_manifest) is not dict or pipeline_manifest.get('sha256')!=pipeline_sha or p.manifest_sha256(pipeline_manifest)!=pipeline_sha:
+            raise ValueError('pipeline manifest changed')
+        from .direct_selected_gcp_frames import verify_selected
+        selected=verify_selected(intent,selected_frames,source_records=source_records,pipeline_manifest=pipeline_manifest)
+        result['state']='source_and_selected_pages_verified_not_custody'
+        result['selectedCount']=selected['selectedCount']
+    elif pipeline_manifest is not None:raise ValueError('selected pages unavailable')
+    return result

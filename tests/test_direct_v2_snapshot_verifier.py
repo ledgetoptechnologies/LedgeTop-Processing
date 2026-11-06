@@ -128,8 +128,8 @@ process.stdout.write(JSON.stringify({intent:raw.toString('base64'),frames:pages.
             path=Path(root)/'queue.db'
             with closing(sqlite3.connect(path)) as db:
                 db.execute('CREATE TABLE reference_source_intakes(job_id TEXT,source_manifest_json TEXT,derived_manifest_json TEXT,viewer_task_id TEXT,source_attestation_json TEXT)')
-                db.execute('CREATE TABLE reference_jobs(job_id TEXT,pipeline_digest TEXT)')
-                db.execute('INSERT INTO reference_jobs VALUES(?,?)',('job','e'*64))
+                db.execute('CREATE TABLE reference_jobs(job_id TEXT,pipeline_digest TEXT,input_json TEXT)')
+                db.execute('INSERT INTO reference_jobs VALUES(?,?,?)',('job','e'*64,'{}'))
                 db.execute('INSERT INTO reference_source_intakes VALUES(?,?,?,?,?)',('job',json.dumps(self.source),json.dumps(self.derived),TASK,json.dumps({'proof':{'principalId':'viewer','sourceSnapshotSha256':self.sha,'sourceManifestSha256':self.source['sha256'],'derivedManifestSha256':self.derived['sha256']}})))
                 db.commit()
             class Queue:

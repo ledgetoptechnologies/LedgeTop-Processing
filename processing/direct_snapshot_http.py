@@ -19,7 +19,7 @@ from . import reference_protocol as p
 BEGIN_LIMIT=1400000
 PAGE_LIMIT=256*1024
 MAX_CONNECTIONS=4
-_PATH=re.compile(r'/internal/v2/reservations/([0-9a-f-]{36})/source-snapshots/([0-9a-f-]{36})/(begin|complete|pages/(?:0|[1-9][0-9]?))\Z')
+_PATH=re.compile(r'/internal/v2/reservations/([0-9a-f-]{36})/source-snapshots/([0-9a-f-]{36})/(begin|complete|complete-selected|pages/(?:0|[1-9][0-9]?)|selected-pages/(?:0|[1-9][0-9]?))\Z')
 
 
 def create_snapshot_server(host,port,*,enabled=False,ssl_context=None,client_scopes=None,backend=None,
@@ -92,9 +92,9 @@ def create_snapshot_server(host,port,*,enabled=False,ssl_context=None,client_sco
             lengths=self.headers.get_all('Content-Length');length=lengths[0]
             if not re.fullmatch(r'0|[1-9][0-9]{0,7}',length):self._reply(400,{'error':'invalid_request'});return
             length=int(length);operation='prepare' if is_prepare else match[3]
-            if operation.startswith('pages/') and int(operation[6:])>=64:
+            if ((operation.startswith('pages/') and int(operation[6:])>=64) or (operation.startswith('selected-pages/') and int(operation[15:])>=64)):
                 self._reply(400,{'error':'invalid_request'});return
-            maximum=16*1024*1024 if is_prepare else 0 if operation=='complete' else PAGE_LIMIT if operation.startswith('pages/') else BEGIN_LIMIT
+            maximum=16*1024*1024 if is_prepare else 0 if operation in ('complete','complete-selected') else PAGE_LIMIT if operation.startswith(('pages/','selected-pages/')) else BEGIN_LIMIT
             if length>maximum:self._reply(413,{'error':'request_too_large'});return
             deadline=time.monotonic()+total_body_timeout;chunks=[];remaining=length
             while remaining:

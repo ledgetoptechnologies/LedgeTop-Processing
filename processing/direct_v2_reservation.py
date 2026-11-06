@@ -56,7 +56,7 @@ class DirectV2Reservations:
             ensure_schema(db)
 
     def inspect_held_snapshot(self, reservation_id, *, authenticated_principal, issuer_id, key_id,
-                              intent_bytes, signature, source_frames):
+                              intent_bytes, signature, source_frames, selected_frames=None):
         """Read-only proof against stored owner/reservation, never an ACK.
 
         Caller authentication and protected transport remain the responsibility
@@ -85,7 +85,7 @@ class DirectV2Reservations:
                     raise ValueError('stored source binding changed')
                 from .viewer_source_attestation import validate_and_verify
                 item=json.loads(row['item_json'])
-                job=db.execute('SELECT pipeline_digest FROM reference_jobs WHERE job_id=?',(row['job_id'],)).fetchone()
+                job=db.execute('SELECT pipeline_digest,input_json FROM reference_jobs WHERE job_id=?',(row['job_id'],)).fetchone()
                 if job is None or self.store._source_routing_keys is None:raise ValueError('source trust unavailable')
                 validate_and_verify(attestation,trusted_keys=self.store._source_routing_keys,
                     authority_id=self.queue.authority_id,environment=row['current_environment'],submission_id=item['attemptId'],
@@ -93,9 +93,15 @@ class DirectV2Reservations:
                     source_manifest_sha256=source['sha256'],derived_manifest_sha256=derived['sha256'],
                     pipeline_manifest_sha256=row['pipeline_manifest_sha'],pipeline_digest=job['pipeline_digest'])
                 if attestation['proof']['principalId']!=authenticated_principal:raise ValueError('source principal changed')
+                manifest=None
+                if selected_frames is not None:
+                    if self.store._reference_input(db,dict(id=row['job_id'],environment=row['current_environment'])) is None:
+                        raise ValueError('pipeline manifest unavailable')
+                    manifest=json.loads(job['input_json'])['manifest']
                 return verify_snapshot(intent_bytes=intent_bytes,signature=signature,source_frames=source_frames,
                     public_key=key,issuer_id=issuer_id,key_id=key_id,snapshot_sha=attestation['proof']['sourceSnapshotSha256'],
-                    source_manifest=source,derived_manifest=derived,task_id=stored['viewer_task_id'],pipeline_sha=row['pipeline_manifest_sha'])
+                    source_manifest=source,derived_manifest=derived,task_id=stored['viewer_task_id'],pipeline_sha=row['pipeline_manifest_sha'],
+                    selected_frames=selected_frames,pipeline_manifest=manifest)
             except (ValueError,TypeError,KeyError):raise Conflict('snapshot unavailable') from None
 
     def reserve(self, **request):
