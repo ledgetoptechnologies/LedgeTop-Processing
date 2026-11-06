@@ -92,6 +92,12 @@ no automatic reclaim is authorized. An integrated run passed 100 tests with
 endpoint and does not prove installed restart recovery. Its retained history
 also has an unqualified 4,096-record lifetime limit and scan cost.
 
+The worker can retain and revalidate a signed direct inventory in a
+quota-charged immutable ledger row in synthetic tests. An integrated run
+passed 139 tests with 17 optional fixture skips. The 64-record lifetime cap,
+physical SQLite/WAL usage, old-writer exclusion and reconstruction of a live
+upload listener remain unqualified; inventory retention is not custody.
+
 An internal worker preparation candidate checks signed input, preflights the
 scratch mount and atomically writes a bound node reservation and direct hold.
 It retains uncertainty on any failed attempt. A combined local run passed 100

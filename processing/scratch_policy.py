@@ -41,6 +41,18 @@ TRANSFER_FENCE_VERSION = 1
 DIRECT_WRITER_VERSION = 2
 DIRECT_CUSTODY_VERSION = 1
 MAX_DIRECT_CUSTODY_FENCES = 4096
+# Immutable, conservative retained source-inventory accounting. Not custody.
+DIRECT_INVENTORY_SCHEMA = """CREATE TABLE IF NOT EXISTS direct_inventory_blobs (
+ reservation TEXT PRIMARY KEY, principal TEXT NOT NULL, inventory_sha TEXT NOT NULL,
+ payload_sha TEXT NOT NULL, payload BLOB NOT NULL, charge INTEGER NOT NULL)"""
+DIRECT_INVENTORY_TRIGGERS = (
+    "CREATE TRIGGER IF NOT EXISTS direct_inventory_no_replace BEFORE INSERT ON direct_inventory_blobs WHEN EXISTS (SELECT 1 FROM direct_inventory_blobs WHERE reservation=NEW.reservation) BEGIN SELECT RAISE(ABORT,'direct inventory retained'); END",
+    "CREATE TRIGGER IF NOT EXISTS direct_inventory_no_update BEFORE UPDATE ON direct_inventory_blobs BEGIN SELECT RAISE(ABORT,'direct inventory retained'); END",
+    "CREATE TRIGGER IF NOT EXISTS direct_inventory_no_delete BEFORE DELETE ON direct_inventory_blobs BEGIN SELECT RAISE(ABORT,'direct inventory retained'); END",
+)
+DIRECT_INVENTORY_MAX_BYTES = 16 * 1024 * 1024
+DIRECT_INVENTORY_MAX_ROWS = 64
+
 DIRECT_GRANT_SCHEMA = '''CREATE TABLE IF NOT EXISTS direct_worker_grants (
  reservation TEXT PRIMARY KEY, operation TEXT UNIQUE NOT NULL, principal TEXT NOT NULL, binding_sha TEXT NOT NULL)'''
 READINESS_ISSUE_SCHEMA = '''CREATE TABLE IF NOT EXISTS direct_readiness_issues (
@@ -169,6 +181,14 @@ class ScratchLedger:
                 saved=db.execute("SELECT value FROM metadata WHERE key='config'").fetchone()
                 try: prior=json.loads(saved[0]) if saved else {}
                 except (ValueError,TypeError):raise PolicyConflict('unknown accounting version or ledger policy') from None
+                if 'directInventoryVersion' in prior:
+                    row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='direct_inventory_blobs'").fetchone()
+                    if row is None or ' '.join(row['sql'].split())!=' '.join(DIRECT_INVENTORY_SCHEMA.replace(' IF NOT EXISTS','').split()):
+                        raise PolicyConflict('direct inventory schema changed')
+                    for sql in DIRECT_INVENTORY_TRIGGERS:
+                        row=db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(sql.split()[5],)).fetchone()
+                        if row is None or ' '.join(row['sql'].split())!=' '.join(sql.replace(' IF NOT EXISTS','').split()):
+                            raise PolicyConflict('direct inventory guards changed')
                 if 'directReadinessIssueVersion' in prior:
                     row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='direct_readiness_issues'").fetchone()
                     if row is None or ' '.join(row['sql'].split())!=' '.join(READINESS_ISSUE_SCHEMA.replace(' IF NOT EXISTS','').split()):
@@ -244,6 +264,8 @@ class ScratchLedger:
             db.execute(CUSTODY_SCHEMA)
             db.execute(DIRECT_GRANT_SCHEMA)
             db.execute(READINESS_ISSUE_SCHEMA)
+            db.execute(DIRECT_INVENTORY_SCHEMA)
+            for trigger in DIRECT_INVENTORY_TRIGGERS:db.execute(trigger)
             for trigger in READINESS_ISSUE_TRIGGERS:db.execute(trigger)
             for trigger in DIRECT_GRANT_TRIGGERS:db.execute(trigger)
             for trigger in CUSTODY_TRIGGERS:
@@ -316,6 +338,27 @@ class ScratchLedger:
         if config is None:raise PolicyConflict('accounting configuration missing')
         try: observed_config=json.loads(config[0])
         except (TypeError,ValueError):raise PolicyConflict('unknown accounting version or ledger policy') from None
+        schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='direct_inventory_blobs'").fetchone()
+        if schema is None or ' '.join(schema['sql'].split())!=' '.join(DIRECT_INVENTORY_SCHEMA.replace(' IF NOT EXISTS','').split()):
+            raise PolicyConflict('direct inventory schema changed')
+        for sql in DIRECT_INVENTORY_TRIGGERS:
+            row=db.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",(sql.split()[5],)).fetchone()
+            if row is None or ' '.join(row['sql'].split())!=' '.join(sql.replace(' IF NOT EXISTS','').split()):
+                raise PolicyConflict('direct inventory guards changed')
+        inventory_rows=db.execute('SELECT reservation,principal,inventory_sha,payload_sha,typeof(payload) AS payload_type,length(payload) AS payload_size,charge FROM direct_inventory_blobs LIMIT ?', (DIRECT_INVENTORY_MAX_ROWS+1,)).fetchall()
+        if len(inventory_rows)>DIRECT_INVENTORY_MAX_ROWS:raise PolicyConflict('direct inventory capacity exceeded')
+        if inventory_rows or 'directInventoryVersion' in observed_config:
+            if (type(observed_config.get('directInventoryVersion')) is not int or observed_config['directInventoryVersion']!=1
+                    or type(observed_config.get('directInventoryCount')) is not int or observed_config['directInventoryCount']!=len(inventory_rows)):
+                raise PolicyConflict('direct inventory marker changed')
+            base['directInventoryVersion']=1;base['directInventoryCount']=len(inventory_rows)
+        for item in inventory_rows:
+            if (not re.fullmatch(r'direct-[a-f0-9]{64}',item['reservation']) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}',item['principal'])
+                    or not re.fullmatch(r'[a-f0-9]{64}',item['inventory_sha']) or not re.fullmatch(r'[a-f0-9]{64}',item['payload_sha'])
+                    or item['payload_type']!='blob' or type(item['payload_size']) is not int or not 1<=item['payload_size']<=DIRECT_INVENTORY_MAX_BYTES
+                    or type(item['charge']) is not int or item['charge']!=item['payload_size']*4+DIRECT_WRITER_PIN_ALLOWANCE
+                    or db.execute('SELECT 1 FROM reservations WHERE id=?',(item['reservation'],)).fetchone() is None):
+                raise PolicyConflict('direct inventory record changed')
         schema=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='direct_readiness_issues'").fetchone()
         if schema is None or ' '.join(schema['sql'].split())!=' '.join(READINESS_ISSUE_SCHEMA.replace(' IF NOT EXISTS','').split()):
             raise PolicyConflict('readiness issue schema changed')
@@ -539,6 +582,7 @@ class ScratchLedger:
             # its full hold even after materialization: conservative until an
             # explicitly qualified control lifecycle can release it.
             outstanding += db.execute("SELECT COALESCE(SUM(bytes),0) FROM control_charges").fetchone()[0]
+            outstanding += db.execute('SELECT COALESCE(SUM(charge),0) FROM direct_inventory_blobs').fetchone()[0]
             outstanding += db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             outstanding += db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             outstanding += db.execute('SELECT COUNT(*) FROM direct_custody_fences').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
@@ -591,6 +635,7 @@ class ScratchLedger:
                 raise PolicyConflict('direct writer pin budget exceeded')
             outstanding = db.execute('SELECT COALESCE(SUM(remaining),0) FROM reservations').fetchone()[0]
             outstanding += db.execute('SELECT COALESCE(SUM(bytes),0) FROM control_charges').fetchone()[0]
+            outstanding += db.execute('SELECT COALESCE(SUM(charge),0) FROM direct_inventory_blobs').fetchone()[0]
             outstanding += db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             outstanding += db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             outstanding += db.execute('SELECT COUNT(*) FROM direct_custody_fences').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
@@ -631,6 +676,7 @@ class ScratchLedger:
             if count>=MAX_DIRECT_CUSTODY_FENCES:raise PolicyConflict('direct custody fence budget exceeded')
             outstanding=db.execute('SELECT COALESCE(SUM(remaining),0) FROM reservations').fetchone()[0]
             outstanding+=db.execute('SELECT COALESCE(SUM(bytes),0) FROM control_charges').fetchone()[0]
+            outstanding += db.execute('SELECT COALESCE(SUM(charge),0) FROM direct_inventory_blobs').fetchone()[0]
             outstanding+=(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0]
                           +db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0]
                           +db.execute('SELECT COUNT(*) FROM direct_worker_grants').fetchone()[0]
@@ -693,6 +739,7 @@ class ScratchLedger:
                 raise PolicyConflict('V2 readiness journal capacity exceeded')
             outstanding=db.execute('SELECT COALESCE(SUM(remaining),0) FROM reservations').fetchone()[0]
             outstanding+=db.execute('SELECT COALESCE(SUM(bytes),0) FROM control_charges').fetchone()[0]
+            outstanding += db.execute('SELECT COALESCE(SUM(charge),0) FROM direct_inventory_blobs').fetchone()[0]
             outstanding+=(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0]
                           +db.execute('SELECT COUNT(*) FROM direct_v2_readiness_uses').fetchone()[0]
                           +db.execute('SELECT COUNT(*) FROM direct_worker_grants').fetchone()[0]

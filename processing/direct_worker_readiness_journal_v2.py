@@ -58,6 +58,7 @@ def issue(ledger, spool, item, *, principal, expected_worker, engine_id,
                 if count>=4096:raise PolicyConflict('readiness issue capacity exceeded')
                 outstanding=db.execute('SELECT COALESCE(SUM(remaining),0) FROM reservations').fetchone()[0]
                 outstanding+=db.execute('SELECT COALESCE(SUM(bytes),0) FROM control_charges').fetchone()[0]
+                outstanding+=db.execute('SELECT COALESCE(SUM(charge),0) FROM direct_inventory_blobs').fetchone()[0]
                 for table in ('direct_writer_pins','direct_v2_readiness_uses','direct_custody_fences','direct_worker_grants','direct_readiness_issues'):
                     outstanding+=db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]*DIRECT_WRITER_PIN_ALLOWANCE
                 if ledger.probe(ledger.root)-outstanding-ledger.floor<DIRECT_WRITER_PIN_ALLOWANCE:
