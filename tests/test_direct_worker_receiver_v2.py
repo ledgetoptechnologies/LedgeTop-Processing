@@ -300,6 +300,11 @@ class WorkerV2Tests(unittest.TestCase):
         self.assertEqual((result['sourceObjectCount'],result['derivedObjectCount']),(2,1))
         self.assertTrue(result['localClosureComplete'])
         self.assertFalse(result['sourceCustodyAccepted']);self.assertFalse(result['processingAuthorized'])
+        with self.assertRaisesRegex(PolicyConflict,'custody is retained'):
+            self.boundary.put(self.headers,protected_transport=True,object_id=fixtures.IMAGE_ID,
+                content_length=3,content_sha256=hashlib.sha256(b'abc').hexdigest(),reader=io.BytesIO(b'abc'))
+        self.spool.verify_object(job_id=self.item['jobId'],generation=self.item['generation'],
+            object_id=fixtures.IMAGE_ID,byte_size=3,sha256=hashlib.sha256(b'abc').hexdigest())
         self.assertEqual(verify_closure(self.ledger,self.spool,self.index,self.item,**args),result)
         # Rebuild all process-local state from retained signed inventory and
         # persistent scratch/files; an exact receipt may be reobserved only

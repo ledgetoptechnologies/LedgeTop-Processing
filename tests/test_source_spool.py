@@ -83,14 +83,26 @@ class SourceSpoolTests(unittest.TestCase):
         restarted = SourceSpool(self.root, mount_id=MOUNT_ID,
             safety_floor_bytes=0, max_object_bytes=1024, chunk_bytes=2)
         digest = hashlib.sha256(b"abc").hexdigest()
-        found = restarted.audit_job(job_id=JOB_ID, generation=1,
-            expected_objects=[{"id": OBJECT_ID, "byteSize": 3, "sha256": digest}])
-        self.assertEqual(found[OBJECT_ID]["sha256"], digest)
-        self.assertFalse(temporary.exists())
-        self.assertEqual(target.stat().st_nlink, 1)
+        with self.assertRaisesRegex(SourceSpoolError, "source_object_conflict"):
+            restarted.audit_job(job_id=JOB_ID, generation=1,
+                expected_objects=[{"id": OBJECT_ID, "byteSize": 3, "sha256": digest}])
+        self.assertTrue(temporary.exists())
+        self.assertEqual(target.stat().st_nlink, 2)
         _, replay = restarted.receive_object(job_id=JOB_ID, generation=1,
             object_id=OBJECT_ID, byte_size=3, sha256=digest, reader=io.BytesIO(b"abc"))
         self.assertTrue(replay)
+
+    def test_audit_preserves_unfinished_partial(self):
+        target = self.root / self.spool.storage_key(JOB_ID, 1, OBJECT_ID)
+        self.spool._directory(JOB_ID, 1)
+        temporary = target.parent / ('.' + target.name + '.part')
+        temporary.write_bytes(b'a')
+        temporary.chmod(0o600)
+        with self.assertRaisesRegex(SourceSpoolError, 'source_object_conflict'):
+            self.spool.audit_job(job_id=JOB_ID, generation=1,
+                expected_objects=[{'id': OBJECT_ID, 'byteSize': 3,
+                                   'sha256': hashlib.sha256(b'abc').hexdigest()}])
+        self.assertEqual(temporary.read_bytes(), b'a')
 
     def test_retry_cannot_bypass_failed_publication_directory_fsync(self):
         key = self.spool.storage_key(JOB_ID, 1, OBJECT_ID)

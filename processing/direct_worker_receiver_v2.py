@@ -107,7 +107,7 @@ class DirectWorkerBoundaryV2:
             # completed object must not free this node between source objects.
             gate._arm_direct_hold(digest[:32], digest)
             if self._readiness_pin is None:
-                pin = self.ledger.begin_direct_writer(scratch_id, settings(item, scratch_id))
+                pin = self.ledger.begin_direct_writer(scratch_id, settings(item, scratch_id), require_unclosed=True)
             else:
                 from .direct_worker_fence_proof_v2 import verify as verify_readiness
                 def check_readiness():
