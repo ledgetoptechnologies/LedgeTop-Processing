@@ -246,6 +246,29 @@ class DirectV2Handoff:
                 return save(db,reservation=self.item['reservationId'],signed_closure=signed,
                             observation=observed,sender=self.sender)
 
+    def challenge_retention(self,token,*,protected_transport):
+        """Observe a freshly challenged worker fence, never acknowledge custody.
+
+        This is not durable evidence or a continuing retention guarantee.
+        """
+        self._auth(token,protected_transport)
+        with self.queue.coordinator_operation('source-io'):
+            with self.queue._db() as db:
+                db.execute('BEGIN IMMEDIATE');self._check(db);full_census(db)
+                row=db.execute('SELECT state,closure FROM direct_v2_handoff_sessions WHERE reservation=?',
+                               (self.item['reservationId'],)).fetchone()
+                if row is None or row['state']!='closure_observed' or row['closure'] is None:
+                    raise Conflict('V2 closure not durably observed')
+                closure=bytes(row['closure'])
+            observed=self.sender.challenge_retention(json.loads(closure))
+            with self.queue._db() as db:
+                db.execute('BEGIN IMMEDIATE');self._check(db);full_census(db)
+                row=db.execute('SELECT state,closure FROM direct_v2_handoff_sessions WHERE reservation=?',
+                               (self.item['reservationId'],)).fetchone()
+                if row is None or row['state']!='closure_observed' or row['closure'] is None or bytes(row['closure'])!=closure:
+                    raise Conflict('V2 closure changed during challenge')
+            return observed
+
     def reconcile_object(self,token,*,protected_transport,object_id):
         """Recover exact durable observation, never infer absence or reupload."""
         self._auth(token,protected_transport)

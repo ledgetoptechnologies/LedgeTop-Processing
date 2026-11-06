@@ -177,7 +177,9 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                     import json
                     signed=json.loads(saved)
                     from processing.direct_worker_receipt_v2 import verify_retention_challenge
-                    fresh=sender.challenge_retention(signed)
+                    with self.assertRaises(Conflict):
+                        handoff.challenge_retention('wrong-viewer-token-012345678901234',protected_transport=True)
+                    fresh=handoff.challenge_retention(token,protected_transport=True)
                     self.assertFalse(fresh['sourceCustodyAccepted'])
                     self.assertFalse(fresh['processingAuthorized'])
                     with self.assertRaises(ReceiptRejected):
