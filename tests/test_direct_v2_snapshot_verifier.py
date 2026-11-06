@@ -143,7 +143,7 @@ process.stdout.write(JSON.stringify({intent:raw.toString('base64'),frames:pages.
             candidate=object.__new__(DirectV2Reservations);candidate.queue=Queue()
             candidate.store=SimpleNamespace(_source_routing_keys={'synthetic':'pinned'})
             candidate._snapshot_pins={('viewer','staging','issuer','key'):self.key.public_key()}
-            row={'principal':'viewer','environment':'staging','job_id':'job','pipeline_manifest_sha':'c'*64,
+            row={'principal':'viewer','current_environment':'staging','job_id':'job','pipeline_manifest_sha':'c'*64,
                  'source_manifest_sha':self.source['sha256'],'derived_manifest_sha':self.derived['sha256'],
                  'item_json':json.dumps({'attemptId':ATTEMPT,'jobId':'job'})}
             with patch('processing.direct_v2_reservation_schema.validate_receiving',return_value=row), patch('processing.viewer_source_attestation.validate_and_verify'):

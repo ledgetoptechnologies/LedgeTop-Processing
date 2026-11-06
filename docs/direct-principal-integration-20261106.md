@@ -63,3 +63,12 @@ after an uncertain response; this is not custody acceptance. A combined
 synthetic run passed 96 tests with three fixture skips. Dynamic worker
 enrollment, credential provisioning, actual runtime wiring, process-death
 recovery and the public Viewer route remain unfinished.
+
+A separate opt-in private mTLS snapshot listener and bounded page journal are
+included as a candidate. A synthetic integration test exercises an actual
+signed source attestation, direct reservation and source-only inspector. It is
+not a Viewer custody acknowledgment. A merged run completed 98 tests with two
+fixture-dependent skips. The current journal has a four-session lifetime cap
+with no qualified retirement, and selected pages and GCP evidence are not
+verified. Listener enrollment, actual Viewer sender, crash recovery and
+installed operation remain unqualified; do not activate it for client jobs.
