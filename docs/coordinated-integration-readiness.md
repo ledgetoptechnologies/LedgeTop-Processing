@@ -21,6 +21,18 @@ failure; its stale unsigned-receipt expectation is corrected by test-only
 [the combined qualification](evidence/coordinated-presentation-pair-20261106.md).
 These overlapping selections are not an aggregate suite or installed acceptance.
 
+The original per-host worker dependency archives, all recorded archive files,
+OS-library inventory bytes and interpreter pins were freshly checked readonly on
+both actual PCs on November 6. They remain preparation artifacts, not installed
+workers; see [the refresh evidence](evidence/worker-dependency-refresh-20261106.md).
+
+The separate tests-only delivery process-death candidate `899b8f3e` has its first
+bounded run reported by Claude: 26 cases in65.966s, with15 existing cases passing
+and all11 new cases failing, including the no-death control. Cause is under
+investigation; no successful delivery fault-boundary proof is claimed from that
+run. It is not selected into this candidate. The task container was removed;
+in-container child reap was not independently verified in that first run.
+
 The configured-node/early-drain maintenance extension is staged separately in
 [draft PR #367](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/367),
 head `315c87605513d8af0c2f58a74609e49e608a44b7`, against this integration branch.
