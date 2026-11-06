@@ -807,7 +807,7 @@ class WorkerHoldTests(unittest.TestCase):
         self.expire_reservation()
         self.steps(2)
         record = self.public(job)
-        self.assertEqual(set(record) - set(self.legacy(record)), self.ADDITIVE)
+        self.assertEqual(set(record) - set(self.legacy(record)), self.ADDITIVE | self.PROJECTED)
         self.assertEqual((record['status'], record['phase']), ('held', 'held'))
         self.assertEqual((record['holdObservation'], record['holdEngineStatusCode']), (None, None))
         listed = self.api.handle('GET', '/ltds/v1/jobs/' + job['jobId'], {'Authorization': 'Bearer ' + VIEWER}, protected_transport=True).body
