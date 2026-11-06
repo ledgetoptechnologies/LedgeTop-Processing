@@ -17,6 +17,18 @@ remain held indefinitely. Closure responses still state
 `processingAuthorized=false`. A signed closure is not authority for Viewer to
 delete originals. No coordinator receipt is issued and no Viewer behavior changes.
 
+The unmounted worker HTTPS adapter also exposes a signed local retention
+observation to the authenticated coordinator. It revalidates the closure and
+looks up the persisted ledger fence, binding the fence, local closure hash and
+exact signed closure hash into a domain-separated worker signature. The
+coordinator verifies its pinned worker key, stores the observation within its
+bounded handoff session allowance, and replays verified evidence without the
+worker online. A lost response can be re-observed. This is a historical local
+observation, not proof the worker remains online or that non-ledger writers are
+excluded; custody and execution flags remain false. The journal schema and
+marker lack a qualified online migration and older-writer fence and are not
+wired into runtime startup.
+
 The scratch ledger fences only its own cooperative APIs. It does not exclude
 an older already-running binary, external filesystem writers or deletion
 outside the ledger, and the logical metadata allowance is not a disk quota.

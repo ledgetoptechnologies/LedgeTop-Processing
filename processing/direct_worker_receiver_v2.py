@@ -161,6 +161,17 @@ class DirectWorkerBoundaryV2:
                 verification=self._closure_verification,expected_worker=self.worker,engine_id=self.engine_id,
                 coordinator_origin=self.origin,gate_generation=self.generation,worker_signer=self._closure_signer)
 
+    def retention(self, headers, *, protected_transport):
+        """Observe a persisted local fence, never acknowledge Viewer custody."""
+        signed=self.complete(headers,protected_transport=protected_transport)
+        _,digest,scratch_id=require_fenced(self.ledger,self.item,expected_worker=self.worker)
+        with self.ledger._transaction() as db:
+            row=db.execute('SELECT binding_sha,closure_sha FROM direct_custody_fences WHERE reservation=?',(scratch_id,)).fetchone()
+            if row is None or row['binding_sha']!=digest:
+                raise PolicyConflict('V2 retention fence unavailable')
+            closure_sha=row['closure_sha']
+        return self._closure_signer.retention_observation(signed,binding_sha=digest,closure_sha=closure_sha)
+
     def observe(self, headers, *, protected_transport, object_id):
         """Observe an exact durable object; absence or active writers stays uncertain."""
         from .direct_worker_boundary import DirectWorkerBoundary

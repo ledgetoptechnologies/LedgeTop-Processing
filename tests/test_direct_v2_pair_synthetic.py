@@ -3,6 +3,7 @@
 No real Viewer or ODM engine runs, and local closure is not a Viewer ACK.
 """
 import io
+import copy
 import sqlite3
 import ssl
 import tempfile
@@ -20,6 +21,7 @@ from processing.direct_worker_sender_v2 import DirectWorkerSenderV2
 from processing.prototype import Queue
 from processing.reference_source_intake import validate_source_intake
 from processing.reference_store import PROFILE, ReferenceStore
+from processing.maintenance import Conflict
 from tests import test_direct_worker_receiver_v2 as fixture
 from tests import test_reference_source_intake as source_fixture
 
@@ -34,7 +36,10 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
     def test_lost_object_observation_recovers_without_reupload(self):
         self.run_pair(False,True)
 
-    def run_pair(self, lose_closure, lose_object=False):
+    def test_lost_retention_observation_recovers_without_false_ack(self):
+        self.run_pair(False,False,True)
+
+    def run_pair(self, lose_closure, lose_object=False, lose_retention=False):
         f=fixture.WorkerV2Tests();f.setUp();self.addCleanup(f.doCleanups)
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
@@ -75,8 +80,58 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                     issuer_id='worker-issuer',key_id='worker-key',worker_public_key=f.proof_key.public_key(),
                     idle_timeout=2,total_timeout=5)
                 from processing.direct_v2_handoff_journal import DirectV2Handoff
+                from processing.scratch_policy import ScratchLedger, PolicyConflict
                 token='synthetic-viewer-handoff-token-0123456789'
                 handoff=DirectV2Handoff(store,sender,principal='viewer-staging',bearer=token)
+                def assert_retained_after_reopen():
+                    scratch_id=f.observation['scratchReservationId']
+                    reopened=ScratchLedger(f.root/'private'/'ledger.sqlite',f.root,
+                        capacity_probe=lambda _:1000000,clock=lambda:1000,safety_floor_bytes=100)
+                    with reopened._transaction() as db:
+                        self.assertIsNotNone(db.execute('SELECT 1 FROM direct_custody_fences WHERE reservation=?',(scratch_id,)).fetchone())
+                    with self.assertRaisesRegex(PolicyConflict,'custody is retained'):
+                        reopened.settle_unstarted(scratch_id,transfer_ended=True)
+                def assert_signed_retention_replay():
+                    if lose_retention:
+                        from processing.direct_worker_sender import DirectDeliveryUncertain
+                        original_observe=sender.observe_retention
+                        def lost(*args,**kwargs):
+                            original_observe(*args,**kwargs)
+                            raise DirectDeliveryUncertain('synthetic lost retention observation')
+                        with patch.object(sender,'observe_retention',side_effect=lost):
+                            with self.assertRaises(DirectDeliveryUncertain):
+                                handoff.observe_retention(token,protected_transport=True)
+                        with queue._db() as db:
+                            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_v2_retention_observations').fetchone()[0],0)
+                    observed=handoff.observe_retention(token,protected_transport=True)
+                    self.assertTrue(observed['retentionFenceActive'])
+                    self.assertFalse(observed['sourceCustodyAccepted'])
+                    self.assertFalse(observed['transferComplete'])
+                    self.assertFalse(observed['processingAuthorized'])
+                    from processing.direct_worker_receipt_v2 import verify_retention, ReceiptRejected
+                    with queue._db() as db:
+                        saved=db.execute('SELECT closure FROM direct_v2_handoff_sessions WHERE reservation=?',(f.item['reservationId'],)).fetchone()[0]
+                    import json
+                    signed=json.loads(saved)
+                    for key,value in (('sourceCustodyAccepted',True),('localClosureSha256','0'*64),
+                                      ('workerClosureReceiptSha256','1'*64),('signature','A'*86)):
+                        changed=copy.deepcopy(observed);changed[key]=value
+                        with self.subTest(field=key),self.assertRaises(ReceiptRejected):
+                            verify_retention(changed,signed_closure=signed,expected_closure=sender._expected_closure(),
+                                issuer_id=sender._issuer,key_id=sender._key,public_key=sender._public)
+                    restarted=DirectV2Handoff(store,sender,principal='viewer-staging',bearer=token)
+                    with patch.object(sender,'observe_retention',side_effect=AssertionError('must replay persisted observation')):
+                        self.assertEqual(restarted.observe_retention(token,protected_transport=True),observed)
+                    with self.assertRaises(Conflict):
+                        restarted.observe_retention('wrong-viewer-token-012345678901234',protected_transport=True)
+                    # Stored evidence must not become trusted if it is damaged.
+                    with queue._db() as db:
+                        db.execute("UPDATE direct_v2_retention_observations SET observation=? WHERE reservation=?",
+                                   (b'{}',f.item['reservationId']))
+                    with self.assertRaises((Conflict,ValueError)):
+                        restarted.observe_retention(token,protected_transport=True)
+                with self.assertRaises(Conflict):
+                    handoff.complete('invalid-viewer-token-012345678901234',protected_transport=True)
                 for object_id,data in ((source_fixture.GCP_ID,b''),(source_fixture.IMAGE_ID,b'abc'),
                                        ('gcp_'+f.item['attemptId'],b'1,2,3\n')):
                     if lose_object:
@@ -107,6 +162,7 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                         with self.assertRaises(DirectDeliveryUncertain):handoff.complete(token,protected_transport=True)
                     with queue._db() as db:
                         self.assertEqual(db.execute('SELECT state FROM direct_v2_handoff_sessions').fetchone()[0],'closure_pending')
+                    assert_retained_after_reopen()
                     handoff=DirectV2Handoff(store,sender,principal='viewer-staging',bearer=token)
                     recovered=handoff.complete(token,protected_transport=True)
                     self.assertFalse(recovered['closure']['sourceCustodyAccepted'])
@@ -114,8 +170,10 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                         self.assertEqual(db.execute('SELECT state FROM direct_v2_handoff_sessions').fetchone()[0],'closure_observed')
                     self.assertEqual(queue.get(job['jobId'])['status'],'held')
                     self.assertTrue((f.spool.root.parent/'direct-v2-worker-signed-closure.json').exists())
+                    assert_signed_retention_replay()
                     return
                 closure=handoff.complete(token,protected_transport=True)
+                assert_retained_after_reopen()
                 self.assertEqual(handoff.complete(token,protected_transport=True),closure)
                 self.assertEqual((closure['closure']['sourceObjectCount'],closure['closure']['derivedObjectCount']),(2,1))
                 self.assertFalse(closure['closure']['sourceCustodyAccepted'])
@@ -123,6 +181,7 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                     self.assertEqual(db.execute("SELECT state FROM direct_v2_handoff_sessions").fetchone()[0],'closure_observed')
                     self.assertEqual(db.execute("SELECT count(*) FROM direct_v2_handoff_objects WHERE state='observed'").fetchone()[0],3)
                 self.assertEqual(queue.get(job['jobId'])['status'],'held')
+                assert_signed_retention_replay()
             finally:
                 server.shutdown();server.server_close();thread.join(3);self.assertFalse(thread.is_alive())
                 queue.close()
