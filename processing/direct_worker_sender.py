@@ -1,18 +1,22 @@
 """Unwired coordinator-to-worker TLS sender; never a Viewer custody ACK."""
 import hashlib
 import http.client
+import ipaddress
+import errno
 import json
 import math
 from pathlib import Path
 import re
+import select
+import socket
 import ssl
+import threading
 import time
 from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from . import reference_protocol as p
 from .direct_worker_receiver import _PreparedManifest
-from .direct_worker_http import _HeaderDeadline
 from .direct_worker_receipt import verify as verify_worker_closure
 from .direct_worker_scratch import scratch_identity
 
@@ -33,8 +37,39 @@ def _unique_pairs(pairs):
     return result
 
 
+class _SocketDeadline:
+    """Watch a duplicated socket through TCP connect, TLS and response."""
+    def __init__(self, source, seconds):
+        self._socket=source.dup();self._lock=threading.Lock()
+        self._active=True;self._accepted=False;self._expires=time.monotonic()+seconds
+        self._timer=threading.Timer(seconds,self._expire);self._timer.daemon=True;self._timer.start()
+
+    def _close_locked(self, *, shutdown):
+        self._active=False
+        if shutdown:
+            try:self._socket.shutdown(socket.SHUT_RDWR)
+            except OSError:pass
+        self._socket.close()
+
+    def _expire(self):
+        with self._lock:
+            if self._active:
+                remaining=self._expires-time.monotonic()
+                if remaining>0:
+                    self._timer=threading.Timer(remaining,self._expire);self._timer.daemon=True;self._timer.start()
+                else:self._close_locked(shutdown=True)
+
+    def finish(self):
+        with self._lock:
+            if not self._active:return self._accepted
+            self._timer.cancel()
+            if time.monotonic()>=self._expires:
+                self._close_locked(shutdown=True);return False
+            self._accepted=True;self._close_locked(shutdown=False);return True
+
+
 class DirectWorkerSender:
-    def __init__(self, *, origin, ca_file, bearer, manifest, item, derived_ids,
+    def __init__(self, *, origin, connect_ip, ca_file, bearer, manifest, item, derived_ids,
                  expected_worker, issuer_id, key_id, worker_public_key,
                  max_object_bytes=20*1024**3, response_limit=65536,
                  idle_timeout=10, total_timeout=120):
@@ -49,6 +84,11 @@ class DirectWorkerSender:
                 or parsed.path not in ('','/') or parsed.query or parsed.fragment
                 or not 1 <= port <= 65535 or origin.rstrip('/') != 'https://'+parsed.netloc):
             raise ValueError('exact HTTPS worker origin required')
+        try:
+            if type(connect_ip) is not str or '%' in connect_ip:raise ValueError()
+            address=ipaddress.ip_address(connect_ip)
+        except ValueError:
+            raise ValueError('pinned numeric worker address required') from None
         if (type(bearer) is not str or not 32<=len(bearer)<=4096
                 or not all(0x21<=ord(c)<=0x7e for c in bearer)):
             raise ValueError('scoped coordinator bearer required')
@@ -65,6 +105,7 @@ class DirectWorkerSender:
         context.load_verify_locations(cafile=str(ca))
         if context.verify_mode!=ssl.CERT_REQUIRED or not context.check_hostname:raise ValueError('verified TLS required')
         self._context,self._host,self._port=context,parsed.hostname,port
+        self._address=address
         self._bearer=bearer
         self._item,self._sha,_=scratch_identity(item,expected_worker=expected_worker)
         self._prepared=_PreparedManifest(manifest,self._item,derived_ids)
@@ -83,12 +124,35 @@ class DirectWorkerSender:
     def _connect(self, deadline):
         connection=http.client.HTTPSConnection(self._host,self._port,context=self._context,
                                               timeout=min(self._idle,self._total))
+        raw=wrapped=guard=None
         try:
-            connection.connect()
             remaining=deadline-time.monotonic()
             if remaining<=0:raise TimeoutError('direct transfer deadline exceeded')
-            return connection,_HeaderDeadline(connection.sock,remaining)
+            family=socket.AF_INET6 if self._address.version==6 else socket.AF_INET
+            raw=socket.socket(family,socket.SOCK_STREAM)
+            raw.setblocking(False)
+            guard=_SocketDeadline(raw,remaining)
+            result=raw.connect_ex((str(self._address),self._port))
+            pending={errno.EINPROGRESS,errno.EWOULDBLOCK,errno.EALREADY,
+                     getattr(socket,'WSAEWOULDBLOCK',errno.EWOULDBLOCK),
+                     getattr(socket,'WSAEINPROGRESS',errno.EINPROGRESS)}
+            if result not in ({0}|pending):raise OSError(result,'worker connection failed')
+            if result:
+                _,writable,failed=select.select([], [raw], [raw], remaining)
+                if not writable or failed:raise TimeoutError('worker connection deadline exceeded')
+                error=raw.getsockopt(socket.SOL_SOCKET,socket.SO_ERROR)
+                if error:raise OSError(error,'worker connection failed')
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise TimeoutError('direct transfer deadline exceeded')
+            raw.settimeout(min(self._idle,remaining))
+            wrapped=self._context.wrap_socket(raw,server_hostname=self._host,do_handshake_on_connect=False)
+            wrapped.do_handshake()
+            connection.sock=wrapped
+            return connection,guard
         except BaseException:
+            if guard is not None:guard.finish()
+            if wrapped is not None:wrapped.close()
+            if raw is not None:raw.close()
             connection.close()
             raise
 
@@ -107,13 +171,18 @@ class DirectWorkerSender:
             chunk=response.read1(min(remaining,65536))
             if not chunk:raise DirectDeliveryUncertain('worker response truncated')
             chunks.append(chunk);remaining-=len(chunk)
-        if response.status!=200:
-            raise DirectDeliveryRejected('worker refused operation')
         try:
-            return json.loads(b''.join(chunks).decode('utf-8'),object_pairs_hook=_unique_pairs,
+            result=json.loads(b''.join(chunks).decode('utf-8'),object_pairs_hook=_unique_pairs,
                               parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
         except (ValueError,UnicodeError,RecursionError):
             raise DirectDeliveryUncertain('worker response invalid') from None
+        # Only this specific authenticated response is guaranteed by the
+        # current worker boundary to happen before any object effect.
+        if response.status==403 and result=={'error':'access_denied'}:
+            raise DirectDeliveryRejected('worker refused operation')
+        if response.status!=200:
+            raise DirectDeliveryUncertain('worker response outcome uncertain')
+        return result
 
     def put(self,object_id,reader):
         obj=self._prepared.object(self._item,object_id)
