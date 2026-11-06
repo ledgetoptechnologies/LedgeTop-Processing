@@ -56,6 +56,25 @@ class SourceIntakeModeTests(unittest.TestCase):
             self.assertIsNone(db.execute("SELECT 1 FROM reference_source_intake_modes WHERE job_id='new'").fetchone())
             self.assertIsNone(db.execute("SELECT 1 FROM reference_source_intakes WHERE job_id='new'").fetchone())
 
+    def test_missing_mode_on_existing_schema_is_not_silently_backfilled(self):
+        with open_db(self.path) as db:
+            mode.initialize(db)
+            db.execute("INSERT INTO reference_source_intakes VALUES('unclassified')")
+        with open_db(self.path) as db:
+            with self.assertRaisesRegex(Conflict, 'mode missing'):
+                mode.initialize(db)
+            with self.assertRaisesRegex(Conflict, 'mode mismatch'):
+                mode.require(db, 'unclassified', 'spool-v1')
+
+    def test_direct_mode_refuses_spool_access(self):
+        with open_db(self.path) as db:
+            mode.initialize(db)
+            db.execute("INSERT INTO reference_source_intakes VALUES('direct')")
+            mode.claim(db, 'direct', 'direct-v2')
+            mode.require(db, 'direct', 'direct-v2')
+            with self.assertRaisesRegex(Conflict, 'mode mismatch'):
+                mode.require(db, 'direct', 'spool-v1')
+
     def test_competing_modes_have_one_transactional_winner(self):
         with open_db(self.path) as db:
             mode.initialize(db)

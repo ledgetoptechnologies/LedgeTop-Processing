@@ -311,6 +311,11 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
           FROM reference_jobs""").fetchone()[0]
         used += db.execute("""SELECT COALESCE(SUM(length(CAST(source_manifest_json AS BLOB))+
           length(CAST(derived_manifest_json AS BLOB))),0) FROM reference_source_intakes""").fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_source_intake_modes'").fetchone():
+            from .source_intake_mode import _check_schema as check_source_mode_schema
+            check_source_mode_schema(db)
+            used += db.execute("""SELECT COALESCE(SUM(length(CAST(job_id AS BLOB))+
+              length(CAST(mode AS BLOB))),0) FROM reference_source_intake_modes""").fetchone()[0]
         used += db.execute("SELECT COALESCE(SUM(length(CAST(receipt_json AS BLOB))),0) FROM reference_source_object_receipts").fetchone()[0]
         for table, column in (("reference_acceptances", "receipt_json"), ("reference_outbox", "payload_json"),
                               ("reference_viewer_receipts", "receipt_json"),

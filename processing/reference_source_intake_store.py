@@ -1140,11 +1140,11 @@ class ReferenceSourceIntakeMethods:
             existing_reservations = db.execute("""SELECT COALESCE(SUM(reserved_bytes),0)
                 FROM reference_source_intakes""").fetchone()[0]
             source_spool.check_capacity(reserved_bytes, reserved_bytes=existing_reservations)
-            self._quota(db, len(encoded.encode('utf-8')) + len(source_encoded.encode('utf-8'))
-                        + len(derived_encoded.encode('utf-8')))
             job_id = validated['providerTaskId'] or str(uuid.uuid4())
             if db.execute('SELECT 1 FROM jobs WHERE id=?', (job_id,)).fetchone():
                 raise Conflict('providerTaskId already belongs to another queue job')
+            self._quota(db, len(encoded.encode('utf-8')) + len(source_encoded.encode('utf-8'))
+                        + len(derived_encoded.encode('utf-8')) + len(job_id.encode('utf-8')) + len('spool-v1'))
             db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,?,?,'queued')",
                 (job_id, 'reference:' + submission['submissionId'], submission['environment'], PROFILE))
             db.execute("""INSERT INTO reference_jobs(job_id,submission_id,request_digest,environment,input_json,
@@ -1196,7 +1196,8 @@ class ReferenceSourceIntakeMethods:
             rows = db.execute('''SELECT r.job_id,r.generation,s.source_manifest_json,s.derived_manifest_json,
                 s.source_state,s.derived_state,s.source_manifest_sha,s.derived_manifest_sha,
                 s.pipeline_manifest_sha FROM reference_jobs r JOIN reference_source_intakes s
-                ON s.job_id=r.job_id ORDER BY r.created_at,r.job_id''').fetchall()
+                ON s.job_id=r.job_id JOIN reference_source_intake_modes m
+                ON m.job_id=s.job_id AND m.mode='spool-v1' ORDER BY r.created_at,r.job_id''').fetchall()
             recorded = {row['job_id']: db.execute('''SELECT generation,object_id,object_kind,
                 byte_size,sha256,mount_id,storage_key FROM reference_source_object_receipts
                 WHERE job_id=? AND generation=?''', (row['job_id'], row['generation'])).fetchall()
