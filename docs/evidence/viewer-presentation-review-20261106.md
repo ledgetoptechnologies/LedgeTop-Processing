@@ -40,4 +40,3 @@ Processing archive SHA-256: `e4876acb4549f026fa6f6c2e952e7a8b577ca4795ca35b4c572
 Full log: `C:/Users/fstor/AppData/Local/Temp/ltds-viewer-ee9e750a-focused-20261106.log`, SHA-256 `e2b69f228f58206ca2e80d69ab978f33cf18fece417c8b2172e0b9d851a8bec3`.
 
 The isolated Processing merge preserves both pre-reservation/claim and start-witness process-death hooks. All six changed/integrated Python source files parse, but this is not functional qualification. It remains outside the release integration branch until Claude's final handoff and combined tests. No Docker workload, runtime installation or NAS operation was performed for this check.
-
