@@ -7,6 +7,7 @@ import time
 import uuid
 from contextlib import closing
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from processing.maintenance import Conflict
 from processing.prototype import Queue
@@ -123,9 +124,14 @@ class DirectV2AdmissionTests(unittest.TestCase):
         with self.queue._db() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM direct_v2_reservations').fetchone()[0],0)
             db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?',(original,job['jobId']))
+        from processing.direct_v2_reservation import V2ReservationUncertain
+        with patch('processing.direct_v2_reservation.time.monotonic',side_effect=[0,0,0,1000]):
+            with self.assertRaises(V2ReservationUncertain):reservations.reserve(**options)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM direct_v2_reservations').fetchone()[0],1)
         observation=reservations.reserve(**options)
         self.assertFalse(observation['sourceCustodyAccepted']);self.assertFalse(observation['transferAuthorized'])
-        self.assertEqual(observation['nodeId'],'cluster');self.assertTrue(reservations.reserve(**options)['replayed'])
+        self.assertEqual(observation['nodeId'],'cluster');self.assertTrue(observation['replayed'])
         self.assertEqual(self.queue.get(job['jobId'])['status'],'held')
         with self.assertRaises(Conflict):
             self.queue.operator(job['jobId'],'resolve',dict(note='synthetic',workerStopped=True))
