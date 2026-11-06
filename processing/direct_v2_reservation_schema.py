@@ -70,7 +70,9 @@ def validate_receiving(db,reservation_id):
     verify_schema(db)
     row=db.execute('''SELECT d.*,j.status,j.held_reason,j.node_id AS queue_node,
         r.node_id AS reference_node,r.generation AS current_generation,r.environment AS current_environment,
-        s.request_digest AS source_digest,s.source_state,s.derived_state,s.source_attestation_json
+        r.manifest_sha AS reference_manifest,s.request_digest AS source_digest,s.source_state,s.derived_state,
+        s.source_manifest_sha,s.derived_manifest_sha,s.pipeline_manifest_sha,s.source_attestation_json,
+        (SELECT authority_id FROM coordinator_identity WHERE singleton=1) AS current_authority
         FROM direct_v2_reservations d
         LEFT JOIN jobs j ON j.id=d.job_id LEFT JOIN reference_jobs r ON r.job_id=d.job_id
         LEFT JOIN reference_source_intakes s ON s.job_id=d.job_id WHERE d.reservation_id=?''',
@@ -98,6 +100,14 @@ def validate_receiving(db,reservation_id):
                 or row['source_digest']!=row['request_digest'] or row['current_generation']!=item['generation']
                 or row['current_environment']!=item['environment'] or row['reservation_id']!=item['reservationId']
                 or row['job_id']!=item['jobId'] or row['node_id']!=item['nodeId']
+                or row['current_authority']!=item['authorityId']
+                or row['source_manifest_sha']!=item['sourceManifestSha256']
+                or row['derived_manifest_sha']!=item['derivedManifestSha256']
+                or row['pipeline_manifest_sha']!=item['pipelineManifestSha256']
+                or row['reference_manifest']!=item['pipelineManifestSha256']
+                or attestation['proof'].get('sourceManifestSha256')!=item['sourceManifestSha256']
+                or attestation['proof'].get('derivedManifestSha256')!=item['derivedManifestSha256']
+                or attestation['proof'].get('pipelineManifestSha256')!=item['pipelineManifestSha256']
                 or body['scratchBindingSha256']!=digest or body['challengeId']!=row['challenge_id']):raise ValueError()
         require(db,row['job_id'],'direct-v2')
         return dict(row)

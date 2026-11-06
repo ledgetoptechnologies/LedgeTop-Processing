@@ -42,6 +42,10 @@ class ReservationSchemaTests(unittest.TestCase):
             with self.assertRaisesRegex(Conflict,'requires inspection'):schema.validate_receiving(db,rid)
             db.execute('UPDATE direct_v2_reservations SET challenge_id=? WHERE reservation_id=?',(original_challenge,rid))
             self.assertEqual(schema.validate_receiving(db,rid)['reservation_id'],rid)
+            job_id=db.execute('SELECT job_id FROM direct_v2_reservations WHERE reservation_id=?',(rid,)).fetchone()[0]
+            db.execute("UPDATE reference_source_intakes SET source_manifest_sha=? WHERE job_id=?",('f'*64,job_id))
+        with self.f.queue._db() as db:
+            with self.assertRaisesRegex(Conflict,'requires inspection'):schema.validate_receiving(db,rid)
     def test_null_primary_key_cannot_disappear_from_byte_census(self):
         with self.f.queue._db() as db:
             db.execute('BEGIN IMMEDIATE');schema.ensure_schema(db)
