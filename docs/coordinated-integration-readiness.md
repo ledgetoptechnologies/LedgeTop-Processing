@@ -71,6 +71,15 @@ serialized-probe runs, including their earlier setup failures, are documented in
 [the original qualification](evidence/first-install-preparation-fixes-20261106.md).
 The combined source still needs full-phase qualification and installed checks.
 
+Beau's read-only Viewer API container inventory identifies enabled, healthy
+LedgeTop Processing provider `f4ad3d2f-d067-48b7-924c-f1c843a1092c`. The
+processing platform is enabled, but source intake and source release are off;
+deployment environment, coordinator bearer and extra CA are unset. The source,
+snapshot and copy signing private keys are not configured in that container.
+This is an environment inventory, not proof that keys do not exist elsewhere.
+Prepare and review the matching private configuration before enabling intake;
+retain source release disabled for the first pilot. Beau controls TrueNAS changes.
+
 The bounded Engineering Hub review is saved in
 `engineering-hub/reviews/hub-update-20261106-processing.md` v1. Authenticated SDK
 reads work; this chat's subscribed listener PID108768 is live and identity
