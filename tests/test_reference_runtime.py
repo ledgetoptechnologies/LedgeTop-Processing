@@ -1135,6 +1135,28 @@ class ReferenceRuntimeTests(unittest.TestCase):
                 running.join(timeout=5)
         self.assertEqual(errors.getvalue(), '')
 
+    def test_viewer_delivery_thread_exit_fails_coordinator_supervision(self):
+        handler = self.supervised_handler()
+        runtime = handler.reference_listener
+        release = threading.Event()
+        runtime._viewer_transfer_worker = object()
+        runtime._viewer_transfer_loop = lambda: release.wait(3)
+        native = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        service = CoordinatorService(native, handler)
+        stop, exits = threading.Event(), []
+        running = threading.Thread(target=lambda: exits.append(service.run(stop)))
+        running.start()
+        try:
+            self.wait_for(service.healthy)
+            release.set()
+            running.join(timeout=4)
+            self.assertFalse(running.is_alive())
+            self.assertEqual(exits, [2])
+            self.assertEqual(service.health()['reason'], 'viewer_transfer_worker_exited')
+            self.assertFalse(service.healthy())
+        finally:
+            release.set(); stop.set(); running.join(timeout=5)
+
     def test_dispatcher_inflight_work_is_joined_past_legacy_close_timeout_before_queue_unlock(self):
         config = replace(self.config, viewer_enabled=False)
         handler = make_handler(config)
