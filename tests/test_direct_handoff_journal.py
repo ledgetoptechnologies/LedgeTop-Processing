@@ -6,7 +6,7 @@ import ssl
 import threading
 import unittest
 import uuid
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from processing.direct_handoff_journal import DirectHandoff
@@ -111,10 +111,13 @@ class HandoffTests(unittest.TestCase):
         self.assertFalse(signed['closure']['sourceCustodyAccepted'])
 
     def test_changed_persisted_observation_never_replays(self):
+        from processing.direct_handoff_census import TRIGGERS
         self.sender.put=Mock(return_value=self.observation());self.send()
         changed=self.observation();changed['sourceCustodyAccepted']=True
         with self.fixture.queue._db() as db:
-            db.execute('UPDATE direct_handoff_objects SET response=?',(json.dumps(changed),))
+            db.execute('DROP TRIGGER direct_handoff_object_update')
+            db.execute('UPDATE direct_handoff_objects SET response=?',(json.dumps(changed).encode(),))
+            db.execute(TRIGGERS['direct_handoff_object_update'])
         with self.assertRaisesRegex(Conflict,'observation changed'):self.send()
         self.assertEqual(self.sender.put.call_count,1)
 
@@ -127,6 +130,86 @@ class HandoffTests(unittest.TestCase):
             owner_secret='synthetic-owner')
         with self.assertRaises(CoordinatorFrozen):self.send()
         self.sender.put.assert_not_called()
+
+    def test_full_manifest_validation_is_not_repeated_for_object_replay(self):
+        self.sender.put=Mock(return_value=self.observation())
+        with patch.object(self.fixture.store,'_reference_input',wraps=self.fixture.store._reference_input) as check:
+            self.send();self.send();self.send()
+            self.assertEqual(check.call_count,2)
+            self.assertEqual(self.sender.put.call_count,1)
+
+    def test_persisted_source_input_cannot_change_during_handoff(self):
+        import sqlite3
+        self.sender.put=Mock(return_value=self.observation());self.send()
+        with self.fixture.queue._db() as db:
+            with self.assertRaisesRegex(sqlite3.IntegrityError,'input locked'):
+                db.execute('UPDATE reference_jobs SET input_json=? WHERE job_id=?',('{}',self.sender._item['jobId']))
+            with self.assertRaisesRegex(sqlite3.IntegrityError,'input locked'):
+                db.execute('INSERT OR REPLACE INTO reference_jobs SELECT * FROM reference_jobs WHERE job_id=?',
+                           (self.sender._item['jobId'],))
+
+    def test_removed_input_guard_is_detected_before_worker_io(self):
+        self.sender.put=Mock(return_value=self.observation());self.send()
+        with self.fixture.queue._db() as db:db.execute('DROP TRIGGER direct_handoff_input_update')
+        with self.assertRaisesRegex(Conflict,'guards changed'):self.send()
+        self.assertEqual(self.sender.put.call_count,1)
+
+    def test_orphan_object_is_detected_by_shared_census(self):
+        from processing.direct_handoff_census import TRIGGERS
+        self.sender.put=Mock(return_value=self.observation());self.send()
+        with self.fixture.queue._db() as db:
+            db.execute('DROP TRIGGER direct_handoff_object_parent')
+            db.execute("INSERT INTO direct_handoff_objects VALUES(?,?,?,?,?,NULL)",('orphan','x','a'*64,1,'intent'))
+            db.execute(TRIGGERS['direct_handoff_object_parent'])
+        self.handoff._validated=False  # a fresh session always performs full census
+        with self.assertRaisesRegex(Conflict,'object census invalid'):self.send()
+
+    def test_partial_handoff_schema_is_detected_by_shared_census(self):
+        self.sender.put=Mock(return_value=self.observation());self.send()
+        with self.fixture.queue._db() as db:
+            db.execute('DROP TABLE direct_handoff_objects')
+            with self.assertRaisesRegex(Conflict,'schema requires inspection'):
+                self.fixture.store._metadata_used_bytes(db)
+
+    def test_counter_corruption_is_detected_on_session_reopen(self):
+        self.sender.put=Mock(return_value=self.observation());self.send()
+        with self.fixture.queue._db() as db:db.execute('UPDATE direct_handoff_sessions SET object_count=0')
+        self.handoff=DirectHandoff(self.fixture.store,self.sender,principal='viewer',bearer=self.token)
+        with self.assertRaisesRegex(Conflict,'object budget exceeded'):self.send()
+
+    def test_replace_cannot_erase_observed_object(self):
+        import sqlite3
+        self.sender.put=Mock(return_value=self.observation());self.send()
+        with self.fixture.queue._db() as db:
+            with self.assertRaisesRegex(sqlite3.IntegrityError,'parent or object invalid'):
+                db.execute('INSERT OR REPLACE INTO direct_handoff_objects SELECT * FROM direct_handoff_objects')
+
+    def test_ten_thousand_objects_validate_once_per_session_not_per_retry(self):
+        request=self.fixture.submit(count=10000);held=self.fixture.direct.reserve(**request)
+        with self.fixture.queue._db() as db:
+            manifest=json.loads(self.fixture.store._row(db,request['job_id'])['input_json'])['manifest']
+        fields=('reservationId','jobId','attemptId','generation','environment','authorityId','nodeId',
+                'workerId','workerInstanceId','manifestSha256','derivedManifestSha256','limitProfile')
+        item={name:held[name] for name in fields};item.update(inputBytes=manifest['totalBytes'],outputBudget=100,ttlSeconds=10)
+        worker={name:item[name] for name in ('authorityId','nodeId','workerId','workerInstanceId')}
+        sender=DirectWorkerSender.__new__(DirectWorkerSender)
+        sender._item,sender._sha,_=scratch_identity(item,expected_worker=worker)
+        sender._prepared=_PreparedManifest(manifest,item,[])
+        obj=manifest['objects'][0]
+        observation=dict(protocol='ltds-direct-local-object-v1',reservationId=item['reservationId'],
+            scratchBindingSha256=sender._sha,jobId=item['jobId'],attemptId=item['attemptId'],
+            generation=item['generation'],nodeId=item['nodeId'],objectId=obj['id'],byteSize=obj['byteSize'],
+            sha256=obj['sha256'],localObjectDurable=True,sourceCustodyAccepted=False,transferComplete=False,replayed=False)
+        def deliver(object_id, _reader):
+            return dict(observation, objectId=object_id)
+        sender.put=Mock(side_effect=deliver)
+        handoff=DirectHandoff(self.fixture.store,sender,principal='viewer',bearer=self.token)
+        def send(value):return handoff.send_object(self.token,protected_transport=True,object_id=value['id'],
+                                               byte_size=value['byteSize'],sha256=value['sha256'],reader=io.BytesIO(b'abc'))
+        with patch.object(self.fixture.store,'_reference_input',wraps=self.fixture.store._reference_input) as check:
+            for value in manifest['objects'][:3]:send(value)
+            self.assertEqual(check.call_count,2)
+        self.assertEqual(sender.put.call_count,3)
 
 
 class HandoffTLSIntegrationTests(unittest.TestCase):

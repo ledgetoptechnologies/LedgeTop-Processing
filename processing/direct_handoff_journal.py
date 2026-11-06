@@ -11,10 +11,8 @@ import json
 from . import reference_protocol as p
 from .direct_worker_sender import DirectWorkerSender
 from .direct_worker_receipt import verify as verify_worker_closure
+from .direct_handoff_census import SESSION_ALLOWANCE, ROW_ALLOWANCE, TRIGGERS, verify_triggers, verify_census
 from .maintenance import Conflict
-
-ROW_ALLOWANCE = 2048
-SESSION_ALLOWANCE = 131072
 
 
 class DirectHandoff:
@@ -29,13 +27,14 @@ class DirectHandoff:
         self.item=dict(sender._item)
         self.manifest,self.derived=sender._prepared.snapshot(self.item)
         self.binding=hashlib.sha256(p.canonical_json(self.item)).hexdigest()
+        self._validated=False
 
     def _authorize(self, token, protected_transport):
         if (protected_transport is not True or type(token) is not str or not token.isascii()
                 or not hmac.compare_digest(token,self._bearer)):
             raise Conflict('direct handoff authorization required')
 
-    def _check(self,db):
+    def _check(self,db,*,full=False):
         r=db.execute('SELECT * FROM direct_intake_reservations WHERE reservation_id=?',
                      (self.item['reservationId'],)).fetchone()
         if r is None:raise Conflict('direct node reservation required')
@@ -50,40 +49,59 @@ class DirectHandoff:
         if (profile is None or profile['principal']!=self.principal
                 or profile['profile']!=self.item.get('limitProfile')):
             raise Conflict('direct principal or profile binding changed')
-        row=self.store._row(db,r['job_id'])
-        submission=json.loads(row['input_json'])
-        if (row['status']!='held' or row['held_reason']!='direct_intake_receiving_profile'
-                or row['node_id']!=r['node_id'] or row['source_state'] is not None
-                or type(submission.get('directIntakeVersion')) is not int or submission['directIntakeVersion']!=1
-                or submission.get('directDerivedManifestSha256')!=self.item['derivedManifestSha256']
-                or submission.get('submissionId')!=self.item['attemptId'] or 'sourceIntakeVersion' in submission
-                or self.store._reference_input(db,dict(id=r['job_id'],environment=r['environment'])) is None
-                or p.canonical_json(submission['manifest'])!=p.canonical_json(self.manifest)
-                or self.item['inputBytes']!=self.manifest['totalBytes']):
+        row=db.execute('''SELECT r.node_id,r.manifest_sha,r.environment,r.generation,j.status,j.held_reason,
+            EXISTS(SELECT 1 FROM reference_source_intakes s WHERE s.job_id=r.job_id) AS has_source
+            FROM reference_jobs r JOIN jobs j ON j.id=r.job_id WHERE r.job_id=?''',(r['job_id'],)).fetchone()
+        if (row is None or row['status']!='held' or row['held_reason']!='direct_intake_receiving_profile'
+                or row['node_id']!=r['node_id'] or row['has_source']
+                or row['manifest_sha']!=self.item['manifestSha256']
+                or row['environment']!=self.item['environment'] or row['generation']!=self.item['generation']):
             raise Conflict('direct source reservation changed')
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_handoff_sessions'").fetchone():
+            verify_triggers(db)
+        else:
+            full=True
+        if full or not self._validated:
+            verify_census(db,full=True)
+            record=self.store._row(db,r['job_id']);submission=json.loads(record['input_json'])
+            if (type(submission) is not dict or type(submission.get('directIntakeVersion')) is not int
+                    or submission['directIntakeVersion']!=1
+                    or submission.get('directDerivedManifestSha256')!=self.item['derivedManifestSha256']
+                    or submission.get('submissionId')!=self.item['attemptId'] or 'sourceIntakeVersion' in submission
+                    or self.store._reference_input(db,dict(id=r['job_id'],environment=r['environment'])) is None
+                    or p.canonical_json(submission['manifest'])!=p.canonical_json(self.manifest)
+                    or self.item['inputBytes']!=self.manifest['totalBytes']):
+                raise Conflict('direct source reservation changed')
+            self._validated=True
         return r
 
     def _tables(self,db):
         db.execute('''CREATE TABLE IF NOT EXISTS direct_handoff_sessions (
             reservation TEXT PRIMARY KEY, principal TEXT NOT NULL, binding TEXT NOT NULL,
-            allowance INTEGER NOT NULL, state TEXT NOT NULL, closure BLOB)''')
+            allowance INTEGER NOT NULL, state TEXT NOT NULL, closure BLOB, object_count INTEGER NOT NULL)''')
         db.execute('''CREATE TABLE IF NOT EXISTS direct_handoff_objects (
             reservation TEXT NOT NULL, object_id TEXT NOT NULL, sha TEXT NOT NULL,
             size INTEGER NOT NULL, state TEXT NOT NULL, response BLOB,
             PRIMARY KEY(reservation,object_id))''')
+        for name,sql in TRIGGERS.items():
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?",(name,)).fetchone():
+                db.execute(sql)
+        verify_triggers(db)
 
     def _session(self,db):
         self._check(db);self._tables(db)
         row=db.execute('SELECT * FROM direct_handoff_sessions WHERE reservation=?',
                        (self.item['reservationId'],)).fetchone()
         if row is None:
+            self._check(db,full=True)
             allowance=SESSION_ALLOWANCE+ROW_ALLOWANCE*len(self.manifest['objects'])
             self.store._quota(db,allowance)
-            db.execute('INSERT INTO direct_handoff_sessions VALUES(?,?,?,?,?,NULL)',
+            db.execute('INSERT INTO direct_handoff_sessions VALUES(?,?,?,?,?,NULL,0)',
                        (self.item['reservationId'],self.principal,self.binding,allowance,'receiving'))
             return 'receiving'
         if (row['principal']!=self.principal or row['binding']!=self.binding
                 or row['allowance']!=SESSION_ALLOWANCE+ROW_ALLOWANCE*len(self.manifest['objects'])
+                or type(row['object_count']) is not int or not 0<=row['object_count']<=len(self.manifest['objects'])
                 or row['state'] not in ('receiving','closure_pending','closure_observed')):
             raise Conflict('direct handoff session changed')
         return row['state']
@@ -153,6 +171,9 @@ class DirectHandoff:
         with self.queue._coordinator_freeze.operation('source-io'):
             with self.queue._db() as db:
                 db.execute('BEGIN IMMEDIATE');state=self._session(db)
+                # Completion must revalidate the full pinned source inventory,
+                # even though ordinary object transfers use scalar checks.
+                self._check(db,full=True)
                 if state=='closure_observed':
                     saved=db.execute('SELECT closure FROM direct_handoff_sessions WHERE reservation=?',
                                      (self.item['reservationId'],)).fetchone()['closure']

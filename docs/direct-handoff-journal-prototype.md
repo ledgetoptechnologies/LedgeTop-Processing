@@ -27,3 +27,14 @@ authenticated replay after a lost Viewer response. Never mint the candidate
 retention guarantee from this journal alone. Keep originals and all unresolved
 reservations until a separately qualified recovery and acceptance protocol says
 otherwise.
+
+For a long-lived handoff instance, the manifest is fully checked when the
+session opens and again before closure; per-object operations use an immutable
+sender index, scalar binding checks and SQLite-guarded input fields. The shared
+quota path uses bounded per-session counters maintained by transaction triggers;
+reopen and completion perform a full object/orphan census. This relies on the
+coordinator owning its database and triggers: same-process code with arbitrary
+schema access is not sandboxed. Recreating a handoff instance for each object
+would repeat the full census and is not a qualified integration. The earlier
+prototype handoff-table schema is refused for inspection, not automatically
+migrated.
