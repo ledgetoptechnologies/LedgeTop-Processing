@@ -59,3 +59,22 @@ class FrameTests(unittest.TestCase):
             self.assertFalse(verify_gcp_chunks(wire,**kw)['sourceCustodyAccepted'])
             with self.assertRaises(ValueError):verify_gcp_chunks(wire[:-1],**kw)
             with self.assertRaises(ValueError):verify_gcp_chunks(wire,**dict(kw,byte_count=len(content)+1))
+
+    def test_viewer_photo_first_selection_excludes_auto_auxiliary(self):
+        def source(identifier,name,role,kind,media):
+            return {'type':'dataset_file','datasetFileId':identifier,'relativePath':name,'processingRole':role,
+                    'byteSize':3,'sha256':'a'*64,'kind':kind,'mediaType':media}
+        records=[source('input','notes.txt','provider_input','auxiliary','text/plain'),
+                 source('ignored','other.txt','auto','auxiliary','text/plain'),
+                 source('photo','photo.jpg','auto','image','image/jpeg')]
+        def check(ids):
+            entries=[dict(type='dataset_file',ordinal=i,pageObjectId=ident,datasetFileId=ident) for i,ident in enumerate(ids)]
+            raw,sha=frame(dict(version='ltds-viewer-selected-frames-v1',index=0,records=entries),SELECTED_DOMAIN)
+            wire=raw+b'\n'; intent=dict(selectedPageHashes=[sha],selectedFrameBytes=len(wire),selectedCount=len(ids))
+            by_id={r['datasetFileId']:r for r in records}
+            objects=[dict(id=x,name=by_id[x]['relativePath'],byteSize=3,sha256='a'*64,
+                          kind=by_id[x]['kind'],mediaType=by_id[x]['mediaType']) for x in ids]
+            return verify_selected(intent,wire,source_records=records,pipeline_manifest={'objects':objects})
+        self.assertEqual(check(['photo','input'])['selectedCount'],2)
+        for ids in (['input','photo'],['photo'],['photo','input','ignored']):
+            with self.subTest(ids=ids),self.assertRaises(ValueError):check(ids)
