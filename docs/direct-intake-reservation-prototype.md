@@ -35,3 +35,17 @@ only a local capacity observation: it neither authenticates the caller nor prove
 physical node-gate ownership, accepts a source object, permits transfer, or
 acknowledges custody. A verified caller, durable receiver, capacity/mount
 identity, reconciliation and cleanup proof remain necessary before any wiring.
+
+The separate unwired `direct_worker_receiver.receive` prototype accepts one
+closed, hash-bound manifest object only when the exact scratch reservation is
+fenced and an already-provisioned physical NodeGate is locked and bound to the
+same authority, worker, job and deterministic receipt. It confines the spool
+to that reservation and delegates atomic publication, hashing, file and
+directory sync, and lost-reply replay to `SourceSpool`. Its observation proves
+only that a local object was verified; it explicitly does not acknowledge the
+source closure or authorize engine execution. The entire scratch reservation
+remains charged (conservatively including already written bytes). Authentication,
+physical gate creation/handover, transfer lifetime, bounded concurrency,
+complete source/derived closure, quota reconciliation and network protocol are
+not implemented. Its tests use real NodeGate and a real Linux tmpfs mount, but
+do not qualify any installed disk, host, network or power-loss guarantee.

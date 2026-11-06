@@ -7,6 +7,7 @@ It deliberately cannot release a fenced reservation. Do not expose it via an
 API until those boundaries and disk/accounting integration are qualified.
 """
 import hashlib
+import json
 
 from . import reference_protocol as p
 from .scratch_policy import PolicyConflict
@@ -40,6 +41,27 @@ def binding(value, *, expected_worker):
     return dict(value)
 
 
+def scratch_identity(value, *, expected_worker):
+    item = binding(value, expected_worker=expected_worker)
+    sha = hashlib.sha256(DOMAIN + p.canonical_json(item)).hexdigest()
+    return item, sha, 'direct-' + sha
+
+
+def require_fenced(ledger, value, *, expected_worker):
+    """Check the exact persisted scratch binding; never create or renew it."""
+    item, sha, scratch_id = scratch_identity(value, expected_worker=expected_worker)
+    expected = dict(job_id=item['jobId'], generation=item['generation'], reservation_id=scratch_id,
+        manifest_sha256=item['manifestSha256'], input_bytes=item['inputBytes'],
+        output_budget=item['outputBudget'], environment=item['environment'], ttl_seconds=item['ttlSeconds'])
+    with ledger._transaction() as db:
+        row = ledger._reservation(db, scratch_id)
+        if (row['state'] != 'reserved' or row['allocated'] != 0
+                or json.loads(row['settings']) != expected
+                or not db.execute('SELECT 1 FROM transfer_fences WHERE reservation=?', (scratch_id,)).fetchone()):
+            raise PolicyConflict('direct scratch fence changed')
+    return item, sha, scratch_id
+
+
 def prepare(ledger, value, *, expected_worker, worker_ready):
     """Fence capacity; a result is NOT a source-custody acknowledgement.
 
@@ -47,9 +69,7 @@ def prepare(ledger, value, *, expected_worker, worker_ready):
     ScratchLedger holds the full remaining budget regardless of time. A crash
     after the fence but before returning can safely repeat this exact call.
     """
-    item = binding(value, expected_worker=expected_worker)
-    sha = hashlib.sha256(DOMAIN + p.canonical_json(item)).hexdigest()
-    scratch_id = 'direct-' + sha
+    item, sha, scratch_id = scratch_identity(value, expected_worker=expected_worker)
     row = ledger.reserve(job_id=item['jobId'], generation=item['generation'],
         reservation_id=scratch_id, manifest_sha256=item['manifestSha256'],
         input_bytes=item['inputBytes'], output_budget=item['outputBudget'],
@@ -57,11 +77,7 @@ def prepare(ledger, value, *, expected_worker, worker_ready):
     if row['state'] != 'reserved' or row['allocated'] != 0:
         raise PolicyConflict('direct scratch no longer unstarted')
     ledger.begin_transfer(scratch_id)
-    with ledger._transaction() as db:
-        current = ledger._reservation(db, scratch_id)
-        if (current['state'] != 'reserved' or current['allocated'] != 0
-                or not db.execute('SELECT 1 FROM transfer_fences WHERE reservation=?', (scratch_id,)).fetchone()):
-            raise PolicyConflict('direct scratch fence changed')
+    require_fenced(ledger, item, expected_worker=expected_worker)
     return dict(protocol='ltds-direct-scratch-observation-v1', bindingSha256=sha,
         reservationId=item['reservationId'], scratchReservationId=scratch_id,
         state='scratch_fenced', transferAuthorized=False, sourceCustodyAccepted=False)
