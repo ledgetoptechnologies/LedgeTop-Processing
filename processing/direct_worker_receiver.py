@@ -12,6 +12,7 @@ from . import reference_protocol as p
 from .direct_worker_scratch import require_fenced, scratch_settings
 from .node_gate import NodeGate, _binding as gate_binding
 from .scratch_policy import PolicyConflict
+from . import direct_limits
 
 DERIVED_DOMAIN = b'LTDS-DIRECT-DERIVED-INVENTORY-V1\0'
 
@@ -20,7 +21,8 @@ def derived_digest(manifest, derived_ids):
     if (type(derived_ids) is not list or any(type(value) is not str for value in derived_ids)
             or len(derived_ids) != len(set(derived_ids))):
         raise PolicyConflict('direct derived inventory invalid')
-    selected=[obj for obj in manifest['objects'] if obj['id'] in derived_ids]
+    derived_set=set(derived_ids)
+    selected=[obj for obj in manifest['objects'] if obj['id'] in derived_set]
     if [obj['id'] for obj in selected] != derived_ids:
         raise PolicyConflict('direct derived inventory order changed')
     records=[{key:obj[key] for key in ('id','byteSize','sha256')} for obj in selected]
@@ -45,13 +47,22 @@ def check_scope(ledger, spool, item, sha, scratch_id, gate, *, coordinator_origi
         raise PolicyConflict('direct node gate binding changed')
 
 
-def _object(manifest, item, object_id):
+def _object(manifest, item, object_id, derived_ids=None):
     p._closed(manifest, ('id','revision','sha256','totalBytes','objectCount','inputCounts','objects'), 'manifest')
     p._slug(manifest['id'], 'manifest id'); p._integer(manifest['revision'], 'revision')
     p._integer(manifest['totalBytes'], 'totalBytes'); p._integer(manifest['objectCount'], 'objectCount')
-    if (manifest['sha256'] != item['manifestSha256'] or p.manifest_sha256(manifest) != manifest['sha256']
-            or type(manifest['objects']) is not list or not 0 < len(manifest['objects']) <= p.MAX_OBJECTS
+    if (manifest['sha256'] != item['manifestSha256']
+            or type(manifest['objects']) is not list or not manifest['objects']
             or len(manifest['objects']) != manifest['objectCount'] or manifest['totalBytes'] != item['inputBytes']):
+        raise PolicyConflict('direct manifest binding changed')
+    if (type(derived_ids) is not list or any(type(value) is not str for value in derived_ids)
+            or len(derived_ids) != len(set(derived_ids))):
+        raise PolicyConflict('direct derived inventory invalid')
+    try:
+        direct_limits.manifest(item.get('limitProfile'),manifest,len(manifest['objects'])-len(derived_ids),len(derived_ids))
+    except (ValueError,TypeError):
+        raise PolicyConflict('direct manifest limits exceeded') from None
+    if p.manifest_sha256(manifest) != manifest['sha256']:
         raise PolicyConflict('direct manifest binding changed')
     p._closed(manifest['inputCounts'], ('images','lidarObjects','points'), 'inputCounts')
     for key in manifest['inputCounts']: p._integer(manifest['inputCounts'][key], key, allow_zero=True)
@@ -76,7 +87,7 @@ def receive(ledger, spool, manifest, item, *, expected_worker, engine_id,
             coordinator_origin, gate_generation, object_id, reader, derived_ids=None):
     """Durably publish one object; no complete-source or Viewer ACK is issued."""
     item, sha, scratch_id = require_fenced(ledger, item, expected_worker=expected_worker)
-    obj = _object(manifest, item, object_id)
+    obj = _object(manifest, item, object_id, derived_ids if derived_ids is not None else [])
     if derived_digest(manifest, derived_ids if derived_ids is not None else []) != item['derivedManifestSha256']:
         raise PolicyConflict('direct derived inventory changed')
     if not callable(getattr(reader, 'close', None)) or getattr(reader, 'closed', None) is not False:

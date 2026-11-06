@@ -40,6 +40,7 @@ class DirectWorkerReceiverTests(unittest.TestCase):
             generation=1, environment='production', manifestSha256=self.manifest['sha256'],
             derivedManifestSha256=receiver.derived_digest(self.manifest,self.derived_ids),
             inputBytes=self.manifest['totalBytes'], outputBudget=200, ttlSeconds=10, **self.worker)
+        if getattr(self,'limit_profile',None): self.item['limitProfile']=self.limit_profile
         self.ledger = self.open_ledger()
         self.observation = scratch.prepare(self.ledger,self.item,expected_worker=self.worker,worker_ready=True)
         directory = self.ledger.prepare_job_directory(self.observation['scratchReservationId'])/'direct-source'

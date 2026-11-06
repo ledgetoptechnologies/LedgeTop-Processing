@@ -49,7 +49,7 @@ class DirectWorkerBoundary:
 
     def put(self,headers,*,protected_transport,object_id,content_length,content_sha256,reader):
         self._authorize(headers,protected_transport)
-        obj=_object(self.manifest,self.item,object_id)
+        obj=_object(self.manifest,self.item,object_id,self.derived_ids)
         if (type(content_length) is not int or content_length!=obj['byteSize']
                 or content_sha256!=obj['sha256']):
             raise DirectBoundaryDenied('direct object metadata mismatch')

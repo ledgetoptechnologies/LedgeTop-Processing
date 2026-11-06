@@ -34,7 +34,7 @@ manifest or this receipt implements that protocol.
 ## Sizing for 10,000 photos
 
 This candidate uses one `sourceObjects` array and one `derivedObjects` array,
-up to 20,000 objects **combined** and an 8 MiB JCS body. It does not embed or
+up to 10,000 objects **each**, 20,000 combined, and an 8 MiB JCS body. It does not embed or
 duplicate the path inventory. The synthetic test builds 10,000 photo entries
 plus one derived entry within this budget; it does not establish installed
 upload speed, memory usage, database capacity or support for a 10,000-photo
@@ -51,6 +51,20 @@ implement consistent per-layer count, transfer, persisted metadata and response
 limits (or independently verified paginated commitments), then test real
 admission, closure, response, restart and exact replay end-to-end. Do not raise
 shared V2 limits merely to accommodate this unwired prototype.
+
+An isolated `ltds-direct-10k-each-v1` prototype adds distinct 10,000 source and
+10,000 derived ceilings plus a 16 MiB worker manifest bound. Its profile is
+included in the immutable worker scratch binding and signed worker closure;
+the prior direct profile retains its 10,000 combined ceiling and V2 is not
+changed. This is not a negotiated network implementation: coordinator and
+worker must authenticate supported profiles, persist the selected profile in
+the coordinator reservation and Viewer receipt, and reject downgrade or
+replay under a different profile. The actual route must separately enforce
+wire bounds before allocation and provide a verified pagination/response
+contract; the existing 4 MiB sender must not be silently bypassed. Full
+10,001-object durable transfer, disk quota, restart and resource-use tests
+remain outstanding; manifest validation currently rescans the inventory for
+each object and needs performance qualification or redesign.
 
 For design review, propose a maximum exact relative path length of 1,024 UTF-8
 bytes and 255 bytes per component, subject to the actual participating

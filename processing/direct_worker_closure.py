@@ -51,7 +51,7 @@ def verify_closure(ledger,spool,manifest,item,*,derived_ids,expected_worker,engi
     item,sha,scratch_id=require_fenced(ledger,item,expected_worker=expected_worker)
     if type(manifest) is not dict or type(manifest.get('objects')) is not list or not manifest['objects']:
         raise PolicyConflict('direct manifest invalid')
-    _object(manifest,item,manifest['objects'][0]['id'])
+    _object(manifest,item,manifest['objects'][0]['id'],derived_ids)
     if (derived_digest(manifest,derived_ids)!=item['derivedManifestSha256']
             or len(derived_ids)>=len(manifest['objects'])):
         raise PolicyConflict('direct derived inventory changed')
@@ -62,6 +62,8 @@ def verify_closure(ledger,spool,manifest,item,*,derived_ids,expected_worker,engi
         manifestSha256=item['manifestSha256'],derivedManifestSha256=item['derivedManifestSha256'],
         sourceObjectCount=len(manifest['objects'])-len(derived_ids),derivedObjectCount=len(derived_ids),
         localClosureComplete=True,sourceCustodyAccepted=False,processingAuthorized=False)
+    if 'limitProfile' in item:
+        result['limitProfile']=item['limitProfile']
     with NodeGate(engine_id) as gate:
         check_scope(ledger,spool,item,sha,scratch_id,gate,coordinator_origin=coordinator_origin,gate_generation=gate_generation)
         receipt_parent=spool.root.parent

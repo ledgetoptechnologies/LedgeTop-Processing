@@ -11,6 +11,7 @@ import json
 
 from . import reference_protocol as p
 from .scratch_policy import PolicyConflict
+from .direct_limits import PROFILE
 
 
 FIELDS = frozenset(('reservationId', 'jobId', 'attemptId', 'generation', 'environment',
@@ -20,8 +21,10 @@ DOMAIN = b'LTDS-DIRECT-WORKER-SCRATCH-BINDING-V1\0'
 
 
 def binding(value, *, expected_worker):
-    if type(value) is not dict or set(value) != FIELDS:
+    if type(value) is not dict or (set(value) != FIELDS and set(value) != FIELDS | {'limitProfile'}):
         raise ValueError('closed direct scratch binding required')
+    if 'limitProfile' in value and value['limitProfile'] != PROFILE:
+        raise ValueError('unknown direct scratch limit profile')
     for name in ('reservationId', 'jobId', 'attemptId', 'authorityId'):
         p._uuid(value[name], name)
     for name in ('nodeId', 'workerId', 'workerInstanceId'):

@@ -47,6 +47,24 @@ class DirectWorkerBoundaryTests(unittest.TestCase):
                 self.put('object-1',self.f.data,headers,protected)
         self.assertFalse((self.f.spool.root/self.f.item['jobId']).exists())
 
+    def test_profile_runs_local_boundary_and_signed_closure(self):
+        from processing.direct_limits import PROFILE
+        f=receiver_fixture.DirectWorkerReceiverTests();f.with_derived=True;f.limit_profile=PROFILE
+        f.setUp();self.addCleanup(f.doCleanups)
+        signer=WorkerClosureSigner(issuer_id='worker-issuer',key_id='worker-key',identity=f.worker,private_key=self.key)
+        boundary=DirectWorkerBoundary(ledger=f.ledger,spool=f.spool,manifest=f.manifest,item=f.item,
+            derived_ids=f.derived_ids,expected_worker=f.worker,engine_id=f.engine,
+            coordinator_origin=f.origin,gate_generation=1,bearer=self.bearer,signer=signer)
+        headers={'Authorization':'Bearer '+self.bearer,'X-Coordinator-Authority':f.worker['authorityId']}
+        for obj,data in ((f.manifest['objects'][0],f.data),(f.manifest['objects'][1],f.derived_data)):
+            observation=boundary.put(headers,protected_transport=True,object_id=obj['id'],
+                content_length=obj['byteSize'],content_sha256=obj['sha256'],reader=io.BytesIO(data))
+            self.assertFalse(observation['sourceCustodyAccepted'])
+        signed=boundary.complete(headers,protected_transport=True)
+        self.assertEqual(signed['closure']['limitProfile'],PROFILE)
+        self.assertFalse(signed['closure']['sourceCustodyAccepted'])
+        self.assertFalse(signed['closure']['processingAuthorized'])
+
     def test_exact_signed_receipt_is_durable_and_replays_after_restart(self):
         self.upload();first=self.complete()
         self.assertFalse(first['closure']['sourceCustodyAccepted']);self.assertFalse(first['closure']['processingAuthorized'])

@@ -24,8 +24,8 @@
         "originalPathInventorySha256": {"$ref": "#/$defs/hash"}, "sourceManifestSha256": {"$ref": "#/$defs/hash"},
         "derivedManifestSha256": {"$ref": "#/$defs/hash"}, "engineMappingSha256": {"$ref": "#/$defs/hash"},
         "workerClosureReceiptSha256": {"$ref": "#/$defs/hash"},
-        "sourceObjects": {"type": "array", "minItems": 1, "maxItems": 20000, "items": {"$ref": "#/$defs/object"}},
-        "derivedObjects": {"type": "array", "maxItems": 20000, "items": {"$ref": "#/$defs/object"}},
+        "sourceObjects": {"type": "array", "minItems": 1, "maxItems": 10000, "items": {"$ref": "#/$defs/object"}},
+        "derivedObjects": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/object"}},
         "retentionGuarantee": {"const": "until_explicit_source_release_v1"}
       }
     }

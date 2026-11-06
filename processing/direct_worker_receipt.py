@@ -4,6 +4,7 @@ import copy
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from . import reference_protocol as p
+from . import direct_limits
 
 DOMAIN=b'LTDS-DIRECT-WORKER-LOCAL-CLOSURE-V1\0'
 PROTOCOL='ltds-direct-worker-local-closure-v1'
@@ -19,7 +20,7 @@ class ReceiptRejected(ValueError):pass
 def validate_closure(value):
     """Closed exact-type local observation; not an upstream custody receipt."""
     try:
-        if type(value) is not dict or set(value)!=CLOSURE_FIELDS:
+        if type(value) is not dict or (set(value)!=CLOSURE_FIELDS and set(value)!=CLOSURE_FIELDS | {'limitProfile'}):
             raise ValueError()
         if (type(value['protocol']) is not str or value['protocol']!='ltds-direct-local-closure-v1'
                 or value['localClosureComplete'] is not True
@@ -36,8 +37,7 @@ def validate_closure(value):
         p._integer(value['generation'],'generation')
         p._integer(value['sourceObjectCount'],'sourceObjectCount')
         p._integer(value['derivedObjectCount'],'derivedObjectCount',allow_zero=True)
-        if value['sourceObjectCount']+value['derivedObjectCount']>p.MAX_OBJECTS:
-            raise ValueError()
+        direct_limits.counts(value.get('limitProfile'),value['sourceObjectCount'],value['derivedObjectCount'])
         return copy.deepcopy(value)
     except (ValueError,TypeError,KeyError):
         raise ReceiptRejected('invalid worker closure') from None

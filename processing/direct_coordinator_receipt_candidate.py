@@ -50,7 +50,7 @@ def validate_body(body):
         all_ids=set()
         for field in ('sourceObjects','derivedObjects'):
             objects=body[field]
-            if type(objects) is not list or len(objects)>MAX_OBJECTS or (field=='sourceObjects' and not objects):raise ValueError()
+            if type(objects) is not list or len(objects)>10000 or (field=='sourceObjects' and not objects):raise ValueError()
             previous=None
             for obj in objects:
                 if type(obj) is not dict or set(obj)!=OBJECT_FIELDS:raise ValueError()
