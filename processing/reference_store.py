@@ -374,6 +374,10 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                 length(CAST(profile AS BLOB))),0) FROM direct_intake_profile_bindings''').fetchone()[0]
         from .direct_handoff_census import verify_census as direct_handoff_census
         used += direct_handoff_census(db)
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_v2_reservations'").fetchone():
+            used += db.execute('''SELECT COALESCE(SUM(length(reservation_id)+length(job_id)+length(node_id)+
+                length(principal)+length(request_digest)+length(item_json)+length(proof_json)+
+                length(challenge_id)+length(state)),0) FROM direct_v2_reservations''').fetchone()[0]
         return used
 
     def _quota(self, db, extra_bytes=0):
@@ -574,7 +578,8 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                 nodes = [node for node in self.queue.node_ids if self.queue._staging_open(db, node)]
                 if node_id not in nodes:
                     return None
-            rows = db.execute("SELECT id,profile,environment FROM jobs WHERE status='queued' AND environment=? "
+            rows = db.execute("SELECT id,profile,environment FROM jobs WHERE (status='queued' OR "
+                              "(status='held' AND held_reason='direct_admission_pending')) AND environment=? "
                               "ORDER BY seq", (environment,)).fetchall()
             for item in rows:
                 profile = item["profile"]
@@ -659,6 +664,8 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
         if candidate is None or candidate['profile'] != PROFILE:
             return None
         row = self._row(db, candidate['id'])
+        if row['status'] != 'queued':
+            return None
         # Keep its position as a queue barrier, but never advertise it to an
         # ordinary worker before a direct-custody handoff exists.
         if 'directIntakeVersion' in json.loads(row['input_json']):

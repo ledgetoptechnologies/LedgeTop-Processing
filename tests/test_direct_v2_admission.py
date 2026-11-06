@@ -1,6 +1,10 @@
 """Unwired V2 direct admission, never a source-custody ACK."""
 import tempfile
 import unittest
+import base64
+import time
+import uuid
+from contextlib import closing
 from types import SimpleNamespace
 
 from processing.maintenance import Conflict
@@ -49,4 +53,65 @@ class DirectV2AdmissionTests(unittest.TestCase):
             self.store.max_metadata_bytes=used-attestation_bytes
             with self.assertRaisesRegex(Conflict,'metadata quota'):
                 self.store._quota(db)
+
+    def test_pending_job_reopens_unassigned_without_cluster_node(self):
+        with tempfile.TemporaryDirectory() as directory:
+            queue=Queue(directory,node_ids=('main',),reference_enabled=True)
+            queue.allowed_profiles.add(PROFILE);store=ReferenceStore(queue)
+            self.fixture.authority_id=queue.authority_id;validated=self.fixture.validate()
+            options=dict(self.options,authority_id=queue.authority_id)
+            job,_=store.submit_source_intake(validated,**options)
+            queue.close()
+            queue=Queue(directory,node_ids=('main',),reference_enabled=True)
+            try:
+                self.assertIsNone(queue.get(job['jobId'])['nodeId'])
+                self.assertEqual(queue.get(job['jobId'])['status'],'held')
+            finally:queue.close()
+
+    def test_pending_job_with_missing_mode_fails_restart_closed(self):
+        job,_=self.store.submit_source_intake(self.validated,**self.options)
+        self.queue.close()
+        import sqlite3
+        from pathlib import Path
+        with closing(sqlite3.connect(Path(self.temp.name)/'jobs.sqlite3')) as db, db:
+            db.execute('DROP TABLE reference_source_intake_modes')
+        with self.assertRaises(Conflict):
+            Queue(self.temp.name,reference_enabled=True)
+
+    def test_verified_worker_reservation_preserves_held_source(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from processing import direct_v2_inventory as inventory, direct_worker_scratch_v2 as scratch
+        from processing import direct_worker_fence_proof_v2 as fence, reference_protocol as p
+        from processing.direct_v2_reservation import DirectV2Reservations
+        from processing.reference_source_intake import INTAKE_FIELDS
+        job,_=self.store.submit_source_intake(self.validated,**self.options)
+        payload={key:self.validated[key] for key in INTAKE_FIELDS}
+        worker=dict(authorityId=self.queue.authority_id,nodeId='cluster',workerId='worker',workerInstanceId='instance')
+        prepared=inventory.prepare(payload,authenticated_principal='viewer-staging',environment='staging',
+            capability_fingerprint='a'*64,options_fingerprint=self.options['options_fingerprint'],
+            allowed_odm_options=set(),trusted_source_keys=self.fixture.trusted_keys,authority_id=self.queue.authority_id)
+        item=dict(reservationId=str(uuid.uuid4()),jobId=job['jobId'],attemptId=payload['submissionId'],generation=1,
+            environment='staging',**worker,sourceManifestSha256=prepared['sourceManifestSha256'],
+            derivedManifestSha256=prepared['derivedManifestSha256'],pipelineManifestSha256=prepared['pipelineManifestSha256'],
+            inventorySha256=prepared['inventorySha256'],objectCount=3,overheadBytesPerObject=65536,
+            inputBytes=sum(x['byteSize'] for k in ('sourceManifest','derivedManifest') for x in prepared[k]['objects']),
+            outputBudget=100,ttlSeconds=30)
+        digest=scratch.identity(item,expected_worker=worker)[1];challenge=str(uuid.uuid4());now=int(time.time())
+        body=dict(protocol=fence.PROTOCOL,challengeId=challenge,scratchBindingSha256=digest,pinId='a'*32,
+            gateGeneration=1,issuedAt=now,expiresAt=now+30,sourceCustodyAccepted=False,
+            transferAuthorized=False,processingAuthorized=False)
+        envelope=dict(protocol=fence.PROTOCOL,issuerId='issuer',keyId='key',body=body)
+        key=Ed25519PrivateKey.generate()
+        proof=dict(envelope,signature=base64.urlsafe_b64encode(key.sign(fence.DOMAIN+p.canonical_json(envelope))).decode().rstrip('='))
+        options=dict(payload=payload,authenticated_principal='viewer-staging',item=item,expected_worker=worker,
+            readiness_proof=proof,challenge_id=challenge,gate_generation=1,issuer_id='issuer',key_id='key',
+            worker_public_key=key.public_key(),trusted_source_keys=self.fixture.trusted_keys,
+            capability_fingerprint='a'*64,options_fingerprint=self.options['options_fingerprint'],allowed_odm_options=set())
+        reservations=DirectV2Reservations(self.store)
+        observation=reservations.reserve(**options)
+        self.assertFalse(observation['sourceCustodyAccepted']);self.assertFalse(observation['transferAuthorized'])
+        self.assertEqual(observation['nodeId'],'cluster');self.assertTrue(reservations.reserve(**options)['replayed'])
+        self.assertEqual(self.queue.get(job['jobId'])['status'],'held')
+        with self.assertRaises(Conflict):
+            self.queue.operator(job['jobId'],'resolve',dict(note='synthetic',workerStopped=True))
 
