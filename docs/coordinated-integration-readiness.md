@@ -25,21 +25,26 @@ not be added together or described as a complete suite.
 
 ### Recovery follow-on under review
 
-Claude's local `c59f600` recovery candidate is not yet selected into this review
-branch or installed. Independent static review confirms a remaining automatic
+Claude's finalized `c59f600` recovery candidate is selected at root `7be3ee2`;
+the independent integrated selection passed 521/521 Linux tests in 148.143
+seconds, no skips. See
+[the exact evidence boundary](evidence/integrated-source-recovery-20261106.md).
+It is not installed. Independent static review confirms a remaining automatic
 recovery gap: coordinator restart after claim but before transfer reservation
 commits leaves `source_recovery_claim_unreserved`; an initial lost claim reply
 has a related replay gap. The negative processing-recovery test deliberately
 expects that hold. Preserving this hold is safe, but does not satisfy unattended
 same-claim recovery. Claude yielded the follow-on to the Processing agent; the
-isolated design checkpoint is `e439115`, with implementation to follow his final
-tested-head handoff. Never requeue or invent a replacement claim to bypass it.
+isolated design checkpoint is `e439115`, and implementation beginning at
+`8824e53` is selected for review after the passing checkpoint. It is not yet
+qualified; fresh runtime capacity discovery remains under correction. Never
+requeue or invent a replacement claim to bypass it.
 
 The same review distinguishes delivery to a signed synthetic Viewer receipt
 from actual Viewer import, and uncertain native init/upload holds from automatic
 recovery. Those evidence boundaries remain explicit when combining candidates.
 The normal frozen-bootstrap-before-worker sequence has no static catalog-call
-cycle; the new isolated regression at `8eec4a4` is prepared but not yet run.
+cycle; the new isolated regression at `8eec4a4` passed in the 521-test selection.
 
 The selected cutover journal/projection/policy commits are now integrated at
 `2778a89`, with independent review. The pre-dispatch recovery, stale rejection
