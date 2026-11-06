@@ -11,6 +11,8 @@ from .direct_v2_snapshot_verifier import _decode
 SELECTED_DOMAIN=b'ltds-viewer-selected-frame-v1\0'
 EVIDENCE_DOMAIN=b'ltds-viewer-gcp-evidence-frame-v2\0'
 FILE_DOMAIN=b'ltds-viewer-generated-gcp-file-frame-v1\0'
+PHOTO=re.compile(r'\.(?:jpe?g|png|tiff?|dng|raw|heic)\Z',re.IGNORECASE|re.ASCII)
+AUXILIARY=re.compile(r'\.(?:txt|geojson|json|zip|las|laz)\Z',re.IGNORECASE|re.ASCII)
 
 
 def _lines(raw, hashes, *, total_bytes, limit, page_limit):
@@ -47,6 +49,16 @@ def verify_selected(intent, frames, *, source_records, pipeline_manifest):
     if (type(intent['selectedCount']) is not int or intent['selectedCount']!=len(selected)
             or len(selected)!=len(set(selected)) or len(selected)!=len(objects)):
         raise ValueError('selected closure invalid')
+    # Match Viewer's photo-first selection, preserving source order within
+    # each group. GCP selection remains unavailable in this candidate.
+    photos=[];inputs=[]
+    for source in source_records:
+        role=source['processingRole'];name=source['relativePath'];photo=bool(PHOTO.search(name))
+        if role in ('gcp_source','administrative') or (role=='auto' and not photo):continue
+        if role=='image' and not photo:raise ValueError('unsupported selected image')
+        if role=='provider_input' and not AUXILIARY.search(name):raise ValueError('unsupported provider input')
+        (photos if photo else inputs).append(source['datasetFileId'])
+    if selected!=photos+inputs:raise ValueError('selected source policy changed')
     for identifier,obj in zip(selected,objects):
         source=sources.get(identifier)
         if (source is None or source['processingRole'] in ('gcp_source','administrative')
