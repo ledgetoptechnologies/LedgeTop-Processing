@@ -304,7 +304,15 @@ class FreezeGate:
         """Called under Queue's transaction/lifecycle mutex before yielding DB."""
         self._check()
         row = self._row(db)
+        def handoff_counter_authorized(action, first, second, database, source):
+            # A counter is mutated only by the exact validated AFTER INSERT
+            # trigger. last_insert_rowid alone is replayable on one connection.
+            if (action == sqlite3.SQLITE_UPDATE and first == 'direct_handoff_sessions'
+                    and second == 'object_count' and source != 'direct_handoff_object_insert'):
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
         if getattr(self._local, 'control', False):
+            db.set_authorizer(handoff_counter_authorized)
             return
         token = getattr(self._local, 'operation', None)
         if token is not None and self._active.get(token) == threading.get_ident():
@@ -313,8 +321,10 @@ class FreezeGate:
                     or saved['start_revision'] > row['revision']):
                 raise CoordinatorFrozen('coordinator_operation_ownership_uncertain')
             if row['phase'] in ('open', 'intent', 'draining'):
+                db.set_authorizer(handoff_counter_authorized)
                 return
         if row['phase'] == 'open':
+            db.set_authorizer(handoff_counter_authorized)
             return
         # Pure SELECTs and transaction bookkeeping still work. SQLite enforces
         # this on every coordinator DB connection, including background writers.
@@ -326,6 +336,8 @@ class FreezeGate:
                   sqlite3.SQLITE_ALTER_TABLE, sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH}
         denied_by_gate = [False]
         def authorize(action, first, second, database, source):
+            if handoff_counter_authorized(action,first,second,database,source) != sqlite3.SQLITE_OK:
+                return sqlite3.SQLITE_DENY
             startup = getattr(self._local, 'startup', None)
             if startup is not None and threading.get_ident() == self.queue._startup_thread:
                 # A real runtime's constructor/start may add only this reviewed

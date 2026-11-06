@@ -175,9 +175,12 @@ class HandoffTests(unittest.TestCase):
                 self.fixture.store._metadata_used_bytes(db)
 
     def test_counter_corruption_is_detected_on_session_reopen(self):
+        import sqlite3
         from processing.direct_handoff_census import TRIGGERS
         self.sender.put=Mock(return_value=self.observation());self.send()
-        with self.fixture.queue._db() as db:
+        # A raw, out-of-band writer models the explicitly untrusted DB-control
+        # boundary, bypassing the Queue connection authorizer.
+        with sqlite3.connect(self.fixture.queue.path) as db:
             db.execute('DROP TRIGGER direct_handoff_session_count')
             db.execute('UPDATE direct_handoff_sessions SET object_count=0')
             db.execute(TRIGGERS['direct_handoff_session_count'])
@@ -190,8 +193,22 @@ class HandoffTests(unittest.TestCase):
         with self.fixture.queue._db() as db:
             for sql in ('UPDATE direct_handoff_sessions SET object_count=0',
                         'UPDATE direct_handoff_sessions SET object_count=object_count+1'):
-                with self.assertRaisesRegex(sqlite3.IntegrityError,'counter transition invalid'):
+                with self.assertRaises(sqlite3.DatabaseError):
                     db.execute(sql)
+
+    def test_last_insert_rowid_cannot_replay_counter_in_same_connection(self):
+        import sqlite3
+        with self.fixture.queue._coordinator_freeze.operation('source-io'), self.fixture.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            self.handoff._session(db)
+            db.execute('INSERT INTO direct_handoff_objects VALUES(?,?,?,?,?,NULL)',
+                       (self.sender._item['reservationId'],self.obj['id'],self.obj['sha256'],self.obj['byteSize'],'intent'))
+            self.assertEqual(db.execute('SELECT object_count FROM direct_handoff_sessions').fetchone()[0],1)
+            with self.assertRaises(sqlite3.DatabaseError):
+                db.execute('UPDATE direct_handoff_sessions SET object_count=object_count+1')
+            with self.assertRaises(sqlite3.DatabaseError):
+                db.execute('UPDATE direct_handoff_sessions SET object_count=object_count+1 WHERE reservation=?',
+                           (self.sender._item['reservationId'],))
 
     def test_replace_cannot_erase_observed_object(self):
         import sqlite3
