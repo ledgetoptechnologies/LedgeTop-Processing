@@ -5,6 +5,7 @@ import subprocess
 import sys
 import json
 from pathlib import Path
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from processing import direct_worker_readiness_journal_v2 as journal
@@ -58,6 +59,22 @@ class ReadinessJournalTests(unittest.TestCase):
     def test_replay_refuses_missing_pin_and_expired_proof(self):
         f,kwargs=self.setup_fixture();proof=journal.issue(f.ledger,f.spool,f.item,**kwargs)
         with patch('processing.direct_worker_fence_proof_v2.time.time',return_value=1000):
-            with self.assertRaises(ValueError):journal.issue(f.ledger,f.spool,f.item,**kwargs)
+            with self.assertRaises(journal.ReadinessIssueUncertain):journal.issue(f.ledger,f.spool,f.item,**kwargs)
+        with f.ledger._transaction() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
         f.ledger._retire_direct_writer(f.observation['scratchReservationId'],proof['body']['pinId'])
         with self.assertRaises(journal.ReadinessIssueUncertain):journal.issue(f.ledger,f.spool,f.item,**kwargs)
+
+    def test_intent_commit_outcome_is_uncertain_and_replay_holds(self):
+        f,kwargs=self.setup_fixture();original=f.ledger._transaction;calls=[]
+        @contextmanager
+        def lose_commit_reply(*args,**options):
+            with original(*args,**options) as db:
+                yield db
+            calls.append(True)
+            if len(calls)==2:raise RuntimeError('synthetic committed intent teardown failure')
+        with patch.object(f.ledger,'_transaction',side_effect=lose_commit_reply):
+            with self.assertRaises(journal.ReadinessIssueUncertain):journal.issue(f.ledger,f.spool,f.item,**kwargs)
+        with self.assertRaises(journal.ReadinessIssueUncertain):journal.issue(f.ledger,f.spool,f.item,**kwargs)
+        with f.ledger._transaction() as db:
+            self.assertEqual(db.execute('SELECT state FROM direct_readiness_issues').fetchone()[0],'issuing')

@@ -38,25 +38,31 @@ def issue(ledger, spool, item, *, principal, expected_worker, engine_id,
     request_sha=p.digest(request)
     verify_args=dict(expected_item=item,expected_worker=expected_worker,challenge_id=challenge_id,
         gate_generation=gate_generation,issuer_id=issuer_id,key_id=key_id,public_key=pub)
-    replay_wire=None
-    with ledger._transaction() as db:
-        row=db.execute('SELECT * FROM direct_readiness_issues WHERE challenge=?',(challenge_id,)).fetchone()
-        if row is not None:
-            if (row['reservation'],row['request_sha'])!=(scratch_id,request_sha):
-                raise PolicyConflict('readiness issue replay differs')
-            if row['state']!='issued':raise ReadinessIssueUncertain('readiness issuance requires reconciliation')
-            replay_wire=row['proof']
-        else:
-            count=db.execute('SELECT COUNT(*) FROM direct_readiness_issues').fetchone()[0]
-            if count>=4096:raise PolicyConflict('readiness issue capacity exceeded')
-            outstanding=db.execute('SELECT COALESCE(SUM(remaining),0) FROM reservations').fetchone()[0]
-            outstanding+=db.execute('SELECT COALESCE(SUM(bytes),0) FROM control_charges').fetchone()[0]
-            for table in ('direct_writer_pins','direct_v2_readiness_uses','direct_custody_fences','direct_worker_grants','direct_readiness_issues'):
-                outstanding+=db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]*DIRECT_WRITER_PIN_ALLOWANCE
-            if ledger.probe(ledger.root)-outstanding-ledger.floor<DIRECT_WRITER_PIN_ALLOWANCE:
-                raise PolicyConflict('readiness issue budget unavailable')
-            db.execute("INSERT INTO direct_readiness_issues VALUES(?,?,?,'issuing',NULL)",(challenge_id,scratch_id,request_sha))
-            ledger._latch(db,directReadinessIssueVersion=1,directReadinessIssueCount=count+1)
+    replay_wire=None; intent_may_exist=False
+    try:
+        with ledger._transaction() as db:
+            row=db.execute('SELECT * FROM direct_readiness_issues WHERE challenge=?',(challenge_id,)).fetchone()
+            if row is not None:
+                if (row['reservation'],row['request_sha'])!=(scratch_id,request_sha):
+                    raise PolicyConflict('readiness issue replay differs')
+                if row['state']!='issued':raise ReadinessIssueUncertain('readiness issuance requires reconciliation')
+                replay_wire=row['proof']
+            else:
+                count=db.execute('SELECT COUNT(*) FROM direct_readiness_issues').fetchone()[0]
+                if count>=4096:raise PolicyConflict('readiness issue capacity exceeded')
+                outstanding=db.execute('SELECT COALESCE(SUM(remaining),0) FROM reservations').fetchone()[0]
+                outstanding+=db.execute('SELECT COALESCE(SUM(bytes),0) FROM control_charges').fetchone()[0]
+                for table in ('direct_writer_pins','direct_v2_readiness_uses','direct_custody_fences','direct_worker_grants','direct_readiness_issues'):
+                    outstanding+=db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0]*DIRECT_WRITER_PIN_ALLOWANCE
+                if ledger.probe(ledger.root)-outstanding-ledger.floor<DIRECT_WRITER_PIN_ALLOWANCE:
+                    raise PolicyConflict('readiness issue budget unavailable')
+                intent_may_exist=True
+                db.execute("INSERT INTO direct_readiness_issues VALUES(?,?,?,'issuing',NULL)",(challenge_id,scratch_id,request_sha))
+                ledger._latch(db,directReadinessIssueVersion=1,directReadinessIssueCount=count+1)
+    except Exception:
+        if intent_may_exist:
+            raise ReadinessIssueUncertain('readiness issuance requires reconciliation') from None
+        raise
     if replay_wire is not None:
         proof=json.loads(replay_wire)
         with NodeGate(engine_id) as gate:
@@ -70,7 +76,10 @@ def issue(ledger, spool, item, *, principal, expected_worker, engine_id,
                                           (proof['body']['pinId'],scratch_id)).fetchone()
                         or db.execute('SELECT 1 FROM direct_v2_readiness_uses WHERE challenge=?',(challenge_id,)).fetchone()):
                     raise ReadinessIssueUncertain('readiness replay requires reconciliation')
-                verify(proof,now=int(time.time()),**verify_args)
+                try:
+                    verify(proof,now=int(time.time()),**verify_args)
+                except ValueError:
+                    raise ReadinessIssueUncertain('readiness replay requires reconciliation') from None
         return proof
     try:
         proof=issue_fenced(ledger,spool,item,expected_worker=expected_worker,engine_id=engine_id,
