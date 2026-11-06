@@ -1,4 +1,5 @@
 from dataclasses import replace
+import ast
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ from processing.node_gate import NodeGate, GateError
 from processing.scratch_policy import LeaseLapsed, ScratchLedger
 from processing.treedar_engine import (TreeDarEngine, TreeDarConfig, TreeDarHeld,
     SOURCE_FILES, REQUIRED_OUTPUTS, source_digest, _entries)
+from processing.reference_treedar_bundle import NATIVE_FILES
 
 
 class FakeDocker:
@@ -128,12 +130,25 @@ class TreeDarEngineTests(unittest.TestCase):
             path.write_bytes(b'synthetic output')
             relative = 'run/' + name
             objects.append(dict(id='treedar-'+hashlib.sha256(relative.encode()).hexdigest()[:32],
-                role='report',byteSize=path.stat().st_size,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),relativePath=relative))
+                role=NATIVE_FILES[name][0],byteSize=path.stat().st_size,sha256=hashlib.sha256(path.read_bytes()).hexdigest(),relativePath=relative))
         admission = dict(jobId=self.job['jobId'],generation=1,environment='staging',objectId='lidar1',
             objectSha256=self.obj['sha256'],byteSize=3,sourceKind='synthetic_lidar',verticalUnits='metre',verticalDatum='synthetic_local')
         (output / 'proof.json').write_bytes(p.canonical_json(dict(schemaVersion=1,job=identity['job'],engineVersion='0.0.1',admission=admission,objects=objects)))
         self.docker.state = 'exited'
         return output
+
+    def test_required_fixture_roles_match_real_treedar_bootstrap(self):
+        # Read the checked-in constant without importing TreeDar's heavyweight
+        # geospatial dependencies. The bootstrap uses ROLES except manifest.
+        path = Path(__file__).resolve().parents[1] / 'engines/treedar/src/treedar/runinfo.py'
+        module = ast.parse(path.read_text(encoding='utf-8'))
+        assignments = [node for node in module.body if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == 'ROLES' for target in node.targets)]
+        self.assertEqual(len(assignments), 1)
+        roles = ast.literal_eval(assignments[0].value)
+        self.assertEqual({name: NATIVE_FILES[name][0] for name in REQUIRED_OUTPUTS},
+            {name: roles[name][0] if name != 'manifest.json' else 'engine_manifest'
+             for name in REQUIRED_OUTPUTS})
 
     def test_lapsed_unfenced_lease_commits_nothing(self):
         real=self.ledger.clock;self.ledger.clock=lambda:real()+10**6
