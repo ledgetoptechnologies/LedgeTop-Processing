@@ -45,9 +45,14 @@ Original TAR independently revalidated against keyed baseline: 202 files,
 TAR proves retained bytes, never restore permission or substitute authority.
 
 The authorized unchanged known-success inner cleanup followed worker closure;
-inner task-label container/volume inventories were empty. Exact stopped outer
-and artifact volume remain for independent root review; Windows proof remains.
-Prepared separate rollback dcec is still unexecuted pending that review.
+inner task-label container/volume inventories were empty. After root independently
+reviewed the result and rehashed all 277 proof files, exact stopped outer was
+revalidated for image/operation/PID0/exit0/no-OOM and removed. A fresh FULL closed
+all-container named/bind-parent/child alias census proved zero references before
+the exact owned artifact volume was removed without force. Both task-label
+container/volume inventories were empty; Windows proof remains unchanged.
+Root separately authorized fresh rollback dcec after this closure; its outcome
+is a separate receipt and is not implied by this successful forward.
 
 Scope: actual local Docker, explicit fixture enrollment/Desktop mount seams,
 synthetic original/native engine/coordinator transport, actual factory/TLS
