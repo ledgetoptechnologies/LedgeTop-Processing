@@ -221,6 +221,18 @@ class RuntimePreparationTests(unittest.TestCase):
         trust=json.loads(new['public-trust.json'])
         self.assertEqual(set(trust['inputBindings'][0]),{'bindingSha256','gateSha256'})
 
+    def test_disabled_direct_preparation_contains_only_references(self):
+        key=Ed25519PrivateKey.generate().public_key().public_bytes(s.Encoding.PEM,s.PublicFormat.SubjectPublicKeyInfo).decode('ascii')
+        direct={'enabled':False,'nodes':{'main':dict(origin='https://worker.example:9443',connectIp='192.0.2.1',
+            caFile='/run/direct/ca.pem',clientCertFile='/run/direct/client.pem',clientKeyFile='/run/direct/client.key',
+            bearerFile='/run/direct/bearer',issuerId='worker-main',keyId='key-main',workerPublicKeyPem=key)}}
+        self.spec['directWorkers']=direct
+        result=prep.compose(self.spec)
+        self.assertEqual(json.loads(result['final.json'])['directWorkers'],direct)
+        self.assertNotIn('directWorkers',json.loads(result['bootstrap.json']))
+        self.spec['directWorkers']['enabled']=True
+        with self.assertRaises(Exception):prep.compose(self.spec)
+
     def test_binding_identity_and_profile_changes_refuse_before_output(self):
         mutations=(lambda b:b.update(schemaVersion=2),lambda b:b.update(installed=True),
             lambda b:b['gate'].update(path='/tmp/foreign-gate.json'),
