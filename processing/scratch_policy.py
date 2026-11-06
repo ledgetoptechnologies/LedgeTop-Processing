@@ -41,6 +41,8 @@ TRANSFER_FENCE_VERSION = 1
 DIRECT_WRITER_VERSION = 2
 DIRECT_CUSTODY_VERSION = 1
 MAX_DIRECT_CUSTODY_FENCES = 4096
+CUSTODY_SCHEMA = '''CREATE TABLE IF NOT EXISTS direct_custody_fences (
+ reservation TEXT PRIMARY KEY, binding_sha TEXT NOT NULL, closure_sha TEXT NOT NULL)'''
 CUSTODY_TRIGGERS = (
     "CREATE TRIGGER IF NOT EXISTS direct_custody_no_replace BEFORE INSERT ON direct_custody_fences WHEN EXISTS (SELECT 1 FROM direct_custody_fences WHERE reservation=NEW.reservation) BEGIN SELECT RAISE(ABORT,'direct custody is retained'); END",
     "CREATE TRIGGER IF NOT EXISTS direct_custody_no_update BEFORE UPDATE ON direct_custody_fences BEGIN SELECT RAISE(ABORT,'direct custody is retained'); END",
@@ -173,8 +175,6 @@ class ScratchLedger:
                 CREATE TABLE IF NOT EXISTS unstarted_settlements (reservation TEXT PRIMARY KEY, settled_at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS direct_writer_pins (
                   id TEXT PRIMARY KEY, reservation TEXT UNIQUE NOT NULL);
-                CREATE TABLE IF NOT EXISTS direct_custody_fences (
-                  reservation TEXT PRIMARY KEY, binding_sha TEXT NOT NULL, closure_sha TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS direct_v2_readiness_uses (
                   challenge TEXT PRIMARY KEY, reservation TEXT NOT NULL, proof_sha256 TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS reservations (
@@ -210,6 +210,7 @@ class ScratchLedger:
                     db.execute(statement)
             for trigger in V2_READY_TRIGGERS:
                 db.execute(trigger)
+            db.execute(CUSTODY_SCHEMA)
             for trigger in CUSTODY_TRIGGERS:
                 db.execute(trigger)
             for table, name, declaration in (
@@ -280,6 +281,9 @@ class ScratchLedger:
         if config is None:raise PolicyConflict('accounting configuration missing')
         try: observed_config=json.loads(config[0])
         except (TypeError,ValueError):raise PolicyConflict('unknown accounting version or ledger policy') from None
+        table=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='direct_custody_fences'").fetchone()
+        if table is None or ' '.join(table['sql'].split())!=' '.join(CUSTODY_SCHEMA.replace(' IF NOT EXISTS','').split()):
+            raise PolicyConflict('direct custody fence schema changed')
         custody=db.execute('SELECT reservation,binding_sha,closure_sha FROM direct_custody_fences LIMIT ?',
                            (MAX_DIRECT_CUSTODY_FENCES+1,)).fetchall()
         for sql in CUSTODY_TRIGGERS:

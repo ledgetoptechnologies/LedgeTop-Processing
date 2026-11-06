@@ -20,6 +20,14 @@ delete originals. No coordinator receipt is issued and no Viewer behavior change
 The scratch ledger fences only its own cooperative APIs. It does not exclude
 an older already-running binary, external filesystem writers or deletion
 outside the ledger, and the logical metadata allowance is not a disk quota.
+The cleanup executor `scratch_cleanup.py` requires a ledger cleanup intent
+before its rename/unlink; fence acquisition rejects every prior intent and
+ledger eligibility cannot issue another while retained. `source_spool.py`
+also removes owned partial names during write recovery and directory audit,
+and closure receipt publication removes only its own temporary file. Those
+direct filesystem operations are not generally fenced by the new ledger
+record: exclusive spool ownership and all possible callers must be qualified
+before treating the fence as custody.
 Worker and coordinator identity, online quiescence, power-loss durability,
 actual installed mount and restart behavior, engine-input preservation, and an
 authenticated explicit release protocol remain unqualified. Never enable or

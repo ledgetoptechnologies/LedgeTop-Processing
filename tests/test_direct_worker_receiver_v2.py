@@ -363,6 +363,29 @@ class WorkerV2Tests(unittest.TestCase):
             ScratchLedger(self.root/'private'/'ledger.sqlite',self.root,
                 capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
 
+    def test_retained_custody_journal_schema_change_is_rejected(self):
+        scratch_id=self.observation['scratchReservationId']
+        self.ledger._establish_direct_custody_fence(scratch_id,self.readiness['body']['pinId'],
+            binding_sha=self.observation['bindingSha256'],closure_sha='b'*64,
+            expected_settings=scratch.settings(self.item,scratch_id))
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            db.execute('ALTER TABLE direct_custody_fences ADD COLUMN unexpected TEXT');db.commit()
+        with self.assertRaisesRegex(PolicyConflict,'schema changed'):
+            ScratchLedger(self.root/'private'/'ledger.sqlite',self.root,
+                capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
+
+    @unittest.skipUnless(os.environ.get('LTDS_OLD_SCRATCH_SOURCE'),'previous scratch source fixture not supplied')
+    def test_previous_scratch_binary_refuses_retained_custody_ledger(self):
+        scratch_id=self.observation['scratchReservationId']
+        self.ledger._establish_direct_custody_fence(scratch_id,self.readiness['body']['pinId'],
+            binding_sha=self.observation['bindingSha256'],closure_sha='b'*64,
+            expected_settings=scratch.settings(self.item,scratch_id))
+        spec=importlib.util.spec_from_file_location('old_scratch_custody',os.environ['LTDS_OLD_SCRATCH_SOURCE'])
+        old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)
+        with self.assertRaises(old.PolicyConflict):
+            old.ScratchLedger(self.root/'private'/'ledger.sqlite',self.root,
+                capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
+
     @unittest.skipUnless(os.environ.get('LTDS_OLD_GATE_SOURCE'),'old gate source fixture not supplied')
     def test_old_gate_refuses_v2_upload_hold(self):
         self.put_zero()
