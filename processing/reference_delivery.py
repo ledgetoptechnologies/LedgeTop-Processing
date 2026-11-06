@@ -53,6 +53,18 @@ class DeliveryReceiver:
         if 'odm' in requested and sum(
                 obj['role'] == 'odm_archive' and obj['byteSize'] > 0 for obj in result['objects']) != 1:
             raise Conflict('ODM delivery requires the original archive')
+        if 'treedar' in requested:
+            # Never acknowledge a typed result the Viewer cannot accept: once
+            # the worker receives this receipt its execution slot is released.
+            # Preserve the internal manifest and its digest; this check only
+            # validates its complete, ordered Viewer projection.
+            from .viewer_result_manifest import derive_viewer_result_manifest, ViewerManifestRejected
+            try:
+                derive_viewer_result_manifest(result, job_id=job['jobId'],
+                    generation=job['generation'], environment=job['environment'],
+                    pipeline_digest=job['pipelineDigest'])
+            except ViewerManifestRejected:
+                raise Conflict('TreeDar delivery requires the complete typed result closure') from None
         # Authenticate even exact delivery replays, before exposing old receipts.
         self.store.record_worker_result(job['jobId'], result, claim_token=claim_token,
             node_id=node_id, worker_id=worker_id, worker_instance_id=worker_instance_id,

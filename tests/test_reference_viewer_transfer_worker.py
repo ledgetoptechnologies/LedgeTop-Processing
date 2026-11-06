@@ -161,9 +161,36 @@ class ReferenceViewerTransferWorkerTests(unittest.TestCase):
                 dict(id='odm-archive', role='odm_archive', byteSize=len(payloads['odm-archive']),
                     sha256=hashlib.sha256(payloads['odm-archive']).hexdigest())])
         result['resultManifestSha256'] = __import__('processing.reference_protocol', fromlist=['digest']).digest(result)
-        store.record_worker_result(job['jobId'], result, claim_token=claim['claimToken'], **binding)
-        store.queue.complete(job['jobId'], {'claimToken': claim['claimToken'], 'status': 'succeeded', 'result': {}})
-        store.update_phase(job['jobId'], 'awaiting_acceptance')
+        from processing.reference_delivery import DeliveryReceiver, BINDING
+        from processing.reference_protocol import digest
+        receiver = DeliveryReceiver(store)
+        def envelope_for(manifest):
+            payload = dict(jobId=job['jobId'], generation=job['generation'],
+                environment=job['environment'], inputManifestSha256=job['manifestSha256'],
+                pipelineDigest=job['pipelineDigest'], resultManifestSha256=manifest['resultManifestSha256'],
+                resultManifest=manifest, terminalState='succeeded')
+            return dict(outboxId=digest({key: payload[key] for key in BINDING}),
+                payloadSha256=digest(payload), payload=payload)
+        for defect in ('missing', 'duplicate', 'empty', 'unknown'):
+            incomplete = copy.deepcopy(result)
+            if defect == 'missing':
+                incomplete['objects'] = [obj for obj in incomplete['objects'] if obj['role'] != 'ground_model']
+            elif defect == 'duplicate':
+                duplicate = copy.deepcopy(incomplete['objects'][0]); duplicate['id'] = 'another-ground-model'
+                incomplete['objects'].append(duplicate)
+            elif defect == 'empty':
+                incomplete['objects'][0]['byteSize'] = 0
+            else:
+                incomplete['objects'][0]['role'] = 'unrecognized-role'
+            incomplete['resultManifestSha256'] = digest({k:v for k,v in incomplete.items() if k != 'resultManifestSha256'})
+            with self.subTest(defect=defect), self.assertRaisesRegex(Conflict, 'complete typed result closure'):
+                receiver.receive(envelope_for(incomplete), claim_token=claim['claimToken'], **binding)
+            self.assertEqual(store.queue.get(job['jobId'])['status'], 'running')
+            self.assertEqual(store.get(job['jobId'])['phase'], 'processing')
+        receipt = receiver.receive(envelope_for(result), claim_token=claim['claimToken'], **binding)
+        self.assertEqual(receipt['acceptedObjectIds'], sorted(obj['id'] for obj in result['objects']))
+        self.assertEqual(store.get(job['jobId'])['phase'], 'awaiting_acceptance')
+        self.assertEqual(receiver.receive(envelope_for(result), claim_token=claim['claimToken'], **binding), receipt)
         sender = FakeSender(self.signer)
         worker = ReferenceViewerTransferWorker(store, sender,
             trusted_receipt_keys=self.signer.trusted_keys, clock=lambda: self.clock_value)
