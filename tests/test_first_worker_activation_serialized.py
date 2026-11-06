@@ -33,6 +33,8 @@ UID=GID=10001
 class SerializedServiceBodyTests(unittest.TestCase):
     def setUp(self):
         self.assertTrue(os.path.ismount('/opt'),'qualification requires task-owned tmpfs /opt')
+        self.assertFalse(os.statvfs('/opt').f_flag & os.ST_NOEXEC,
+                         'copied interpreter requires explicit exec on task-owned tmpfs /opt')
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.base=Path(self.temp.name);self.base.chmod(0o750);os.chown(self.base,0,GID)
         self.home=self.base/'service-home';self.home.mkdir(mode=0o700);os.chown(self.home,UID,GID)
