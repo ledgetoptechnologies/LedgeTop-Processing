@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import select
+import stat
 import sqlite3
 import subprocess
 import sys
@@ -52,12 +53,15 @@ class IsolatedWriterRecoveryTests(unittest.TestCase):
                 # The confined child is still alive: no recovery or pin release.
                 self.assertIsNone(child.poll())
                 with closing(connect()) as db:self.assertEqual(db.execute('SELECT state FROM operation').fetchone()[0],'running')
+                retired_child=child
                 child.kill();child.communicate(timeout=3);self.assertIsNotNone(child.returncode);child=None
 
-                def recover(operation_id,pin_id):
+                def recover(operation_id,pin_id,retired):
                     # Caller is this trusted supervisor after exact child wait;
                     # seccomp denied fork, Unix socket creation/FD passing,
                     # ptrace, pidfd extraction and io_uring in that child.
+                    if retired is not retired_child or retired.poll() is None:
+                        raise ValueError('confined writer quiescence not established')
                     with closing(connect()) as db:
                         db.execute('BEGIN IMMEDIATE');row=db.execute('SELECT * FROM operation WHERE id=?',(operation_id,)).fetchone()
                         if row is None or row['pin']!=pin_id:raise ValueError('operation binding changed')
@@ -69,8 +73,11 @@ class IsolatedWriterRecoveryTests(unittest.TestCase):
                         try:current=os.stat(partial.name,dir_fd=directory,follow_symlinks=False)
                         except FileNotFoundError:current=None
                         if current is not None:
-                            if (current.st_dev,current.st_ino)!=(row['dev'],row['ino']):raise ValueError('partial identity changed')
+                            if ((current.st_dev,current.st_ino)!=(row['dev'],row['ino'])
+                                    or not stat.S_ISREG(current.st_mode) or current.st_nlink!=1
+                                    or current.st_uid!=os.geteuid()):raise ValueError('partial identity changed')
                             os.unlink(partial.name,dir_fd=directory)
+                        elif row['state']!='recovering':raise ValueError('partial disappearance uncertain')
                         os.fsync(directory)
                     finally:os.close(directory)
                     receipt=dict(operationId=operation_id,pin=pin_id,partialRetired=True,sourceCustodyAccepted=False)
@@ -81,12 +88,13 @@ class IsolatedWriterRecoveryTests(unittest.TestCase):
                         if changed!=1:raise ValueError('recovery outcome uncertain')
                         db.commit()
                     return receipt
-                receipt=recover(op,pin);self.assertFalse(receipt['sourceCustodyAccepted'])
+                receipt=recover(op,pin,retired_child);self.assertFalse(receipt['sourceCustodyAccepted'])
                 self.assertFalse(partial.exists())
                 # Reopen the journal after the committed recovery: exact replay
                 # must return the same outcome without a second deletion.
-                self.assertEqual(recover(op,pin),receipt)
-                with self.assertRaises(ValueError):recover(op,uuid.uuid4().hex)
+                self.assertEqual(recover(op,pin,retired_child),receipt)
+                with self.assertRaises(ValueError):recover(op,uuid.uuid4().hex,retired_child)
+                with self.assertRaises(ValueError):recover(op,pin,None)
                 child=start('complete');self.assertEqual(line(child),b'READY\n')
                 child.stdin.write(b'abc');child.stdin.flush();self.assertEqual(line(child),b'COMPLETE\n')
                 child.stdin.close();child.stdin=None;_,error=child.communicate(timeout=3)

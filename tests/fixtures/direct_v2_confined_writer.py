@@ -28,6 +28,14 @@ for operation in (lambda:os.fork(),lambda:socket.socket(socket.AF_UNIX,socket.SO
     except OSError as error:
         if error.errno!=errno.EPERM:raise
     else:raise RuntimeError('delegation restriction failed')
+libc=ctypes.CDLL(None,use_errno=True)
+libc.syscall.restype=ctypes.c_long
+for name in ('sendmsg','ptrace','pidfd_getfd','io_uring_setup'):
+    number=lib.seccomp_syscall_resolve_name(name.encode())
+    if number>=0:
+        ctypes.set_errno(0)
+        result=libc.syscall(number,-1,0,0,0,0,0)
+        if result!=-1 or ctypes.get_errno()!=errno.EPERM:raise RuntimeError('syscall isolation failed')
 path=sys.argv[1];mode=sys.argv[2]
 fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
 try:
