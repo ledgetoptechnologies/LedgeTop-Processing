@@ -64,13 +64,19 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
                     inventory=f.index,item=f.item,reservation_binding=f.reservation,expected_worker=f.worker,
                     issuer_id='worker-issuer',key_id='worker-key',worker_public_key=f.proof_key.public_key(),
                     idle_timeout=2,total_timeout=5)
+                from processing.direct_v2_handoff_journal import DirectV2Handoff
+                token='synthetic-viewer-handoff-token-0123456789'
+                handoff=DirectV2Handoff(store,sender,principal='viewer-staging',bearer=token)
                 for object_id,data in ((source_fixture.GCP_ID,b''),(source_fixture.IMAGE_ID,b'abc'),
                                        ('gcp_'+f.item['attemptId'],b'1,2,3\n')):
-                    observed=sender.put(object_id,io.BytesIO(data))
+                    observed=handoff.send_object(token,protected_transport=True,object_id=object_id,reader=io.BytesIO(data))
                     self.assertTrue(observed['localObjectDurable']);self.assertFalse(observed['sourceCustodyAccepted'])
-                closure=sender.complete()
+                closure=handoff.complete(token,protected_transport=True)
                 self.assertEqual((closure['closure']['sourceObjectCount'],closure['closure']['derivedObjectCount']),(2,1))
                 self.assertFalse(closure['closure']['sourceCustodyAccepted'])
+                with queue._db() as db:
+                    self.assertEqual(db.execute("SELECT state FROM direct_v2_handoff_sessions").fetchone()[0],'closure_observed')
+                    self.assertEqual(db.execute("SELECT count(*) FROM direct_v2_handoff_objects WHERE state='observed'").fetchone()[0],3)
                 self.assertEqual(queue.get(job['jobId'])['status'],'held')
             finally:
                 server.shutdown();server.server_close();thread.join(3);self.assertFalse(thread.is_alive())

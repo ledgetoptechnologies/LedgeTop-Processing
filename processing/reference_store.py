@@ -378,6 +378,8 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
                 length(CAST(profile AS BLOB))),0) FROM direct_intake_profile_bindings''').fetchone()[0]
         from .direct_handoff_census import verify_census as direct_handoff_census
         used += direct_handoff_census(db)
+        from .direct_v2_handoff_journal import metadata_bytes as direct_v2_handoff_bytes
+        used += direct_v2_handoff_bytes(db)
         from .direct_v2_reservation_schema import metadata_bytes as direct_v2_reservation_metadata
         used += direct_v2_reservation_metadata(db)
         return used
