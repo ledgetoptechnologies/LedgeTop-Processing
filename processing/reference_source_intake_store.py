@@ -1081,7 +1081,8 @@ class ReferenceSourceIntakeMethods:
     def submit_source_intake(self, validated, *, capability_fingerprint,
                              options_fingerprint, allowed_odm_options,
                              source_spool, trusted_source_keys, authority_id,
-                             available_engines=('odm', 'treedar')):
+                             available_engines=('odm', 'treedar'), ingress_mode='spool-v1',
+                             authenticated_principal=None):
         """Atomically queue a v2 source envelope in a non-claimable state.
 
         This records metadata only. A separate verified spool writer must
@@ -1101,7 +1102,13 @@ class ReferenceSourceIntakeMethods:
             trusted_source_keys=trusted_source_keys, authority_id=authority_id)
         if _json(checked) != _json({key: validated[key] for key in checked}):
             raise ValueError('normalized source-intake identity or digest mismatch')
-        if source_spool is None or not callable(getattr(source_spool, 'check_capacity', None)):
+        if ingress_mode not in ('spool-v1','direct-v2'):
+            raise ValueError('closed source ingress mode required')
+        if ingress_mode == 'direct-v2':
+            protocol._slug(authenticated_principal, 'authenticated source principal')
+            if checked['sourceAttestation']['proof']['principalId'] != authenticated_principal:
+                raise Conflict('authenticated source principal changed')
+        if ingress_mode == 'spool-v1' and (source_spool is None or not callable(getattr(source_spool, 'check_capacity', None))):
             raise ValueError('configured source spool required for source-intake admission')
         pipeline_raw = {key: raw[key] for key in (
             'schemaVersion', 'submissionId', 'manifest', 'pipeline', 'capabilityFingerprint')}
@@ -1123,6 +1130,8 @@ class ReferenceSourceIntakeMethods:
         derived_encoded = _json(validated['derivedManifest'])
         reserved_bytes = validated['sourceManifest']['totalBytes'] + sum(
             item['byteSize'] for item in validated['derivedManifest']['objects'])
+        if ingress_mode == 'direct-v2':
+            reserved_bytes = 0
         protocol._integer(reserved_bytes, 'source spool reservation', allow_zero=True)
         with self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -1133,20 +1142,25 @@ class ReferenceSourceIntakeMethods:
                 if (old['environment'] != submission['environment']
                         or old['request_digest'] != validated['requestDigest']):
                     raise Conflict('submissionId belongs to a different reference request')
+                from .source_intake_mode import require as require_source_mode
+                require_source_mode(db,old['job_id'],ingress_mode)
                 return self._public(self._row(db, old['job_id'])), False
             pending = db.execute("SELECT COUNT(*) FROM reference_jobs WHERE phase NOT IN ('completed','cancelled')").fetchone()[0]
             if pending >= self.max_queued_jobs:
                 raise Conflict('reference pending job quota reached')
             existing_reservations = db.execute("""SELECT COALESCE(SUM(reserved_bytes),0)
                 FROM reference_source_intakes""").fetchone()[0]
-            source_spool.check_capacity(reserved_bytes, reserved_bytes=existing_reservations)
+            if ingress_mode == 'spool-v1':
+                source_spool.check_capacity(reserved_bytes, reserved_bytes=existing_reservations)
             job_id = validated['providerTaskId'] or str(uuid.uuid4())
             if db.execute('SELECT 1 FROM jobs WHERE id=?', (job_id,)).fetchone():
                 raise Conflict('providerTaskId already belongs to another queue job')
             self._quota(db, len(encoded.encode('utf-8')) + len(source_encoded.encode('utf-8'))
-                        + len(derived_encoded.encode('utf-8')) + len(job_id.encode('utf-8')) + len('spool-v1'))
-            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status) VALUES(?,?,?,?,'queued')",
-                (job_id, 'reference:' + submission['submissionId'], submission['environment'], PROFILE))
+                        + len(derived_encoded.encode('utf-8')) + len(job_id.encode('utf-8')) + len(ingress_mode))
+            status='held' if ingress_mode=='direct-v2' else 'queued'
+            reason='direct_admission_pending' if ingress_mode=='direct-v2' else None
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status,held_reason) VALUES(?,?,?,?,?,?)",
+                (job_id, 'reference:' + submission['submissionId'], submission['environment'], PROFILE,status,reason))
             db.execute("""INSERT INTO reference_jobs(job_id,submission_id,request_digest,environment,input_json,
                 manifest_sha,pipeline_digest,phase) VALUES(?,?,?,?,?,?,?,'queued')""",
                 (job_id, submission['submissionId'], submission['requestDigest'], submission['environment'],
@@ -1161,7 +1175,7 @@ class ReferenceSourceIntakeMethods:
                  validated['sourceManifestSha256'], validated['derivedManifestSha256'],
                  validated['manifestSha256'], reserved_bytes))
             from .source_intake_mode import claim as claim_source_mode
-            claim_source_mode(db, job_id, 'spool-v1')
+            claim_source_mode(db, job_id, ingress_mode)
             return self._public(self._row(db, job_id)), True
 
     def source_capacity(self, source_spool):
