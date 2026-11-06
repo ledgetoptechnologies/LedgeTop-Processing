@@ -269,6 +269,55 @@ class DirectV2Handoff:
                     raise Conflict('V2 closure changed during challenge')
             return observed
 
+    def inspect_source_binding(self,token,*,protected_transport,snapshot_journal):
+        """Reverify held source pages and exact worker closure; never custody.
+
+        The result is a point-in-time prerequisite, not an acceptance,
+        execution grant, or authority to release Viewer files.
+        """
+        from .direct_snapshot_page_journal import SnapshotPageJournal
+        from .direct_worker_receipt_v2 import verify
+        from cryptography.hazmat.primitives import serialization
+        self._auth(token,protected_transport)
+        if (type(snapshot_journal) is not SnapshotPageJournal or snapshot_journal.store is not self.store
+                or snapshot_journal.queue is not self.queue):raise Conflict('snapshot journal unavailable')
+        pins=snapshot_journal.reservations._workers
+        pin=pins.get(self.item['nodeId'])
+        raw=lambda k:k.public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)
+        if (pin is None or (pin[1],pin[2])!=(self.sender._issuer,self.sender._key)
+                or raw(pin[3])!=raw(self.sender._public)
+                or any(pin[0][k]!=self.item[k] for k in ('authorityId','nodeId','workerId','workerInstanceId'))):
+            raise Conflict('worker closure key unavailable')
+        with self.queue.coordinator_operation('source-io-admission'):
+            with self.queue._db() as db:
+                db.execute('BEGIN');self._check(db);full_census(db)
+                handoff=db.execute('SELECT * FROM direct_v2_handoff_sessions WHERE reservation=?',(self.item['reservationId'],)).fetchone()
+                snap=db.execute('SELECT snapshot FROM direct_snapshot_sessions WHERE reservation=?',(self.item['reservationId'],)).fetchone()
+                if (handoff is None or handoff['state']!='closure_observed' or handoff['closure'] is None or snap is None
+                        or handoff['principal']!=self.principal or handoff['binding']!=self.binding):raise Conflict('source inspection unavailable')
+                signed=bytes(handoff['closure']);snapshot=snap['snapshot']
+                try:
+                    verify(json.loads(signed),expected_closure=self.sender._expected_closure(),
+                        issuer_id=self.sender._issuer,key_id=self.sender._key,public_key=self.sender._public)
+                except (ValueError,TypeError,KeyError):raise Conflict('worker closure unavailable') from None
+            if not snapshot_journal._completion.acquire(blocking=False):raise Conflict('snapshot inspection busy')
+            try:
+                inspected=snapshot_journal._complete(self.item['reservationId'],snapshot,self.principal,
+                                                    self.item['environment'],include_selected=True)
+            finally:snapshot_journal._completion.release()
+            with self.queue._db() as db:
+                db.execute('BEGIN');self._check(db);full_census(db)
+                handoff=db.execute('SELECT * FROM direct_v2_handoff_sessions WHERE reservation=?',(self.item['reservationId'],)).fetchone()
+                observed=db.execute('SELECT source_sha,pipeline_sha FROM direct_snapshot_observations WHERE reservation=?',(self.item['reservationId'],)).fetchone()
+                if (handoff is None or handoff['state']!='closure_observed' or handoff['closure']!=signed
+                        or handoff['principal']!=self.principal or handoff['binding']!=self.binding or observed is None
+                        or observed['source_sha']!=inspected['sourceSnapshotSha256']
+                        or observed['pipeline_sha']!=self.item['pipelineManifestSha256']):raise Conflict('source inspection changed')
+            return dict(state='snapshot_and_worker_closure_observed_not_custody',
+                sourceSnapshotSha256=inspected['sourceSnapshotSha256'],
+                workerClosureReceiptSha256=hashlib.sha256(signed).hexdigest(),
+                sourceCustodyAccepted=False,processingAuthorized=False,sourceReleaseAuthorized=False)
+
     def reconcile_object(self,token,*,protected_transport,object_id):
         """Recover exact durable observation, never infer absence or reupload."""
         self._auth(token,protected_transport)

@@ -89,6 +89,14 @@ class SnapshotRealPair(unittest.TestCase):
         workers={node:dict(identity=dict(worker,nodeId=node),issuerId='worker-issuer',keyId='worker-key',publicKey=worker_key.public_key()) for node in queue.node_ids}
         pins=[dict(principal='viewer-staging',environment='staging',issuerId='snapshot-issuer',keyId='snapshot-key',publicKey=snapshot_key.public_key())]
         reservations=DirectV2Reservations(store,trusted_workers=workers,trusted_snapshot_signers=pins)
+        # The coordinator now requires a durable prepare intent before reserve.
+        from processing.direct_preparation_client import DirectPreparationClient
+        from processing.direct_preparation_journal import prepare_once
+        client=object.__new__(DirectPreparationClient)
+        client._worker,client._issuer,client._key,client._public=worker,'worker-issuer','worker-key',worker_key.public_key()
+        with patch.object(client,'prepare',return_value=ready):
+            prepare_once(reservations,client,payload=payload,item=item,principal='viewer-staging',challenge_id=challenge,
+                gate_generation=1,capability_fingerprint='a'*64,options_fingerprint=opts['options_fingerprint'],allowed_odm_options=set())
         reservations.reserve(payload=payload,authenticated_principal='viewer-staging',item=item,expected_worker=worker,
             readiness_proof=ready,challenge_id=challenge,gate_generation=1,issuer_id='worker-issuer',key_id='worker-key',
             worker_public_key=worker_key.public_key(),trusted_source_keys=src.trusted_keys,capability_fingerprint='a'*64,
@@ -127,6 +135,42 @@ class SnapshotRealPair(unittest.TestCase):
             saved=db.execute('SELECT source_sha,selected_sha,pipeline_sha,observation FROM direct_snapshot_observations').fetchone()
             self.assertEqual((saved['source_sha'],saved['selected_sha'],saved['pipeline_sha']),(hashlib.sha256(raw).hexdigest(),hashlib.sha256(selected+b'\n').hexdigest(),payload['manifest']['sha256']))
             self.assertFalse(json.loads(saved['observation'])['sourceCustodyAccepted'])
+        # Exercise the actual handoff verification against the signed closure
+        # and real mTLS snapshot journal. The worker closure is synthetic.
+        from processing.direct_worker_sender_v2 import DirectWorkerSenderV2
+        from processing.direct_v2_handoff_journal import DirectV2Handoff
+        from processing.direct_worker_receipt_v2 import WorkerClosureSignerV2
+        keys=('authorityId','principalId','environment','submissionId','viewerTaskId','providerTaskId',
+              'sourceManifestSha256','derivedManifestSha256','pipelineManifestSha256','pipelineDigest',
+              'attestationSha256','sourceSnapshotSha256','preparedEnvelopeSha256','activationId')
+        expected={key:prepared[key] for key in keys}
+        index=inventory.prepare_worker_index(prepared,expected_binding=expected,reservation_binding=binding,**opts)
+        sender=object.__new__(DirectWorkerSenderV2)
+        sender._item=item;sender._sha=observation['bindingSha256'];sender._inventory=index;sender._reservation=binding
+        sender._issuer='worker-issuer';sender._key='worker-key';sender._public=worker_key.public_key()
+        sender._source_count=1;sender._derived_count=0
+        bearer='synthetic-handoff-token-'+'x'*32
+        handoff=DirectV2Handoff(store,sender,principal='viewer-staging',bearer=bearer)
+        closure=WorkerClosureSignerV2(issuer_id='worker-issuer',key_id='worker-key',identity=worker,private_key=worker_key).issue(sender._expected_closure())
+        with queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');handoff._session(db)
+            db.execute("UPDATE direct_v2_handoff_sessions SET state='closure_observed',closure=? WHERE reservation=?",(p.canonical_json(closure),binding['reservationId']))
+        observed=handoff.inspect_source_binding(bearer,protected_transport=True,snapshot_journal=backend)
+        self.assertEqual(observed['state'],'snapshot_and_worker_closure_observed_not_custody')
+        self.assertFalse(observed['sourceCustodyAccepted']);self.assertFalse(observed['processingAuthorized']);self.assertFalse(observed['sourceReleaseAuthorized'])
+        from processing.maintenance import Conflict
+        with self.assertRaises(Conflict):handoff.inspect_source_binding('wrong',protected_transport=True,snapshot_journal=backend)
+        saved_key=sender._public;sender._public=Ed25519PrivateKey.generate().public_key()
+        try:
+            with self.assertRaises(Conflict):handoff.inspect_source_binding(bearer,protected_transport=True,snapshot_journal=backend)
+        finally:sender._public=saved_key
+        altered=copy.deepcopy(closure);altered['signature']='A'*86
+        with queue._db() as db:db.execute('UPDATE direct_v2_handoff_sessions SET closure=? WHERE reservation=?',(p.canonical_json(altered),binding['reservationId']))
+        with self.assertRaises(Conflict):handoff.inspect_source_binding(bearer,protected_transport=True,snapshot_journal=backend)
+        with queue._db() as db:db.execute('UPDATE direct_v2_handoff_sessions SET closure=? WHERE reservation=?',(p.canonical_json(closure),binding['reservationId']))
+        with patch.object(backend,'_complete',side_effect=Conflict('synthetic verifier unavailable')):
+            with self.assertRaises(Conflict):handoff.inspect_source_binding(bearer,protected_transport=True,snapshot_journal=backend)
+        self.assertEqual(queue.get(job['jobId'])['status'],'held')
         status,response=post('complete',b'');self.assertEqual(status,200,response)
         self.assertEqual(response['state'],'source_pages_verified_not_custody')
         self.assertFalse(response['sourceCustodyAccepted']);self.assertFalse(response['processingAuthorized'])
@@ -142,5 +186,16 @@ class SnapshotRealPair(unittest.TestCase):
                 source_frames=frame+b'\n',selected_frames=selected+b'x\n')
         self.assertEqual(queue.get(job['jobId'])['status'],'held')
         self.assertEqual(post('complete',b'')[1],response)
+        # Reopen the coordinator; the authenticated observation must be
+        # reconstructed and reverified, not treated as a custody receipt.
+        queue.close()
+        queue=Queue(root/'coordinator',reference_enabled=True);self.addCleanup(queue.close);queue.allowed_profiles.add(PROFILE)
+        store=ReferenceStore(queue,source_routing_keys=src.trusted_keys)
+        reservations=DirectV2Reservations(store,trusted_workers=workers,trusted_snapshot_signers=pins)
+        backend=SnapshotPageJournal(store,reservations)
+        handoff=DirectV2Handoff(store,sender,principal='viewer-staging',bearer=bearer)
+        after_restart=handoff.inspect_source_binding(bearer,protected_transport=True,snapshot_journal=backend)
+        self.assertEqual(after_restart,observed)
+        self.assertFalse(after_restart['sourceCustodyAccepted'])
 
 if __name__=='__main__':unittest.main()
