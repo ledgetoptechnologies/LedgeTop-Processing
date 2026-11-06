@@ -5,6 +5,7 @@ module never accepts reservation data from a remote request or starts a thread.
 """
 import ipaddress
 import os
+import threading
 
 from . import reference_protocol as protocol
 from .reference_runtime import _file, RuntimeConfigurationError
@@ -57,3 +58,37 @@ def create_listener(settings_path=None, *, boundary_kwargs=None, tls_context=Non
         raise RuntimeConfigurationError('trusted V2 boundary dependencies required')
     boundary = DirectWorkerBoundaryV2(**boundary_kwargs)
     return create_direct_worker_server(boundary, settings['host'], settings['port'], ssl_context=tls_context)
+
+
+class ListenerOwner:
+    """Own a server thread; never stop it while a handler remains admitted."""
+    def __init__(self, server):
+        if server is None:
+            raise ValueError('enabled listener required')
+        self._server = server
+        self._thread = None
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def start(self):
+        with self._lock:
+            if self._closed or self._thread is not None:
+                raise RuntimeError('listener owner already started or closed')
+            self._thread = threading.Thread(target=self._server.serve_forever,
+                                            kwargs={'poll_interval': 0.05}, daemon=False)
+            self._thread.start()
+
+    def close(self, timeout):
+        """Drain first; on timeout keep listener draining and owner alive."""
+        with self._lock:
+            if self._closed:
+                return True
+            if self._thread is None:
+                raise RuntimeError('listener owner not started')
+            if not self._server.drain(timeout):
+                return False
+            self._server.shutdown()
+            self._thread.join()
+            self._server.server_close()
+            self._closed = True
+            return True
