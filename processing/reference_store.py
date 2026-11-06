@@ -362,6 +362,14 @@ class ReferenceStore(ReferenceSourceIntakeMethods):
             used += db.execute('''SELECT COALESCE(SUM(length(CAST(reservation_id AS BLOB))+
                 length(CAST(principal AS BLOB))+length(CAST(operation AS BLOB))+
                 length(CAST(profile AS BLOB))),0) FROM direct_intake_profile_bindings''').fetchone()[0]
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_handoff_sessions'").fetchone():
+            if {row['name'] for row in db.execute('PRAGMA table_info(direct_handoff_sessions)')} != {
+                    'reservation','principal','binding','allowance','state','closure'}:
+                raise Conflict('direct handoff schema requires inspection')
+            if db.execute('''SELECT 1 FROM direct_handoff_sessions WHERE typeof(allowance)!='integer'
+                OR allowance<131072 OR allowance>41091072 LIMIT 1''').fetchone():
+                raise Conflict('direct handoff allowance invalid')
+            used += db.execute('SELECT COALESCE(SUM(allowance),0) FROM direct_handoff_sessions').fetchone()[0]
         return used
 
     def _quota(self, db, extra_bytes=0):
