@@ -89,6 +89,27 @@ class DisabledProtectedTransport:
 
 def load_disabled_transport(config_path,node,*,expected_config_sha256):
     """Load one exact node from a private, disabled schema-6 config."""
+    return _load_transport(config_path,node,expected_config_sha256=expected_config_sha256,enabled=False)
+
+@dataclass(frozen=True,repr=False)
+class EnrolledProtectedTransport:
+    """Enabled candidate; caller must pin config digest from protected enrollment."""
+    node: str
+    origin: str
+    connect_ip: str
+    issuer_id: str
+    key_id: str
+    worker_public_key: object
+    _context: ssl.SSLContext = field(repr=False)
+    _bearer: str = field(repr=False)
+    enabled: bool = field(default=True,init=False)
+
+def load_enrolled_transport(config_path,node,*,expected_config_sha256,expected_credential_sha256):
+    """Load an explicitly enabled config; not wired to automatic startup."""
+    return _load_transport(config_path,node,expected_config_sha256=expected_config_sha256,enabled=True,
+                           expected_credential_sha256=expected_credential_sha256)
+
+def _load_transport(config_path,node,*,expected_config_sha256,enabled,expected_credential_sha256=None):
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     p._slug(node,'node')
@@ -99,8 +120,8 @@ def load_disabled_transport(config_path,node,*,expected_config_sha256):
     value=p.decode_submission(config_bytes)
     if type(value) is not dict or value.get('schemaVersion')!=6:raise ValueError('schema 6 required')
     direct=value.get('directWorkers');p._closed(direct,('enabled','nodes'),'direct worker preparation')
-    if direct['enabled'] is not False or type(direct['nodes']) is not dict or node not in direct['nodes']:
-        raise ValueError('disabled enrolled node required')
+    if direct['enabled'] is not enabled or type(direct['nodes']) is not dict or node not in direct['nodes']:
+        raise ValueError('matching enrolled node configuration required')
     item=direct['nodes'][node]
     p._closed(item,('origin','connectIp','caFile','clientCertFile','clientKeyFile','bearerFile',
                     'issuerId','keyId','workerPublicKeyPem'),'direct worker node')
@@ -110,7 +131,15 @@ def load_disabled_transport(config_path,node,*,expected_config_sha256):
     if not isinstance(key,Ed25519PublicKey):raise ValueError('pinned worker key required')
     ca=_read(item['caFile'],private=False);cert=_read(item['clientCertFile'],private=False)
     secret_key=_read(item['clientKeyFile'],private=True)
-    bearer=_read(item['bearerFile'],private=True,maximum=4096).decode('ascii').rstrip('\r\n')
+    bearer_bytes=_read(item['bearerFile'],private=True,maximum=4096)
+    if enabled:
+        expected=expected_credential_sha256
+        if type(expected) is not dict or set(expected)!={'ca','certificate','privateKey','bearer'}:
+            raise ValueError('protected credential pins required')
+        for name,raw in (('ca',ca),('certificate',cert),('privateKey',secret_key),('bearer',bearer_bytes)):
+            p._hash(expected[name],'protected credential digest')
+            if hashlib.sha256(raw).hexdigest()!=expected[name]:raise ValueError('protected credential changed')
+    bearer=bearer_bytes.decode('ascii').rstrip('\r\n')
     if not 32<=len(bearer)<=4096 or any(ord(c)<33 or ord(c)>126 for c in bearer):raise ValueError('invalid bearer')
     context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT);context.minimum_version=ssl.TLSVersion.TLSv1_2
     context.load_verify_locations(cadata=ca.decode('ascii'))
@@ -122,7 +151,8 @@ def load_disabled_transport(config_path,node,*,expected_config_sha256):
         os.close(certfd)
         if keyfd is not None:os.close(keyfd)
     if context.verify_mode!=ssl.CERT_REQUIRED or not context.check_hostname:raise ValueError('verified TLS required')
-    return DisabledProtectedTransport(node,origin,address,item['issuerId'],item['keyId'],key,context,bearer)
+    cls=EnrolledProtectedTransport if enabled else DisabledProtectedTransport
+    return cls(node,origin,address,item['issuerId'],item['keyId'],key,context,bearer)
 
 @dataclass(frozen=True,repr=False)
 class DisabledSenderPreparation:
