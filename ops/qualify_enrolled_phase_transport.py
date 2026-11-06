@@ -7,6 +7,7 @@ on import, and no image is pulled or built by this module.
 """
 from contextlib import contextmanager
 from pathlib import Path
+from datetime import datetime,timezone,timedelta
 import base64
 import hashlib
 import json
@@ -39,6 +40,64 @@ def environment_bytes(value):
                 type(v) is str and '\n' not in v and '\r' not in v for k,v in value.items()),
             'closed_fixture_environment_required')
     return ''.join(k+'='+v+'\n' for k,v in sorted(value.items())).encode()
+
+
+def post_restart_stopped_writer_audit(driver,state,operation):
+    """Qualification-only audit AFTER healthy original restart, never a phase.
+
+    No effect is retried; failures leave the original/holder/state for capture.
+    The original is not restarted again after this offline audit.
+    """
+    require(state['phase']=='rolled-back-rebaseline-required' and not state['admissionOpened']
+            and state['pending'] is None,'completed_unadmitted_rollback_required')
+    # A terminal rollback must contain the accepted real start and readiness
+    # observations; health alone is not a substitute for those receipts.
+    started=driver._prior(state,'start-exact-predecessor')
+    driver._prior(state,'verify-predecessor-readiness')
+    original=driver._original();holder=driver._find('holder')
+    require(original['State']['Running'] is True and original['State']['Pid']>0
+            and started['containerId']==original['Id'] and started['startedAt']==original['State']['StartedAt'],
+            'exact_restarted_original_required')
+    require(holder is not None,'existing_original_lease_holder_required')
+    driver._stopped(holder)
+    intent=dict(intentId=str(uuid.uuid5(uuid.UUID(driver.plan['operationId']),'post-restart-stopped-writer-audit')))
+    private_write(Path(operation)/'post-restart-audit-intent.json',json.dumps(dict(
+        schemaVersion=1,operationId=driver.plan['operationId'],intentId=intent['intentId'],
+        originalId=original['Id'],originalStartedAt=original['State']['StartedAt'],
+        holderId=holder['Id'],previousHolderStartedAt=holder['State']['StartedAt'],
+        qualificationOnly=True),sort_keys=True,separators=(',',':')).encode())
+    driver.docker.stop(original['Id'])
+    stopped=driver._original();driver._stopped(stopped)
+    require(stopped['State']['StartedAt']==original['State']['StartedAt'],'original_restarted_during_audit')
+    earliest=datetime.now(timezone.utc).replace(microsecond=0)
+    driver.docker.start(holder['Id'])
+    latest=datetime.now(timezone.utc)+timedelta(seconds=1)
+    current=driver._find('holder')
+    require(current is not None and current['Id']==holder['Id'] and current['Image']==holder['Image']
+            and current['State']['Running'] is True and current['State']['Pid']>0
+            and current['State']['StartedAt']!=holder['State']['StartedAt'],
+            'fresh_original_holder_incarnation_required')
+    when=datetime.fromisoformat(current['State']['StartedAt'].replace('Z','+00:00'))
+    require(when.tzinfo is not None and earliest<=when<=latest,'fresh_holder_start_window_required')
+    # This is a NEW socket/kernel/physical observation of the actual live
+    # holder. No previous PID/start proof is reused as lease authority.
+    context=driver._context('holder',state)
+    before=driver.boundary('holder',context)
+    binding=driver._binding(state,'rollback-final')
+    reference=driver._custody().projection(driver._prior(state,'capture-full-custody')['reference'],
+        intent,phase='rollback-final',binding=binding,context=context)
+    driver.docker.stop(current['Id'])
+    released=driver._find('holder');driver._stopped(released)
+    require(released['Id']==current['Id'] and released['State']['StartedAt']==current['State']['StartedAt'],
+            'audited_holder_incarnation_changed')
+    result=dict(schemaVersion=1,qualificationOnly=True,originalRestartObserved=True,
+        originalStoppedAfterRestart=True,liveSQLiteAudit=False,continuousAvailabilityQualified=False,
+        projectionReference=reference,holderStartedAt=current['State']['StartedAt'],
+        holderWindow=dict(earliest=earliest.isoformat(),latest=latest.isoformat()),
+        freshBoundarySha256=hashlib.sha256(json.dumps(before,sort_keys=True,separators=(',',':')).encode()).hexdigest(),
+        holderReleased=True)
+    private_write(Path(operation)/'post-restart-audit-result.json',json.dumps(result,sort_keys=True,separators=(',',':')).encode())
+    return result
 
 
 def private_docker_logs(container_id, *, maximum=262144):
@@ -327,7 +386,9 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
                 expected='rolled-back-rebaseline-required' if rollback else 'complete'
                 require(state['phase']==expected,'actual_phase_sequence_incomplete')
                 require(state['admissionOpened'] is (not rollback),'actual_admission_projection_changed')
-                catalogs=None
+                catalogs=None;post_restart_audit=None
+                if rollback:
+                    post_restart_audit=post_restart_stopped_writer_audit(driver,state,operation)
                 if not rollback:
                     final=driver._find('final')['Id']
                     first=driver.boundary.fresh(final,catalog_observer_source(authority),maximum=65536)
@@ -344,6 +405,7 @@ def qualify(candidate_image, candidate_source, daemon_id, artifact_root, operati
                     actualDockerPhases=True,actualApplicationGate=True,actualFullCustodyTar=True,
                     actualFactoryWorkerTLS=True,connectedWorkerSSHQualified=False,
                     postResumeConnectedCatalog=catalogs,
+                    postRestartStoppedWriterAudit=post_restart_audit,
                     fixtureSystemdEngineCoordinatorTransport=True,productionHostEnrollmentQualified=False,
                     desktopReadonly0777Exemption=True,installedQualified=False)
     except BaseException:
