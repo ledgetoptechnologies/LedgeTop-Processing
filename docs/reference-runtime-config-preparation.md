@@ -40,8 +40,8 @@ for this input. Both input modes are **preparation evidence**, never proof of
 installation or current physical custody.
 
 The noncircular first-install sequence is: capture real host/daemon/Gate binding
-metadata; prepare runtime and Viewer packages; use those exact runtime bytes in
-the existing worker composer with its documented pre-install manifest intent;
+metadata; prepare runtime and Viewer packages; use the exact `final.json` bytes
+in the existing worker composer with its documented pre-install manifest intent;
 obtain the real worker config and unit hashes; then install separately and run
 the existing fresh physical/readiness gates. The worker composer, not this
 runtime tool, replaces its intent's zero config hash/one-byte placeholder after

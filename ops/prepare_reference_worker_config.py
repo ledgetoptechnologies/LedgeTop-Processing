@@ -20,6 +20,7 @@ from ops.enrolled_coordinator_transport import canonical, decode, require
 
 PROTOCOL='ltds-first-worker-private-preparation-v1'
 MAX_PRIVATE=65536
+FINAL_RUNTIME_SCHEMA=6
 
 
 def descriptor(value):
@@ -143,12 +144,25 @@ def tls_material(spec,now):
     return raw
 
 
+def selected_runtime_keys(runtime):
+    """Refuse anything but the runtime preparer's final.json, before any output.
+
+    bootstrap.json (schema 2) carries no Viewer receipt pins, and schemas 3-5
+    are never produced by that preparer. Returns the validated receipt pins.
+    """
+    require(type(runtime) is dict and type(runtime.get('schemaVersion')) is int and
+            runtime['schemaVersion']==FINAL_RUNTIME_SCHEMA,'final_runtime_selection_required')
+    keys=runtime.get('viewerReceiptKeys')
+    require(type(keys) is dict and keys,'viewer_receipt_keys_required')
+    from processing.viewer_acceptance_receipt import validate_trusted_viewer_receipt_keys
+    return validate_trusted_viewer_receipt_keys(keys)
+
+
 def compose(spec,now):
     m=validate_spec(spec)
     require(now.tzinfo is not None and now.utcoffset()==timedelta(0),'aware_preparation_clock_required')
     runtime=decode(pinned(spec['runtime']))
-    require(type(runtime) is dict and type(runtime.get('schemaVersion')) is int and
-            runtime['schemaVersion'] in (2,3,4,5,6),'recovery_bound_runtime_required')
+    receipt_keys=selected_runtime_keys(runtime)
     workers=runtime.get('workers');bindings=runtime.get('recoveryBindings');node=m['gate']['nodeId']
     require(type(workers) is dict and type(bindings) is dict and node in workers and set(workers)==set(bindings),
             'original_runtime_worker_required')
@@ -221,7 +235,7 @@ def compose(spec,now):
                                   sourceSha256=m['source']['footprintSha256'],activation=None))
     for key,value in spec['policy'].items():
         if key!='minimumTlsValiditySeconds':config[key]=value
-    config['viewerReceiptKeys']=runtime.get('viewerReceiptKeys',{})
+    config['viewerReceiptKeys']=receipt_keys
     for path in (config['stateRoot'],config['scratchRoot']):
         require(not Path(path).exists() and not Path(path).is_symlink(),'new_worker_state_required')
     raw=canonical(config);require(len(raw)<=MAX_PRIVATE,'bounded_prepared_config_required')
