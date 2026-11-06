@@ -52,6 +52,17 @@ class PreparationJournalTests(unittest.TestCase):
                     issuer_id='worker-issuer',key_id='worker-key',worker_public_key=f.proof_key.public_key(),
                     trusted_source_keys=opts['trusted_source_keys'],capability_fingerprint=opts['capability_fingerprint'],
                     options_fingerprint=opts['options_fingerprint'],allowed_odm_options=opts['allowed_odm_options'])
+            with queue._db() as db:db.execute("UPDATE nodes SET state='draining' WHERE id=?",(f.item['nodeId'],))
+            with self.assertRaisesRegex(Conflict,'maintenance'):
+                reservations.reserve(payload=f.payload,authenticated_principal='viewer-staging',item=f.item,
+                    expected_worker=f.worker,readiness_proof=f.readiness,challenge_id=f.challenge,gate_generation=1,
+                    issuer_id='worker-issuer',key_id='worker-key',worker_public_key=f.proof_key.public_key(),
+                    trusted_source_keys=opts['trusted_source_keys'],capability_fingerprint=opts['capability_fingerprint'],
+                    options_fingerprint=opts['options_fingerprint'],allowed_odm_options=opts['allowed_odm_options'])
+            with queue._db() as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM direct_v2_reservations').fetchone()[0],0)
+                self.assertEqual(db.execute('SELECT held_reason FROM jobs WHERE id=?',(f.item['jobId'],)).fetchone()[0],'direct_preparing')
+                db.execute("UPDATE nodes SET state='active' WHERE id=?",(f.item['nodeId'],))
             result=reservations.reserve(payload=f.payload,authenticated_principal='viewer-staging',item=f.item,
                 expected_worker=f.worker,readiness_proof=f.readiness,challenge_id=f.challenge,gate_generation=1,
                 issuer_id='worker-issuer',key_id='worker-key',worker_public_key=f.proof_key.public_key(),

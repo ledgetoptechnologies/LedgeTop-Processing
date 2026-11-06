@@ -17,6 +17,8 @@ from processing.node_gate import NodeGate
 from processing.prototype import Queue
 from processing.reference_source_intake import validate_source_intake
 from processing.reference_store import PROFILE,ReferenceStore
+from processing.reference_runtime import _DynamicAPI
+from processing.reference_worker_api import ReferenceWorkerAPI
 from processing.scratch_policy import ScratchLedger
 from tests import test_direct_protected_transport as protected_fixture
 from tests import test_direct_snapshot_http as tls_fixture
@@ -70,9 +72,32 @@ class SchedulerTest(unittest.TestCase):
                                            gateGeneration=1,outputBudget=100,ttlSeconds=10) for n in queue.node_ids}
                         workers={n:dict(identity=dict(f.worker,nodeId=n),issuerId='worker-issuer',keyId='worker-key',
                                         publicKey=f.proof_key.public_key()) for n in queue.node_ids}
-                        scheduler=DirectPreparationScheduler(store,trusted_workers=workers,enrollment=enrollment)
-                        result=scheduler.run_once(capability_fingerprint=opts['capability_fingerprint'],
-                            options_fingerprint=opts['options_fingerprint'],allowed_odm_options=set())
+                        worker_wire={n:dict(identity=v['identity'],issuerId=v['issuerId'],keyId=v['keyId'],
+                            publicKeyPem=v['publicKey'].public_bytes(serialization.Encoding.PEM,
+                                serialization.PublicFormat.SubjectPublicKeyInfo).decode()) for n,v in workers.items()}
+                        enrollment_file=secure.root/'scheduler-enrollment.json'
+                        enrollment_file.write_text(json.dumps(dict(schemaVersion=1,trustedWorkers=worker_wire,enrollment=enrollment)))
+                        enrollment_file.chmod(0o600)
+                        scheduler=DirectPreparationScheduler.from_protected_file(store,str(enrollment_file))
+                        token='synthetic-worker-bearer-with-enough-length'
+                        worker_api=ReferenceWorkerAPI(store,None,bearer_workers={token:dict(node_id='cluster',
+                            worker_id='worker',worker_instance_id='instance')})
+                        policy_api=_DynamicAPI(SimpleNamespace(worker=worker_api,coordinator_queue=queue),object(),None,
+                            lambda:dict(nodes=[dict(role='cluster',available=True)]),lambda:{})
+                        policy_api._direct_preparation_scheduler=scheduler
+                        def policy():
+                            response=policy_api.handle('GET','/ltds/worker/v1/direct-source-policy',
+                                {'Authorization':'Bearer '+token},protected_transport=True)
+                            if response.status!=200:raise RuntimeError('policy unavailable')
+                            return response.body
+                        driver.direct_source_policy=policy
+                        with patch('processing.reference_runtime._available_discovery_snapshot',side_effect=lambda value:value), \
+                             patch('processing.reference_runtime.discovered_policy',return_value=(opts['capability_fingerprint'],opts['options_fingerprint'],set())):
+                            self.assertTrue(policy()['directPreparationEnabled'])
+                            result=scheduler.run_once(capability_fingerprint=opts['capability_fingerprint'],
+                                options_fingerprint=opts['options_fingerprint'],allowed_odm_options=set(),revalidate_policy=lambda *_:True)
+                            enrollment_file.write_text(enrollment_file.read_text()+' ')
+                            self.assertFalse(policy()['directPreparationEnabled'])
                         self.assertEqual((result['nodeId'],result['state']),('cluster','receiving'))
                         self.assertFalse(result['sourceCustodyAccepted']);self.assertFalse(result['processingAuthorized'])
                         with NodeGate('fixture-v2') as gate:self.assertEqual(gate.snapshot()['reservation']['job']['id'],f.payload['providerTaskId'])
