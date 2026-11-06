@@ -27,10 +27,13 @@ non-custodial result, never an ACK or permission to release originals.
 
 Journal state is FULL-synchronous SQLite under coordinator authority, with
 closed schemas, immutable triggers, count markers and exact replay. Each new
-session reserves a conservative 12 MiB + 1 MiB + 64 KiB in the shared logical
-metadata quota; a maximum of four sessions is retained. Neither sessions nor
-pages have a qualified retirement protocol. At capacity, later requests hold
-without evicting records; this is unsuitable for sustained operation. Logical
+session reserves the signed frame-byte total plus the exact intent bytes and
+512 KiB logical overhead against the shared metadata quota. A maximum of 128
+sessions is retained. Neither sessions nor pages have a qualified retirement
+protocol. At quota or session capacity, later requests hold without evicting
+records; this is unsuitable for sustained operation. Version 2 of this journal
+refuses version 1 state until a separately reviewed migration; older binaries
+likewise refuse the new marker. Logical
 reservation does not prove a physical SQLite/WAL space bound. An enrolled
 older writer, restored database snapshot, external source writer, actual disk
 failure, and online upgrade/rollback are not fenced or qualified.

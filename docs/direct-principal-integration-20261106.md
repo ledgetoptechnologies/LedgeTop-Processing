@@ -68,7 +68,13 @@ A separate opt-in private mTLS snapshot listener and bounded page journal are
 included as a candidate. A synthetic integration test exercises an actual
 signed source attestation, direct reservation and source-only inspector. It is
 not a Viewer custody acknowledgment. A merged run completed 98 tests with two
-fixture-dependent skips. The current journal has a four-session lifetime cap
+fixture-dependent skips. The current journal has a 128-session lifetime cap
 with no qualified retirement, and selected pages and GCP evidence are not
 verified. Listener enrollment, actual Viewer sender, crash recovery and
 installed operation remain unqualified; do not activate it for client jobs.
+
+Snapshot journal V2 reserves logical space based on the signed page stream and
+intent size instead of the maximum for every session. A merged run passed 72
+tests with three external-fixture skips. This is not a physical SQLite/WAL disk
+quota, and old journal migration, safe 24-hour retirement and large-workload
+performance remain unqualified.

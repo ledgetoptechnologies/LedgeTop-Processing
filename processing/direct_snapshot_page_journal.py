@@ -13,16 +13,17 @@ from .direct_v2_snapshot_verifier import _decode, SNAPSHOT_DOMAIN, PAGE_DOMAIN, 
 from .maintenance import Conflict
 from .reference_api import Response
 
-MAX_SESSIONS=4
+MAX_SESSIONS=128
 MAX_PAGES=64
 MAX_PAGE_BYTES=256*1024
 MAX_FRAME_BYTES=12*1024*1024
 MAX_INTENT_BYTES=1024*1024
-ALLOWANCE=MAX_FRAME_BYTES+MAX_INTENT_BYTES+65536
+# Logical metadata planning allowance, not a filesystem/WAL quota.
+SESSION_OVERHEAD=512*1024
 TABLES={
  'direct_snapshot_sessions':'''CREATE TABLE direct_snapshot_sessions (
   reservation TEXT PRIMARY KEY,snapshot TEXT NOT NULL,principal TEXT NOT NULL,environment TEXT NOT NULL,
-  intent BLOB NOT NULL,signature BLOB NOT NULL,allowance INTEGER NOT NULL)''',
+  intent BLOB NOT NULL,signature BLOB NOT NULL,frame_bytes INTEGER NOT NULL,allowance INTEGER NOT NULL)''',
  'direct_snapshot_pages':'''CREATE TABLE direct_snapshot_pages (
   reservation TEXT NOT NULL,page_index INTEGER NOT NULL,page BLOB NOT NULL,
   PRIMARY KEY(reservation,page_index))''',
@@ -39,7 +40,9 @@ def metadata_bytes(db):
     marker=0 if 'direct_snapshot_version' not in cols else db.execute('SELECT direct_snapshot_version FROM coordinator_identity WHERE singleton=1').fetchone()[0]
     names={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}; present=set(TABLES)&names
     if marker==0 and not present and 'direct_snapshot_session_count' not in cols and 'direct_snapshot_page_count' not in cols:return 0
-    if (type(marker) is not int or marker!=1 or present!=set(TABLES)
+    # V1 precharged a fixed allowance and used a different schema. Never
+    # reinterpret or erase old journals; a reviewed migration is required.
+    if (type(marker) is not int or marker!=2 or present!=set(TABLES)
         or not {'direct_snapshot_session_count','direct_snapshot_page_count'}<=cols):raise Conflict('snapshot journal requires inspection')
     for name,sql in TABLES.items():
         row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(name,)).fetchone()
@@ -53,12 +56,20 @@ def metadata_bytes(db):
     if (type(counts[0]) is not int or type(counts[1]) is not int or counts[0]!=sessions or counts[1]!=pages
         or sessions>MAX_SESSIONS or pages>MAX_SESSIONS*MAX_PAGES):raise Conflict('snapshot count changed')
     bad=db.execute('''SELECT 1 FROM direct_snapshot_sessions WHERE typeof(intent)!='blob' OR length(intent)>? OR length(intent)=0
-        OR typeof(signature)!='blob' OR length(signature)!=64 OR allowance!=? LIMIT 1''',(MAX_INTENT_BYTES,ALLOWANCE)).fetchone()
+        OR typeof(signature)!='blob' OR length(signature)!=64 OR typeof(frame_bytes)!='integer' OR frame_bytes<1 OR frame_bytes>?
+        OR typeof(allowance)!='integer' OR allowance!=length(intent)+frame_bytes+?
+        OR CASE WHEN json_valid(CAST(intent AS TEXT))
+             THEN COALESCE(json_type(CAST(intent AS TEXT),'$.sourceFrameBytes')!='integer'
+                  OR json_extract(CAST(intent AS TEXT),'$.sourceFrameBytes')!=frame_bytes,1)
+             ELSE 1 END LIMIT 1''',
+        (MAX_INTENT_BYTES,MAX_FRAME_BYTES,SESSION_OVERHEAD)).fetchone()
     bad_page=db.execute('''SELECT 1 FROM direct_snapshot_pages p LEFT JOIN direct_snapshot_sessions s ON s.reservation=p.reservation
         WHERE s.reservation IS NULL OR typeof(page_index)!='integer' OR page_index<0 OR page_index>=?
         OR typeof(page)!='blob' OR length(page)=0 OR length(page)>? LIMIT 1''',(MAX_PAGES,MAX_PAGE_BYTES)).fetchone()
-    if bad or bad_page:raise Conflict('snapshot journal bounds changed')
-    return sessions*ALLOWANCE
+    overflow=db.execute('''SELECT 1 FROM direct_snapshot_pages p JOIN direct_snapshot_sessions s ON s.reservation=p.reservation
+        GROUP BY p.reservation HAVING SUM(length(p.page)+1)>MAX(s.frame_bytes) LIMIT 1''').fetchone()
+    if bad or bad_page or overflow:raise Conflict('snapshot journal bounds changed')
+    return db.execute('SELECT COALESCE(SUM(allowance),0) FROM direct_snapshot_sessions').fetchone()[0]
 
 def ensure(db):
     if not db.in_transaction:raise Conflict('snapshot transaction required')
@@ -70,7 +81,7 @@ def ensure(db):
         db.execute('ALTER TABLE coordinator_identity ADD COLUMN direct_snapshot_page_count INTEGER NOT NULL DEFAULT 0')
         for sql in TABLES.values():db.execute(sql)
         for sql in TRIGGERS:db.execute(sql)
-        db.execute('UPDATE coordinator_identity SET direct_snapshot_version=1 WHERE singleton=1')
+        db.execute('UPDATE coordinator_identity SET direct_snapshot_version=2 WHERE singleton=1')
     metadata_bytes(db)
 
 def _b64(value,maximum):
@@ -137,8 +148,9 @@ class SnapshotPageJournal:
                 return {'state':'snapshot_receiving','sourceCustodyAccepted':False}
             count=db.execute('SELECT direct_snapshot_session_count FROM coordinator_identity WHERE singleton=1').fetchone()[0]
             if count>=MAX_SESSIONS:raise Conflict('snapshot journal capacity reached')
-            self.store._quota(db,ALLOWANCE)
-            db.execute('INSERT INTO direct_snapshot_sessions VALUES(?,?,?,?,?,?,?)',(reservation,snapshot,principal,environment,raw,signature,ALLOWANCE))
+            allowance=len(raw)+size+SESSION_OVERHEAD
+            self.store._quota(db,allowance)
+            db.execute('INSERT INTO direct_snapshot_sessions VALUES(?,?,?,?,?,?,?,?)',(reservation,snapshot,principal,environment,raw,signature,size,allowance))
             db.execute('UPDATE coordinator_identity SET direct_snapshot_session_count=direct_snapshot_session_count+1 WHERE singleton=1')
             return {'state':'snapshot_receiving','sourceCustodyAccepted':False}
 
@@ -154,6 +166,8 @@ class SnapshotPageJournal:
             session=db.execute('SELECT * FROM direct_snapshot_sessions WHERE reservation=?',(reservation,)).fetchone()
             if session is None or (session['snapshot'],session['principal'],session['environment'])!=(snapshot,principal,environment):raise Conflict('snapshot session unavailable')
             intent=_decode(session['intent'],MAX_INTENT_BYTES)
+            if type(intent.get('sourceFrameBytes')) is not int or intent['sourceFrameBytes']!=session['frame_bytes']:
+                raise Conflict('source frame reservation changed')
             if index>=len(intent['sourcePageHashes']) or hashlib.sha256(PAGE_DOMAIN+body).hexdigest()!=intent['sourcePageHashes'][index]:raise Conflict('source page differs')
             old=db.execute('SELECT page FROM direct_snapshot_pages WHERE reservation=? AND page_index=?',(reservation,index)).fetchone()
             if old:
@@ -173,6 +187,8 @@ class SnapshotPageJournal:
             session=db.execute('SELECT * FROM direct_snapshot_sessions WHERE reservation=?',(reservation,)).fetchone()
             if session is None or (session['snapshot'],session['principal'],session['environment'])!=(snapshot,principal,environment):raise Conflict('snapshot session unavailable')
             intent=_decode(session['intent'],MAX_INTENT_BYTES)
+            if type(intent.get('sourceFrameBytes')) is not int or intent['sourceFrameBytes']!=session['frame_bytes']:
+                raise Conflict('source frame reservation changed')
             rows=db.execute('SELECT page_index,page FROM direct_snapshot_pages WHERE reservation=? ORDER BY page_index',(reservation,)).fetchall()
             if len(rows)!=len(intent['sourcePageHashes']) or any(row['page_index']!=i for i,row in enumerate(rows)):raise Conflict('source pages incomplete')
             frames=b''.join(row['page']+b'\n' for row in rows)
