@@ -184,6 +184,16 @@ class WorkerV2Tests(unittest.TestCase):
             replay.put(self.headers,protected_transport=True,object_id=fixtures.GCP_ID,
                 content_length=0,content_sha256=hashlib.sha256(b'').hexdigest(),reader=io.BytesIO(b''))
 
+    @unittest.skipUnless(os.environ.get('LTDS_OLD_PROCESSING_SOURCE'),'old processing source not supplied')
+    def test_previous_scratch_refuses_consumed_v2_readiness(self):
+        self.put_zero()
+        source=Path(os.environ['LTDS_OLD_PROCESSING_SOURCE'])/'processing'/'scratch_policy.py'
+        spec=importlib.util.spec_from_file_location('previous_scratch_v2',source)
+        old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)
+        with self.assertRaisesRegex(old.PolicyConflict,'unknown accounting version'):
+            old.ScratchLedger(self.root/'private'/'ledger.sqlite',self.root,
+                capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
+
     def test_expiry_after_atomic_handover_retains_pin_without_reading(self):
         original=self.ledger._handover_v2_writer
         def delayed(*args,**kwargs):
