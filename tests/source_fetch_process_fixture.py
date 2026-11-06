@@ -8,8 +8,10 @@ reached disk survives. The one stand-in is the engine: FileEngine answers from a
 log that outlives both processes, so starts are counted across deaths. Its status
 stays 20 until a test scripts 40, when it serves a synthetic archive and the real
 ReferenceSender delivers the result. The driver is built without __init__, which
-would demand a BrokerClient that a v2 fetch never uses. A test owns CLOCK_SKEW, a
-plain file, so a lease or backoff lapses without a wait and no database is touched.
+would demand a BrokerClient that a v2 fetch never uses, so the journal table below
+must carry every column __init__ gives it. A test owns CLOCK_SKEW, a plain file, so
+a lease or backoff lapses without a wait and no database is touched. step() swallows
+whatever _background raises, so BACKGROUND_LOG keeps it where a test can read it.
 """
 import io
 import json
@@ -26,7 +28,7 @@ import zipfile
 
 from processing.prototype import Queue
 from processing.reference_control import ReferenceControlAPI
-from processing.reference_driver import ReferenceDriver, _NoRedirects
+from processing.reference_driver import DriverWait, ReferenceDriver, _NoRedirects
 from processing.reference_engine_worker import ReferenceEngineWorker
 from processing.reference_failure import FailureOutbox
 from processing.reference_http import create_reference_http_server
@@ -48,6 +50,7 @@ GATE_ORIGIN = 'http://127.0.0.1:18080'
 ENGINE_LOG = 'engine-calls.log'
 ENGINE_SCRIPT = 'engine-script.json'
 CLOCK_SKEW = 'clock-skew'
+BACKGROUND_LOG = 'background.log'
 
 
 class FileEngine(NativeEngine):
@@ -193,7 +196,8 @@ def build_worker(config):
     with driver._db() as db:
         db.execute('''CREATE TABLE IF NOT EXISTS driver_jobs (
           created INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT UNIQUE NOT NULL,
-          claim_request TEXT UNIQUE NOT NULL, stage TEXT NOT NULL, data TEXT NOT NULL)''')
+          claim_request TEXT UNIQUE NOT NULL, stage TEXT NOT NULL, data TEXT NOT NULL,
+          background_checked REAL NOT NULL DEFAULT 0)''')
         db.execute('CREATE TABLE IF NOT EXISTS readiness_tasks(uuid TEXT PRIMARY KEY)')
         fresh = db.execute('SELECT 1 FROM driver_jobs').fetchone() is None
     driver._refresh_options()
@@ -266,9 +270,32 @@ def die_around_delivery(driver, moment):
     driver.worker._phase, driver._request = phase, request
 
 
+def watch_background(driver, root):
+    """Record what step() would hide. An absent coordinator is an ordinary retry."""
+    real, log = driver._background, Path(root) / BACKGROUND_LOG
+
+    def note(line):
+        with log.open('a') as stream:
+            stream.write(line + '\n')
+
+    def background():
+        try:
+            result = real()
+        except Exception as error:
+            if not (isinstance(error, DriverWait) and str(error) == 'coordinator_unavailable'):
+                note(type(error).__name__ + ': ' + str(error))
+            raise
+        if result['state'] == 'acceptance_observation_pending':
+            note(result['state'])
+        return result
+
+    driver._background = background
+
+
 def worker(config):
     patch('processing.node_gate.canonical_gate_path', return_value=Path(config['root']) / 'gate').start()
     driver = build_worker(config)
+    watch_background(driver, config['root'])
     if os.environ.get('SOURCE_FETCH_DIE'):
         die_around_recovery(driver, os.environ['SOURCE_FETCH_DIE'])
     if os.environ.get('DELIVERY_DIE'):

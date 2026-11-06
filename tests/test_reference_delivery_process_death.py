@@ -21,7 +21,7 @@ import uuid
 from processing import reference_protocol as protocol
 from processing.reference_tls import verified_client_context
 from tests import test_reference_source_fetch_process_restart as restart
-from tests.source_fetch_process_fixture import CLOCK_SKEW, ENGINE_SCRIPT, VIEWER_TOKEN
+from tests.source_fetch_process_fixture import BACKGROUND_LOG, CLOCK_SKEW, ENGINE_SCRIPT, VIEWER_TOKEN
 from tests.viewer_v2_receipt_signer import SyntheticViewerCopyV2Signer
 
 # The bytes the intake fixture lands in the spool: the photo, the raw GCP file
@@ -86,12 +86,27 @@ class DeliveryProcessDeathTests(restart.ProcessHarness):
         self.assertEqual(len(rows), 1)
         return rows[0]
 
+    def background_log(self):
+        path = self.root / BACKGROUND_LOG
+        return path.read_text() if path.exists() else ''
+
+    def background_checked(self):
+        return self.read(self.root / 'driver-journal.sqlite', 'SELECT background_checked FROM driver_jobs')[0][0]
+
+    def assert_background_ran(self, worker):
+        """This step really reached cleanup, or a retained file would prove nothing."""
+        checked = self.background_checked()
+        self.assertIn(self.step(worker)['state'], ('idle', 'not_ready'))
+        self.assertGreater(self.background_checked(), checked)
+        self.assertEqual(self.background_log(), '')
+
     def assert_sources_retained(self):
         current = self.spool_files()
         self.assertEqual({path: current.get(path) for path in self.sources}, self.sources)
 
     def assert_retained(self, *, verified=False):
         """No cleanup began, the result is intact, and the worker's verification is as stated."""
+        self.assertEqual(self.background_log(), '')
         path, sha, accepted, copy_verified, cleaned = self.result_object()
         self.assertEqual((accepted is not None, copy_verified, cleaned), (verified, int(verified), None))
         self.assertEqual(self.read(self.root / 'ledger.sqlite', 'SELECT COUNT(*) FROM cleanup_intents'), [(0,)])
@@ -116,7 +131,8 @@ class DeliveryProcessDeathTests(restart.ProcessHarness):
                 break
             self.step(worker)
         stage, data = self.journal()
-        self.assertEqual(stage, 'completed')
+        self.assertEqual(stage, 'completed', self.background_log())
+        self.assertEqual(self.background_log(), '')
         self.assertEqual(self.status(), ('succeeded', None))
         self.assertEqual(self.job_state(), ('completed', 1))
         self.assertEqual(self.worker_phase(), 'delivered')
@@ -143,7 +159,7 @@ class DeliveryProcessDeathTests(restart.ProcessHarness):
 
     def dies(self, child):
         self.assertIsNone(self.step(child))
-        self.assertEqual(child.wait(), -9)
+        self.assertEqual(child.wait(restart.REAP_SECONDS), -9)
 
     def delivering(self, worker):
         self.fetched(worker)
@@ -218,7 +234,7 @@ class DeliveryProcessDeathTests(restart.ProcessHarness):
         self.awaiting_copy(worker)
         before = self.identity()
         for _ in range(3):
-            self.step(worker)
+            self.assert_background_ran(worker)
         self.assert_retained()
         self.accept()
         self.assert_finished(worker, before, attempts=1)
@@ -318,7 +334,7 @@ class DeliveryProcessDeathTests(restart.ProcessHarness):
         worker = self.spawn('worker')
         self.delivering(worker)
         self.assertEqual(self.step(worker), {'state': 'delivering', 'jobId': self.job_id, 'deliveryState': 'retry_scheduled'})
-        self.assertEqual(coordinator.wait(), -9)
+        self.assertEqual(coordinator.wait(restart.REAP_SECONDS), -9)
         self.assertEqual(self.job_state(), ('waiting_for_delivery', 1))
         self.assertEqual(self.status(), ('running', None))
         self.assertEqual(self.coordinator_receipts(), [])
@@ -348,7 +364,7 @@ class DeliveryProcessDeathTests(restart.ProcessHarness):
         worker = self.spawn('worker')
         self.lapse(WEEK)
         for _ in range(3):
-            self.assertIn(self.step(worker)['state'], ('idle', 'not_ready'))
+            self.assert_background_ran(worker)
         self.assertEqual(self.journal()[0], 'awaiting_acceptance')
         self.assertEqual(self.job_state(), ('awaiting_acceptance', 1))
         self.assert_retained()
@@ -363,7 +379,7 @@ class DeliveryProcessDeathTests(restart.ProcessHarness):
         request = self.copy_request()
         with self.assertRaises((OSError, http.client.HTTPException)):
             self.viewer('POST', '/acceptance', request)
-        self.assertEqual(coordinator.wait(), -9)
+        self.assertEqual(coordinator.wait(restart.REAP_SECONDS), -9)
         self.assertEqual(self.job_state(), ('completed', 1))
         stored = self.read(self.database, 'SELECT receipt_json FROM reference_viewer_receipts')
         self.assertEqual(len(stored), 1)
