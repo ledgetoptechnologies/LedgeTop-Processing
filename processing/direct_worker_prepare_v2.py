@@ -86,6 +86,11 @@ def _prepare_signed_job(ledger, *, payload, item, principal, worker, engine_id,
             spool=SourceSpool(directory,mount_path=mount_path,mount_id=mount_id,marker_name=marker_name,
                               safety_floor_bytes=0,require_mount=True)
             preflight._assert_mount();spool._assert_mount()
+        # Retain exact signed source before issuing the expiring readiness pin.
+        # A failure remains fenced and can be replayed without an orphan proof.
+        from .direct_worker_inventory_retention import retain as retain_inventory
+        retain_inventory(ledger,payload=payload,item=normalized,worker=worker,
+                         verification=source_verification,coordinator_principal=principal)
         proof=readiness.issue(ledger,spool,normalized,principal=principal,expected_worker=worker,
             engine_id=engine_id,coordinator_origin=coordinator_origin,gate_generation=gate_generation,
             challenge_id=challenge_id,validity_seconds=validity_seconds,issuer_id=issuer_id,

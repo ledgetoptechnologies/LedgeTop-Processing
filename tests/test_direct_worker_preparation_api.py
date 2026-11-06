@@ -33,6 +33,25 @@ class PreparationListenerTests(unittest.TestCase):
             root.chmod(0o777)
             with self.assertRaises(ValueError):_read(str(key),private=True)
             root.chmod(0o700)
+    @unittest.skipIf(os.name=='nt','Linux scratch fixture required')
+    def test_preparation_persists_signed_inventory_before_reply(self):
+        from tests.test_direct_worker_prepare_v2 import WorkerPrepareTests
+        fixture=WorkerPrepareTests();f,kwargs=fixture.fixture();self.addCleanup(fixture.doCleanups)
+        from processing import reference_protocol as protocol
+        policy=dict(directPreparationEnabled=True,capabilityFingerprint=f.options['capability_fingerprint'],
+                    optionsFingerprint=f.options['options_fingerprint'],allowedOdmOptions=[])
+        worker=SimpleNamespace(engine_id=kwargs['engine_id'],origin=kwargs['coordinator_origin'],gate_generation=1)
+        backend=DirectPreparationAPI(driver=SimpleNamespace(direct_source_policy=lambda:policy,worker=worker),
+            ledger=f.ledger,worker=f.worker,mount_path='/tmp',mount_id='a'*32,marker_name=f.spool.marker.name,
+            source_keys=f.options['trusted_source_keys'],signer=f.proof_key,issuer_id='worker-issuer',key_id='worker-key')
+        raw=protocol.canonical_json(dict(source=f.payload,item=f.item,challengeId=kwargs['challenge_id']))
+        response=backend._prepare_from_listener(('coord-a','staging'),raw)
+        self.assertEqual(response.status,200)
+        with f.ledger._transaction() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM direct_inventory_blobs').fetchone()[0],1)
+        again=backend._prepare_from_listener(('coord-a','staging'),raw)
+        self.assertEqual(again.status,200);self.assertEqual(again.body,response.body)
+
     def test_mtls_identity_and_disabled_fleet_policy_hold_before_gate(self):
         f=snapshot_fixture.SnapshotListenerTests();f.setUp();self.addCleanup(f.doCleanups)
         calls=[]
