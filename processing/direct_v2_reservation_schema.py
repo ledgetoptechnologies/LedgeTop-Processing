@@ -27,14 +27,16 @@ def ensure_schema(db):
     if not db.in_transaction:raise Conflict('direct V2 schema transaction required')
     table_exists=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(TABLE,)).fetchone() is not None
     fence_exists=db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(FENCE_TABLE,)).fetchone() is not None
+    if table_exists:
+        verify_schema(db)
     if table_exists != fence_exists:
         raise Conflict('direct V2 reservation fence mismatch')
     if not table_exists:
         db.execute(FENCE_SCHEMA)
         db.execute('INSERT INTO legacy_fence_requirement(version) VALUES(2)')
         db.execute(SCHEMA)
-    verify_fence(db)
     verify_schema(db)
+    verify_fence(db)
 
 def verify_fence(db):
     row=db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?",(FENCE_TABLE,)).fetchone()
@@ -49,8 +51,8 @@ def metadata_bytes(db):
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(FENCE_TABLE,)).fetchone():
             raise Conflict('direct V2 reservation fence mismatch')
         return 0
-    verify_fence(db)
     verify_schema(db)
+    verify_fence(db)
     if db.execute('''SELECT 1 FROM direct_v2_reservations WHERE
         typeof(reservation_id)!='text' OR typeof(job_id)!='text' OR typeof(node_id)!='text'
         OR typeof(principal)!='text' OR typeof(request_digest)!='text' OR typeof(challenge_id)!='text'

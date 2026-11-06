@@ -60,4 +60,13 @@ class ReservationSchemaTests(unittest.TestCase):
             with self.f.queue.coordinator_operation('source-io-admission'),self.f.queue._db() as db:
                 db.execute('BEGIN IMMEDIATE');schema.ensure_schema(db)
 
+    def test_lost_reservation_table_is_not_recreated_after_fence(self):
+        with self.f.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE');schema.ensure_schema(db)
+            db.execute('DROP TABLE direct_v2_reservations')
+        with self.f.queue._db() as db:
+            with self.assertRaisesRegex(Conflict,'fence mismatch'):schema.metadata_bytes(db)
+            db.execute('BEGIN IMMEDIATE')
+            with self.assertRaisesRegex(Conflict,'fence mismatch'):schema.ensure_schema(db)
+
 if __name__=='__main__':unittest.main()
