@@ -73,11 +73,30 @@ class ListenerOwner:
         self._lock = threading.Lock()
         self._closed = False
         self._stop = threading.Event()
+        self._failed = threading.Event()
+        self._draining = threading.Event()
 
     def _serve(self):
-        self._server.timeout = 0.05
-        while not self._stop.is_set():
-            self._server.handle_request()
+        try:
+            self._server.timeout = 0.05
+            while not self._stop.is_set():
+                self._server.handle_request()
+        except BaseException:
+            self._failed.set()
+
+    def status(self):
+        """Report local listener health, never job or custody readiness."""
+        if self._failed.is_set():
+            return 'failed'
+        if self._closed:
+            return 'closed'
+        if self._thread is None:
+            return 'not_started'
+        if self._stop.is_set():
+            return 'stopping'
+        if self._draining.is_set():
+            return 'draining'
+        return 'running' if self._thread.is_alive() else 'failed'
 
     def start(self):
         with self._lock:
@@ -106,6 +125,7 @@ class ListenerOwner:
                 self._server.server_close()
                 self._closed = True
                 return True
+            self._draining.set()
             if not self._server.drain(max(0, deadline - time.monotonic())):
                 return False
             self._stop.set()

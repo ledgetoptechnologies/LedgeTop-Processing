@@ -117,6 +117,69 @@ class WorkerListenerSettingsTest(unittest.TestCase):
             release.set()
             self.assertTrue(owner.close(2))
 
+    def test_accept_loop_failure_is_reported_and_closes_safely(self):
+        entered = threading.Event()
+        class Server:
+            closed = False
+            def handle_request(self): entered.set(); raise OSError('synthetic accept failure')
+            def drain(self, _): return True
+            def server_close(self): self.closed = True
+        server = Server(); owner = ListenerOwner(server)
+        self.assertEqual(owner.status(), 'not_started')
+        owner.start(); self.assertTrue(entered.wait(1))
+        self.assertTrue(owner._failed.wait(1))
+        self.assertEqual(owner.status(), 'failed')
+        self.assertTrue(owner.close(1)); self.assertTrue(server.closed)
+        self.assertEqual(owner.status(), 'failed')
+
+    @unittest.skipIf(os.name == 'nt', 'Linux scratch fixture required')
+    def test_owner_drains_real_v2_tls_upload(self):
+        import http.client
+        import ssl
+        import uuid
+        from ops.qualify_enrolled_phase_transport import configuration_material
+        from processing.direct_worker_http import create_direct_worker_server
+        from processing.reference_tls import verified_client_context
+        from tests.test_direct_worker_receiver_v2 import WorkerV2Tests
+        from tests.test_reference_source_intake import IMAGE_ID
+
+        fixture = WorkerV2Tests(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        material = configuration_material(str(uuid.uuid4()), str(uuid.uuid4()))['configurationFiles']
+        for name in ('fixture-ca.pem', 'fixture-cert.pem', 'fixture-key.pem'):
+            (fixture.root / name).write_bytes(material[name])
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(str(fixture.root/'fixture-cert.pem'), str(fixture.root/'fixture-key.pem'))
+        server = create_direct_worker_server(fixture.boundary, '127.0.0.1', 0, ssl_context=context)
+        owner = ListenerOwner(server); owner.start()
+        entered = threading.Event(); release = threading.Event(); outcome = []
+        original = fixture.spool.receive_object
+        def blocked(*args, **kwargs):
+            entered.set()
+            if not release.wait(3): raise TimeoutError('test release timed out')
+            return original(*args, **kwargs)
+        def upload():
+            connection = http.client.HTTPSConnection('127.0.0.1', server.server_port,
+                context=verified_client_context(str(fixture.root/'fixture-ca.pem')), timeout=3)
+            try:
+                import hashlib
+                connection.request('PUT', '/direct/v2/objects/' + IMAGE_ID, body=b'abc',
+                    headers={**fixture.headers, 'Content-SHA256': hashlib.sha256(b'abc').hexdigest()})
+                response = connection.getresponse(); response.read(); outcome.append(response.status)
+            finally: connection.close()
+        try:
+            with patch.object(fixture.spool, 'receive_object', side_effect=blocked):
+                thread = threading.Thread(target=upload); thread.start()
+                try:
+                    self.assertTrue(entered.wait(3)); self.assertFalse(owner.close(.05))
+                    self.assertEqual(owner.status(), 'draining')
+                finally:
+                    release.set(); thread.join(4)
+                self.assertFalse(thread.is_alive()); self.assertEqual(outcome, [200])
+                self.assertTrue(owner.close(3)); self.assertEqual(owner.status(), 'closed')
+        finally:
+            release.set(); owner.close(3)
+
     @unittest.skipIf(os.name == 'nt', 'Linux scratch fixture required')
     def test_owner_drains_real_tls_upload_before_shutdown(self):
         import http.client
