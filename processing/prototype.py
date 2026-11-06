@@ -107,7 +107,7 @@ class Queue(Maintenance):
                 if 'held_reason' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
                     db.execute('ALTER TABLE jobs ADD COLUMN held_reason TEXT')
                 db.execute('CREATE TABLE IF NOT EXISTS coordinator_identity (singleton INTEGER PRIMARY KEY CHECK(singleton=1), authority_id TEXT NOT NULL)')
-                db.execute('INSERT OR IGNORE INTO coordinator_identity VALUES(1, ?)', (str(uuid.uuid4()),))
+                db.execute('INSERT OR IGNORE INTO coordinator_identity(singleton,authority_id) VALUES(1, ?)', (str(uuid.uuid4()),))
                 self.authority_id = db.execute('SELECT authority_id FROM coordinator_identity WHERE singleton=1').fetchone()[0]
                 if authority_lease is not None and authority_lease.authority != self.authority_id:
                     raise authority_leases.LeaseUnavailable('authority_lease_authority_changed')

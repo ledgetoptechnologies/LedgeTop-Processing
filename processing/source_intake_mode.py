@@ -29,11 +29,23 @@ def _check_schema(db):
 
 def initialize(db):
     """Create and backfill only once; callers hold the startup transaction."""
-    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)).fetchone() is None:
+    if not db.in_transaction:
+        db.execute('BEGIN IMMEDIATE')
+    columns = {row['name'] for row in db.execute('PRAGMA table_info(coordinator_identity)')}
+    if 'source_mode_version' not in columns:
+        db.execute('ALTER TABLE coordinator_identity ADD COLUMN source_mode_version INTEGER NOT NULL DEFAULT 0')
+    marker = db.execute('SELECT source_mode_version FROM coordinator_identity WHERE singleton=1').fetchone()
+    if marker is None or type(marker[0]) is not int or marker[0] not in (0, 1):
+        raise Conflict('source intake mode migration marker invalid')
+    exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)).fetchone() is not None
+    if (marker[0] == 1) != exists:
+        raise Conflict('source intake mode migration marker mismatch')
+    if not exists:
         db.execute(CREATE)
         db.execute("INSERT INTO reference_source_intake_modes SELECT job_id,'spool-v1' FROM reference_source_intakes")
         for sql in TRIGGERS.values():
             db.execute(sql)
+        db.execute('UPDATE coordinator_identity SET source_mode_version=1 WHERE singleton=1 AND source_mode_version=0')
     _check_schema(db)
     if db.execute('''SELECT 1 FROM reference_source_intakes s LEFT JOIN reference_source_intake_modes m
         ON m.job_id=s.job_id WHERE m.job_id IS NULL LIMIT 1''').fetchone():
