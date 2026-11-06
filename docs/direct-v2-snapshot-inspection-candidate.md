@@ -20,7 +20,12 @@ in the proposed receipt. GCP-bearing snapshots are explicitly refused until
 their complete metadata and chunk streams have an agreed verifier. The source
 page check follows Viewer's exact-path and case-insensitive basename collision
 policy using Python Unicode lowercase; Unicode-version differences versus JS
-remain to be qualified. It cannot prove
+remain to be qualified. The current held-source exporter rejects zero-byte
+dataset files, so this inspection also holds them even though the separate V2
+source-manifest validator permits zero-byte records. Kind/media checks are a
+conservative local interpretation of Viewer's extension and normalized MIME
+rules, not cross-language equivalence for every filename or media type. This is
+not a complete snapshot validator. It cannot prove
 worker custody, writer confinement, current mount integrity, crash recovery or
 an authenticated explicit release. Viewer must continue to hold originals.
 
