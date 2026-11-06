@@ -6,10 +6,16 @@ The Linux child/TLS suite is a separate qualification layer.
 import copy
 import json
 import threading
+from dataclasses import replace
+from unittest.mock import patch
 from uuid import uuid4
 
 from processing.node_gate import NodeGate
 from processing.reference_execution import ExecutionRouter
+from processing.prototype import Queue, REFERENCE_PROFILE
+from processing.reference_runtime import ReferenceRuntime
+from tests import test_reference_runtime as runtime_fixture
+from tests.test_reference_source_grant_renewal import WORKER_TOKEN
 from tests.test_reference_source_processing_recovery import ProcessingHarness, GATE_ORIGIN
 
 
@@ -52,6 +58,7 @@ class PreReservationRecoveryTests(ProcessingHarness):
         self.assertEqual(self.rows()['reference_claims'],before)
         self.run_to_engine()
         self.assertEqual(self.row()[1]['reservation'],reservation)
+
 
     def test_committed_reservation_lost_reply_uses_existing_schema_three(self):
         self.lose_reply.add('reservation')
@@ -259,3 +266,100 @@ class PreReservationRecoveryTests(ProcessingHarness):
         self.assertEqual(self.driver.step()['state'],'held')
         self.assertEqual(self.receipts(),[])
         self.assertEqual(self.row()[1]['reservation'],reservation)
+
+
+class RuntimePreReservationDiscoveryTests(ProcessingHarness):
+    """Fresh real runtime Store cannot use its optimistic constructor defaults."""
+    def runtime_after_restart(self, *, processing=False):
+        if processing:
+            self.to_execution_pending()
+        else:
+            self.down.add('reservation')
+            self.assertEqual(self.driver.step()['state'],'retry_wait')
+            self.down.clear()
+        self.queue.close()
+        self.queue=Queue(self.directory.name)
+        self.queue.allowed_profiles.add(REFERENCE_PROFILE)
+        fixture=runtime_fixture.ReferenceRuntimeTests('runTest')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.value=fixture.recovery_config(self.queue.authority_id)
+        fixture.write_config()
+        settings=fixture.settings()
+        workers=copy.deepcopy(settings.workers)
+        workers['cluster'].update(bearer=WORKER_TOKEN,workerId='worker',instanceId='instance')
+        settings=replace(settings,workers=workers,source_spool=self.spool,
+            source_attestation_keys=self.case.trusted_keys,viewer_receipt_keys=self.viewer_receipt_keys)
+        definitions=[dict(name='numeric-probe',type='float',value=1,help='Numeric setting.')]
+        self.catalog=dict(ready=True,commonOptions=definitions,nodes=[dict(role=node,available=True,
+            capabilitiesSha256='a'*64,engine='odm',engineVersion='pinned-engine-1',options=definitions)
+            for node in ('cluster','main')])
+        self.capacities={node:dict(ready=True,maxImages=None,maxInputBytes=None,taskQueueCount=0)
+            for node in ('cluster','main')}
+        self.discovery_calls=[]
+        def discover():
+            self.discovery_calls.append('catalog')
+            if self.catalog is None:raise OSError('synthetic catalog outage')
+            return copy.deepcopy(self.catalog)
+        def capacities():
+            self.discovery_calls.append('capacity')
+            return copy.deepcopy(self.capacities)
+        first,second=fixture.tls_patches()
+        with first,second:
+            runtime=ReferenceRuntime(self.queue,replace(fixture.config,prototype_state_dir=self.directory.name),settings,
+                discover=discover,discover_capacities=capacities)
+        self.addCleanup(runtime.close)
+        self.runtime=runtime
+        self.store=runtime.store
+        return runtime
+
+    def request(self, method='GET', body=None, *, token=None):
+        headers={'Authorization':'Bearer '+WORKER_TOKEN,
+            'X-Claim-Token':self.row()[1]['claim']['claimToken'] if token is None else token}
+        suffix='recovery-state' if method=='GET' else 'recover'
+        from processing.reference_protocol import canonical_json
+        return self.runtime.api.handle(method,'/ltds/worker/v1/jobs/'+self.job_id+'/'+suffix,
+            headers,b'' if body is None else canonical_json(body),protected_transport=True)
+
+    def test_fresh_runtime_refreshes_changed_and_unavailable_catalog_before_schema_four(self):
+        self.runtime_after_restart()
+        self.assertTrue(self.store._capacity_snapshot['cluster']['ready'])
+        valid=copy.deepcopy(self.catalog)
+        self.catalog=None
+        self.assertEqual(self.request().status,503)
+        self.assertEqual(self.status(),('held','coordinator_restart'))
+        self.catalog=dict(ready=True,commonOptions=[],nodes=[dict(role=node,available=False,options=[])
+            for node in ('cluster','main')])
+        self.assertFalse(self.request().body['eligible'])
+        self.assertTrue(self.discovery_calls)
+        self.assertIsNone(self.store.get(self.job_id,private=True)['transferRequest'])
+        self.catalog=valid
+        self.assertTrue(self.request().body['eligible'])
+
+    def test_post_refreshes_again_instead_of_using_a_prior_valid_get(self):
+        self.runtime_after_restart()
+        self.control=self.runtime.api
+        self.down.add('recover')
+        self.assertEqual(self.driver.step()['state'],'retry_wait')
+        self.down.clear()
+        request=self.row()[1]['sourceRecovery']['pending']['request']
+        self.capacities['cluster']['taskQueueCount']=1
+        self.assertEqual(self.request('POST',request).status,409)
+        self.assertIsNone(self.store.get(self.job_id,private=True)['transferRequest'])
+        self.capacities['cluster']['taskQueueCount']=0
+        self.assertEqual(self.request('POST',request).status,200)
+        self.assertEqual(len(self.receipts()),1)
+
+    def test_invalid_claim_token_probes_no_catalog(self):
+        self.runtime_after_restart()
+        self.assertIn(self.request(token='not-the-claim').status,(401,403,409))
+        self.assertEqual(self.discovery_calls,[])
+
+    def test_processing_recovery_does_not_depend_on_catalog(self):
+        self.runtime_after_restart(processing=True)
+        self.catalog=None
+        response=self.request()
+        self.assertEqual(response.status,200)
+        self.assertEqual(response.body['schemaVersion'],3)
+        self.assertTrue(response.body['eligible'])
+        self.assertEqual(self.discovery_calls,[])

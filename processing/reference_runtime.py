@@ -9,6 +9,7 @@ workflow exists.
 from contextlib import contextmanager
 from dataclasses import dataclass
 import os
+import re
 from pathlib import Path
 import ssl
 import stat
@@ -342,6 +343,43 @@ class _DynamicAPI:
                                                protected_transport=protected_transport)
             return self.control.handle(method, path, headers, body,
                                        protected_transport=protected_transport)
+        recovery=re.fullmatch(r'/ltds/worker/v1/jobs/([A-Za-z0-9][A-Za-z0-9_-]{0,127})/(recovery-state|recover)',path) if type(path) is str else None
+        if (recovery and (method,recovery.group(2)) in (('GET','recovery-state'),('POST','recover'))
+                and protected_transport is True):
+            worker=self.control.worker
+            identity=worker._authenticate(headers)
+            token=worker._header(headers,'X-Claim-Token')
+            if identity is not None and token is not None:
+                with self._worker_refresh_lock:
+                    try:
+                        # Authenticate the exact claim BEFORE any network probe.
+                        # A monotonic later phase must keep its existing offline
+                        # continuation/delivery path, without catalog dependency.
+                        claim=worker.store.claim_snapshot(recovery.group(1),**identity,claim_token=token)
+                        unreserved=False
+                        if (worker.recovery is not None and claim.get('sourceIntakeVersion')==2
+                                and claim['executionPhase'] in ('queued','waiting_capacity')
+                                and (claim['status'],claim['heldReason'])==('held','coordinator_restart')):
+                            current=worker.recovery.state(recovery.group(1),identity=identity,claim_token=token)
+                            unreserved=current['schemaVersion']==4
+                        if method=='POST':
+                            from .reference_recovery import ClaimRecoveryService
+                            payload=ClaimRecoveryService._request(p.decode_submission(body))
+                            unreserved=unreserved and payload['schemaVersion']==4
+                        elif body:
+                            unreserved=False
+                    except Exception:
+                        # Preserve existing closed/auth/error handling; failed
+                        # authentication/validation grants no recovery authority.
+                        return self.control.handle(method,path,headers,body,protected_transport=protected_transport)
+                    if unreserved:
+                        try:
+                            options=self.discover()
+                            capacities=self.discover_capacities()
+                            worker.store.update_fleet_snapshot(capacities,options['nodes'])
+                        except Exception:
+                            return Response(503,{'error':'engine_capacity_unavailable'})
+                    return self.control.handle(method,path,headers,body,protected_transport=protected_transport)
         # Authenticate before engine discovery; ordinary status and worker actions
         # never depend on live catalog reads. Each admission sees a fresh snapshot.
         if path in (p.PREFIX + '/options', p.PREFIX + "/capabilities", p.PREFIX + "/jobs",
