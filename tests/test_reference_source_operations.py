@@ -30,7 +30,8 @@ def uncertain_operation(directory):
         from processing import reference_protocol as protocol
         api=ReferenceAPI(store,bearer_tokens={'synthetic-staging-token':'staging'},
             capability_fingerprint='a'*64,options_fingerprint='a'*64,
-            source_spool=spool,source_attestation_keys={},authority_id=queue.authority_id)
+            source_spool=spool,source_attestation_keys=store._test_source_keys,authority_id=queue.authority_id,
+            source_bearer_principals={'synthetic-staging-token':'viewer-staging'})
         values=completion(store,job['jobId'],spool)
         body=protocol.canonical_json(dict(generation=1,
             sourceManifestSha256=values['source_manifest_sha256'],
@@ -67,7 +68,8 @@ class SourceOperationTests(unittest.TestCase):
                 db.execute("UPDATE reference_source_intakes SET source_state='receiving',derived_state='receiving'")
             api=ReferenceAPI(store,bearer_tokens={'synthetic-staging-token':'staging'},
                 capability_fingerprint='a'*64,options_fingerprint='a'*64,
-                source_spool=spool,source_attestation_keys={},authority_id=queue.authority_id)
+                source_spool=spool,source_attestation_keys=store._test_source_keys,authority_id=queue.authority_id,
+                source_bearer_principals={'synthetic-staging-token':'viewer-staging'})
             headers={'Authorization':'Bearer synthetic-staging-token','Content-SHA256':hashlib.sha256(b'abc').hexdigest()}
             values=completion(store,job['jobId'],spool)
             body=protocol.canonical_json(dict(generation=1,
@@ -135,7 +137,8 @@ class SourceOperationTests(unittest.TestCase):
             (spool.root / spool.storage_key(job['jobId'], 1, image)).unlink()
             api = ReferenceAPI(store, bearer_tokens={'synthetic-staging-token':'staging'},
                 capability_fingerprint='a'*64, options_fingerprint='a'*64,
-                source_spool=spool, source_attestation_keys={}, authority_id=queue.authority_id)
+                source_spool=spool, source_attestation_keys=store._test_source_keys, authority_id=queue.authority_id,
+                source_bearer_principals={'synthetic-staging-token':'viewer-staging'})
             entered, resume = threading.Event(), threading.Event()
             class Body(io.BytesIO):
                 def read(self, size=-1):

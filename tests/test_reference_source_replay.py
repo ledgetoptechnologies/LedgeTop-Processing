@@ -49,7 +49,8 @@ class SourceReplayTests(unittest.TestCase):
         values = dict(bearer_tokens={self.bearer: 'staging'},
             capability_fingerprint='a' * 64, options_fingerprint=self.old_options,
             allowed_odm_options={'numeric-probe'}, source_spool=self.spool,
-            source_attestation_keys=self.keys, authority_id=self.queue.authority_id)
+            source_attestation_keys=self.keys, authority_id=self.queue.authority_id,
+            source_bearer_principals={self.bearer:'viewer-staging'})
         values.update(changes)
         return ReferenceAPI(self.store, **values)
 
@@ -64,10 +65,12 @@ class SourceReplayTests(unittest.TestCase):
                 worker_id='worker', worker_instance_id='instance')},
             capability_fingerprint='a' * 64, options_fingerprint=self.old_options,
             allowed_odm_options={'numeric-probe'}, source_spool=self.spool,
-            source_attestation_keys=self.keys, authority_id=self.queue.authority_id)
+            source_attestation_keys=self.keys, authority_id=self.queue.authority_id,
+            source_bearer_principals={self.bearer:'viewer-staging'})
         discover = Mock(side_effect=RuntimeError('synthetic all-node outage'))
         settings = SimpleNamespace(viewer_bearers={self.bearer: 'staging'},
-            viewer_receipt_keys={}, source_spool=self.spool, source_attestation_keys=self.keys)
+            viewer_receipt_keys={}, source_spool=self.spool, source_attestation_keys=self.keys,
+            source_bearer_principals={self.bearer:'viewer-staging'})
         api = _DynamicAPI(control, SimpleNamespace(), settings, discover, Mock())
         return api, discover
 

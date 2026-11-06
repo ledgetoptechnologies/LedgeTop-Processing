@@ -36,6 +36,7 @@ def source_fixture(directory, *, range_v2=False):
         spool = SourceSpool(root, mount_id='a' * 64, safety_floor_bytes=0,
             max_object_bytes=1024, chunk_bytes=3)
         queue, store, control, job, _ = case._make_reserved_source_job(directory, spool, 'reader', source_range_v2=range_v2)
+        store._test_source_keys = case.trusted_keys
         try:
             grant = store.mint_source_transfer_grant(job['jobId'], source_spool=spool)
             store.update_phase(job['jobId'], 'fetching')
