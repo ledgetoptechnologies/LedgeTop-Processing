@@ -1,7 +1,6 @@
 """Unwired V2 worker receive boundary. No Viewer custody acknowledgement."""
 import hmac
 import json
-import re
 import threading
 
 from . import reference_protocol as p
@@ -16,7 +15,9 @@ from .scratch_policy import PolicyConflict
 class DirectWorkerBoundaryV2:
     """The future TLS listener must supply actual transport and reserved state."""
     def __init__(self, *, ledger, spool, inventory, item, reservation_binding,
-                 expected_worker, engine_id, coordinator_origin, gate_generation, bearer, readiness_pin=None):
+                 expected_worker, engine_id, coordinator_origin, gate_generation, bearer,
+                 readiness_proof=None, challenge_id=None, issuer_id=None, key_id=None,
+                 public_key=None, now=None):
         if (not isinstance(inventory, VerifiedWorkerInventory) or type(bearer) is not str
                 or not 32 <= len(bearer) <= 4096 or not bearer.isascii()
                 or not all(33 <= ord(c) <= 126 for c in bearer)):
@@ -24,9 +25,14 @@ class DirectWorkerBoundaryV2:
         # Construction is internal and remains unwired. Every fresh boundary
         # requires the exact durable readiness pin; restart without a qualified
         # handover record fails closed rather than inferring continuation.
-        if type(readiness_pin) is not str or not re.fullmatch('[a-f0-9]{32}', readiness_pin):
-            raise DirectBoundaryDenied('V2 readiness pin required')
         item, _, _ = identity(item, expected_worker=expected_worker)
+        from .direct_worker_fence_proof_v2 import verify as verify_readiness, FenceProofRejected
+        try:
+            verified = verify_readiness(readiness_proof, expected_item=item, expected_worker=expected_worker,
+                challenge_id=challenge_id, gate_generation=gate_generation, issuer_id=issuer_id,
+                key_id=key_id, public_key=public_key, now=now)
+        except (ValueError, TypeError, FenceProofRejected):
+            raise DirectBoundaryDenied('verified V2 readiness proof required') from None
         saved = json.loads(inventory._wire)
         if (p.canonical_json(reservation_binding) != inventory._reservation_wire
                 or any(item[key] != reservation_binding[key] for key in reservation_binding)
@@ -40,7 +46,7 @@ class DirectWorkerBoundaryV2:
         self.ledger, self.spool, self.inventory = ledger, spool, inventory
         self.item, self.reservation, self.worker = item, dict(reservation_binding), dict(expected_worker)
         self.engine_id, self.origin, self.generation, self._bearer = engine_id, coordinator_origin, gate_generation, bearer
-        self._readiness_pin = readiness_pin
+        self._readiness_pin = verified['pinId']
         self._writer_lock = threading.Lock()
 
     def put(self, headers, *, protected_transport, object_id, content_length, content_sha256, reader):

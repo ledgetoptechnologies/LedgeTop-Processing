@@ -81,7 +81,8 @@ class WorkerV2Tests(unittest.TestCase):
         self.boundary = DirectWorkerBoundaryV2(ledger=self.ledger,spool=self.spool,inventory=index,
             item=self.item,reservation_binding=self.reservation,expected_worker=self.worker,engine_id='fixture-v2',
             coordinator_origin=origin,gate_generation=1,bearer=self.bearer,
-            readiness_pin=self.readiness['body']['pinId'])
+            readiness_proof=self.readiness,challenge_id=self.challenge,issuer_id='worker-issuer',
+            key_id='worker-key',public_key=self.proof_key.public_key(),now=110)
 
     def put_zero(self, headers=None):
         return self.boundary.put(headers or self.headers,protected_transport=True,object_id=fixtures.GCP_ID,
@@ -140,11 +141,18 @@ class WorkerV2Tests(unittest.TestCase):
         self.assertTrue(self.put_zero()['replayed'])
 
     def test_fresh_boundary_without_readiness_pin_is_rejected(self):
-        with self.assertRaisesRegex(DirectBoundaryDenied,'readiness pin required'):
+        with self.assertRaisesRegex(DirectBoundaryDenied,'readiness proof required'):
             DirectWorkerBoundaryV2(ledger=self.ledger,spool=self.spool,inventory=self.boundary.inventory,
                 item=self.item,reservation_binding=self.reservation,expected_worker=self.worker,
                 engine_id='fixture-v2',coordinator_origin='https://127.0.0.1:8443',
                 gate_generation=1,bearer=self.bearer)
+        with self.assertRaisesRegex(DirectBoundaryDenied,'readiness proof required'):
+            DirectWorkerBoundaryV2(ledger=self.ledger,spool=self.spool,inventory=self.boundary.inventory,
+                item=self.item,reservation_binding=self.reservation,expected_worker=self.worker,
+                engine_id='fixture-v2',coordinator_origin='https://127.0.0.1:8443',
+                gate_generation=1,bearer=self.bearer,readiness_proof=self.readiness,
+                challenge_id=self.challenge,issuer_id='worker-issuer',key_id='worker-key',
+                public_key=self.proof_key.public_key(),now=120)
 
     def test_full_v2_closure_requires_raw_and_derived_objects(self):
         from processing.direct_worker_closure_v2 import verify_closure
@@ -163,6 +171,21 @@ class WorkerV2Tests(unittest.TestCase):
         self.assertTrue(result['localClosureComplete'])
         self.assertFalse(result['sourceCustodyAccepted']);self.assertFalse(result['processingAuthorized'])
         self.assertEqual(verify_closure(self.ledger,self.spool,self.index,self.item,**args),result)
+        # Rebuild all process-local state from retained signed inventory and
+        # persistent scratch/files; an exact receipt may be reobserved only
+        # after rehashing every object under the still-held node gate.
+        recovered = inventory.prepare_worker_index(json.loads(self.index._wire),
+            expected_binding=self.expected,reservation_binding=self.reservation,**self.options)
+        reopened = ScratchLedger(self.root/'private'/'ledger.sqlite',self.root,
+            capacity_probe=lambda _:1000000,clock=lambda:1000,safety_floor_bytes=100)
+        self.assertEqual(verify_closure(reopened,self.spool,recovered,self.item,**args),result)
+        from processing.direct_worker_receipt_v2 import WorkerClosureSignerV2, verify
+        signer=WorkerClosureSignerV2(issuer_id='worker-issuer',key_id='worker-key',
+                                     identity=self.worker,private_key=self.proof_key)
+        signed=verify_closure(reopened,self.spool,recovered,self.item,worker_signer=signer,**args)
+        self.assertEqual(verify(signed,expected_closure=result,issuer_id='worker-issuer',
+            key_id='worker-key',public_key=self.proof_key.public_key()),signed)
+        self.assertEqual(verify_closure(reopened,self.spool,recovered,self.item,worker_signer=signer,**args),signed)
 
     @unittest.skipUnless(os.environ.get('LTDS_OLD_GATE_SOURCE'),'old gate source fixture not supplied')
     def test_old_gate_refuses_v2_upload_hold(self):

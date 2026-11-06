@@ -15,7 +15,7 @@ def _persist_receipt(parent, expected, *, name='direct-source-closure.json'):
     """Publish/revalidate exact local receipt; uncertain outcomes retain pin."""
     directory=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     if name not in ('direct-source-closure.json','direct-worker-signed-closure.json',
-                    'direct-v2-source-closure.json'):
+                    'direct-v2-source-closure.json','direct-v2-worker-signed-closure.json'):
         raise ValueError('closed receipt name required')
     raw=p.canonical_json(expected)
     try:

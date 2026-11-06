@@ -11,7 +11,8 @@ from .scratch_policy import PolicyConflict
 
 
 def verify_closure(ledger, spool, inventory, item, *, expected_binding, reservation_binding,
-                   verification, expected_worker, engine_id, coordinator_origin, gate_generation):
+                   verification, expected_worker, engine_id, coordinator_origin, gate_generation,
+                   worker_signer=None):
     """Reverify signed inventory and every file, keeping the node held afterward."""
     if not isinstance(inventory, VerifiedWorkerInventory) or type(verification) is not dict:
         raise PolicyConflict('verified V2 inventory required')
@@ -23,7 +24,9 @@ def verify_closure(ledger, spool, inventory, item, *, expected_binding, reservat
                 'derivedManifestSha256', 'pipelineManifestSha256', 'inventorySha256'))):
         raise PolicyConflict('V2 closure inventory binding changed')
     ids = inventory.object_ids(reservation_binding=reservation_binding)
-    if len(ids) != item['objectCount']:
+    if (len(ids) != item['objectCount'] or item['inputBytes'] != sum(
+            obj['byteSize'] for key in ('sourceManifest','derivedManifest')
+            for obj in checked[key]['objects'])):
         raise PolicyConflict('V2 closure object count changed')
     result = dict(protocol='ltds-direct-local-closure-v2', reservationId=item['reservationId'],
         scratchBindingSha256=digest, jobId=item['jobId'], attemptId=item['attemptId'],
@@ -64,7 +67,16 @@ def verify_closure(ledger, spool, inventory, item, *, expected_binding, reservat
         spool._fsync_directory(directory)
         spool._assert_mount()
         _persist_receipt(receipt_parent, result, name='direct-v2-source-closure.json')
+        signed = None
+        if worker_signer is not None:
+            from .direct_worker_receipt_v2 import WorkerClosureSignerV2, verify
+            if not isinstance(worker_signer, WorkerClosureSignerV2):
+                raise PolicyConflict('pinned V2 worker signer required')
+            signed = worker_signer.issue(result)
+            verify(signed, expected_closure=result, issuer_id=worker_signer.issuer_id,
+                   key_id=worker_signer.key_id, public_key=worker_signer._key.public_key())
+            _persist_receipt(receipt_parent, signed, name='direct-v2-worker-signed-closure.json')
         spool._assert_mount()
         require_fenced(ledger, item, expected_worker=expected_worker)
         ledger._retire_direct_writer(scratch_id, pin)
-    return result
+    return signed if signed is not None else result
