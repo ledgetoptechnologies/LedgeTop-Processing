@@ -40,6 +40,7 @@ class WorkerV2Tests(unittest.TestCase):
         fixture.payload['sourceManifest']['totalBytes'] = 3
         fixture.rehash(); signed = fixture.validate()
         payload = {key:signed[key] for key in INTAKE_FIELDS}
+        self.payload=payload
         options = dict(authenticated_principal='viewer-staging', environment='staging',
             capability_fingerprint='a'*64, options_fingerprint=payload['pipeline']['odm']['optionsFingerprint'],
             allowed_odm_options=set(), trusted_source_keys=fixture.trusted_keys, authority_id=fixtures.AUTHORITY)
