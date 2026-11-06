@@ -11,10 +11,12 @@ from .node_gate import NodeGate
 from .scratch_policy import PolicyConflict
 
 
-def _persist_receipt(parent, expected):
+def _persist_receipt(parent, expected, *, name='direct-source-closure.json'):
     """Publish/revalidate exact local receipt; uncertain outcomes retain pin."""
     directory=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-    name='direct-source-closure.json';raw=p.canonical_json(expected)
+    if name not in ('direct-source-closure.json','direct-worker-signed-closure.json'):
+        raise ValueError('closed receipt name required')
+    raw=p.canonical_json(expected)
     try:
         info=os.fstat(directory)
         if not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.geteuid() or info.st_mode&0o077:
@@ -44,7 +46,7 @@ def _persist_receipt(parent, expected):
 
 
 def verify_closure(ledger,spool,manifest,item,*,derived_ids,expected_worker,engine_id,
-                   coordinator_origin,gate_generation):
+                   coordinator_origin,gate_generation,worker_signer=None):
     """Persist a local observation only after every selected byte is verified."""
     item,sha,scratch_id=require_fenced(ledger,item,expected_worker=expected_worker)
     if type(manifest) is not dict or type(manifest.get('objects')) is not list or not manifest['objects']:
@@ -92,7 +94,17 @@ def verify_closure(ledger,spool,manifest,item,*,derived_ids,expected_worker,engi
         spool._assert_mount()
         _persist_receipt(receipt_parent,result)
         spool._assert_mount()
+        signed=None
+        if worker_signer is not None:
+            from .direct_worker_receipt import WorkerClosureSigner, verify
+            if not isinstance(worker_signer,WorkerClosureSigner):
+                raise PolicyConflict('pinned worker signer required')
+            signed=worker_signer.issue(result)
+            verify(signed,expected_closure=result,issuer_id=worker_signer.issuer_id,
+                   key_id=worker_signer.key_id,public_key=worker_signer._key.public_key())
+            _persist_receipt(receipt_parent,signed,name='direct-worker-signed-closure.json')
+            spool._assert_mount()
         require_fenced(ledger,item,expected_worker=expected_worker)
         spool._assert_mount()
         ledger._retire_direct_writer(scratch_id,pin)
-    return result
+    return signed if worker_signer is not None else result
