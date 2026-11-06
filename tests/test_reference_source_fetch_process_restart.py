@@ -28,7 +28,7 @@ REPOSITORY = Path(__file__).resolve().parent.parent
 
 
 @unittest.skipIf(os.name == 'nt', 'SIGKILL and the private ledger paths are POSIX')
-class ProcessRestartTests(unittest.TestCase):
+class ProcessHarness(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -149,6 +149,8 @@ class ProcessRestartTests(unittest.TestCase):
         self.assertEqual(self.engine_calls().count('initialize'), 1)
         self.assertEqual(self.engine_calls().count('commit'), 1)
 
+
+class ProcessRestartTests(ProcessHarness):
     def test_control_no_restart_starts_once(self):
         self.spawn('coordinator')
         worker = self.spawn('worker')
