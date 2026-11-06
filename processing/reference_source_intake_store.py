@@ -373,23 +373,14 @@ class ReferenceSourceIntakeMethods:
         transfer = json.loads(row['transfer_json'])
         if datetime.fromisoformat(transfer['expiresAt'].replace('Z', '+00:00')).timestamp() <= clock():
             raise Conflict('source reservation expired')
-        objects = {item['id']: item for name in ('source_manifest_json', 'derived_manifest_json')
-                   for item in json.loads(row[name])['objects']}
         receipts = [dict(item) for item in db.execute('''SELECT generation,object_id,byte_size,sha256,mount_id,
             storage_key,receipt_json FROM reference_source_object_receipts WHERE job_id=? ORDER BY object_id''', (job_id,))]
-        if {item['object_id'] for item in receipts} != set(objects) or len(receipts) != len(objects):
-            raise Conflict('source custody closure changed')
-        for receipt in receipts:
-            item, body = objects[receipt['object_id']], json.loads(receipt['receipt_json'])
-            if ((receipt['generation'], receipt['byte_size'], receipt['sha256']) != (generation, item['byteSize'], item['sha256'])
-                    or (body.get('jobId'), body.get('generation'), body.get('objectId'), body.get('sha256')) !=
-                       (job_id, generation, item['id'], item['sha256'])):
-                raise Conflict('source custody binding changed')
         return {'closureSha256': protocol.digest(dict(transfer=row['transfer_json'], grant=None,
                     source=row['source_manifest_sha'], derived=row['derived_manifest_sha'],
                     retention=[row['source_receipt_sha'], row['derived_receipt_sha']], receipts=receipts)),
                 'grantSha256': None, 'predecessorGrantSha256': None, 'renewalSequence': 0, 'renewalPending': False,
-                'requestsAdmitted': 0, 'bytesAdmitted': 0, 'attemptsAdmitted': 0, 'objectCount': len(objects)}
+                'requestsAdmitted': 0, 'bytesAdmitted': 0, 'attemptsAdmitted': 0, 'objectCount': len(receipts)}
+
     def _source_accepted_custody(self, db, row, job_id):
         """Every retained object against the accepted manifests, granted or not.
 
