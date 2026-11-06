@@ -12,8 +12,9 @@ the underlying socket. An interrupted or uncertain read leaves the existing
 writer pin held. The local closure remains explicitly non-authoritative for
 Viewer acceptance and processing.
 
-The listener limits concurrent connections, object length, idle time and body
-read deadline. It has no installed configuration, credential provisioning,
+The listener limits concurrent connections, object length, idle time, an
+absolute TLS-handshake-and-header deadline, and the body read deadline. It has
+no installed configuration, credential provisioning,
 authenticated reservation creation, safe uncertain-pin recovery, coordinated
 shutdown/drain, or verified public response contract. Do not deploy it until
 those contracts and real multi-process/worker failure paths are qualified.

@@ -43,9 +43,35 @@ class _BoundedReader:
         self.closed = True
 
 
+class _HeaderDeadline:
+    """Close the exact connection if TLS or header parsing outlives its budget."""
+    def __init__(self, connection, seconds):
+        self._connection = connection
+        self._lock = threading.Lock()
+        self._active = True
+        self._timer = threading.Timer(seconds, self._expire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _expire(self):
+        with self._lock:
+            if self._active:
+                self._active = False
+                try: self._connection.shutdown(socket.SHUT_RDWR)
+                except OSError: pass
+                try: self._connection.close()
+                except OSError: pass
+
+    def finish(self):
+        with self._lock:
+            self._active = False
+            self._timer.cancel()
+
+
 def create_direct_worker_server(boundary, host, port, *, ssl_context,
                                 idle_timeout=10, body_deadline=120,
-                                max_object_bytes=20 * 1024**3, max_connections=4):
+                                header_deadline=15, max_object_bytes=20 * 1024**3,
+                                max_connections=4):
     """Create a bounded server without starting it or changing live services."""
     if not isinstance(boundary, DirectWorkerBoundary):
         raise ValueError('trusted worker boundary required')
@@ -55,7 +81,8 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
         raise ValueError('TLS server context with TLS 1.2 minimum required')
     if (type(host) is not str or type(port) is not int or not 0 <= port <= 65535
             or any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
-                   for v in (idle_timeout, body_deadline))
+                   for v in (idle_timeout, body_deadline, header_deadline))
+            or header_deadline > 60
             or type(max_object_bytes) is not int or not 1 <= max_object_bytes <= 2**53-1
             or type(max_connections) is not int or not 1 <= max_connections <= 16):
         raise ValueError('invalid worker listener limits')
@@ -70,6 +97,13 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
 
         def log_message(self, *_):
             pass
+
+        def parse_request(self):
+            try:
+                return super().parse_request()
+            finally:
+                # No body is read before headers have been completely parsed.
+                self.server._local.header_deadline.finish()
 
         def handle_expect_100(self):
             self._reply(417, {'error': 'expectation_not_supported'})
@@ -131,6 +165,7 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
         def __init__(self):
             self.idle_timeout, self.body_deadline = idle_timeout, body_deadline
             self.max_object_bytes = max_object_bytes
+            self._local = threading.local()
             self._slots = threading.BoundedSemaphore(max_connections)
             super().__init__((host, port), Handler)
 
@@ -151,14 +186,20 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
 
         def process_request_thread(self, request, client_address):
             wrapped = None
+            deadline = None
             try:
                 # Acquire a bounded slot before handshaking so slow TLS peers
                 # cannot accumulate unbounded threads or block the accept loop.
-                wrapped = ssl_context.wrap_socket(request, server_side=True)
+                wrapped = ssl_context.wrap_socket(request, server_side=True, do_handshake_on_connect=False)
+                deadline = _HeaderDeadline(wrapped, header_deadline)
+                self._local.header_deadline = deadline
+                wrapped.do_handshake()
                 self.finish_request(wrapped, client_address)
             except Exception:
                 self.handle_error(request, client_address)
             finally:
+                if deadline is not None:
+                    deadline.finish()
                 self.shutdown_request(wrapped if wrapped is not None else request)
                 self._slots.release()
 
