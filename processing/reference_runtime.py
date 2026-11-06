@@ -73,6 +73,7 @@ class ReferenceSettings:
     source_attestation_keys: object | None = None
     source_release: object | None = None
     source_bearer_principals: dict | None = None
+    direct_workers: dict | None = None
 
 
 def _file(path, *, private):
@@ -125,6 +126,7 @@ def load_reference_settings(path, config):
                 allowed.add("sourceAttestationKeys")
                 allowed.add("sourceRelease")
                 allowed.add("sourceBearerPrincipals")
+                allowed.add("directWorkers")
             if not required <= set(value) or set(value) - allowed:
                 raise RuntimeConfigurationError("runtime configuration fields differ")
         else:
@@ -240,6 +242,59 @@ def load_reference_settings(path, config):
                 viewer_targets[environment] = {"origin": origin, "keyId": key_id, "secret": secret}
             if len(set(target_secrets)) != len(target_secrets) or not viewer_keys:
                 raise RuntimeConfigurationError("distinct Viewer service keys and receipt pins are required")
+        direct_workers=None
+        if 'directWorkers' in value:
+            direct=value['directWorkers']
+            p._closed(direct,('enabled','nodes'),'direct worker preparation')
+            if direct['enabled'] is not False:
+                raise RuntimeConfigurationError('direct worker runtime not implemented')
+            if type(direct['nodes']) is not dict or set(direct['nodes'])!=set(node_ids):
+                raise RuntimeConfigurationError('direct worker nodes must exactly cover configured nodes')
+            from .reference_result_proxy import _origin
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+            import ipaddress
+            direct_workers={}
+            direct_key_bytes=set();direct_endpoints=set()
+            for node,entry in direct['nodes'].items():
+                p._closed(entry,('origin','connectIp','caFile','clientCertFile','clientKeyFile',
+                    'bearerFile','issuerId','keyId','workerPublicKeyPem'),'direct worker node')
+                origin=_origin(entry['origin'])
+                if type(entry['connectIp']) is not str or '%' in entry['connectIp']:
+                    raise RuntimeConfigurationError('direct worker address invalid')
+                ipaddress.ip_address(entry['connectIp'])
+                for field in ('caFile','clientCertFile','clientKeyFile','bearerFile'):
+                    _file(entry[field],private=field in ('clientKeyFile','bearerFile'))
+                p._slug(entry['issuerId'],'issuer');p._slug(entry['keyId'],'key')
+                if type(entry['workerPublicKeyPem']) is not str or len(entry['workerPublicKeyPem'])>4096:
+                    raise RuntimeConfigurationError('worker public key invalid')
+                key=serialization.load_pem_public_key(entry['workerPublicKeyPem'].encode('ascii'))
+                if not isinstance(key,Ed25519PublicKey):raise RuntimeConfigurationError('worker public key invalid')
+                raw_key=key.public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)
+                if raw_key in direct_key_bytes or origin in direct_endpoints:
+                    raise RuntimeConfigurationError('direct worker pins and origins must be distinct')
+                direct_key_bytes.add(raw_key);direct_endpoints.add(origin)
+                context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                context.minimum_version=ssl.TLSVersion.TLSv1_2
+                context.load_verify_locations(cafile=entry['caFile'])
+                context.load_cert_chain(entry['clientCertFile'],entry['clientKeyFile'])
+                secret_path,initial=_file(entry['bearerFile'],private=True)
+                fd=os.open(secret_path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+                try:
+                    observed=os.fstat(fd)
+                    if (observed.st_dev,observed.st_ino)!=(initial.st_dev,initial.st_ino):
+                        raise RuntimeConfigurationError('direct bearer identity changed')
+                    with os.fdopen(fd,'rb',closefd=False) as source: raw_secret=source.read(4097)
+                finally:os.close(fd)
+                if len(raw_secret)>4096:raise RuntimeConfigurationError('direct bearer invalid')
+                secret=raw_secret.decode('ascii').rstrip('\r\n')
+                if (not 32<=len(secret)<=4096 or any(ord(c)<33 or ord(c)>126 for c in secret)
+                        or secret in credentials or secret in legacy):
+                    raise RuntimeConfigurationError('direct bearer invalid')
+                credentials.append(secret)
+                # Preparation only: retain the protected path, never an
+                # additional in-memory copy of the direct bearer.
+                direct_workers[node]={**entry,'origin':origin,'workerPublicKey':key}
         source_spool=None
         source_attestation_keys=None
         if value["schemaVersion"] in (5,6):
@@ -271,7 +326,7 @@ def load_reference_settings(path, config):
         return ReferenceSettings(dict(listener), {token: env for env, token in viewers.items()},
                                  {node: dict(worker) for node, worker in workers.items()}, dict(budget), recovery,
                                  viewer_keys, viewer_targets or None, source_spool, source_attestation_keys,release_settings,
-                                 source_principals)
+                                 source_principals,direct_workers)
     except Exception:
         raise RuntimeConfigurationError("invalid private reference runtime configuration") from None
 

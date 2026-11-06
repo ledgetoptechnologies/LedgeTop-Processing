@@ -276,6 +276,39 @@ class ReferenceRuntimeTests(unittest.TestCase):
         with patch('processing.source_spool.os.path.ismount',return_value=True):
             with self.assertRaises(RuntimeConfigurationError):self.settings()
 
+    def test_disabled_direct_worker_preparation_is_strict_and_never_enables_runtime(self):
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from ops.qualify_enrolled_phase_transport import configuration_material
+        self.source_intake_config()
+        files=configuration_material(str(uuid.uuid4()),str(uuid.uuid4()))['configurationFiles']
+        for name in ('fixture-ca.pem','fixture-cert.pem','fixture-key.pem'):
+            (self.root/name).write_bytes(files[name]);(self.root/name).chmod(0o600)
+        nodes={}
+        for i,node in enumerate(('cluster','main')):
+            key=Ed25519PrivateKey.generate().public_key().public_bytes(
+                serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo).decode('ascii')
+            token=self.root/(node+'.secret');token.write_text('synthetic-direct-'+node+'-'+str(i)*40);token.chmod(0o600)
+            nodes[node]=dict(origin='https://'+node+'.example:9443',connectIp='127.0.0.'+str(i+1),
+                caFile=str(self.root/'fixture-ca.pem'),clientCertFile=str(self.root/'fixture-cert.pem'),
+                clientKeyFile=str(self.root/'fixture-key.pem'),bearerFile=str(token),
+                issuerId='worker-'+node,keyId='key-'+node,workerPublicKeyPem=key)
+        self.value['directWorkers']=dict(enabled=False,nodes=nodes);self.write_config()
+        with patch('processing.source_spool.os.path.ismount',return_value=True):loaded=self.settings()
+        self.assertEqual(set(loaded.direct_workers),{'cluster','main'})
+        for mutation in ('enabled','missing','ip','key','token'):
+            original=copy.deepcopy(self.value)
+            if mutation=='enabled':self.value['directWorkers']['enabled']=True
+            if mutation=='missing':del self.value['directWorkers']['nodes']['main']
+            if mutation=='ip':self.value['directWorkers']['nodes']['main']['connectIp']='example.com'
+            if mutation=='key':self.value['directWorkers']['nodes']['main']['workerPublicKeyPem']='invalid'
+            if mutation=='token':self.value['directWorkers']['nodes']['main']['bearerFile']=nodes['cluster']['bearerFile']
+            self.write_config()
+            with patch('processing.source_spool.os.path.ismount',return_value=True):
+                with self.subTest(mutation=mutation),self.assertRaises(RuntimeConfigurationError):self.settings()
+            self.value=original
+        self.write_config()
+
     def test_schema6_source_bearer_principal_requires_matching_trusted_key(self):
         self.source_intake_config()
         self.value['sourceBearerPrincipals']={'staging':'viewer-staging'};self.write_config()

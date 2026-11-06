@@ -84,7 +84,7 @@ def signer(value):
 def compose(spec):
     install.closed(spec, ('schemaVersion', 'protocol', 'preparationId', 'authorityId', 'listener',
         'coordinatorOrigin', 'nodes', 'environments', 'forbiddenCredentials', 'streamBudget',
-        'sourceSpool', 'outputDirectory'))
+        'sourceSpool', 'outputDirectory') + (('directWorkers',) if 'directWorkers' in spec else ()))
     require(type(spec['schemaVersion']) is int and spec['schemaVersion'] == 1 and spec['protocol'] == PROTOCOL,
             'runtime_preparation_profile_required')
     for field in ('preparationId', 'authorityId'):
@@ -192,6 +192,25 @@ def compose(spec):
     final = dict(bootstrap, schemaVersion=6, viewerReceiptKeys=copy_keys, viewerAcceptance={},
                  sourceSpool=spool, sourceAttestationKeys=source_keys,
                  sourceBearerPrincipals={env:record['principalId'] for env,record in envs.items()})
+    if 'directWorkers' in spec:
+        direct=spec['directWorkers'];install.closed(direct,('enabled','nodes'))
+        require(direct['enabled'] is False and type(direct['nodes']) is dict and set(direct['nodes'])==set(workers),
+                'disabled_complete_direct_worker_inventory_required')
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        for ident,entry in direct['nodes'].items():
+            install.closed(entry,('origin','connectIp','caFile','clientCertFile','clientKeyFile',
+                'bearerFile','issuerId','keyId','workerPublicKeyPem'))
+            _origin(entry['origin']);ipaddress.ip_address(entry['connectIp'])
+            for field in ('caFile','clientCertFile','clientKeyFile','bearerFile'):install.absolute(entry[field])
+            _slug(entry['issuerId'],'issuer');_slug(entry['keyId'],'key')
+            require(type(entry['workerPublicKeyPem']) is str and len(entry['workerPublicKeyPem'])<=4096,
+                    'bounded_worker_public_key_required')
+            key=serialization.load_pem_public_key(entry['workerPublicKeyPem'].encode('ascii'))
+            require(isinstance(key,Ed25519PublicKey),'ed25519_worker_public_key_required')
+        # Paths are references only: preparation never writes or provisions the
+        # private TLS material, and runtime performs its own file/TLS checks.
+        final['directWorkers']=direct
     trust = dict(schemaVersion=1, authorityId=spec['authorityId'], nodeEndpoints=endpoints,
                  recoveryBindings=recovery, sourceAttestationKeys=source_keys, viewerReceiptKeys=copy_keys,
                  inputBindings=evidence)
