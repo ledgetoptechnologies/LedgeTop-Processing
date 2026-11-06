@@ -417,7 +417,8 @@ def load_config(path, *, expected_direct_config_sha256=None, expected_direct_cre
                     if (type(upload['port']) is not int or not 1<=upload['port']<=65535 or upload['port']==direct['port']
                             or type(upload['bearer']) is not str or not 32<=len(upload['bearer'])<=4096
                             or not upload['bearer'].isascii() or not all(33<=ord(c)<=126 for c in upload['bearer'])
-                            or upload['bearer'] in (config['workerBearer'],config['resultReadBearer'],config['engineToken'])):
+                            or upload['bearer'] in (config['workerBearer'],config['resultReadBearer'],config['engineToken'])
+                            or ('maintenanceReadiness' in config and upload['bearer']==config['maintenanceReadiness']['bearer'])):
                         raise ValueError('separate protected observation upload settings required')
                 for field in ('issuerId','keyId'):p._slug(direct[field],field)
                 if type(direct['clients']) is not dict or not direct['clients'] or len(direct['clients'])>64:
