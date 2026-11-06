@@ -1423,8 +1423,8 @@ class ReferenceDriver:
         if observed != 'present' or info['status']['code'] not in (10, 20):
             raise DriverHeld('source_recovery_engine_task_changed')
         if row['phase'] == 'commit_pending':
-            output, _more = self.worker.engine.output_page(job_id, line=0, limit=1)
-            if not output:
+            # Blank lines are not engine output, and malformed pages prove nothing.
+            if self.worker._first_real_output(job_id) is None:
                 raise DriverHeld('source_recovery_commit_unproven')
         elif row['phase'] != 'processing':
             raise DriverHeld('source_recovery_execution_changed')
