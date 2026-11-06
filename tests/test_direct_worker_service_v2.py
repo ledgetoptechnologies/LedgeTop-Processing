@@ -63,11 +63,12 @@ class WorkerListenerSettingsTest(unittest.TestCase):
     def test_opt_in_builds_boundary_before_opening_server(self):
         path = self.write(self.config())
         with patch('processing.direct_worker_service_v2.DirectWorkerBoundaryV2') as boundary, \
+             patch('processing.direct_worker_grant_v2.DirectWorkerGrant') as grant, \
              patch('processing.direct_worker_service_v2.create_direct_worker_server') as server:
-            result = create_listener(path, boundary_kwargs={'ledger': object()}, tls_context=object(), client_principals={'a'*64:'coordinator'})
+            result = create_listener(path, boundary_kwargs={'ledger': object()}, tls_context=object(), client_principals={'a'*64:'coordinator'}, coordinator_principal='coordinator')
             boundary.assert_called_once()
             server.assert_called_once_with(boundary.return_value, '127.0.0.1', 18181, ssl_context=unittest.mock.ANY,
-                                           client_principals={'a'*64:'coordinator'})
+                                           client_principals={'a'*64:'coordinator'}, reservation_grant=grant.return_value)
             self.assertIsInstance(result, ListenerOwner)
             self.assertTrue(result.close(0))
             server.return_value.server_close.assert_called_once()

@@ -92,7 +92,7 @@ class _HeaderDeadline:
 def create_direct_worker_server(boundary, host, port, *, ssl_context,
                                 idle_timeout=10, body_deadline=120,
                                 header_deadline=15, max_object_bytes=20 * 1024**3,
-                                max_connections=4, client_principals=None):
+                                max_connections=4, client_principals=None, reservation_grant=None):
     """Create a bounded server without starting it or changing live services."""
     from .direct_worker_receiver_v2 import DirectWorkerBoundaryV2
     if not isinstance(boundary, (DirectWorkerBoundary, DirectWorkerBoundaryV2)):
@@ -112,6 +112,11 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
                 raise ValueError('invalid client certificate fingerprint')
             protocol._slug(principal, 'client principal')
         client_principals = dict(client_principals)
+    if reservation_grant is not None:
+        from .direct_worker_grant_v2 import DirectWorkerGrant
+        if (version!='v2' or client_principals is None or not isinstance(reservation_grant,DirectWorkerGrant)
+                or reservation_grant.boundary is not boundary):
+            raise ValueError('bound mutual TLS reservation grant required')
     if (type(host) is not str or type(port) is not int or not 0 <= port <= 65535
             or any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
                    for v in (idle_timeout, body_deadline, header_deadline))
@@ -179,6 +184,17 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
                 if length > self.server.max_object_bytes:
                     self._reply(413, {'error': 'object_too_large'}); return
                 headers = dict(self.headers.items())
+                if reservation_grant is not None:
+                    principal=getattr(self.server._local,'peer_principal',None)
+                    if self.command=='POST' and self.path=='/direct/v2/reservation':
+                        if length<1 or length>8192:
+                            self._reply(400,{'error':'invalid_grant'});return
+                        from . import reference_protocol as protocol
+                        body=_BoundedReader(self,length,time.monotonic()+self.server.body_deadline)
+                        payload=protocol.decode_submission(body.read(length))
+                        result=reservation_grant.authorize(principal,headers,payload)
+                        self._reply(200,result);return
+                    reservation_grant.require(principal,headers)
                 match = re.fullmatch(r'/direct/' + version + r'/objects/([A-Za-z0-9][A-Za-z0-9_-]{0,127})', self.path)
                 if self.command == 'PUT' and match:
                     body = _BoundedReader(self, length, time.monotonic() + self.server.body_deadline)
