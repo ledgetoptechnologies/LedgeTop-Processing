@@ -42,7 +42,7 @@ REQUIRED = frozenset(('stateRoot','scratchRoot','nodeId','workerId','workerInsta
     'engineToken','workerBearer','resultReadBearer','caFile','serverCertFile','serverKeyFile','listenHost',
     'listenPort','outputBudget','safetyFloor','transferTtl','cleanupGrace','pollSeconds','engineVersion','shareResults'))
 OPTIONAL = frozenset(('allowedEnvironments','cleanupEnabled','engineCleanupEnabled','allowedOdmOptions','schemaVersion',
-                      'executionRouting','viewerReceiptKeys','sourceRangeV2Enabled','maintenanceReadiness'))
+                      'executionRouting','viewerReceiptKeys','sourceRangeV2Enabled','maintenanceReadiness','directPreparation'))
 TREEDAR_DOCKER_EXECUTABLE = '/usr/bin/docker'
 TREEDAR_DOCKER_SOCKET = '/run/docker.sock'
 _STATE_OWNERS = {}
@@ -198,6 +198,7 @@ class WorkerService:
         self._lock = threading.Lock()
         self._state, self._reason = 'starting', None
         self._driver_thread = self._server_thread = None
+        self._direct_owner=getattr(server,'worker_direct_owner',None)
         readiness=getattr(server,'worker_readiness_api',None)
         if readiness is not None:readiness.service=self
 
@@ -208,9 +209,12 @@ class WorkerService:
 
     def health(self):
         with self._lock:
-            return dict(state=self._state, reason=self._reason,
+            direct=self._direct_owner.status() if self._direct_owner is not None else 'disabled'
+            failed=direct=='failed'
+            return dict(state='failed' if failed else self._state, reason='direct_preparation_listener_failed' if failed else self._reason,
                 driverAlive=self._driver_thread is not None and self._driver_thread.is_alive(),
-                listenerAlive=self._server_thread is not None and self._server_thread.is_alive())
+                listenerAlive=self._server_thread is not None and self._server_thread.is_alive(),
+                directPreparationListener=direct)
 
     def run(self, stop):
         if self._server_thread is not None:
@@ -227,6 +231,8 @@ class WorkerService:
             backoff = self.poll_seconds
             try:
                 while not stop.is_set():
+                    if self._direct_owner is not None and self._direct_owner.status()=='failed':
+                        raise RuntimeError('direct preparation listener failed')
                     state = self.driver.step()['state']
                     backoff = min(60, max(self.poll_seconds, backoff * 2)) if state in ('retry_wait','held','not_ready') else self.poll_seconds
                     stop.wait(backoff)
@@ -237,6 +243,7 @@ class WorkerService:
         self._driver_thread = threading.Thread(target=drive, name='reference-driver', daemon=False)
         server_started = driver_started = False
         try:
+            if self._direct_owner is not None:self._direct_owner.start()
             self._server_thread.start()
             server_started = True
             self._driver_thread.start()
@@ -255,6 +262,9 @@ class WorkerService:
             # Stop new reads first, then join handlers so every stream's finally
             # closes its descriptor and releases only its own durable read pin.
             try:
+                if self._direct_owner is not None:
+                    # Never release worker ownership while direct handlers run.
+                    while not self._direct_owner.close(1):pass
                 if server_started:
                     if self._server_thread.is_alive():
                         try:
@@ -299,7 +309,7 @@ def _file(path, *, private=False):
     return candidate, info
 
 
-def load_config(path):
+def load_config(path, *, expected_direct_config_sha256=None):
     """Return private settings; never include their values in an exception."""
     try:
         candidate, initial = _file(path, private=True)
@@ -314,6 +324,12 @@ def load_config(path):
             os.close(descriptor)
         if len(raw) > MAX_CONFIG_BYTES:
             raise ValueError('configuration exceeds size limit')
+        if expected_direct_config_sha256 is not None:
+            from processing.direct_protected_transport import _read
+            p._hash(expected_direct_config_sha256,'enrolled worker config digest')
+            protected_raw=_read(path,private=True,maximum=MAX_CONFIG_BYTES)
+            if (protected_raw!=raw or hashlib.sha256(protected_raw).hexdigest()!=expected_direct_config_sha256):
+                raise ValueError('enrolled direct worker configuration changed')
         config = p.decode_submission(raw)
         if type(config) is not dict or not REQUIRED <= set(config) or set(config) - REQUIRED - OPTIONAL:
             raise ValueError('configuration fields differ')
@@ -377,6 +393,48 @@ def load_config(path):
             if readiness['bearer'] in (config['workerBearer'],config['resultReadBearer'],config['engineToken']):
                 raise ValueError('separate maintenance read credential required')
             config['_loadedConfigSha256']=hashlib.sha256(raw).hexdigest()
+        if 'directPreparation' in config:
+            direct=config['directPreparation']
+            p._closed(direct,('enabled','host','port','certificate','privateKey','clientCA','clients',
+                'sourceAttestationKeys','signingKey','issuerId','keyId','mountPath','mountId','markerName'),
+                'direct preparation settings')
+            if type(direct['enabled']) is not bool:raise ValueError('invalid direct preparation flag')
+            if direct['enabled']:
+                from processing.direct_protected_transport import _read, _sealed
+                # The digest must come from a separately authenticated, immutable
+                # enrollment record, never from this config or an HTTP request.
+                if expected_direct_config_sha256 is None:
+                    raise ValueError('enrolled direct worker configuration required')
+                address=ipaddress.ip_address(direct['host'])
+                if not address.is_loopback or type(direct['port']) is not int or not 1<=direct['port']<=65535:
+                    raise ValueError('private loopback listener required')
+                for field in ('issuerId','keyId'):p._slug(direct[field],field)
+                if type(direct['clients']) is not dict or not direct['clients'] or len(direct['clients'])>64:
+                    raise ValueError('pinned coordinator clients required')
+                for fingerprint,scope in direct['clients'].items():
+                    p._hash(fingerprint,'client certificate fingerprint');p._closed(scope,('principal','environment'),'client scope')
+                    p._slug(scope['principal'],'coordinator principal');p._environment(scope['environment'])
+                from processing.viewer_source_attestation import validate_trusted_keys
+                direct['_trustedSourceKeys']=validate_trusted_keys(direct['sourceAttestationKeys'])
+                from cryptography.hazmat.primitives import serialization
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+                keybytes=_read(direct['signingKey'],private=True,maximum=8192)
+                signer=serialization.load_pem_private_key(keybytes,password=None)
+                if not isinstance(signer,Ed25519PrivateKey):raise ValueError('worker signer required')
+                direct['_signer']=signer
+                cert=_read(direct['certificate'],private=False)
+                secret=_read(direct['privateKey'],private=True)
+                ca=_read(direct['clientCA'],private=False)
+                context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2
+                context.load_verify_locations(cadata=ca.decode('ascii'));context.verify_mode=ssl.CERT_REQUIRED
+                certfd=_sealed(cert);keyfd=None
+                try:
+                    keyfd=_sealed(secret)
+                    context.load_cert_chain('/proc/self/fd/'+str(certfd),'/proc/self/fd/'+str(keyfd))
+                finally:
+                    os.close(certfd)
+                    if keyfd is not None:os.close(keyfd)
+                direct['_tlsContext']=context
         return config
     except Exception:
         raise ValueError('invalid private worker configuration') from None
@@ -517,6 +575,26 @@ def _build_worker(config,owner,resources):
     server.worker_readiness_api=readiness_api
     original_close = server.server_close
     resources['serverClose']=original_close
+    direct=config.get('directPreparation')
+    if direct and direct['enabled']:
+        from processing.source_spool import SourceSpool
+        from processing.direct_worker_preparation_api import DirectPreparationAPI
+        from processing.direct_snapshot_http import create_snapshot_server
+        from processing.direct_worker_service_v2 import ListenerOwner
+        # Validate exact real mount/marker before opening the listener. The
+        # preparation routine rechecks it before/after the physical node hold.
+        SourceSpool(scratch,mount_path=direct['mountPath'],mount_id=direct['mountId'],
+                    marker_name=direct['markerName'],safety_floor_bytes=0,require_mount=True)
+        context=direct['_tlsContext']
+        worker_identity=dict(authorityId=config['authorityId'],nodeId=config['nodeId'],
+            workerId=config['workerId'],workerInstanceId=config['workerInstanceId'])
+        backend=DirectPreparationAPI(driver=driver,ledger=ledger,worker=worker_identity,
+            mount_path=direct['mountPath'],mount_id=direct['mountId'],marker_name=direct['markerName'],
+            source_keys=direct['_trustedSourceKeys'],signer=direct['_signer'],
+            issuer_id=direct['issuerId'],key_id=direct['keyId'])
+        direct_server=create_snapshot_server(direct['host'],direct['port'],enabled=True,ssl_context=context,
+            client_scopes=direct['clients'],prepare_backend=backend)
+        server.worker_direct_owner=ListenerOwner(direct_server)
     server.daemon_threads = False
     server.block_on_close = True
     close_lock = threading.Lock()
@@ -531,6 +609,9 @@ def _build_worker(config,owner,resources):
             with driver._lock:
                 owner.check(root)
                 # A failed join or lease close retains all later ownership.
+                direct_owner=getattr(server,'worker_direct_owner',None)
+                if direct_owner is not None and not direct_owner.close(1):
+                    raise ValueError('direct preparation listener remains active')
                 original_close()
                 session.close()
                 owner.__exit__(None,None,None)

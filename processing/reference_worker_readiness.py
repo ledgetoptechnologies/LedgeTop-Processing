@@ -146,7 +146,8 @@ class WorkerReadinessAPI:
         driver=self.driver;worker=driver.worker
         if self.service is None:raise ValueError('worker service not started')
         health=self.service.health()
-        if health['state']!='ready' or health['driverAlive'] is not True or health['listenerAlive'] is not True:
+        if (health['state']!='ready' or health['driverAlive'] is not True or health['listenerAlive'] is not True
+                or health.get('directPreparationListener','disabled') not in ('disabled','running')):
             raise ValueError('worker service not ready')
         if not driver._lock.acquire(blocking=False):raise ValueError('worker driver busy')
         try:

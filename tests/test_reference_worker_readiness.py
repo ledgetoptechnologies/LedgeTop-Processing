@@ -89,6 +89,12 @@ class ReadinessTests(unittest.TestCase):
         self.api.service.health=lambda:dict(state='ready',driverAlive=False,listenerAlive=True)
         self.assertEqual(self.request()[1].status,503)
 
+    def test_direct_listener_failure_prevents_worker_readiness(self):
+        for state in ('failed','draining','not_started','closed'):
+            self.api.service.health=lambda:dict(state='ready',driverAlive=True,listenerAlive=True,
+                                                directPreparationListener=state)
+            with self.subTest(state=state):self.assertEqual(self.request()[1].status,503)
+
     def test_serving_mode_does_not_claim_idle_during_active_engine_work(self):
         identifier=str(uuid.uuid4())
         self.engine.read.side_effect=lambda route,**kwargs: (dict(engineVersion='pinned-v2',taskQueueCount=1) if route=='/info'

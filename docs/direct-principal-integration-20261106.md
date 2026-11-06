@@ -92,3 +92,10 @@ It retains uncertainty on any failed attempt. A combined local run passed 100
 tests with 10 external-fixture skips. It has no authenticated daemon endpoint
 or provisioned fleet-policy trust, and does not establish old-process fencing or
 installed recovery; it must not be used to activate a node.
+
+An optional worker-service preparation listener is implemented but its
+coordinator policy refuses all preparation. Protected credentials and a pinned
+config are checked when explicitly configured; the daemon entrypoint does not
+yet obtain an enrolled config digest. A combined synthetic service run passed
+39 tests. Actual enabled preparation, worker enrollment, installation,
+process restart and per-job upload listener lifecycle remain unqualified.
