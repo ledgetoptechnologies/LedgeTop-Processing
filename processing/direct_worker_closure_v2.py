@@ -1,4 +1,5 @@
 """V2 local all-source observation; never Viewer custody or execution."""
+import hashlib
 import os
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from .direct_worker_receiver import check_scope
 from .direct_worker_scratch_v2 import require_fenced, settings
 from .node_gate import NodeGate
 from .scratch_policy import PolicyConflict
+from . import reference_protocol as p
 
 
 def verify_closure(ledger, spool, inventory, item, *, expected_binding, reservation_binding,
@@ -78,5 +80,11 @@ def verify_closure(ledger, spool, inventory, item, *, expected_binding, reservat
             _persist_receipt(receipt_parent, signed, name='direct-v2-worker-signed-closure.json')
         spool._assert_mount()
         require_fenced(ledger, item, expected_worker=expected_worker)
+        # Persist the independent no-cleanup fence while the writer pin is
+        # still held. A crash on either side of this call retains at least one
+        # fence. It is not an authenticated Viewer custody acknowledgement.
+        ledger._establish_direct_custody_fence(scratch_id,pin,binding_sha=digest,
+            closure_sha=hashlib.sha256(p.canonical_json(result)).hexdigest(),
+            expected_settings=settings(item,scratch_id))
         ledger._retire_direct_writer(scratch_id, pin)
     return signed if signed is not None else result

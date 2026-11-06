@@ -316,6 +316,75 @@ class WorkerV2Tests(unittest.TestCase):
         self.assertEqual(verify(signed,expected_closure=result,issuer_id='worker-issuer',
             key_id='worker-key',public_key=self.proof_key.public_key()),signed)
         self.assertEqual(verify_closure(reopened,self.spool,recovered,self.item,worker_signer=signer,**args),signed)
+        # The new local retention fence is not a Viewer ACK: it preserves the
+        # reservation after the writer pin retires and survives process reopen.
+        scratch_id=self.observation['scratchReservationId']
+        with reopened._transaction() as db:
+            fence=db.execute('SELECT * FROM direct_custody_fences WHERE reservation=?',(scratch_id,)).fetchone()
+            self.assertIsNotNone(fence)
+            remaining=db.execute('SELECT remaining FROM reservations WHERE id=?',(scratch_id,)).fetchone()['remaining']
+            self.assertIsNone(db.execute('SELECT 1 FROM direct_writer_pins WHERE reservation=?',(scratch_id,)).fetchone())
+        with self.assertRaisesRegex(PolicyConflict,'custody is retained'):
+            reopened.settle_unstarted(scratch_id,transfer_ended=True)
+        # Processing is not blocked by this separate retention fence. Terminal
+        # accounting stays conservative while the source is still retained.
+        reopened.claim_engine_lease(scratch_id)
+        reopened.set_engine_state(scratch_id,'engine_started')
+        reopened.set_engine_state(scratch_id,'terminal',terminal_attested=True)
+        with reopened._transaction() as db:
+            self.assertEqual(db.execute('SELECT remaining FROM reservations WHERE id=?',(scratch_id,)).fetchone()['remaining'],remaining)
+        self.assertEqual(reopened.cleanup_candidates(),[])
+        again=ScratchLedger(self.root/'private'/'ledger.sqlite',self.root,
+            capacity_probe=lambda _:1000000,clock=lambda:2000,safety_floor_bytes=100)
+        with self.assertRaisesRegex(PolicyConflict,'custody is retained'):
+            again.settle_unstarted(scratch_id,transfer_ended=True)
+
+    def test_custody_fence_rejects_preexisting_cleanup_intent(self):
+        scratch_id=self.observation['scratchReservationId']
+        with self.ledger._transaction() as db:
+            db.execute("INSERT INTO cleanup_intents VALUES(?,?,?,?,'cleanup_pending')",
+                       (scratch_id,'existing-object','synthetic-cleanup-token',999))
+        with self.assertRaisesRegex(PolicyConflict,'writer or reservation changed'):
+            self.ledger._establish_direct_custody_fence(scratch_id,self.readiness['body']['pinId'],
+                binding_sha=self.observation['bindingSha256'],closure_sha='b'*64,
+                expected_settings=scratch.settings(self.item,scratch_id))
+        with self.ledger._transaction() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_custody_fences').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0],1)
+
+    def test_retained_custody_journal_guard_cannot_be_recreated_on_restart(self):
+        scratch_id=self.observation['scratchReservationId']
+        self.ledger._establish_direct_custody_fence(scratch_id,self.readiness['body']['pinId'],
+            binding_sha=self.observation['bindingSha256'],closure_sha='b'*64,
+            expected_settings=scratch.settings(self.item,scratch_id))
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            db.execute('DROP TRIGGER direct_custody_no_delete');db.commit()
+        with self.assertRaisesRegex(PolicyConflict,'guards changed'):
+            ScratchLedger(self.root/'private'/'ledger.sqlite',self.root,
+                capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
+
+    def test_retained_custody_journal_schema_change_is_rejected(self):
+        scratch_id=self.observation['scratchReservationId']
+        self.ledger._establish_direct_custody_fence(scratch_id,self.readiness['body']['pinId'],
+            binding_sha=self.observation['bindingSha256'],closure_sha='b'*64,
+            expected_settings=scratch.settings(self.item,scratch_id))
+        with closing(sqlite3.connect(self.ledger.path)) as db:
+            db.execute('ALTER TABLE direct_custody_fences ADD COLUMN unexpected TEXT');db.commit()
+        with self.assertRaisesRegex(PolicyConflict,'schema changed'):
+            ScratchLedger(self.root/'private'/'ledger.sqlite',self.root,
+                capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
+
+    @unittest.skipUnless(os.environ.get('LTDS_OLD_SCRATCH_SOURCE'),'previous scratch source fixture not supplied')
+    def test_previous_scratch_binary_refuses_retained_custody_ledger(self):
+        scratch_id=self.observation['scratchReservationId']
+        self.ledger._establish_direct_custody_fence(scratch_id,self.readiness['body']['pinId'],
+            binding_sha=self.observation['bindingSha256'],closure_sha='b'*64,
+            expected_settings=scratch.settings(self.item,scratch_id))
+        spec=importlib.util.spec_from_file_location('old_scratch_custody',os.environ['LTDS_OLD_SCRATCH_SOURCE'])
+        old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)
+        with self.assertRaises(old.PolicyConflict):
+            old.ScratchLedger(self.root/'private'/'ledger.sqlite',self.root,
+                capacity_probe=lambda _:1000000,clock=lambda:100,safety_floor_bytes=100)
 
     @unittest.skipUnless(os.environ.get('LTDS_OLD_GATE_SOURCE'),'old gate source fixture not supplied')
     def test_old_gate_refuses_v2_upload_hold(self):
