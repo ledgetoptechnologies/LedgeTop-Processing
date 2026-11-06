@@ -72,7 +72,7 @@ class DirectV2PairSyntheticTests(unittest.TestCase):
             for name in ('fixture-ca.pem','fixture-cert.pem','fixture-key.pem'):(root/name).write_bytes(material[name])
             context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2
             context.load_cert_chain(str(root/'fixture-cert.pem'),str(root/'fixture-key.pem'))
-            server=create_direct_worker_server(f.boundary,'127.0.0.1',0,ssl_context=context,idle_timeout=2)
+            server=create_direct_worker_server(f.boundary,'127.0.0.1',0,ssl_context=context,idle_timeout=2,allow_ungranted_v2_test_only=True)
             thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
             try:
                 sender=DirectWorkerSenderV2(origin='https://127.0.0.1:'+str(server.server_port),

@@ -54,8 +54,9 @@ ceiling and refuses new observations at capacity until a safe archival scheme
 is qualified. The merged check ran 79 tests with four old-code fixture skips.
 
 The opt-in direct listener can require a pinned client certificate, but its
-mapped principal is not yet bound to a reservation or enrolled runtime
-configuration. The bearer alone is not an installed coordinator identity; do
-not treat allowlisting as per-job authorization. The merged synthetic check ran
-56 tests with three older-code fixture skips; the mTLS-specific handler fixture
-does not establish an authenticated V2 reservation or installed behavior.
+mapped principal is now bound to a pre-enrolled reservation in the candidate.
+The merged synthetic check ran 140 tests with six older-code fixture skips,
+including actual loopback mTLS reservation and transfer. The bearer alone is
+not an installed coordinator identity. Coordinator-side grant submission,
+dynamic worker enrollment, credential provisioning, live recovery and the
+public Viewer route remain unwired; no installed behavior is established.
