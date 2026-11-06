@@ -36,9 +36,11 @@ class SyntheticActivationTests(unittest.TestCase):
     def test_durable_journal_and_production_gate_verify_exact_process(self):
         with self.assertRaisesRegex(TransportHeld,'activation_receipt_required'):
             guard_coordinator_progress(self.driver,'stop-bootstrap')
-        with patch.object(f,'readiness',side_effect=self.packet):
+        with patch.object(f,'verify_fixture_ownership'), patch.object(f,'readiness',side_effect=self.packet):
             states=f.activate_fixture_workers(self.controller,self.driver,SimpleNamespace(instances=self.instances),self.startup,'b'*64)
+            resumed=f.activate_fixture_workers(self.controller,self.driver,SimpleNamespace(instances=self.instances),self.startup,'b'*64)
         self.assertEqual([s['phase'] for s in states],['ready','ready'])
+        self.assertEqual(states,resumed)
         guard_coordinator_progress(self.driver,'stop-bootstrap')
         packet=self.packet(self.instances[0],self.workers[0])
         self.assertIsNotNone(activation_readiness_binding(self.driver,self.workers[0],packet['readiness'],packet['process']))
@@ -48,9 +50,47 @@ class SyntheticActivationTests(unittest.TestCase):
 
     def test_not_frozen_or_wrong_node_cannot_register(self):
         self.state['phase']='bootstrap-draining'
-        with patch.object(f,'readiness',side_effect=self.packet), self.assertRaisesRegex(TransportHeld,'not_frozen'):
+        with patch.object(f,'verify_fixture_ownership'), patch.object(f,'readiness',side_effect=self.packet), self.assertRaisesRegex(TransportHeld,'not_frozen'):
             f.activate_fixture_workers(self.controller,self.driver,SimpleNamespace(instances=self.instances),self.startup,'b'*64)
         self.assertFalse((self.root/'first-worker-activation-cluster.json').exists())
         self.state['phase']='bootstrap-frozen'; self.instances[0]['node']='main'
-        with self.assertRaisesRegex(TransportHeld,'order_changed'):
+        with patch.object(f,'verify_fixture_ownership'), self.assertRaisesRegex(TransportHeld,'order_changed'):
             f.activate_fixture_workers(self.controller,self.driver,SimpleNamespace(instances=self.instances),self.startup,'b'*64)
+
+    def test_wrong_controller_is_rejected_before_registration(self):
+        outer=self.root/'volume';outer.mkdir(mode=0o700)
+        op=outer/self.plan['operationId'];op.mkdir(mode=0o700);root=op/'operation';root.mkdir(mode=0o700)
+        self.driver.root=root
+        worker_root=op/'workers';worker_root.mkdir(mode=0o700)
+        layout={'operationId':self.plan['operationId'],'candidateImageId':'sha256:test','installations':{}}
+        for instance,worker in zip(self.instances,self.workers):
+            instance.update(root=worker_root/worker['nodeId'],entry={'root':worker['settings']['sourceRoot']},manifest=worker)
+            layout['installations'][worker['nodeId']]=instance['entry']
+        workers=SimpleNamespace(root=worker_root,layout=layout,instances=self.instances,controller_id='a'*64)
+        self.driver.docker=SimpleNamespace(inspect=lambda _: {'Id':'a'*64,'Image':'sha256:test',
+            'Config':{'Labels':{'org.ledgetop.phase-controller':'wrong'}},
+            'State':{'Running':True},'HostConfig':{'NetworkMode':'bridge'}})
+        with patch.object(f,'Path',side_effect=lambda value: outer if value=='/prototype-state' else Path(value)), \
+             patch.object(Path,'is_mount',return_value=True),patch.object(f.socket,'gethostname',return_value='a'*12):
+            with self.assertRaisesRegex(TransportHeld,'owned_fixture_controller_required'):
+                f.verify_fixture_ownership(self.driver,workers)
+        self.assertFalse(any(root.iterdir()))
+
+        self.driver.docker.inspect=lambda _: {'Id':'a'*64,'Image':'sha256:test',
+            'Config':{'Labels':{'org.ledgetop.phase-controller':self.plan['operationId']}},
+            'State':{'Running':True},'HostConfig':{'NetworkMode':'bridge'},
+            'Mounts':[{'Destination':'/prototype-state','Type':'volume','RW':True,
+                       'Name':'ltds-phase-forward-artifacts-'+self.plan['operationId'].replace('-','')[:16]}]}
+        self.instances[0]['manifest']={'nodeId':'other'}
+        with patch.object(f,'Path',side_effect=lambda value: outer if value=='/prototype-state' else Path(value)), \
+             patch.object(Path,'is_mount',return_value=True),patch.object(f.socket,'gethostname',return_value='a'*12):
+            with self.assertRaisesRegex(TransportHeld,'fixture_worker_binding_changed'):
+                f.verify_fixture_ownership(self.driver,workers)
+
+    def test_worker_process_change_after_observation_refuses_verification(self):
+        boundary=f.FixtureActivationBoundary(self.controller,self.driver,SimpleNamespace(),self.instances[0],self.workers[0])
+        current={'action':'start','requestId':str(uuid.uuid4())};first=self.packet(self.instances[0],self.workers[0])
+        changed=copy.deepcopy(first);changed['process']['startTime']='99'
+        with patch.object(f,'verify_fixture_ownership'),patch.object(f,'readiness',side_effect=[first,changed]):
+            observation=boundary.observe({},current)
+            self.assertFalse(boundary.verify({},current,observation))
