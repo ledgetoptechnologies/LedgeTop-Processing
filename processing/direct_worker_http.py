@@ -216,6 +216,15 @@ def create_direct_worker_server(boundary, host, port, *, ssl_context,
                 if version == 'v2' and self.command == 'GET' and match and length == 0:
                     result = boundary.observe(headers, protected_transport=True, object_id=match[1])
                     self._reply(200, result); return
+                if version == 'v2' and self.command == 'POST' and self.path == '/direct/v2/retention-challenge':
+                    if length != 64:
+                        self._reply(400, {'error': 'invalid_challenge'}); return
+                    body = _BoundedReader(self, length, time.monotonic()+self.server.body_deadline)
+                    challenge = body.read(length).decode('ascii')
+                    if not re.fullmatch('[0-9a-f]{64}',challenge):
+                        self._reply(400, {'error': 'invalid_challenge'}); return
+                    result = boundary.retention_challenge(headers,protected_transport=True,challenge=challenge)
+                    self._reply(200,result); return
                 if version == 'v2' and self.command == 'GET' and self.path == '/direct/v2/retention' and length == 0:
                     result = boundary.retention(headers, protected_transport=True)
                     self._reply(200, result); return

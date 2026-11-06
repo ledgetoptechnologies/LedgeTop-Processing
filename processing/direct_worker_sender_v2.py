@@ -161,6 +161,26 @@ class DirectWorkerSenderV2(DirectWorkerSender):
             if guard is not None:guard.finish()
             if connection is not None:connection.close()
 
+    def challenge_retention(self, signed_closure):
+        """Request fresh challenge-bound observation, which is not custody."""
+        import secrets
+        from .direct_worker_receipt_v2 import verify_retention_challenge
+        challenge=secrets.token_hex(32)
+        deadline=time.monotonic()+self._total;connection=guard=None
+        try:
+            connection,guard=self._connect(deadline)
+            connection.request('POST','/direct/v2/retention-challenge',body=challenge.encode('ascii'),headers=self._headers())
+            result=self._response(connection,deadline)
+            checked=verify_retention_challenge(result,challenge=challenge,signed_closure=signed_closure,
+                expected_closure=self._expected_closure(),issuer_id=self._issuer,key_id=self._key,public_key=self._public)
+            if not guard.finish():raise DirectDeliveryUncertain('V2 challenge outcome uncertain')
+            return checked
+        except DirectDeliveryUncertain:raise
+        except Exception:raise DirectDeliveryUncertain('V2 challenge outcome uncertain') from None
+        finally:
+            if guard is not None:guard.finish()
+            if connection is not None:connection.close()
+
     def observe(self,object_id):
         """Retrieve exact durable worker observation; absence is not a negative ACK."""
         obj=self._inventory.object(object_id,reservation_binding=self._reservation)

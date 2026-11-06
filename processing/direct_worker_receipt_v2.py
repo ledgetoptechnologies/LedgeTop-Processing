@@ -65,6 +65,37 @@ class WorkerClosureSignerV2:
         return dict(body,signature=base64.urlsafe_b64encode(self._key.sign(
             b'LTDS-DIRECT-WORKER-RETENTION-OBSERVATION-V2\0'+p.canonical_json(body))).decode('ascii').rstrip('='))
 
+    def challenged_retention(self, observation, *, challenge):
+        """Sign a response to this challenge; this is not a custody promise."""
+        if type(challenge) is not str or not __import__('re').fullmatch('[0-9a-f]{64}',challenge):
+            raise ReceiptRejected('invalid retention challenge')
+        body=dict(protocol='ltds-direct-retention-challenge-v1',schemaVersion=1,
+                  issuerId=self.issuer_id,keyId=self.key_id,challenge=challenge,observation=observation,
+                  sourceCustodyAccepted=False,processingAuthorized=False)
+        return dict(body,signature=base64.urlsafe_b64encode(self._key.sign(
+            b'LTDS-DIRECT-RETENTION-CHALLENGE-V1\0'+p.canonical_json(body))).decode('ascii').rstrip('='))
+
+
+def verify_retention_challenge(receipt, *, challenge, signed_closure, expected_closure, issuer_id, key_id, public_key):
+    if type(challenge) is not str or not __import__('re').fullmatch('[0-9a-f]{64}',challenge):
+        raise ReceiptRejected('invalid retention challenge')
+    fields={'protocol','schemaVersion','issuerId','keyId','challenge','observation','sourceCustodyAccepted','processingAuthorized','signature'}
+    if type(receipt) is not dict or set(receipt)!=fields:raise ReceiptRejected('invalid challenge response')
+    observation=verify_retention(receipt['observation'],signed_closure=signed_closure,expected_closure=expected_closure,
+                                 issuer_id=issuer_id,key_id=key_id,public_key=public_key)
+    expected=dict(protocol='ltds-direct-retention-challenge-v1',schemaVersion=1,issuerId=issuer_id,keyId=key_id,
+                  challenge=challenge,observation=observation,sourceCustodyAccepted=False,processingAuthorized=False)
+    if p.canonical_json({k:v for k,v in receipt.items() if k!='signature'})!=p.canonical_json(expected):
+        raise ReceiptRejected('challenge response binding differs')
+    try:
+        value=receipt['signature']
+        if type(value) is not str or len(value)!=86:raise ValueError()
+        signature=base64.b64decode(value+'==',altchars=b'-_',validate=True)
+        if len(signature)!=64 or base64.urlsafe_b64encode(signature).decode().rstrip('=')!=value:raise ValueError()
+        public_key.verify(signature,b'LTDS-DIRECT-RETENTION-CHALLENGE-V1\0'+p.canonical_json(expected))
+    except (ValueError,TypeError,InvalidSignature):raise ReceiptRejected('challenge signature invalid') from None
+    return copy.deepcopy(receipt)
+
 def verify_retention(receipt,*,signed_closure,expected_closure,issuer_id,key_id,public_key):
     verify(signed_closure,expected_closure=expected_closure,issuer_id=issuer_id,key_id=key_id,public_key=public_key)
     expected=dict(protocol='ltds-direct-worker-retention-observation-v2',schemaVersion=2,issuerId=issuer_id,keyId=key_id,
