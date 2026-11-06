@@ -60,6 +60,40 @@ class ConfigurationTests(unittest.TestCase):
         changed=copy.deepcopy(self.raw);changed['service']['errorCooldownSeconds']+=1
         self.assertNotEqual(module.parse_configuration(changed).config_id,parsed.config_id)
 
+    def test_future_node_explicit_host_and_dependency_interpreter_are_bound(self):
+        raw=copy.deepcopy(self.raw)
+        raw['schemaVersion']=2
+        raw['host']=dict(uid=1000,userName='operator',hostname='gpu-third.example',
+            pythonExecutable='/opt/processing/venv/bin/python',requiresTunnel=True)
+        for section in ('qualification','supervisor'):raw[section]['policy']['node_id']='gpu-third'
+        parsed=module.parse_configuration(raw)
+        self.assertEqual(parsed.startup_policy.node_id,'gpu-third')
+        self.assertEqual(parsed.supervisor_policy.node_id,'gpu-third')
+        from ops.update_service_units import render_configured_units,NAME
+        unit=render_configured_units('/opt/processing/source','/home/operator/update.json',raw)[NAME+'.service']
+        self.assertIn('ExecStart=/opt/processing/venv/bin/python -B -m ops.update_service tick',unit)
+        with patch('os.geteuid',return_value=1000),patch('pwd.getpwuid',return_value=SimpleNamespace(pw_name='operator')), \
+                patch('socket.gethostname',return_value='gpu-third.example'), \
+                patch.object(module.sys,'executable','/opt/processing/venv/bin/python'):
+            module.runtime_identity(parsed)
+            changed=copy.deepcopy(raw);changed['host']['hostname']='foreign.example'
+            with self.assertRaisesRegex(ValueError,'configured_processing_host_required'):
+                module.runtime_identity(module.parse_configuration(changed))
+            changed=copy.deepcopy(raw);changed['host']['pythonExecutable']='/usr/bin/python3'
+            with self.assertRaisesRegex(ValueError,'configured_processing_host_required'):
+                module.runtime_identity(module.parse_configuration(changed))
+
+    def test_future_node_cannot_infer_legacy_host_or_untyped_dependency(self):
+        raw=copy.deepcopy(self.raw)
+        for section in ('qualification','supervisor'):raw[section]['policy']['node_id']='gpu-third'
+        with self.assertRaisesRegex(ValueError,'configured_processing_host_required'):
+            module.runtime_identity(module.parse_configuration(raw))
+        raw['schemaVersion']=2
+        raw['host']=dict(uid=True,userName='operator',hostname='gpu-third',
+            pythonExecutable='/opt/processing/venv/bin/python',requiresTunnel=False)
+        with self.assertRaisesRegex(ValueError,'explicit_host_binding_required'):
+            module.parse_configuration(raw)
+
     def test_missing_default_fields_unknown_fields_and_wrong_policy_object_types_rejected(self):
         cases=[]
         for section in ('registry','qualification','supervisor','capacity'):

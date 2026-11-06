@@ -86,7 +86,7 @@ class UpdateMaintenanceAdapter:
         if not sys_linux():raise MaintenanceAdapterHeld('linux_maintenance_adapter_required')
         if type(window) is not ScheduleWindow or not isinstance(api,Client) or not isinstance(operator,Client):
             raise MaintenanceAdapterHeld('fixed_clients_and_window_required')
-        if node_id not in ('main','cluster'):raise MaintenanceAdapterHeld('fixed_node_required')
+        identity(node_id)
         identity(engine_id);identity(adapter_id)
         if type(authority_id) is not str or str(uuid.UUID(authority_id))!=authority_id:
             raise MaintenanceAdapterHeld('canonical_authority_required')
@@ -203,6 +203,12 @@ class UpdateMaintenanceAdapter:
     def _host(self):
         authority=self.api.json('GET','/v1/prototype/authority')
         if authority!={'authorityId':self.binding['authorityId']}:raise MaintenanceAdapterHeld('coordinator_authority_changed')
+        inventory=self.api.json('GET','/v1/prototype/nodes')['nodes']
+        if (type(inventory) is not list or not 1<=len(inventory)<=128
+                or any(type(node) is not dict or type(node.get('id')) is not str for node in inventory)
+                or len({node['id'] for node in inventory})!=len(inventory)
+                or sum(node['id']==self.binding['nodeId'] for node in inventory)!=1):
+            raise MaintenanceAdapterHeld('configured_node_inventory_required')
         settings,ingress,adapter=self._context(self.path.parent)
         item=adapter.inspect();sha(item['Image'],True)
         backend=json.loads(ingress.docker(['inspect',ingress.config['backendName']]))

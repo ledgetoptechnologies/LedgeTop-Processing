@@ -101,8 +101,18 @@ def parse_configuration(raw):
     from processing.update_capacity import CapacityPolicy,canonical_capacity_path
     from ops.update_maintenance_adapter import ScheduleWindow
     raw=json.loads(canonical(raw))
-    closed(raw,('schemaVersion','serviceId','codeBindingSha256','registry','qualification','maintenance','supervisor','capacity','service'))
-    if type(raw['schemaVersion']) is not int or raw['schemaVersion']!=1:raise ServiceConfigurationError('configuration_version_required')
+    version=raw.get('schemaVersion') if type(raw) is dict else None
+    if type(version) is not int or version not in (1,2):raise ServiceConfigurationError('configuration_version_required')
+    closed(raw,('schemaVersion','serviceId','codeBindingSha256','registry','qualification','maintenance','supervisor','capacity','service')
+        + (('host',) if version==2 else ()))
+    if version==2:
+        host=closed(raw['host'],('uid','userName','hostname','pythonExecutable','requiresTunnel'))
+        if (type(host['uid']) is not int or not 1<=host['uid']<2**31
+                or type(host['userName']) is not str or not re.fullmatch(r'[a-z_][a-z0-9_-]{0,63}',host['userName'])
+                or type(host['hostname']) is not str or not re.fullmatch(r'[a-z0-9][a-z0-9.-]{0,252}',host['hostname'])
+                or type(host['requiresTunnel']) is not bool):
+            raise ServiceConfigurationError('explicit_host_binding_required')
+        absolute_config_path(host['pythonExecutable'])
     if type(raw['serviceId']) is not str or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,63}',raw['serviceId']):raise ServiceConfigurationError('fixed_service_identity_required')
     if type(raw['codeBindingSha256']) is not str or not re.fullmatch(r'[a-f0-9]{64}',raw['codeBindingSha256']):raise ServiceConfigurationError('reviewed_source_binding_required')
     for key in ('registry','qualification','supervisor'):closed(raw[key],('statePath','policy'))
@@ -150,8 +160,18 @@ def runtime_identity(configuration):
     if os.name!='posix' or not sys.platform.startswith('linux'):raise ServiceConfigurationError('linux_host_required')
     import pwd
     node=configuration.supervisor_policy.node_id
-    if (os.geteuid()!=1000 or pwd.getpwuid(os.geteuid()).pw_name!='bkoltz'
-            or socket.gethostname().split('.')[0].lower()!={'main':'node','cluster':'cluster'}[node]):
+    if configuration.raw['schemaVersion']==2:
+        host=configuration.raw['host']
+        if (os.geteuid()!=host['uid'] or pwd.getpwuid(os.geteuid()).pw_name!=host['userName']
+                or socket.gethostname().lower()!=host['hostname']
+                or Path(sys.executable).absolute()!=Path(host['pythonExecutable'])):
+            raise ServiceConfigurationError('configured_processing_host_required')
+        return
+    # Preserve reviewed legacy host bindings; new node IDs require explicit v2
+    # host/interpreter configuration instead of a guessed machine name.
+    legacy={'main':'node','cluster':'cluster'}
+    if (node not in legacy or os.geteuid()!=1000 or pwd.getpwuid(os.geteuid()).pw_name!='bkoltz'
+            or socket.gethostname().split('.')[0].lower()!=legacy[node]):
         raise ServiceConfigurationError('configured_processing_host_required')
 
 
