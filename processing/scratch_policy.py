@@ -38,8 +38,12 @@ import uuid
 MAX_INTEGER = 2**53 - 1
 ACCOUNTING_VERSION = 1
 TRANSFER_FENCE_VERSION = 1
-DIRECT_WRITER_VERSION = 1
+DIRECT_WRITER_VERSION = 2
 MAX_DIRECT_WRITER_PINS = 64
+# A conservative logical allowance for each persisted pin's SQLite/WAL work.
+# This is admission accounting, not a filesystem quota or a claim about the
+# maximum physical SQLite growth on an arbitrary filesystem.
+DIRECT_WRITER_PIN_ALLOWANCE = 64 * 1024
 FENCED_LEASE = float(MAX_INTEGER)
 CONTROL_SCHEMA='''CREATE TABLE IF NOT EXISTS control_charges (
  reservation TEXT PRIMARY KEY,charge_id TEXT NOT NULL UNIQUE,scope TEXT NOT NULL,
@@ -359,6 +363,7 @@ class ScratchLedger:
             # its full hold even after materialization: conservative until an
             # explicitly qualified control lifecycle can release it.
             outstanding += db.execute("SELECT COALESCE(SUM(bytes),0) FROM control_charges").fetchone()[0]
+            outstanding += db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
             free = _integer(self.probe(self.root), "free bytes")
             if free - outstanding - self.floor < total:
                 raise PolicyConflict("insufficient unreserved scratch")
@@ -401,6 +406,12 @@ class ScratchLedger:
                 raise PolicyConflict('direct writer already active or uncertain')
             if db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0]>=MAX_DIRECT_WRITER_PINS:
                 raise PolicyConflict('direct writer pin budget exceeded')
+            outstanding = db.execute('SELECT COALESCE(SUM(remaining),0) FROM reservations').fetchone()[0]
+            outstanding += db.execute('SELECT COALESCE(SUM(bytes),0) FROM control_charges').fetchone()[0]
+            outstanding += db.execute('SELECT COUNT(*) FROM direct_writer_pins').fetchone()[0] * DIRECT_WRITER_PIN_ALLOWANCE
+            free = _integer(self.probe(self.root), 'free bytes')
+            if free - outstanding - self.floor < DIRECT_WRITER_PIN_ALLOWANCE:
+                raise PolicyConflict('insufficient unreserved scratch for direct writer pin')
             pin=uuid.uuid4().hex
             self._latch(db,directWriterVersion=DIRECT_WRITER_VERSION)
             db.execute('INSERT INTO direct_writer_pins VALUES(?,?)',(pin,reservation_id))

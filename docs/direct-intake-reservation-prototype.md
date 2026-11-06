@@ -60,8 +60,8 @@ prototype assumes a trusted owned reader; the future network adapter must prove
 reader ownership and retirement rather than accepting a caller assertion.
 The first writer permanently latches a ledger version marker. The exact earlier
 `649b` scratch source was tested to reject the ledger after retirement; that
-does not qualify rollback across all old versions. Pin metadata size/space
-precharge and production upgrade/rollback handling remain open.
+does not qualify rollback across all old versions. A physical upper bound for
+pin metadata growth and production upgrade/rollback handling remain open.
 
 An unwired closure prototype binds a domain-separated digest of the selected
 derived-object inventory into the coordinator reservation and worker scratch
@@ -75,3 +75,15 @@ been accepted and processing is not authorized. It does not yet represent the
 full Viewer source snapshot, raw GCP provenance, V3 path mapping, or a signed
 and authenticated cross-service closure. No Viewer acknowledgement or source
 release may rely on it.
+Writer admission now includes a 64 KiB logical SQLite/WAL allowance per active
+or uncertain writer in the scratch free-space calculation. It is a conservative
+planning hold, not a filesystem quota or a proven upper bound on physical
+database growth. The writer accounting marker is version 2; a version 1 ledger
+is refused rather than silently adopting weaker accounting.
+
+Recovery remains deliberately unavailable. A process-ID or death check does
+not prove that another process lacks a duplicated reader descriptor. The future
+transport must enforce a lifetime lease and reader ownership with no untracked
+descriptor delegation, and prove the old lease and reader are retired before
+an authenticated recovery can remove a pin. Stale, missing, or uncertain
+identity must retain the reservation. Do not implement timeout-only release.
