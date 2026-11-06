@@ -109,13 +109,14 @@ class VerifiedWorkerInventory:
     The trusted caller must check the durable reservation/fence on each use.
     Reverify the signed original with independent current pins before closure.
     """
-    __slots__ = ('_wire', '_binding_wire', '_objects')
+    __slots__ = ('_wire', '_binding_wire', '_reservation_wire', '_objects')
 
-    def __init__(self, checked, binding, token=None):
+    def __init__(self, checked, binding, reservation, token=None):
         if token is not _CONSTRUCTION_TOKEN:
             raise ValueError('verified worker inventory factory required')
         object.__setattr__(self, '_wire', protocol.canonical_json(checked))
         object.__setattr__(self, '_binding_wire', protocol.canonical_json(binding))
+        object.__setattr__(self, '_reservation_wire', protocol.canonical_json(reservation))
         index = {}
         for kind, manifest in (('source', checked['sourceManifest']), ('derived', checked['derivedManifest'])):
             for obj in manifest['objects']:
@@ -128,7 +129,9 @@ class VerifiedWorkerInventory:
     def __setattr__(self, name, value):
         raise AttributeError('verified worker inventory is immutable')
 
-    def object(self, object_id):
+    def object(self, object_id, *, reservation_binding):
+        protocol._require(protocol.canonical_json(reservation_binding) == self._reservation_wire,
+                          'worker inventory reservation changed')
         protocol._slug(object_id, 'source object id')
         value = self._objects.get(object_id)
         protocol._require(value is not None, 'worker inventory object not found')
@@ -138,13 +141,28 @@ class VerifiedWorkerInventory:
             retentionHoldId=hold, sourceCustodyAccepted=False, transferAuthorized=False,
             processingAuthorized=False)
 
-    def revalidate_for_closure(self, *, expected_binding, **verification):
+    def revalidate_for_closure(self, *, expected_binding, reservation_binding, **verification):
         protocol._require(protocol.canonical_json(expected_binding) == self._binding_wire,
+                          'worker inventory reservation changed')
+        protocol._require(protocol.canonical_json(reservation_binding) == self._reservation_wire,
                           'worker inventory reservation changed')
         return verify(json.loads(self._wire), expected_binding=expected_binding, **verification)
 
 
-def prepare_worker_index(value, *, expected_binding, **verification):
+def prepare_worker_index(value, *, expected_binding, reservation_binding, **verification):
     """Verify once and index exact V2 objects against independently pinned state."""
     checked = verify(value, expected_binding=expected_binding, **verification)
-    return VerifiedWorkerInventory(checked, expected_binding, _CONSTRUCTION_TOKEN)
+    fields = ('reservationId', 'jobId', 'attemptId', 'generation', 'authorityId',
+              'environment', 'nodeId', 'workerId', 'workerInstanceId')
+    protocol._closed(reservation_binding, fields, 'worker reservation binding')
+    for field in ('reservationId', 'jobId', 'attemptId'):
+        protocol._uuid(reservation_binding[field], field)
+    protocol._integer(reservation_binding['generation'], 'generation')
+    for field in ('nodeId', 'workerId', 'workerInstanceId'):
+        protocol._slug(reservation_binding[field], field)
+    protocol._require(reservation_binding['jobId'] == checked['providerTaskId']
+        and reservation_binding['attemptId'] == checked['submissionId']
+        and reservation_binding['authorityId'] == checked['authorityId']
+        and reservation_binding['environment'] == checked['environment'],
+        'worker reservation identity mismatch')
+    return VerifiedWorkerInventory(checked, expected_binding, reservation_binding, _CONSTRUCTION_TOKEN)

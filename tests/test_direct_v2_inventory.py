@@ -86,22 +86,31 @@ class DirectV2InventoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             inventory.worker_object(prepared, 'unknown-id', expected_binding=binding, **self.options)
 
+        reservation = dict(reservationId='00000000-0000-4000-8000-000000000099',
+            jobId=prepared['providerTaskId'], attemptId=prepared['submissionId'], generation=1,
+            authorityId=prepared['authorityId'], environment=prepared['environment'],
+            nodeId='cluster', workerId='worker-1', workerInstanceId='instance-1')
         with patch.object(inventory, 'validate_source_intake', wraps=inventory.validate_source_intake) as validator:
-            index = inventory.prepare_worker_index(prepared, expected_binding=binding, **self.options)
+            index = inventory.prepare_worker_index(prepared, expected_binding=binding,
+                                                   reservation_binding=reservation, **self.options)
             self.assertEqual(validator.call_count, 1)
             prepared['sourceManifest']['objects'][1]['byteSize'] = 100
-            self.assertEqual(index.object(fixtures.GCP_ID), obj)
-            self.assertEqual(index.object(fixtures.GCP_ID), obj)
+            self.assertEqual(index.object(fixtures.GCP_ID, reservation_binding=reservation), obj)
+            self.assertEqual(index.object(fixtures.GCP_ID, reservation_binding=reservation), obj)
+            with self.assertRaises(ValueError):
+                index.object(fixtures.GCP_ID, reservation_binding=dict(reservation, generation=2))
             self.assertEqual(validator.call_count, 1)
             with self.assertRaises(AttributeError): index._wire = b'forged'
-            self.assertEqual(index.revalidate_for_closure(expected_binding=binding, **self.options)
+            self.assertEqual(index.revalidate_for_closure(expected_binding=binding,
+                             reservation_binding=reservation, **self.options)
                              ['sourceManifest']['objects'][1]['byteSize'], 0)
             self.assertEqual(validator.call_count, 2)
             changed = dict(binding, sourceSnapshotSha256='f'*64)
             with self.assertRaises(ValueError):
-                index.revalidate_for_closure(expected_binding=changed, **self.options)
+                index.revalidate_for_closure(expected_binding=changed, reservation_binding=reservation,
+                                             **self.options)
         with self.assertRaises(ValueError):
-            inventory.VerifiedWorkerInventory(prepared, binding)
+            inventory.VerifiedWorkerInventory(prepared, binding, reservation)
 
 
 if __name__ == '__main__':
