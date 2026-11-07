@@ -41,3 +41,18 @@ not establish an installed worker/coordinator, live Viewer authentication or
 status ingestion, real-engine scheduling by this candidate, two installed
 nodes, physical restart/disconnect recovery, or client-job readiness. No live
 service or data was changed by these checks.
+
+## Local image build and import check
+
+At source commit `18fc4f186a20b1778bf908fe73ee79bdb2687e2e`, the candidate
+Processing image built locally as `ledgetop-processing:candidate-18fc4f18`
+from the pinned Python base in the repository Dockerfile. Its image ID is
+`sha256:409dcfb422f0222dc611f89edf6e0f379136331616840f24c692926baf6d6fcc`.
+The source tree was not mounted into the import check: the built image itself
+successfully imported `processing.reference_runtime`,
+`processing.reference_driver` and `processing.reference_worker_api` as UID
+10001, inside a network-disabled, read-only container with one CPU, 512 MiB
+memory, 64 PIDs and a 64 MiB temporary filesystem. The candidate image remains
+local and was not installed on either PC or published to GHCR. This import
+check does not load a real private runtime configuration or prove API startup,
+spool attachment, engine execution, Viewer handoff or host acceptance.
