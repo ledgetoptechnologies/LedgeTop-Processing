@@ -17,7 +17,7 @@ class VerifiedControllerEntryTests(unittest.TestCase):
         self.source = root/'source'; (self.source/'ops').mkdir(parents=True)
         (self.source/'ops'/'__init__.py').write_bytes(b'')
         (self.source/'ops'/'enrolled_coordinator_driver.py').write_bytes(
-            b'from pathlib import Path\ndef main(args):\n Path(args[0]).write_text("ran")\n return 0\n')
+            b'from pathlib import Path\ndef main(args):\n Path(args[0]).write_text("ran")\n return int(args[1]) if len(args)>1 else 0\n')
         self.archive = root/'source.tar'
         with tarfile.open(self.archive, 'w') as out:
             out.add(self.source, arcname='source')
@@ -28,6 +28,10 @@ class VerifiedControllerEntryTests(unittest.TestCase):
 
     def test_exact_archive_and_tree_execute_verified_module(self):
         self.assertEqual(guard.main(self.args), 0)
+        self.assertEqual(self.marker.read_text(), 'ran')
+
+    def test_controller_exit_code_propagates(self):
+        self.assertEqual(guard.main(self.args + ['7']), 7)
         self.assertEqual(self.marker.read_text(), 'ran')
 
     def test_changed_archive_or_source_and_extra_file_never_execute(self):
@@ -53,6 +57,23 @@ class VerifiedControllerEntryTests(unittest.TestCase):
         self.args[self.args.index('--sha256')+1] = sha
         with patch.object(guard.subprocess, 'run') as run:
             self.assertEqual(guard.main(self.args), 2); run.assert_not_called()
+
+    def test_hardlink_traversal_and_duplicate_members_never_execute(self):
+        original = self.archive.read_bytes()
+        for kind in ('hardlink', 'traversal', 'duplicate'):
+            with self.subTest(kind=kind):
+                self.archive.write_bytes(original)
+                with tarfile.open(self.archive, 'a') as out:
+                    name = {'hardlink':'source/ops/link', 'traversal':'source/../outside',
+                            'duplicate':'source/ops/__init__.py'}[kind]
+                    member = tarfile.TarInfo(name)
+                    if kind == 'hardlink':
+                        member.type = tarfile.LNKTYPE; member.linkname = 'source/ops/__init__.py'
+                    out.addfile(member, io.BytesIO(b''))
+                self.args[self.args.index('--sha256')+1] = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+                with patch.object(guard.subprocess, 'run') as run:
+                    self.assertEqual(guard.main(self.args), 2); run.assert_not_called()
+                self.assertFalse(self.marker.exists())
 
 
 if __name__ == '__main__': unittest.main()
