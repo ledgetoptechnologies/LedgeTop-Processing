@@ -9,6 +9,7 @@ import hashlib
 import io
 import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 import uuid
@@ -23,6 +24,8 @@ from processing import viewer_source_attestation as attest
 from tests import test_reference_source_intake as intake_fixture
 
 
+@unittest.skipUnless(sys.platform.startswith('linux'),
+    'source intake dispatch requires the coordinator Linux lease primitives')
 class SourceIntakeMultiNodeDispatchTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='source-multi-node-')
