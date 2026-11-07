@@ -18,14 +18,14 @@ SOURCES=('processing/coordinator_freeze.py','processing/reference_store.py',
  'processing/reference_failure.py','processing/prototype.py','processing/reference_runtime.py',
  'processing/config.py','processing/reference_protocol.py','processing/authority_lease.py',
  'processing/app.py','processing/runtime_source_custody.py','processing/maintenance.py',
- 'processing/legacy_viewer_readonly.py')
+ 'processing/legacy_viewer_readonly.py','processing/source_intake_mode.py')
 BINDINGS=('bootstrapStartupId','currentStartupId','planId','ownerSha256','requestIds',
  'operationBinding','sourceReaderBinding','sourceCustody','bootstrapWindow','finalWindow')
 BASE_ADDITIONS=frozenset(('coordinator_freeze_state','coordinator_freeze_receipts',
  'coordinator_operation_pins','coordinator_operation_epochs','processing_node_inventory',
  'reference_recovery_startup','reference_recovery_receipts','reference_source_intakes',
  'reference_source_object_receipts','reference_viewer_receipts','reference_viewer_transfers',
- 'reference_source_grant_tokens'))
+ 'reference_source_grant_tokens','reference_source_intake_modes'))
 READERS=frozenset(('source_reader_binding','source_reader_epochs','source_reader_pins','source_reader_fences'))
 
 
@@ -54,6 +54,28 @@ def _schema_statements(root, hashes):
                 if name in result:require(result[name]==statement,'ambiguous_reviewed_ddl')
                 result[name]=statement
     return result
+
+
+def _source_mode_statements(root, expected_sha256):
+    # Verify the exact bytes parsed here, including against replacement after
+    # the general source scan. Never import or execute candidate Python.
+    path=Path(root)/'processing/source_intake_mode.py'
+    require(path.resolve()==path.absolute() and not path.is_symlink(),'original_reviewed_source_required')
+    raw=path.read_bytes()
+    require(len(raw)<=1048576 and hashlib.sha256(raw).hexdigest()==expected_sha256,'reviewed_candidate_source_changed')
+    tree=ast.parse(raw)
+    values={}
+    for node in tree.body:
+        if isinstance(node,ast.Assign) and len(node.targets)==1 and isinstance(node.targets[0],ast.Name):
+            name=node.targets[0].id
+            if name in ('CREATE','TRIGGERS'):
+                require(name not in values,'ambiguous_source_mode_ddl')
+                values[name]=ast.literal_eval(node.value)
+    triggers=values.get('TRIGGERS')
+    require(type(values.get('CREATE')) is str and type(triggers) is dict and
+            set(triggers)=={'source_intake_mode_no_replace','source_intake_mode_no_update','source_intake_mode_no_delete'} and
+            all(type(sql) is str for sql in triggers.values()),'reviewed_source_mode_ddl_required')
+    return values['CREATE'],triggers
 
 
 def _origin(value):
@@ -115,6 +137,7 @@ def build_startup_policy(root, *, expected_source_hashes, candidate_image_id, ca
     bootstrap=old._json(bootstrap_config_bytes.decode('utf-8'));final=old._json(final_config_bytes.decode('utf-8'))
     inventory,recovery=_inventory(bootstrap,final,node_endpoints,authority_id)
     statements=_schema_statements(root,expected_source_hashes)
+    mode_table,mode_triggers=_source_mode_statements(root,expected_source_hashes['processing/source_intake_mode.py'])
     memory=sqlite3.connect(':memory:')
     try:
         for kind,name,_,sql in reviewed['objects']:
@@ -124,7 +147,10 @@ def build_startup_policy(root, *, expected_source_hashes, candidate_image_id, ca
         columns={name:[row[1] for row in memory.execute('PRAGMA table_info("'+name+'")')]
                  for kind,name,_,_ in reviewed['objects'] if kind=='table'}
         memory.execute('ALTER TABLE nodes ADD COLUMN target_engine_version TEXT')
-        for name in sorted(BASE_ADDITIONS):require(name in statements,'reviewed_startup_ddl_missing');memory.execute(statements[name])
+        memory.execute('ALTER TABLE coordinator_identity ADD COLUMN source_mode_version INTEGER NOT NULL DEFAULT 0')
+        for name in sorted(BASE_ADDITIONS-{'reference_source_intake_modes'}):require(name in statements,'reviewed_startup_ddl_missing');memory.execute(statements[name])
+        memory.execute(mode_table)
+        for name in sorted(mode_triggers):memory.execute(mode_triggers[name])
         bootstrap_objects=[list(row) for row in memory.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name')]
         for name in sorted(READERS):require(name in statements,'reviewed_reader_ddl_missing');memory.execute(statements[name])
         # Index SQL has ON table before its columns, so it is deliberately not
@@ -135,7 +161,8 @@ def build_startup_policy(root, *, expected_source_hashes, candidate_image_id, ca
     phases={phase:dict(objects=bootstrap_objects if phase in ('bootstrap-frozen','rollback-bootstrap') else final_objects,
                        rows={},files={},directories={}) for phase in PHASES}
     policy=dict(schemaVersion=1,profile=PROFILE,candidateImageId=candidate_image_id,candidateSourceCommit=candidate_source_commit,
-        oldColumns=columns,additionalColumns={'nodes':{'target_engine_version':None}},bindingNames=list(BINDINGS),phases=phases,
+        oldColumns=columns,additionalColumns={'nodes':{'target_engine_version':None},
+            'coordinator_identity':{'source_mode_version':1}},bindingNames=list(BINDINGS),phases=phases,
         startup=dict(version=1,authorityId=authority_id,sourceHashes=expected_source_hashes,
             bootstrapConfigSha256=hashlib.sha256(bootstrap_config_bytes).hexdigest(),
             finalConfigSha256=hashlib.sha256(final_config_bytes).hexdigest(),inventory=inventory,recovery=recovery))

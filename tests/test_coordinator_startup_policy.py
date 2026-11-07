@@ -49,7 +49,11 @@ class StartupPolicyTests(unittest.TestCase):
         boot={row[1] for row in policy['phases']['bootstrap-frozen']['objects'] if row[0]=='table'}
         final={row[1] for row in policy['phases']['final-frozen']['objects'] if row[0]=='table'}
         self.assertEqual(final-boot,s.READERS)
-        self.assertEqual(len(boot),31);self.assertEqual(len(final),35)
+        self.assertEqual(len(boot),32);self.assertEqual(len(final),36)
+        self.assertEqual(policy['additionalColumns']['coordinator_identity'],{'source_mode_version':1})
+        objects={row[1] for row in policy['phases']['bootstrap-frozen']['objects']}
+        self.assertTrue({'reference_source_intake_modes','sqlite_autoindex_reference_source_intake_modes_1',
+            'source_intake_mode_no_update','source_intake_mode_no_delete','source_intake_mode_no_replace'}<=objects)
         self.assertEqual(policy['bindingNames'],list(s.BINDINGS))
         self.assertNotIn('bearer',self.build().decode())
         self.assertEqual(policy['startup']['bootstrapConfigSha256'],hashlib.sha256(old._canonical(self.bootstrap)).hexdigest())
@@ -57,6 +61,30 @@ class StartupPolicyTests(unittest.TestCase):
     def test_source_hash_change_refused(self):
         bad=dict(self.hashes);bad[s.SOURCES[0]]='0'*64
         with self.assertRaisesRegex(old.CensusRefused,'source_changed'):self.build(expected_source_hashes=bad)
+
+    def test_real_source_mode_startup_matches_declared_schema_and_immutable_guards(self):
+        from processing import source_intake_mode as mode
+        policy=json.loads(self.build())
+        expected={row[1]:row for row in policy['phases']['bootstrap-frozen']['objects']}
+        db=sqlite3.connect(':memory:');db.row_factory=sqlite3.Row
+        self.addCleanup(db.close)
+        db.execute('CREATE TABLE coordinator_identity(singleton INTEGER PRIMARY KEY, authority_id TEXT NOT NULL)')
+        db.execute("INSERT INTO coordinator_identity VALUES(1,'synthetic')")
+        db.execute('CREATE TABLE reference_source_intakes(job_id TEXT PRIMARY KEY)')
+        mode.initialize(db)
+        self.assertEqual(db.execute('SELECT source_mode_version FROM coordinator_identity').fetchone()[0],1)
+        self.assertEqual(db.execute('SELECT COUNT(*) FROM reference_source_intake_modes').fetchone()[0],0)
+        names=('reference_source_intake_modes','sqlite_autoindex_reference_source_intake_modes_1',
+               'source_intake_mode_no_update','source_intake_mode_no_delete','source_intake_mode_no_replace')
+        for name in names:
+            actual=list(db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name=?',(name,)).fetchone())
+            self.assertEqual(actual,expected[name])
+        db.execute("INSERT INTO reference_source_intakes VALUES('fixture')")
+        db.execute("INSERT INTO reference_source_intake_modes VALUES('fixture','spool-v1')")
+        for statement in ("UPDATE reference_source_intake_modes SET mode='direct-v2'",
+                          'DELETE FROM reference_source_intake_modes',
+                          "INSERT OR REPLACE INTO reference_source_intake_modes VALUES('fixture','direct-v2')"):
+            with self.subTest(statement=statement),self.assertRaises(sqlite3.IntegrityError):db.execute(statement)
 
     def test_config_changes_and_source_release_are_not_silently_supported(self):
         for change in ({'sourceRelease':{}},{'viewerAcceptance':{'unexpected':{}}}):
@@ -93,6 +121,7 @@ class StartupPolicyTests(unittest.TestCase):
             bootstrapWindow={'earliest':'2026-11-05 20:00:00','latest':'2026-11-05 20:00:30'},finalWindow=None)
         result=s.materialize(policy,context,'bootstrap-frozen',b'x'*32)
         self.assertEqual(result['rows']['coordinator_freeze_state'][0]['phase'],'frozen')
+        self.assertEqual(result['rows']['reference_source_intake_modes'],[])
         context['finalWindow']=dict(context['bootstrapWindow'])
         with self.assertRaisesRegex(old.CensusRefused,'future_final_window'):s.materialize(policy,context,'bootstrap-frozen',b'x'*32)
 

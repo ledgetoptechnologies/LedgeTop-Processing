@@ -21,7 +21,7 @@ PROFILE = 'first-enrolled-exact-declared-projection-v1'
 PHASES = ('bootstrap-frozen', 'final-frozen', 'rollback-bootstrap', 'rollback-final')
 EMPTY_PAYLOAD_TABLES = frozenset((
  'reference_source_intakes','reference_source_object_receipts','reference_viewer_receipts',
- 'reference_viewer_transfers','reference_source_grant_tokens','reference_recovery_receipts',
+ 'reference_viewer_transfers','reference_source_grant_tokens','reference_recovery_receipts','reference_source_intake_modes',
  'reference_worker_acceptance_observations','source_reader_pins','source_reader_fences',
  'source_releases','source_release_objects','reference_source_grant_renewals',
  'reference_source_range_usage','reference_source_range_requests','reference_source_object_pins',
@@ -205,7 +205,9 @@ def verify_projection(root, *, baseline, policy_bytes, expected_policy_sha256, e
         _require(objects==declared['objects'],'undeclared_candidate_schema')
         tables=sorted(item[1] for item in objects if item[0]=='table')
         _require(set(declared['rows'])==set(tables)-set(old_columns),'undeclared_startup_table')
-        _require(policy['additionalColumns'] in ({}, {'nodes':{'target_engine_version':None}}),'unknown_legacy_column_change')
+        _require(policy['additionalColumns'] in ({}, {'nodes':{'target_engine_version':None}},
+            {'nodes':{'target_engine_version':None},'coordinator_identity':{'source_mode_version':1}}),
+            'unknown_legacy_column_change')
         raw_bytes=row_count=0;coordinates={}
         for name in tables:
             columns=[row[1] for row in db.execute('PRAGMA table_info('+_identifier(name)+')')]

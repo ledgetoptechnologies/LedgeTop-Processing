@@ -97,6 +97,34 @@ class CandidateProjectionTests(unittest.TestCase):
         self.fixture.mutate("UPDATE nodes SET target_engine_version='unexpected'")
         with self.assertRaisesRegex(old.CensusRefused,'added_column'):self.verify()
 
+    def _with_source_mode_migration(self):
+        from processing import source_intake_mode
+        with self.fixture.db() as db:
+            db.execute('CREATE TABLE reference_source_intakes(job_id TEXT PRIMARY KEY)')
+            source_intake_mode.initialize(db)
+            objects=[list(row) for row in db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name')]
+        self.policy['additionalColumns']['coordinator_identity']={'source_mode_version':1}
+        for phase in self.policy['phases'].values():
+            phase['objects']=objects
+            phase['rows']['reference_source_intakes']=[]
+            phase['rows']['reference_source_intake_modes']=[]
+
+    def test_source_mode_migration_remains_strictly_projected(self):
+        self._with_source_mode_migration()
+        self.assertTrue(self.verify()['retainedFilesValidated'])
+        self.fixture.mutate('UPDATE coordinator_identity SET source_mode_version=0')
+        with self.assertRaisesRegex(old.CensusRefused,'undeclared_added_column_value'):self.verify()
+
+    def test_source_mode_undeclared_trigger_change_is_rejected(self):
+        self._with_source_mode_migration()
+        self.fixture.mutate('DROP TRIGGER source_intake_mode_no_delete')
+        with self.assertRaisesRegex(old.CensusRefused,'undeclared_candidate_schema'):self.verify()
+
+    def test_source_mode_orphan_row_is_rejected(self):
+        self._with_source_mode_migration()
+        self.fixture.mutate("INSERT INTO reference_source_intake_modes VALUES('unexpected','spool-v1')")
+        with self.assertRaisesRegex(old.CensusRefused,'candidate_database_integrity_failed'):self.verify()
+
     def test_startup_binding_mismatch_refused(self):
         with self.assertRaisesRegex(old.CensusRefused,'startup_rows'):
             self.verify(gate_binding={'epoch':'foreign-epoch'})
