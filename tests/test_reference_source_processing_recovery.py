@@ -13,6 +13,7 @@ from processing import reference_source_intake_store as intake_store
 from processing.maintenance import Conflict
 from processing.node_gate import NodeGate
 from processing.reference_driver import ReferenceDriver
+from processing.reference_driver import DriverWait
 from processing.reference_api import ReferenceAPI
 from processing.reference_engine_worker import ReferenceEngineWorker
 from processing.reference_failure import FailureOutbox
@@ -558,6 +559,45 @@ class DeliveryAcrossRestartTests(ProcessingHarness):
         self.new_worker()
         self.accept()
         self.restart_coordinator()
+        self.assert_finished()
+
+    def test_coordinator_disconnect_while_engine_finishes_recovers_without_restart(self):
+        self.to_execution_pending()
+        self.run_to_engine()
+        self.transport.tasks[self.job_id] = 40
+        self.driver.outbox.clock = lambda: self.now[0]
+        with patch.object(self.driver, '_request', side_effect=DriverWait('coordinator_unavailable')), \
+                patch.object(self.driver.sender, '_open', side_effect=OSError('coordinator unavailable')):
+            for _ in range(5):
+                self.assertIn(self.driver.step()['state'], ('delivering', 'retry_wait'))
+                self.assertEqual(self.transport.starts(), 1)
+                self.assertEqual(self.transport.tasks[self.job_id], 40)
+            with self.driver.outbox._transaction() as db:
+                completion = db.execute('SELECT state, attempts, receipt, local_metadata FROM completions WHERE job=?',
+                                        (self.job_id,)).fetchone()
+            self.assertEqual(completion['state'], 'pending')
+            self.assertGreater(completion['attempts'], 0)
+            self.assertIsNone(completion['receipt'])
+            for relative in json.loads(completion['local_metadata'])['localObjects'].values():
+                self.assertTrue((self.root / 'scratch' / relative).is_file())
+        self.now[0] += 120
+        self.execute_until('awaiting_acceptance')
+        self.accept()
+        self.assert_finished()
+
+    def test_viewer_unavailable_after_delivery_preserves_result_until_acceptance(self):
+        self.to_execution_pending()
+        self.run_to_engine()
+        self.transport.tasks[self.job_id] = 40
+        self.execute_until('awaiting_acceptance')
+        row_before = self.driver.worker._row(self.job_id)
+        for _ in range(3):
+            self.driver._background()
+            self.assertEqual(self.row()[0], 'awaiting_acceptance')
+            self.assertEqual(self.transport.starts(), 1)
+            self.assertEqual(self.driver.worker._row(self.job_id)['phase'], row_before['phase'])
+        self.new_worker()
+        self.accept()
         self.assert_finished()
 
 
