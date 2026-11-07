@@ -135,6 +135,63 @@ class FirstWorkerEnrollmentTests(unittest.TestCase):
         self.assertEqual(Path(self.manifest['gate']['path']).read_bytes(),self.original_gate)
         self.assertFalse(any(call in self.boundary.calls for call in ('start','enable','stop','update')))
 
+    def test_offline_fresh_reenrollment_and_fresh_rollback_on_simulated_host(self):
+        # Coordinator/ingress closure and systemd are simulated boundaries;
+        # this verifies actual installer file/receipt behavior, not host safety.
+        old = self.installer
+        old.prepare(); old_receipt = old.enroll()
+        old_manifest = copy.deepcopy(self.manifest)
+        old_journal = old.journal.read_bytes()
+        old_unit = old.unit.read_bytes()
+        old_config = old.config.read_bytes()
+
+        def archive(label, worker):
+            target = self.home / label
+            target.mkdir(mode=0o700); os.chown(target, 10001, 10001)
+            worker.config.rename(target / 'config')
+            worker.unit.rename(target / 'unit')
+            self.assertFalse(worker.config.exists()); self.assertFalse(worker.unit.exists())
+            return target
+
+        def fresh(label):
+            manifest = copy.deepcopy(old_manifest)
+            operation = str(uuid.uuid4())
+            self.root = self.parent / operation
+            manifest['operationId'] = operation
+            manifest['installationRoot'] = str(self.root)
+            config = json.loads(old_config)
+            config['maintenanceReadiness']['sourceRoot'] = str(self.root / 'source')
+            config['stateRoot'] = str(self.home / '.local/share/ledgetop-processing-reference/worker-state' / operation)
+            config['scratchRoot'] = str(self.home / '.local/share/ledgetop-processing-reference/worker-scratch' / operation)
+            raw = json.dumps(config).encode()
+            path = self.input / (label + '-config.json'); path.write_bytes(raw); path.chmod(0o600)
+            manifest['config'] = dict(path=str(path), sha256=hashed(raw), bytes=len(raw), ownerUid=0)
+            manifest['unitSha256'] = hashed(install.render_unit(manifest).encode())
+            return install.Installer(manifest, boundary=self.boundary)
+
+        old_archive = archive('old-archive', old)
+        with self.assertRaises(Exception): old.inspect()
+        candidate = fresh('candidate')
+        candidate.prepare(); candidate_receipt = candidate.enroll()
+        self.assertEqual(candidate.inspect(), candidate_receipt)
+        self.assertNotEqual(candidate_receipt['operationId'], old_receipt['operationId'])
+        self.assertNotEqual(candidate_receipt['installedTreeSha256'], old_receipt['installedTreeSha256'])
+        candidate_journal = candidate.journal.read_bytes()
+        candidate_archive = archive('candidate-archive', candidate)
+        with self.assertRaises(Exception): candidate.inspect()
+        rollback = fresh('rollback')
+        rollback.prepare(); rollback_receipt = rollback.enroll()
+        self.assertEqual(rollback.inspect(), rollback_receipt)
+        self.assertNotIn(rollback_receipt['operationId'], (old_receipt['operationId'], candidate_receipt['operationId']))
+        self.assertEqual(old.journal.read_bytes(), old_journal)
+        self.assertEqual(candidate.journal.read_bytes(), candidate_journal)
+        self.assertEqual((old_archive / 'unit').read_bytes(), old_unit)
+        self.assertEqual((old_archive / 'config').read_bytes(), old_config)
+        self.assertTrue((candidate_archive / 'unit').is_file())
+        self.assertTrue((candidate_archive / 'config').is_file())
+        self.assertFalse(rollback_receipt['serviceStartIssued'])
+        self.assertFalse(rollback_receipt['engineMutationIssued'])
+
     def test_inspection_of_absent_installation_creates_nothing(self):
         self.assertEqual(self.installer.inspect()['state'],'absent');self.assertFalse(self.root.exists())
 
