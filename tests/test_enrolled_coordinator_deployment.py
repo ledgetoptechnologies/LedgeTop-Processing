@@ -229,6 +229,49 @@ class DeploymentBundleTests(unittest.TestCase):
             with patch.object(d,'build_startup_policy',return_value=b'different derived policy'):
                 with self.assertRaises(d.TransportHeld):d.verify_private_artifacts(value,plan,config_reader=lambda role,entry:raw[role+'Config'])
 
+    @unittest.skipUnless(__import__('os').name == 'posix' and __import__('os').geteuid() == 10001,
+                         'qualification requires candidate runtime UID')
+    def test_non_null_spool_gate_verifies_actual_bind_and_rejects_changed_evidence(self):
+        import hashlib, tempfile
+        from pathlib import Path
+        from ops import local_spool_qualification as q
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/'mount';root.mkdir(mode=0o700);objects=root/'objects';objects.mkdir(mode=0o700)
+            marker=root/'.spool-id';marker.write_text('a'*64);marker.chmod(0o600)
+            value,plan=bundle()
+            value['recipes']['final']['mounts'].append(dict(type='bind',source=str(root),target=str(root),readOnly=False))
+            settings=dict(root=str(objects),mountPath=str(root),mountId='a'*64,markerName='.spool-id',
+                          safetyFloorBytes=0,maxObjectBytes=1024**3,chunkBytes=4096)
+            raw={name:(b'k'*32 if name=='censusKey' else b'KEY=value\n' if name.endswith('Environment') else name.encode()) for name in d.FILES}
+            raw['finalConfig']=d.canonical(dict(schemaVersion=6,sourceSpool=settings))
+            with patch('os.path.ismount',return_value=True):
+                observed=q.observe(raw['finalConfig'],value['recipes']['final'],required_free_bytes=4096)
+            proof=d.canonical(observed)
+            for name,entry in value['artifacts'].items():entry['sha256']=hashlib.sha256(raw[name]).hexdigest()
+            for role in ('bootstrap','final','holder'):value['recipes'][role]['environmentSha256']=value['artifacts'][role+'Environment']['sha256']
+            # Recipe environment hash must be final before recording its digest.
+            observed['finalRecipeSha256']=d.digest(value['recipes']['final']);proof=d.canonical(observed)
+            for role in ('bootstrap','final'):
+                plan['candidate'][role+'RecipeSha256']=d.digest(value['recipes'][role])
+                plan['candidate'][role+'ConfigSha256']=value['artifacts'][role+'Config']['sha256']
+            plan['candidate']['declaredTransformSha256']=value['artifacts']['policy']['sha256']
+            plan['bindings']['censusKeySha256']=value['artifacts']['censusKey']['sha256']
+            plan['bindings']['reviewedCountsSha256']=value['artifacts']['reviewedCounts']['sha256']
+            for name in plan['gates']:plan['gates'][name]=None;value['qualifications'][name]=None
+            value['qualifications']['nasQualificationSha256']=dict(path='/private/spool-proof',sha256=hashlib.sha256(proof).hexdigest())
+            plan['gates']['nasQualificationSha256']=hashlib.sha256(proof).hexdigest()
+            plan['bindings']['deploymentSha256']=d.digest(value)
+            by_path={entry['path']:raw[name] for name,entry in value['artifacts'].items()};by_path['/private/spool-proof']=proof
+            by_environment={value['artifacts'][role+'Environment']['path']:mode_environment(value,role) for role in ('bootstrap','final','holder')}
+            with patch.object(d,'private_bytes',side_effect=lambda path,**_:by_path[path]),patch.object(d,'environment_file',side_effect=lambda path:by_environment[path]),patch.object(d,'build_startup_policy',return_value=raw['policy']):
+                result=d.verify_private_artifacts(value,plan,config_reader=lambda role,entry:raw[role+'Config'])
+                self.assertEqual(result['nasQualificationSha256']['bytes'],len(proof))
+                # A changed host bind is rejected even with an otherwise valid proof.
+                root.rename(root.with_name(root.name+'-old'))
+                root.mkdir()
+                with self.assertRaises(d.TransportHeld):
+                    d.verify_private_artifacts(value,plan,config_reader=lambda role,entry:raw[role+'Config'])
+
 
 def mode_environment(value,role):
     if role=='holder':return {}

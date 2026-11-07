@@ -176,6 +176,8 @@ class ConcreteDriverTests(unittest.TestCase):
         # worker_prestart_review suite validates the actual qualification gate.
         self.worker_review=patch('ops.worker_prestart_review.verify',autospec=True)
         self.review=self.worker_review.start();self.addCleanup(self.worker_review.stop)
+        self.spool_probe=patch.object(self.driver,'_live_spool',return_value={'synthetic':'spool-observation'})
+        self.probe=self.spool_probe.start();self.addCleanup(self.spool_probe.stop)
         self.controller=j.FirstEnrolledCutover(self.operation,plan,self.driver);self.controller.prepare()
 
     def advance_until(self,phase):
@@ -188,6 +190,7 @@ class ConcreteDriverTests(unittest.TestCase):
     def test_full_production_journal_driver_sequence_opens_only_after_projection_and_worker_proof(self):
         result=self.advance_until('complete')
         self.review.assert_called_with(self.driver.bundle,self.driver.plan)
+        self.probe.assert_called()
         self.assertTrue(result['admissionOpened']);self.assertEqual(len(result['events']),22)
         self.assertEqual(result['events'][19]['action'],'verify-final-readiness')
         self.assertEqual(result['events'][20]['action'],'resume-final-gate')

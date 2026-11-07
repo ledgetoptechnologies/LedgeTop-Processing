@@ -90,6 +90,14 @@ class ConcreteCutoverDriver:
             config_reader=lambda role,entry:read_config_from_predecessor(self.docker,self.bundle,self.plan,role),
             require_all_qualifications=True)
 
+    def _live_spool(self):
+        from .local_spool_qualification import live_probe_source, verify_live
+        entry=self.bundle['qualifications']['nasQualificationSha256']
+        raw=private_bytes(entry['path'],maximum=1024*1024)
+        require(hashlib.sha256(raw).hexdigest()==entry['sha256'],'qualification_artifact_changed')
+        observed=self.boundary.fresh(self._find('final')['Id'],live_probe_source())
+        return verify_live(decode(raw),observed)
+
     def _original(self):
         item=self.docker.inspect(self.plan['predecessor']['containerId'])
         require(item['Id']==self.plan['predecessor']['containerId'] and item['Image']==self.plan['predecessor']['imageId']
@@ -476,7 +484,11 @@ finally:db.close()
             owner='final' if phase=='final-frozen' else 'holder';binding=self._binding(state,phase)
             reference=self._custody().projection(self._prior(state,'capture-full-custody')['reference'],intent,phase=phase,
                 binding=binding,context=self._context(owner,state),final_id=self._find('final')['Id'] if owner=='final' else None)
-            return dict(reference=reference,binding=binding,workers=self._workers() if action=='verify-final-readiness' else None)
+            spool=None
+            if action=='verify-final-readiness':
+                spool=self._live_spool()
+            return dict(reference=reference,binding=binding,workers=self._workers() if action=='verify-final-readiness' else None,
+                        spool=spool)
         if action=='rename-predecessor':
             old=self._original();require(old['Name']=='/'+journal.NAME+'-retained-'+self.plan['operationId'].replace('-','')[:12],
                                          'retained_original_name_not_observed');return self._summary(old)

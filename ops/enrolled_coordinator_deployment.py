@@ -304,7 +304,7 @@ def verify_private_artifacts(bundle, plan, *, config_reader, require_all_qualifi
             # This validates point-in-time evidence, not ongoing mount health or
             # crash/power-loss durability. Runtime checks remain mandatory.
             from .local_spool_qualification import validate
-            validate(raw, policy_inputs['finalConfig'])
+            validate(raw, policy_inputs['finalConfig'], bundle['recipes']['final'])
         if name == 'workerQualificationSha256':
             from .worker_prestart_review import validate
             validate(raw, bundle, plan)
