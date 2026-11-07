@@ -289,6 +289,38 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.fleet.max_active, 2)
         self.assertEqual(len(self.fleet.commits), 3)
 
+    def test_production_arrival_does_not_preempt_running_staging_job(self):
+        # Keep main unavailable so production cannot run concurrently while
+        # the staging attempt owns the cluster node.
+        self.busy['main'] = 1
+        staging = self.submit(environment='staging')
+        self.service.tick()
+        staging_task = self.task(staging)
+        self.assertEqual(staging_task['node_id'], 'cluster')
+        self.assertEqual(staging_task['job']['status'], 'running')
+        engine_uuid = staging_task['engine_uuid']
+
+        production = self.submit(environment='production')
+        self.service.tick()
+
+        staging_task = self.task(staging)
+        production_task = self.task(production)
+        self.assertEqual(staging_task['node_id'], 'cluster')
+        self.assertEqual(staging_task['engine_uuid'], engine_uuid)
+        self.assertEqual(staging_task['job']['status'], 'running')
+        self.assertEqual(self.service.info(staging)['status']['code'], 20)
+        self.assertIsNone(production_task['node_id'])
+        self.assertEqual(production_task['job']['status'], 'queued')
+        self.assertEqual(sum(call[0] == 'cancel' for call in self.engines['cluster'].calls), 0)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+        self.finish(staging)
+        self.service.tick()
+        self.assertEqual(self.service.info(staging)['status']['code'], 40)
+        self.assertEqual(self.task(production)['node_id'], 'cluster')
+        self.assertEqual(self.service.info(production)['status']['code'], 20)
+        self.assertEqual(len(self.fleet.commits), 2)
+
     def test_tree_running_on_main_does_not_block_cluster_photo_slot(self):
         tree, _ = self.queue.submit({'requestId': 'tree', 'environment': 'production', 'profile': PROFILE})
         claim = self.queue.claim({'workerId': 'tree-worker', 'nodeId': 'main'})
