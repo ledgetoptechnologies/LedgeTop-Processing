@@ -248,7 +248,8 @@ class LegacyViewerReadonly:
                 fd = owner.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptors[-1])
                 descriptors.append(fd); self._owned(fd, directory=True)
             folder = descriptors[-1]
-            expected = {item['path'] for item in task['_files']} | {'all.zip', 'all.zip.receipt'}
+            required = {item['path'] for item in task['_files']} | {'all.zip', 'all.zip.receipt'}
+            expected = required | {'all.zip.intent'}
             observed = set()
             entries = os.scandir(folder)
             owner._iterators.append(entries)
@@ -260,10 +261,22 @@ class LegacyViewerReadonly:
                 try: entries.close()
                 except BaseException: owner._hold()
                 owner._iterators.remove(entries)
-            _require(observed == expected)
+            _require(required <= observed)
             for item in task['_files']:
                 fd = owner.open(item['path'], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
                 try: _require(self._owned(fd).st_size == item['bytes'])
+                finally: owner.close_fd(fd)
+            identity = dict(version=1, task=identifier, generation=task['generation'], job=task['job_id'],
+                            node=task['node_id'], engine=task['engine_uuid'])
+            if 'all.zip.intent' in observed:
+                fd = owner.open('all.zip.intent', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+                try:
+                    before = self._owned(fd); _require(before.st_size <= 65536)
+                    intent = _json(os.read(fd, before.st_size + 1).decode(), 65536)
+                    _require(_identity(before) == _identity(os.fstat(fd)))
+                    _require(type(intent) is dict and set(intent) == set(identity)
+                             and all(type(intent[key]) is type(value) and intent[key] == value
+                                     for key, value in identity.items()))
                 finally: owner.close_fd(fd)
             fd = owner.open('all.zip.receipt', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
             try:
@@ -271,8 +284,6 @@ class LegacyViewerReadonly:
                 receipt = _json(os.read(fd, before.st_size + 1).decode(), 65536)
                 _require(_identity(before) == _identity(os.fstat(fd)))
             finally: owner.close_fd(fd)
-            identity = dict(version=1, task=identifier, generation=task['generation'], job=task['job_id'],
-                            node=task['node_id'], engine=task['engine_uuid'])
             _require(type(receipt) is dict and set(receipt) == set(identity) | {'bytes', 'sha256'}
                      and all(type(receipt[key]) is type(value) and receipt[key] == value for key, value in identity.items())
                      and type(receipt['bytes']) is int and 4 <= receipt['bytes'] <= self.maximum
