@@ -168,6 +168,7 @@ def fake_run(self,args,**kw):
  called('command')
  if args==['/usr/bin/hostname']:return b'serialized-fixture\\n'
  if args[:2]==['/usr/bin/systemctl','--user']:
+  if args[2:] == ['daemon-reload'] or args[2:4] == ['--no-block','start']:called('service-effect')
   if args[2:] in (['show-environment'],['daemon-reload']):return b''
   if args[2]!='show':raise AssertionError('unreviewed service action')
   prop=next(x.split('=',1)[1] for x in args if x.startswith('--property='))
@@ -240,6 +241,25 @@ Ingress.http=http
         code,out,error=self.run_body(body)
         self.assertNotEqual(code,0);self.assertEqual(out,b'');self.assertFalse(self.mark.exists())
         self.assertIn(b'activation_readonly_source_changed',error)
+
+    def test_spoofed_installed_tree_pin_refuses_before_service_effect(self):
+        wrong='a'*64 if self.tree!='a'*64 else 'b'*64
+        body=service.serialize_service(self.worker,self.manifest,self.ingress,self.native,wrong,'start',str(uuid.uuid4()))
+        code,out,error=self.run_body(body)
+        self.assertNotEqual(code,0);self.assertEqual(out,b'')
+        self.assertIn(b'activation_installed_dependency_tree_changed',error)
+        calls=[json.loads(line)['kind'] for line in self.mark.read_text().splitlines()] if self.mark.exists() else []
+        self.assertNotIn('service-effect',calls)
+
+    def test_changed_dependency_tree_refuses_before_service_effect(self):
+        body,_=self.body('start')
+        path=next((self.venv/'lib').rglob('rfc8785/__init__.py'))
+        path.chmod(0o640);path.write_bytes(path.read_bytes()+b'\n# synthetic mutation\n');path.chmod(0o440)
+        code,out,error=self.run_body(body)
+        self.assertNotEqual(code,0);self.assertEqual(out,b'')
+        self.assertIn(b'activation_installed_dependency_tree_changed',error)
+        calls=[json.loads(line)['kind'] for line in self.mark.read_text().splitlines()] if self.mark.exists() else []
+        self.assertNotIn('service-effect',calls)
 
     def test_invalid_serialized_manifest_fails_before_external_command(self):
         body,_=self.body();bad=copy.deepcopy(self.manifest);bad['gate']['generation']=True

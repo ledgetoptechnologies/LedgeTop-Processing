@@ -24,6 +24,14 @@ zero-hash/one-byte pre-composition intent.
   install-only receipt including its installed-tree digest. This does not assert
   that the installed tree still exists or matches today.
 
+If the preparation receipt was not retained, `preparationReceipt` may instead
+be the explicit marker `{kind:not-retained}` only with `enrolled-static` and its
+exact completed installer receipt. This does not reconstruct or claim the lost
+preparation event. It permits configuration review from separately reviewed
+enrollment evidence; it does not validate that the historical receipt is fresh,
+authorize activation, or replace fresh installed-tree and worker readiness gates.
+Install-intent still requires the original preparation receipt.
+
 The manifest binds source archive/footprint/requirements, dependency archive and
 interpreter hash/version, derived unit, real config hash, original host/service,
 native engine and canonical Gate. The validator compares config/source/unit,

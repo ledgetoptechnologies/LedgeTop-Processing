@@ -128,6 +128,23 @@ class ConcreteDriverExclusionTests(unittest.TestCase):
         with patch.object(a,'registered_binding',return_value=None),patch.object(a.os.path,'lexists',return_value=False):
             with self.assertRaisesRegex(TransportHeld,'receipt_required'):a.guard_coordinator_progress(self.driver,'stop-bootstrap')
 
+    def test_reserved_first_install_cannot_skip_activation_at_cutover_or_readiness(self):
+        self.worker['settings']['sourceRoot']='/opt/ledgetop-processing-reference/'+str(uuid.uuid4())+'/source'
+        with patch.object(a,'registered_binding',return_value=None),patch.object(a.os.path,'lexists',return_value=False):
+            for action in ('stop-bootstrap','verify-final-readiness','resume-final-gate'):
+                with self.subTest(action=action),self.assertRaisesRegex(TransportHeld,'receipt_required'):
+                    a.guard_coordinator_progress(self.driver,action)
+            with self.assertRaisesRegex(TransportHeld,'receipt_required'):
+                a.activation_readiness_binding(self.driver,self.worker,{}, {})
+
+    def test_malformed_reserved_install_namespace_is_not_a_legacy_worker(self):
+        for path in ('/opt/ledgetop-processing-reference/not-a-uuid/source',
+                     '/opt/ledgetop-processing-reference/'+str(uuid.uuid4())+'/source/child',
+                     '/opt/ledgetop-processing-reference/../elsewhere/source'):
+            self.worker['settings']['sourceRoot']=path
+            with self.subTest(path=path),self.assertRaises(Exception):
+                a.installed_first_worker(self.worker)
+
     def test_existing_worker_without_activation_keeps_read_only_compatibility(self):
         with patch.object(a,'registered_binding',return_value=None),patch.object(a.os.path,'lexists',return_value=False):
             self.assertIsNone(a.activation_readiness_binding(self.driver,self.worker,{},{}))

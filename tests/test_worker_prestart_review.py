@@ -121,6 +121,39 @@ class WorkerPrestartReviewTests(unittest.TestCase):
         entries[0]['enrollment']['receipt']['sha256'] = hashlib.sha256(raw).hexdigest()
         with self.assertRaises(Exception):review.compose(self.bundle,self.plan,entries)
 
+    def test_missing_preparation_receipt_requires_exact_completed_enrollment(self):
+        entries=copy.deepcopy(self.entries)
+        entries[0]['preparationReceipt']={'kind':'not-retained'}
+        with self.assertRaisesRegex(Exception,'completed_enrollment_receipt_required'):
+            review.compose(self.bundle,self.plan,entries)
+        manifest=json.loads(Path(entries[0]['manifest']['path']).read_bytes())
+        receipt=dict(schemaVersion=1,protocol=prep.install.PROTOCOL,operationId=manifest['operationId'],
+            manifestSha256=review.digest(manifest),sourceSha256=manifest['source']['footprintSha256'],
+            configSha256=manifest['config']['sha256'],unitSha256=manifest['unitSha256'],unitInstalled=True,
+            serviceStartIssued=False,serviceEnableIssued=False,engineMutationIssued=False,
+            installedTreeSchemaVersion=1,installedTreeSha256='a'*64)
+        path=Path(entries[0]['manifest']['path']).parent/'completed-enrollment.json'
+        def set_receipt(value):
+            raw=review.canonical(value);path.write_bytes(raw);path.chmod(0o600)
+            entries[0]['enrollment'].update(kind='enrolled-static',receipt=dict(path=str(path),sha256=hashlib.sha256(raw).hexdigest()))
+        set_receipt(receipt)
+        result=review.validate(review.compose(self.bundle,self.plan,entries),self.bundle,self.plan)
+        self.assertEqual(result['scope'],'configuration-review')
+        self.assertEqual(result['workers'][0]['preparationReceipt'],{'kind':'not-retained'})
+        for key,bad in (('unitInstalled',False),('serviceStartIssued',True),('serviceEnableIssued',True),
+                        ('engineMutationIssued',True),('manifestSha256','b'*64),('sourceSha256','c'*64),
+                        ('configSha256','c'*64),('unitSha256','d'*64),('installedTreeSha256','0'*64),
+                        ('operationId','00000000-0000-4000-8000-000000000001')):
+            changed=copy.deepcopy(receipt);changed[key]=bad;set_receipt(changed)
+            with self.subTest(key=key),self.assertRaises(Exception):review.compose(self.bundle,self.plan,entries)
+        set_receipt(receipt);entries[0]['preparationReceipt']={'kind':'not-retained','preparationOnly':True}
+        with self.assertRaises(Exception):review.compose(self.bundle,self.plan,entries)
+        entries[0]['preparationReceipt']={'kind':'not-retained'}
+        entries[0]['enrollment']['receipt']['sha256']='e'*64
+        with self.assertRaises(Exception):review.compose(self.bundle,self.plan,entries)
+        set_receipt(receipt);path.unlink()
+        with self.assertRaises(Exception):review.compose(self.bundle,self.plan,entries)
+
     def test_producer_is_exclusive_and_bound_gate_accepts_only_exact_bytes(self):
         root = Path(self.entries[0]['manifest']['path']).parent
         def private(name,value):

@@ -13,6 +13,7 @@ from processing import reference_source_intake_store as intake_store
 from processing.maintenance import Conflict
 from processing.node_gate import NodeGate
 from processing.reference_driver import ReferenceDriver
+from processing.reference_api import ReferenceAPI
 from processing.reference_engine_worker import ReferenceEngineWorker
 from processing.reference_failure import FailureOutbox
 from processing.reference_recovery import SOURCE_RECEIPT_PROTOCOL, ClaimRecoveryService
@@ -24,6 +25,7 @@ from tests import test_reference_driver as driver_tests
 from tests import test_reference_source_fetch_recovery as fetch_tests
 from tests.test_reference_source_grant_renewal import WORKER_TOKEN, _ControlOpener
 from tests.viewer_v2_receipt_signer import SyntheticViewerCopyV2Signer
+from tests.test_reference_v2_store_acceptance import make_pull_acceptance
 
 GATE_ORIGIN = 'http://127.0.0.1:18080'
 
@@ -437,7 +439,7 @@ class StartedRecoveryTests(ProcessingHarness):
 class DeliveryAcrossRestartTests(ProcessingHarness):
     """A job that outlives a coordinator restart still reaches signed acceptance.
 
-    Real delivery receipt, Queue completion, viewer transfer, signed V2 copy
+    Real delivery receipt, Queue completion, Viewer pull, signed V2 copy
     receipt, worker verification and observation. Only the engine and the Viewer
     signer are synthetic; the coordinator is reopened, not killed.
     """
@@ -470,15 +472,28 @@ class DeliveryAcrossRestartTests(ProcessingHarness):
         self.assertEqual(self.row()[0], stage)
 
     def accept(self):
-        """The Viewer's side: take the transfer, sign the copy, post the acceptance."""
-        acceptance = self.store.ensure_viewer_transfer(self.job_id, accepted_at='2026-11-04T00:00:02.000Z')
-        transfer = self.store.claim_viewer_transfer(now=self.now[0])
+        """Model the Viewer pulling a result and posting its signed acceptance."""
+        token = 'synthetic-staging-token'
+        api = ReferenceAPI(self.store, bearer_tokens={token: 'staging'},
+            source_bearer_principals={token: 'viewer-staging'},
+            capability_fingerprint='a' * 64,
+            options_fingerprint=self.case.payload['pipeline']['odm']['optionsFingerprint'],
+            viewer_receipt_keys=self.signer.trusted_keys,
+            source_attestation_keys=self.case.trusted_keys, authority_id=self.queue.authority_id)
+        headers = {'Authorization': 'Bearer ' + token}
+        path = f'/ltds/v1/jobs/{self.job_id}'
+        pulled = api.handle('GET', path + '/results', headers, protected_transport=True)
+        self.assertEqual(pulled.status, 200, pulled.body)
+        manifest = pulled.body
         private = self.store.get(self.job_id, private=True)
+        acceptance = make_pull_acceptance(private, manifest)
         expected = {**private['sourceAcceptanceBinding'],
-            'resultManifestSha256': transfer['viewerResultManifest']['resultManifestSha256']}
-        envelope = self.signer.envelope(expected, acceptance, transfer['viewerResultManifest'])
-        self.store.accept(self.job_id, envelope['acceptance'], viewer_receipt=envelope['viewerReceipt'],
-            trusted_viewer_receipt_keys=self.signer.trusted_keys)
+            'resultManifestSha256': manifest['resultManifestSha256']}
+        envelope = self.signer.envelope(expected, acceptance, manifest)
+        response = api.handle('POST', path + '/acceptance', headers,
+            protocol.canonical_json(envelope), protected_transport=True)
+        self.assertEqual(response.status, 200, response.body)
+        self.assertTrue(response.body['fullyAccepted'])
 
     def assert_finished(self):
         self.assertEqual(self.transport.starts(), 1)

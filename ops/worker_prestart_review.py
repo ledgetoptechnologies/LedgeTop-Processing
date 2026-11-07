@@ -60,12 +60,6 @@ def _worker(entry, worker, authority):
         and settings['unitName'] == 'ledgetop-processing-reference-worker.service'
         and settings['unitFile'] == str(home/'.config/systemd/user/ledgetop-processing-reference-worker.service')
         and expected['activation'] is None, 'worker_review_enrollment_binding_changed')
-    prepared = _read(entry['preparationReceipt'])
-    wanted = dict(schemaVersion=1, protocol='ltds-first-worker-private-preparation-v1',
-        workerConfigSha256=manifest['config']['sha256'], manifestSha256=digest(manifest),
-        unitSha256=manifest['unitSha256'], preparationOnly=True)
-    require(prepared == wanted and type(prepared.get('schemaVersion')) is int
-            and type(prepared.get('preparationOnly')) is bool, 'worker_preparation_receipt_changed')
     enrollment = entry['enrollment']
     require(type(enrollment) is dict and enrollment.get('kind') in ('install-intent', 'enrolled-static'),
             'worker_enrollment_scope_required')
@@ -73,6 +67,19 @@ def _worker(entry, worker, authority):
     _closed(enrollment, fields + (('receipt',) if enrollment['kind'] == 'enrolled-static' else ()))
     require(enrollment['operationId'] == manifest['operationId'] and enrollment['manifestSha256'] == digest(manifest),
             'worker_enrollment_reference_changed')
+    preparation = entry['preparationReceipt']
+    if preparation == {'kind': 'not-retained'}:
+        # This is explicitly NOT a reconstructed preparation receipt. It is
+        # accepted only alongside the separately pinned completed installer
+        # receipt below; subsequent live activation/readiness gates are unchanged.
+        require(enrollment['kind'] == 'enrolled-static', 'completed_enrollment_receipt_required')
+    else:
+        prepared = _read(preparation)
+        wanted = dict(schemaVersion=1, protocol='ltds-first-worker-private-preparation-v1',
+            workerConfigSha256=manifest['config']['sha256'], manifestSha256=digest(manifest),
+            unitSha256=manifest['unitSha256'], preparationOnly=True)
+        require(prepared == wanted and type(prepared.get('schemaVersion')) is int
+                and type(prepared.get('preparationOnly')) is bool, 'worker_preparation_receipt_changed')
     if enrollment['kind'] == 'enrolled-static':
         receipt = _read(enrollment['receipt'])
         fields = ('schemaVersion', 'protocol', 'operationId', 'manifestSha256', 'sourceSha256',
