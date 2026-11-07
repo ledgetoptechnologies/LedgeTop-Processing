@@ -184,10 +184,9 @@ class ViewerService:
         return self.store.upload(identifier, filename, stream, length)
 
     def ensure_upload_capacity(self, request_bytes):
-        # Reserve the incoming multipart temporary file before reading it. The
-        # per-file durable write performs a second check after that temporary
-        # copy exists, before creating its own temporary file.
-        return self.store.ensure_capacity(request_bytes, copies=1)
+        # Reserve both the request-body temp file and durable per-file temp copy
+        # before accepting the body. The per-file write rechecks the same bound.
+        return self.store.ensure_capacity(request_bytes, copies=2)
 
     def commit(self, identifier):
         return self.store.commit(identifier)
@@ -374,23 +373,14 @@ class ViewerService:
     def _start_claimed(self, task, job, node_id):
         try:
             self.store.update(task['uuid'], stage='running', phase='claimed', node_id=node_id,
-                              claim_token=job['claimToken'], engine_uuid=str(uuid.uuid4()), error=None)
+                              claim_token=job['claimToken'], engine_uuid=str(uuid.uuid4()),
+                              upload_cursor=0, error=None)
             task = self.store.task(task['uuid'])
             engine = self.engines[node_id]
             self.store.update(task['uuid'], phase='init_pending')
             engine.initialize(task)
-            self.store.update(task['uuid'], phase='initialized')
-            for item in task['files']:
-                self.store.update(task['uuid'], phase='upload_pending')
-                engine.upload(task['engine_uuid'], item)
-                self.store.update(task['uuid'], phase='uploaded')
-            self.store.update(task['uuid'], phase='commit_pending')
-            engine.action('commit', task['engine_uuid'])
-            # A successful commit response only means NodeODM accepted the
-            # task. Keep the public state queued until /info confirms that the
-            # engine has actually started processing it.
-            self.store.update(task['uuid'], phase='awaiting_engine_start')
-            self._poll(self.store.task(task['uuid']))
+            self.store.update(task['uuid'], phase='initialized', upload_cursor=0)
+            self._upload_and_commit(self.store.task(task['uuid']))
         except Exception:
             current = self.store.task(task['uuid'])
             if current['phase'] == 'commit_pending':
@@ -399,6 +389,58 @@ class ViewerService:
                 self.store.update(task['uuid'], error='commit_ack_uncertain')
             else:
                 self._hold(current, 'engine_submission_uncertain')
+
+    def _upload_and_commit(self, task):
+        engine = self.engines[task['node_id']]
+        cursor = task['upload_cursor']
+        if cursor > len(task['files']):
+            raise SmokeError('durable upload cursor exceeds input manifest')
+        for index in range(cursor, len(task['files'])):
+            self.store.update(task['uuid'], phase='upload_pending', upload_cursor=index)
+            engine.upload(task['engine_uuid'], task['files'][index])
+            # Advance only after an acknowledged full-file upload. If the
+            # process stops in upload_pending, do not guess whether the engine
+            # received that file; keep the job held for inspection.
+            self.store.update(task['uuid'], phase='uploaded', upload_cursor=index + 1)
+        self.store.update(task['uuid'], phase='commit_pending')
+        engine.action('commit', task['engine_uuid'])
+        # Commit acceptance does not mean ODM has begun processing yet.
+        self.store.update(task['uuid'], phase='awaiting_engine_start')
+        self._poll(self.store.task(task['uuid']))
+
+    def _resume_precommit(self, task):
+        """Resume only restart phases whose last engine mutation is known."""
+        engine = self.engines[task['node_id']]
+        phase = task['phase']
+        if phase == 'claimed':
+            # The engine UUID was durably assigned before any engine request.
+            self.store.update(task['uuid'], phase='init_pending')
+            task = self.store.task(task['uuid'])
+            phase = task['phase']
+        if phase == 'init_pending':
+            info = engine.read('/task/' + task['engine_uuid'] + '/info', missing=True)
+            if info is None:
+                engine.initialize(task)
+            elif (not isinstance(info, dict) or info.get('uuid') != task['engine_uuid']
+                  or not isinstance(info.get('status'), dict)
+                  or info['status'].get('code') != 10):
+                raise SmokeError('engine initialization recovery uncertain')
+            self.store.update(task['uuid'], phase='initialized', upload_cursor=0)
+        elif phase in ('initialized', 'uploaded'):
+            info = engine.read('/task/' + task['engine_uuid'] + '/info', missing=True)
+            if info is None:
+                # No engine task exists, so none of the previously acknowledged
+                # uploads remain. Reinitialize the same reserved UUID and replay
+                # only these known-absent side effects from the retained source.
+                engine.initialize(task)
+                self.store.update(task['uuid'], phase='initialized', upload_cursor=0)
+            elif (not isinstance(info, dict) or info.get('uuid') != task['engine_uuid']
+                  or not isinstance(info.get('status'), dict)
+                  or info['status'].get('code') != 10):
+                raise SmokeError('engine upload recovery uncertain')
+        else:
+            raise SmokeError('submission phase is not safely resumable')
+        self._upload_and_commit(self.store.task(task['uuid']))
 
     def tick(self):
         """One bounded scheduler turn; public for deterministic synthetic tests."""
@@ -409,9 +451,28 @@ class ViewerService:
                     continue
                 if job['status'] == 'held' and job['heldReason'] != 'coordinator_restart':
                     continue
-                if (task['phase'] in ('processing', 'commit_pending', 'awaiting_engine_start', 'cancel_pending')
+                if (task['phase'] in ('init_pending', 'initialized', 'uploaded', 'claimed')
+                        and task['engine_uuid'] and task['node_id'] and task['claim_token']
+                        and job['status'] == 'held' and job['heldReason'] == 'coordinator_restart'):
+                    due, failures = self._backoff.get(task['uuid'], (0, 0))
+                    if time.monotonic() < due:
+                        continue
+                    try:
+                        self._resume_precommit(task)
+                    except EngineUnavailable:
+                        failures += 1
+                        self._backoff[task['uuid']] = (
+                            time.monotonic() + min(60, 2 ** min(failures, 6)), failures)
+                    except Exception:
+                        self._hold(task, 'submission_interrupted')
+                elif (task['phase'] in ('processing', 'commit_pending', 'awaiting_engine_start', 'cancel_pending')
                         and task['engine_uuid'] and task['node_id'] and task['claim_token']):
                     self._poll(task)
+                elif task['phase'] == 'upload_pending' and job['status'] == 'held' \
+                        and job['heldReason'] == 'coordinator_restart':
+                    # NodeODM does not expose an authoritative uploaded-file
+                    # inventory; never retry this ambiguous mutation blindly.
+                    self._hold(task, 'submission_interrupted')
                 else:
                     self._hold(task, 'submission_interrupted')
             catalogue = self._catalog()

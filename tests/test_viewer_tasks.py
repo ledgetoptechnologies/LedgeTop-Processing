@@ -93,7 +93,7 @@ class ViewerTaskStoreTests(unittest.TestCase):
             def read(self, *_):
                 raise AssertionError('backpressured upload body must not be read')
         length = 100
-        required = length + self.store.min_free_bytes + 64 * 1024 ** 2
+        required = length * 2 + self.store.min_free_bytes + 64 * 1024 ** 2
         with patch('processing.viewer_tasks.shutil.disk_usage',
                    return_value=type('Usage', (), {'free': required - 1})()):
             with self.assertRaises(StorageBackpressure):
@@ -101,6 +101,19 @@ class ViewerTaskStoreTests(unittest.TestCase):
         task = self.store.task(self.identifier)
         self.assertEqual(task['files'], [])
         self.assertFalse(list(Path(task['directory']).glob('.incoming-*')))
+
+    def test_low_space_must_fit_multipart_and_durable_temporary_copies(self):
+        self.store = TaskStore(self.queue, self.root / 'inputs', max_input_bytes=1024,
+                               min_free_bytes=4096)
+        self.initialize()
+        length = 100
+        margin = 64 * 1024 ** 2
+        required = length * 2 + self.store.min_free_bytes + margin
+        with patch('processing.viewer_tasks.shutil.disk_usage',
+                   return_value=type('Usage', (), {'free': required - 1})()):
+            with self.assertRaises(StorageBackpressure):
+                self.store.upload(self.identifier, 'photo.jpg', io.BytesIO(b'x' * length), length)
+        self.assertEqual(self.store.task(self.identifier)['files'], [])
 
     def test_unsafe_names_identifiers_and_settings_rejected(self):
         for identifier in ('../task', self.identifier.upper(), 'not-a-uuid'):

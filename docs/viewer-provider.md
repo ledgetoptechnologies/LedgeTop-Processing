@@ -1,34 +1,31 @@
 # Viewer provider trial
 
-The coordinator exposes a native NodeODM-compatible 2.x HTTP facade over the
-same durable queue/global execution slot used by TreeDar. Its advertised engine
-is `ledgetop-processing`, not an official ClusterODM build. Dynamic `/options`
-is the fresh exact-definition intersection of configured engines. Engine updates
-must not silently introduce options unsupported by the other node.
+The coordinator exposes a native NodeODM-compatible 2.x HTTP facade over its
+durable photo queue. Its advertised engine is `ledgetop-processing`, not an
+official ClusterODM build. Dynamic `/options` and node readiness are discovered
+from each configured engine; an offline node does not hide a healthy sibling.
+TreeDar remains on the same authoritative coordinator, with one active heavy
+job per physical node.
 
-Small jobs, at most 1,000 photos and the configured local byte ceiling, use
-cluster first. If cluster is busy/unavailable/draining, they wait for cluster.
-Larger jobs wait for main; they never overflow to cluster. There is one running
-or held job globally, production before staging and FIFO within each class.
-Running staging is allowed to finish when production arrives.
+`PROCESSING_NODE_ORDER` controls preference and can name future nodes using
+`PROCESSING_NODE_<ID>_URL`, `_TOKEN`, `_MAX_PHOTOS` and `_MAX_INPUT_BYTES`.
+The cluster defaults to at most 1,000 photos and 20 GiB of inputs; the main node
+has no application photo or byte cap, though live engine limits still apply.
+Small jobs prefer cluster, then may use an eligible main node when cluster is
+busy. Jobs above a node's discovered or configured limit cannot run there. Each
+physical node has one heavy-job slot; different nodes may work concurrently.
+Production jobs are chosen ahead of waiting staging jobs without preempting a
+running task. FIFO is maintained among eligible work.
 
 ## Operator setup
 
-Verified October27 deployment: **`http://192.168.50.89:3005`**. The actual Viewer
-adapter successfully probed this LAN endpoint and detected `nodeodm`, engine
-`ledgetop-processing`, 74dynamic options and `maxParallelTasks:1`.
-The private production token is on cluster at
-`/home/bkoltz/.local/share/ledgetop-processing-prototype/viewer-ba01f37/viewer-production.token`
-(mode0600). Read it in your own SSH terminal and enter it in Viewer; do not paste
-it into chat. The adjacent `viewer-staging.token` is for explicitly staged jobs.
-
-Runtime source: `ba01f372d31a2354ff4321dc5ae7ebf9f2b5f310`, image
-`sha256:40a4d54c3b7311384ba031cf05acb3e760237ada4d6d2434ab1392fabd5bc401`.
-Existing authority/state and all12historical jobs were preserved, with no active
-jobs at handoff. Node backends bind localhost only; ordinary LAN direct access
-to their ingress ports returns403. Cluster ingress permits its host/default
-Docker bridge; main ingress permits cluster plus loopback. Docker administrators
-remain able to bypass host software controls. Legacy ClusterODX is retained stopped.
+Last read-only host check, November 7: cluster `.89` had an older healthy
+`ledgetop-processing-prototype` container; the reference-worker systemd unit
+was inactive on both `.89` and main `.88`. Main NodeODM was running. The current
+photo-queue candidate is not installed on either PC. October 27 provider
+deployment details and receipts below are historical evidence for an earlier
+build, not acceptance evidence for the current candidate. Keep NodeODM behind
+its private ingress; do not expose the Docker daemon or engine ports to Viewer.
 
 Use the cluster's single existing coordinator and state volume. Never start a
 second real dispatcher for staging. `compose.viewer.yaml` requires explicit
@@ -41,7 +38,7 @@ normal credential UI to enter the private `PROCESSING_VIEWER_TOKEN`. Do not put
 the token in URLs, notes, source files or chat. The detected type is `nodeodm`.
 Set provider **admissionLimit to 4** for a queued trial: the default1 would keep
 later jobs waiting inside Viewer rather than testing the orchestrator queue.
-This does not change the orchestrator's single execution slot.
+This is only Viewer admission; it does not change the per-node execution slots.
 
 Primary Viewer credentials label jobs production. A separate optional
 `PROCESSING_VIEWER_STAGING_TOKEN` labels jobs staging. Names are never used to
@@ -50,26 +47,39 @@ guess environments. Environment cannot change when a UUID is reset.
 The native endpoint implements capability/options discovery, multipart
 init/upload/commit, info/output, cancellation/removal and ZIP download. Requests
 use the Viewer's existing query-token protocol. Uploads stream through private
-temporary files, with at most 2GiB per request, 64parts, and a default20GiB per
-job. These disk/transfer bounds are configurable independently of worker CPU/RAM
-limits; main processing remains CPU/RAM uncapped. Input basenames must be unique
-and safe. Current inputs are images plus txt/json/csv auxiliary files.
+temporary files, with at most 2 GiB per request and 64 parts. The default task
+input cap is 20 GiB, and intake reserves space for both the temporary body and
+durable spool copy while preserving 20 GiB of free space. The reserve is
+configurable. Result archives are bounded separately. These are disk limits;
+the main node has no application CPU/RAM cap. Input basenames must be unique and
+safe. Current inputs are images plus txt/json/csv auxiliary files.
+
+For pre-dispatch tasks `/info` returns code 10 plus validated
+`ledgetopQueueState`, `ledgetopQueueReason` (when known), and `ledgetopNodeId`
+fields. Submission remains queued until native NodeODM reports code 20. Viewer
+then downloads and validates `all.zip`, and marks ready only after its required
+ingest and model checks. Processing retains its own copy and receives no final
+Viewer-ready acknowledgment, so automated cleanup must remain disabled.
 
 ## Recovery and maintenance
 
 The public task UUID maps durably to a unique private engine UUID per reset.
-Each mutation has a durable intent. Lost init/upload acknowledgements hold the
-shared slot for inspection instead of starting another expensive job. Lost
-commit acknowledgements reconcile by status reads for that exact engine UUID;
-commit is never replayed. After restart, a known processing job stays publicly
-running while its exact result is reconciled. Read outages back off to60seconds.
+Each mutation has a durable intent. On coordinator restart, uncertain init is
+reconciled by reading that exact UUID; confirmed initialized tasks and fully
+acknowledged uploads resume from the durable per-file cursor. A crash during an
+upload is held for inspection because NodeODM does not expose an authoritative
+uploaded-file inventory; the upload is never blindly replayed. Lost commit
+acknowledgments reconcile by status reads for the exact engine UUID; commit is
+never replayed. Known processing jobs stay publicly running while their exact
+result is reconciled. Read outages back off to 60 seconds.
 
 Running cancellation retains the slot until the engine reports a terminal
 state. Queued cancellation prevents dispatch. `remove` hides/resets a public
 task but retains prior inputs, execution history and result copies. Download
-GETs may be retried; successful downloads do not delete outputs. The current
-Viewer adapter has no successful-ingestion acknowledgement. Verified cleanup
-therefore remains an operator step; do not treat download/remove as an ACK.
+GETs may be retried; successful downloads do not delete outputs. Viewer retries
+ingest from byte zero and verifies the archive and required model products before
+marking ready. It does not send a final readiness ACK to Processing. Do not treat
+download/remove as an ACK or delete retained data automatically.
 
 Maintenance first drains coordinator admission and waits for the current node's
 job/host ownership. Ingress remains open for its uploads/status/results until
@@ -84,9 +94,10 @@ Run stdlib unit/integration checks with `python -m unittest discover -s tests`.
 The optional `scripts/viewer_contract_smoke.py --viewer-adapter PATH` executes
 the actual Viewer `NodeOdmProvider` JS module against two isolated synthetic HTTP
 engines and the real coordinator code. It needs Node.js and the trusted current
-Viewer source path. It exercises20-file upload batches, global TreeDar exclusion,
-production order, small/main routing, cancellation, duplicate commit, output
-cursors, environment authorization, download/hash equality and retained results.
+Viewer source path. It exercises 20-file upload batches, per-node TreeDar
+exclusion, production order, small/main routing, cancellation, duplicate commit,
+output cursors, environment authorization, download/hash equality and retained
+results.
 
 Synthetic engine doubles are opt-in and never perform photogrammetry. Their ZIPs
 are explicitly labelled transport fixtures. Passing these checks does not prove

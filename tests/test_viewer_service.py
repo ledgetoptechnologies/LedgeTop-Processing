@@ -207,6 +207,27 @@ class ViewerServiceTests(unittest.TestCase):
         task = self.task(identifier)
         self.engines[task['node_id']].finish(task['engine_uuid'], code)
 
+    def restart_claimed_task(self, identifier, phase, *, cursor=0, engine_exists=False):
+        job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': 'cluster',
+                                'profiles': [VIEWER_PROFILE]})
+        self.assertIsNotNone(job)
+        task = self.task(identifier)
+        engine_uuid = str(uuid.uuid4())
+        self.service.store.update(identifier, stage='running', phase=phase, node_id='cluster',
+            engine_uuid=engine_uuid, claim_token=job['claimToken'], upload_cursor=cursor)
+        if engine_exists:
+            files = {}
+            if cursor:
+                item = task['files'][0]
+                files[item['name']] = Path(item['path']).read_bytes()
+            self.engines['cluster'].tasks[engine_uuid] = {
+                'uuid': engine_uuid, 'status': {'code': 10}, 'progress': 0,
+                'files': files, 'cancel_requested': False}
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        return engine_uuid
+
     def test_exact_upload_bytes_use_small_node_and_main_is_untouched(self):
         identifier = self.initialize()
         content = b'\xff\xd8\0\r\n--binary' * 8192
@@ -348,6 +369,8 @@ class ViewerServiceTests(unittest.TestCase):
         self.make_queue_service()
         self.assertEqual(self.task(identifier)['job']['status'], 'held')
         self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        self.assertTrue(self.service.info(identifier)['ledgetopHeld'])
+        self.assertEqual(self.service.info(identifier)['ledgetopNodeId'], 'cluster')
         self.service.tick()
         self.assertEqual(self.service.info(identifier)['status']['code'], 40)
         self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
@@ -374,6 +397,66 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.service.info(identifier)['status']['code'], 20)
         self.assertEqual(sum(call[0] == 'initialize' for call in engine.calls), 1)
         self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_restart_resumes_confirmed_upload_cursor_without_reuploading_prior_files(self):
+        identifier = self.submit(count=2)
+        engine_uuid = self.restart_claimed_task(identifier, 'uploaded', cursor=1, engine_exists=True)
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['phase'], 'processing')
+        self.assertEqual(task['engine_uuid'], engine_uuid)
+        upload_names = [call[2] for call in self.engines['cluster'].calls if call[0] == 'upload']
+        self.assertEqual(upload_names, [task['files'][1]['name']])
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.engines['cluster'].calls), 0)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_restart_reconciles_uncertain_init_by_exact_uuid_before_upload(self):
+        identifier = self.submit()
+        self.restart_claimed_task(identifier, 'init_pending')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'processing')
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.engines['cluster'].calls), 1)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_restart_initialization_read_outage_backs_off_without_losing_recovery_state(self):
+        identifier = self.submit()
+        self.restart_claimed_task(identifier, 'init_pending')
+        engine = self.engines['cluster']
+        engine.read_unavailable = True
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['job']['heldReason'], 'coordinator_restart')
+        self.assertEqual(task['phase'], 'init_pending')
+        self.assertFalse(any(call[0] in ('initialize', 'upload', 'commit') for call in engine.calls))
+        engine.read_unavailable = False
+        self.service._backoff[identifier] = (0, 1)
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'processing')
+        self.assertEqual(sum(call[0] == 'initialize' for call in engine.calls), 1)
+
+    def test_restart_resumes_confirmed_initialized_task(self):
+        identifier = self.submit()
+        self.restart_claimed_task(identifier, 'initialized', engine_exists=True)
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['phase'], 'processing')
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.engines['cluster'].calls), 0)
+        self.assertEqual(sum(call[0] == 'upload' for call in self.engines['cluster'].calls), 1)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_restart_does_not_replay_ambiguous_upload_mutation(self):
+        identifier = self.submit()
+        self.restart_claimed_task(identifier, 'upload_pending', engine_exists=True)
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['job']['status'], 'held')
+        self.assertEqual(task['job']['heldReason'], 'operator')
+        self.assertEqual(task['error'], 'submission_interrupted')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 30)
+        self.assertFalse(any(call[0] in ('upload', 'commit', 'initialize')
+                             for call in self.engines['cluster'].calls))
 
     def test_engine_read_outage_backs_off_and_retains_slot_then_recovers(self):
         first = self.submit()
@@ -404,6 +487,20 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick()
         self.assertEqual(len(self.fleet.commits), 1)
         self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
+
+    def test_native_info_exposes_waiting_reason_and_assigned_node(self):
+        identifier = self.submit()
+        queued = self.service.info(identifier)
+        self.assertEqual(queued['ledgetopQueueState'], 'waiting_for_dispatch')
+        self.assertNotIn('ledgetopNodeId', queued)
+        self.service.store.update(identifier, phase='waiting_node', error='no_eligible_node')
+        waiting = self.service.info(identifier)
+        self.assertEqual(waiting['ledgetopQueueReason'], 'waiting_node_capacity')
+        self.service.tick()
+        assigned = self.service.info(identifier)
+        self.assertEqual(assigned['ledgetopNodeId'], 'cluster')
+        self.assertNotIn('ledgetopQueueState', assigned)
+        self.assertNotIn('ledgetopHeld', assigned)
 
     def test_lost_init_or_upload_ack_holds_slot_and_never_replays(self):
         for failure in ('initialize', 'upload'):

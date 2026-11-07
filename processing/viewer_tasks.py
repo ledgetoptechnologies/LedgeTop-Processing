@@ -109,6 +109,7 @@ class TaskStore:
                 outputs TEXT NOT NULL, environment TEXT NOT NULL,
                 stage TEXT NOT NULL DEFAULT 'uploading', phase TEXT NOT NULL DEFAULT 'uploading',
                 job_id TEXT, node_id TEXT, engine_uuid TEXT, claim_token TEXT,
+                upload_cursor INTEGER NOT NULL DEFAULT 0,
                 error TEXT, progress REAL NOT NULL DEFAULT 0,
                 output_lines TEXT NOT NULL DEFAULT '[]', archive_path TEXT,
                 removed INTEGER NOT NULL DEFAULT 0,
@@ -122,6 +123,12 @@ class TaskStore:
                 uuid TEXT NOT NULL, generation INTEGER NOT NULL,
                 job_id TEXT, metadata TEXT NOT NULL, files TEXT NOT NULL,
                 PRIMARY KEY(uuid,generation))''')
+            # Additive migration for candidate databases created before per-file
+            # upload progress was recorded. This value is only advanced after
+            # NodeODM has acknowledged a complete file upload.
+            columns = {row['name'] for row in db.execute('PRAGMA table_info(viewer_tasks)')}
+            if 'upload_cursor' not in columns:
+                db.execute('ALTER TABLE viewer_tasks ADD COLUMN upload_cursor INTEGER NOT NULL DEFAULT 0')
             db.execute('''CREATE UNIQUE INDEX IF NOT EXISTS viewer_engine_uuid
                 ON viewer_tasks(engine_uuid) WHERE engine_uuid IS NOT NULL''')
 
@@ -272,7 +279,9 @@ class TaskStore:
                         or existing_path.stat().st_size != length):
                     raise Conflict('input basename already contains different or missing bytes')
                 return {'success': True, 'uuid': identifier}
-            self.ensure_capacity(length)
+            # The caller may still hold its multipart temporary copy while this
+            # durable temporary file is written. Preserve headroom for both.
+            self.ensure_capacity(length, copies=2)
             temporary = directory / ('.incoming-' + secrets.token_hex(16))
             final = directory / ('input-' + secrets.token_hex(16))
             try:
@@ -397,7 +406,7 @@ class TaskStore:
 
     def update(self, identifier, **fields):
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
-                   'progress', 'output_lines', 'archive_path'}
+                   'progress', 'output_lines', 'archive_path', 'upload_cursor'}
         if not fields or not set(fields) <= allowed:
             raise ValueError('unexpected broker update fields')
         if 'stage' in fields and fields['stage'] not in STAGES:
@@ -419,6 +428,9 @@ class TaskStore:
         if 'progress' in fields and (type(fields['progress']) not in (int, float)
                 or not math.isfinite(fields['progress']) or not 0 <= fields['progress'] <= 100):
             raise ValueError('invalid task progress')
+        if 'upload_cursor' in fields and (type(fields['upload_cursor']) is not int
+                or not 0 <= fields['upload_cursor'] <= 100000):
+            raise ValueError('invalid upload cursor')
         if 'output_lines' in fields:
             lines = fields['output_lines']
             if (not isinstance(lines, list) or len(lines) > 10000
@@ -453,7 +465,8 @@ class TaskStore:
         job = task['job']
         state = job['status'] if job else task['stage']
         recovering = (job and state == 'held' and job['heldReason'] == 'coordinator_restart'
-                      and task['phase'] in ('processing', 'commit_pending', 'awaiting_engine_start', 'cancel_pending')
+                      and task['phase'] in ('claimed', 'init_pending', 'initialized', 'uploaded', 'processing',
+                                            'commit_pending', 'awaiting_engine_start', 'cancel_pending')
                       and task['engine_uuid'] and task['node_id'] and task['claim_token'])
         cancelled_result = (job and state == 'failed' and isinstance(job['result'], dict)
                             and job['result'].get('cancelled') is True)
@@ -465,7 +478,8 @@ class TaskStore:
             # Retain the shared slot, but do not tell Viewer this recoverable
             # engine execution failed before its exact UUID is reconciled. A
             # restart does not itself prove NodeODM left its queued state.
-            code = 10 if task['phase'] in ('commit_pending', 'awaiting_engine_start') else 20
+            code = 10 if task['phase'] in ('claimed', 'init_pending', 'initialized', 'uploaded',
+                                            'commit_pending', 'awaiting_engine_start') else 20
         elif state == 'running' and not engine_started:
             # A durable queue claim owns the task while the coordinator
             # initializes NodeODM and transfers photos. Viewer must keep
@@ -477,9 +491,18 @@ class TaskStore:
         status = {'code': code}
         if code == 30:
             status['errorMessage'] = task['error'] or ('execution_held' if state == 'held' else 'processing_failed')
-        return {'uuid': identifier, 'name': task['name'], 'status': status,
-                'progress': 100 if code == 40 else task['progress'],
-                'imagesCount': task['images_count'], 'dateCreated': task['created_at']}
+        result = {'uuid': identifier, 'name': task['name'], 'status': status,
+                  'progress': 100 if code == 40 else task['progress'],
+                  'imagesCount': task['images_count'], 'dateCreated': task['created_at']}
+        if job and state == 'queued':
+            result['ledgetopQueueState'] = 'waiting_for_dispatch'
+            if task['phase'] == 'waiting_node':
+                result['ledgetopQueueReason'] = 'waiting_node_capacity'
+        if job and job.get('nodeId'):
+            result['ledgetopNodeId'] = job['nodeId']
+        if job and state == 'held':
+            result['ledgetopHeld'] = True
+        return result
 
     def output(self, identifier, line=0):
         if type(line) is not int or not 0 <= line <= 2 ** 53 - 1:
