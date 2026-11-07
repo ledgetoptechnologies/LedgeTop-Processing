@@ -89,3 +89,14 @@ legacy synthetic tests are partial evidence, not full qualification. A fresh
 drained-state census/counts, complete backup, service-owned config stage,
 enrolled and ready workers, production Viewer cutover and rollback all remain
 necessary. Do not use the draft as an executable cutover.
+
+An additional bounded observation used the actual cluster spool bind, its pinned
+marker and the exact 4705 image as uid 10001. One isolated container checked the
+10 GiB reserve, wrote and fsynced 7,602,176 synthetic bytes and directory
+metadata, and exited. A separate fresh container read the same bytes and
+verified SHA-256
+`d94b08e12f8095d50e367133b936c89e679ac1f75cddf8d6dedffcbd1c7370e4`,
+then removed only its own synthetic file and directory. Both task-owned
+containers exited. This verifies persistence across container replacement on
+the current mount, not a host reboot, power loss, installed pipeline or full
+local-spool qualification; the historical NAS gate remains null.
