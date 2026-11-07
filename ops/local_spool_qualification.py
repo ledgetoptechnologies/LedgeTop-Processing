@@ -6,6 +6,7 @@ created by this process is removed. Results are point-in-time observations;
 the actual runtime must independently revalidate its spool on each operation.
 """
 import hashlib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -179,7 +180,18 @@ def verify_host_binding(record):
 
 def live_probe_source():
     """Read current spool identity inside the actual final container, without writes."""
-    return b'''import hashlib,json,os
+    # docker exec invokes this with Python isolated mode (-I), which omits the
+    # working directory from sys.path. The image installs the application at
+    # /app, so explicitly add that fixed, image-owned package root before the
+    # import. Without this, every final-container spool readiness check fails
+    # with ModuleNotFoundError even though the application itself is healthy.
+    return _live_probe_source('/app')
+
+
+def _live_probe_source(package_root):
+    require(type(package_root) is str and PurePosixPath(package_root).is_absolute() and
+            PurePosixPath(package_root).as_posix() == package_root, 'invalid_live_probe_package_root')
+    return (('import sys\nsys.path.insert(0, ' + json.dumps(package_root) + ')\n') + '''import hashlib,json,os
 from pathlib import Path
 from processing.source_spool import SourceSpool
 raw=Path(os.environ['PROCESSING_REFERENCE_CONFIG']).read_bytes()
@@ -187,7 +199,7 @@ config=json.loads(raw);s=config['sourceSpool']
 spool=SourceSpool(s['root'],mount_path=s['mountPath'],mount_id=s['mountId'],marker_name=s['markerName'],safety_floor_bytes=s['safetyFloorBytes'],max_object_bytes=s['maxObjectBytes'],chunk_bytes=s['chunkBytes'])
 root=os.stat(spool.root,follow_symlinks=False);mount=os.stat(spool.mount_path,follow_symlinks=False);marker=os.stat(spool.marker,follow_symlinks=False)
 print(json.dumps(dict(finalConfigSha256=hashlib.sha256(raw).hexdigest(),runtimeUid=os.geteuid(),rootDevice=root.st_dev,rootInode=root.st_ino,mountDevice=mount.st_dev,mountInode=mount.st_ino,markerDevice=marker.st_dev,markerInode=marker.st_ino,availableBytes=spool.available_bytes()),sort_keys=True,separators=(',',':')))
-'''
+''').encode('utf-8')
 
 
 def verify_live(record, live):

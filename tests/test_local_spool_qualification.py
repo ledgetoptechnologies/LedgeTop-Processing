@@ -1,7 +1,10 @@
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -103,6 +106,30 @@ class LocalSpoolQualificationTests(unittest.TestCase):
         finally:
             self.mount.rmdir()
             self.mount.with_name(self.mount.name + '-moved').rename(self.mount)
+
+    def test_live_probe_imports_image_package_under_python_isolated_mode(self):
+        app = self.mount / 'app'
+        package = app / 'processing'
+        package.mkdir(parents=True)
+        (package / '__init__.py').write_text('')
+        (package / 'source_spool.py').write_text('''from pathlib import Path
+class SourceSpool:
+ def __init__(self,root,*,mount_path,marker_name,**kwargs):
+  self.root=Path(root);self.mount_path=Path(mount_path);self.marker=self.mount_path/marker_name
+ def available_bytes(self): return 123
+''')
+        settings = dict(root=str(self.root), mountPath=str(self.mount), mountId='a' * 64,
+            markerName='.spool-id', safetyFloorBytes=0, maxObjectBytes=1024, chunkBytes=512)
+        config_path = self.mount / 'reference-config.json'
+        config_path.write_text(json.dumps({'sourceSpool': settings}))
+        env = dict(os.environ, PROCESSING_REFERENCE_CONFIG=str(config_path))
+        process = subprocess.run([sys.executable, '-I', '-B', '-c',
+            q._live_probe_source(str(app)).decode('utf-8')], env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        output = json.loads(process.stdout)
+        self.assertEqual(output['availableBytes'], 123)
+        self.assertEqual(output['finalConfigSha256'], hashlib.sha256(config_path.read_bytes()).hexdigest())
 
 
 if __name__ == '__main__': unittest.main()
