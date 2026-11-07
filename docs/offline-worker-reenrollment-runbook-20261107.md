@@ -122,3 +122,15 @@ These tests do not prove a real systemd transition, ingress closure, crash
 recovery, correct private inputs, or a complete maintenance rehearsal. A
 host-isolated rehearsal with independent coordinator/engine observers remains
 required before using the procedure on either processing PC.
+
+An additional bounded staging-host test used two uniquely named harmless
+oneshot units in the existing user manager, not the Processing worker. After a
+loaded unit file was renamed away, starting it before `daemon-reload` failed
+with exit 5 and did not create its marker; reload showed `not-found`, and a new
+unit loaded and ran. In a separate test, an exact unit-file symlink to
+`/dev/null` prevented start before and after reload; after reload the manager
+showed `masked`. Both task-owned units and marker files were removed, and their
+final state was `not-found`, inactive, PID zero. These observations narrow the
+cached-file concern for those harmless units on that systemd version; they do
+not prove the exact production unit cannot race, remove the need to close
+authority and ingress, test fresh install activation, or justify live use.
