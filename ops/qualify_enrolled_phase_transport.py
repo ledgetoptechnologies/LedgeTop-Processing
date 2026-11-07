@@ -204,7 +204,7 @@ def fixture_bundle(root, *, operation_id, authority_id, old, candidate_image,
     files=dict(predecessorSchema=private_write(root/'schema.json',raw_schema),
         censusKey=private_write(root/'census-key',key),
         reviewedCounts=private_write(root/'counts.json',t.canonical(dict(jobs=22,nodes=2,viewer_tasks=7,viewer_reservations=0,
-            viewer_files=155,viewer_option_evidence=7,owned_maintenance_schedules=16))))
+            viewer_files=155,viewer_option_evidence=7,reference_jobs=0,owned_maintenance_schedules=16))))
     endpoints=[dict(id=node,url='http://127.0.0.1:'+str(19001+index))
                for index,node in enumerate(('cluster','main'))]
     hashes={name:hashlib.sha256((source_root/name).read_bytes()).hexdigest() for name in policy.SOURCES}

@@ -142,6 +142,8 @@ class ConcreteCutoverDriver:
             operation_directory=self.root,key=key,key_sha256=self.plan['bindings']['censusKeySha256'],
             module_sources=sources,module_sha256=self.bundle['custodySources'],
             reviewed_schema_bytes=private_bytes(self.bundle['artifacts']['predecessorSchema']['path'],maximum=65536),
+            reviewed_counts_bytes=private_bytes(self.bundle['artifacts']['reviewedCounts']['path'],maximum=65536),
+            reviewed_counts_sha256=self.plan['bindings']['reviewedCountsSha256'],
             policy_bytes=private_bytes(self.bundle['artifacts']['policy']['path']),
             policy_sha256=self.plan['candidate']['declaredTransformSha256'],tracked_exec=self.tracked,boundary_check=self.boundary,
             max_artifact_bytes=budgets['maxArtifactBytes'],max_backup_bytes=budgets['maxBackupBytes'],

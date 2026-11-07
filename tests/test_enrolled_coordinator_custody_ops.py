@@ -173,10 +173,18 @@ class CustodyOrchestrationTests(unittest.TestCase):
         modules={name:(source/(name+'.py')).read_bytes() for name in c.MODULE_NAMES}
         self.tracker=SyntheticTracker(self.operation);self.docker=SyntheticArchiveDocker(self.fixture.root)
         self.boundary=self.make_boundary()
-        self.ops=c.CustodyOps(self.docker,holder_id=self.holder_id,holder_settings=self.settings,
+        self.counts=dict(jobs=22,viewer_tasks=7,viewer_reservations=0,viewer_option_evidence=7,
+                         viewer_files=155,reference_jobs=0,owned_maintenance_schedules=16)
+        self.modules=modules
+        self.ops=self.make_ops(self.counts)
+
+    def make_ops(self,counts,*,reviewed_hash=None):
+        raw=c.canonical(counts)
+        return c.CustodyOps(self.docker,holder_id=self.holder_id,holder_settings=self.settings,
             operation_directory=self.directory,key=KEY,key_sha256=hashlib.sha256(KEY).hexdigest(),
-            module_sources=modules,module_sha256={name:hashlib.sha256(raw).hexdigest() for name,raw in modules.items()},
+            module_sources=self.modules,module_sha256={name:hashlib.sha256(body).hexdigest() for name,body in self.modules.items()},
             reviewed_schema_bytes=old.SCHEMA_PATH.read_bytes(),policy_bytes=b'{}',policy_sha256=hashlib.sha256(b'{}').hexdigest(),
+            reviewed_counts_bytes=raw,reviewed_counts_sha256=reviewed_hash or hashlib.sha256(raw).hexdigest(),
             tracked_exec=self.tracker,boundary_check=lambda role,context:copy.deepcopy(self.boundary),
             max_artifact_bytes=16*1048576,max_backup_bytes=64*1048576,max_seconds=10,safety_floor_bytes=1048576)
 
@@ -221,6 +229,28 @@ class CustodyOrchestrationTests(unittest.TestCase):
         self.assertEqual(self.tracker.calls,3)
         with self.assertRaisesRegex(c.CustodyHeld,'boundary_changed'):
             self.ops.inspect_backup(baseline,intent,dispatch=document['dispatch'])
+
+    def test_fresh_reviewed_counts_accept_extra_completed_job_and_reject_stale_counts(self):
+        with self.fixture.db() as db:
+            db.execute("INSERT INTO jobs(id,request_id,environment,profile,status,result) VALUES(?,?,?,'treedar-synthetic-v1','succeeded','{}')",
+                       (str(uuid.uuid4()),'additional-completed','production'))
+        self.boundary=self.make_boundary()
+        with self.assertRaises(AssertionError):
+            self.ops.capture(self.intent('stale-counts'))
+        self.tracker=SyntheticTracker(self.operation)
+        counts=dict(self.counts,jobs=23)
+        self.ops=self.make_ops(counts)
+        reference=self.ops.capture(self.intent('fresh-counts'))
+        document=self.ops.artifacts.load(reference,'baseline')
+        self.assertEqual(document['body']['baseline']['tables']['jobs']['count'],23)
+
+    def test_reviewed_counts_require_exact_pin_and_empty_reference_queue(self):
+        with self.assertRaisesRegex(c.CustodyHeld,'pinned_reviewed_counts'):
+            self.make_ops(self.counts,reviewed_hash='0'*64)
+        with self.assertRaisesRegex(c.CustodyHeld,'invalid_reviewed_counts'):
+            self.make_ops(dict(self.counts,reference_jobs=1))
+        with self.assertRaisesRegex(c.CustodyHeld,'invalid_reviewed_counts'):
+            self.make_ops({k:v for k,v in self.counts.items() if k!='viewer_files'})
 
     def test_lost_capture_reply_reuses_retired_request_without_second_read(self):
         self.tracker.lose_once=True;intent=self.intent('capture-full-custody')

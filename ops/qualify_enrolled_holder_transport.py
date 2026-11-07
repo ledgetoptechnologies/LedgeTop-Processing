@@ -236,10 +236,13 @@ def qualify(image_id,source_commit,daemon_id,artifact_root,operation,expected_cl
         key=secrets.token_bytes(32);key_path=root/'synthetic-census.key';key_path.write_bytes(key);key_path.chmod(0o600)
         # Fail-closed sentinel: this component DOES NOT authorize projection.
         policy=t.canonical(dict(profile='qualification-only-no-projection',projectionQualified=False))
+        counts=t.canonical(dict(jobs=22,viewer_tasks=7,viewer_reservations=0,viewer_option_evidence=7,
+            viewer_files=155,reference_jobs=0,owned_maintenance_schedules=16))
         ops=CustodyOps(docker,holder_id=holder_id,holder_settings=settings,operation_directory=root/'custody',
             key=key,key_sha256=hashlib.sha256(key).hexdigest(),module_sources=modules,
             module_sha256={name:hashlib.sha256(raw).hexdigest() for name,raw in modules.items()},
             reviewed_schema_bytes=schema,policy_bytes=policy,policy_sha256=hashlib.sha256(policy).hexdigest(),
+            reviewed_counts_bytes=counts,reviewed_counts_sha256=hashlib.sha256(counts).hexdigest(),
             tracked_exec=tracked,boundary_check=boundary,max_artifact_bytes=16*1048576,max_backup_bytes=64*1048576,
             max_seconds=15,safety_floor_bytes=1048576)
         intent=lambda action:dict(schemaVersion=1,operationId=operation,planSha256=settings['planSha256'],

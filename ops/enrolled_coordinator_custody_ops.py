@@ -313,10 +313,25 @@ class CustodyOps:
     """
     def __init__(self,docker,*,holder_id,holder_settings,operation_directory,key,key_sha256,
                  module_sources,module_sha256,reviewed_schema_bytes,policy_bytes,policy_sha256,
+                 reviewed_counts_bytes,reviewed_counts_sha256,
                  tracked_exec,boundary_check,max_artifact_bytes,max_backup_bytes,
                  max_metadata_bytes=64*1048576,max_seconds=300,safety_floor_bytes=64*1048576):
         require(type(holder_id) is str and re.fullmatch('[a-f0-9]{64}',holder_id),'exact_holder_id_required')
         require(type(key) is bytes and len(key)==32 and hashlib.sha256(key).hexdigest()==key_sha256,'pinned_census_key_required')
+        require(type(reviewed_counts_bytes) is bytes and len(reviewed_counts_bytes)<=65536 and
+                hashlib.sha256(reviewed_counts_bytes).hexdigest()==reviewed_counts_sha256,
+                'pinned_reviewed_counts_required')
+        try:
+            counts=census._json(reviewed_counts_bytes.decode('utf-8'))
+        except (ValueError,UnicodeError):
+            raise CustodyHeld('invalid_reviewed_counts') from None
+        required={'jobs','viewer_tasks','viewer_reservations','viewer_option_evidence',
+                  'viewer_files','owned_maintenance_schedules','reference_jobs'}
+        require(type(counts) is dict and required.issubset(counts) and
+                all(type(name) is str and re.fullmatch('[a-z_][a-z0-9_]*',name) and
+                    type(value) is int and 0<=value<=100000 for name,value in counts.items()) and
+                counts['reference_jobs']==0,'invalid_reviewed_counts')
+        self.reviewed_counts=counts
         require(set(module_sources)==set(MODULE_NAMES)==set(module_sha256) and
                 all(type(module_sources[name]) is bytes and len(module_sources[name])<=1048576 and
                     hashlib.sha256(module_sources[name]).hexdigest()==module_sha256[name] for name in MODULE_NAMES),
@@ -394,7 +409,7 @@ class CustodyOps:
         packet=canonical(request)
         tail='r=json.loads('+repr(packet)+')\nc=p.coordinator_predecessor_census\n'
         if request['kind']=='census':
-            tail+='result=c.census(r["root"],key=bytes.fromhex(r["keyHex"]),authority_id=r["authorityId"],node_ids=("cluster","main"),uid=10001,max_artifact_bytes=r["maxArtifactBytes"],max_metadata_bytes=r["maxMetadataBytes"],logical_root=r["root"],reviewed_schema_bytes=base64.b64decode(r["schema"]),max_duration_seconds=r["seconds"],expected_counts={"jobs":22,"viewer_tasks":7,"viewer_reservations":0,"viewer_option_evidence":7,"viewer_files":155,"reference_jobs":0,"owned_maintenance_schedules":16})\n'
+            tail+='result=c.census(r["root"],key=bytes.fromhex(r["keyHex"]),authority_id=r["authorityId"],node_ids=("cluster","main"),uid=10001,max_artifact_bytes=r["maxArtifactBytes"],max_metadata_bytes=r["maxMetadataBytes"],logical_root=r["root"],reviewed_schema_bytes=base64.b64decode(r["schema"]),max_duration_seconds=r["seconds"],expected_counts=r["reviewedCounts"])\n'
         else:
             tail+='result=p.coordinator_candidate_projection.verify_projection(r["root"],baseline=r["baseline"],policy_bytes=base64.b64decode(r["policy"]),expected_policy_sha256=r["policySha256"],expected_baseline_sha256=r["baselineSha256"],key=bytes.fromhex(r["keyHex"]),phase=r["phase"],gate_binding=r["binding"],uid=10001,max_artifact_bytes=r["maxArtifactBytes"],max_metadata_bytes=r["maxMetadataBytes"],max_duration_seconds=r["seconds"],reviewed_schema_bytes=base64.b64decode(r["schema"]))\n'
         value=(header+tail+'print(json.dumps(result,sort_keys=True,separators=(",",":")))\n').encode()
@@ -422,7 +437,8 @@ class CustodyOps:
         import base64
         source=self._source(dict(kind='census',root=self.settings['stateRoot'],keyHex=self.key.hex(),
             schema=base64.b64encode(self.schema).decode(),authorityId=self.settings['authorityId'],
-            maxArtifactBytes=self.max_artifact,maxMetadataBytes=self.max_metadata,seconds=self.seconds))
+            maxArtifactBytes=self.max_artifact,maxMetadataBytes=self.max_metadata,seconds=self.seconds,
+            reviewedCounts=self.reviewed_counts))
         packet=self._exec(self.holder_id,source,intent,dispatch,purpose,inspection=inspection)
         result=packet['result']
         require(result.get('profile')==census.PROFILE and result.get('retainedFilesValidated') is True and
