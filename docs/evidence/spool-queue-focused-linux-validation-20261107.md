@@ -35,6 +35,17 @@ Ran 128 tests
 OK (skipped=1)
 ```
 
+The bounded photo-admission, dynamic source-intake scale, driver-routing,
+runtime and runtime-configuration selection then passed **117 tests** in the
+same Linux qualification image. The 10,000-photo scale case is metadata-only:
+its request declared 10,000 images/50 GB but created and uploaded zero image
+bytes; it returned 201 in about 2.2 seconds with a queued `source_receiving`
+record and did not claim or process the job. The first run exposed a stale test
+fixture missing `source_bearer_principals`; the fixture now supplies the
+synthetic principal required by current runtime construction. The rerun passed
+the incomplete-upload/backpressure/capabilities checks and the full 117-test
+selection. This is not a 10,000-photo processing or disk-capacity test.
+
 These results establish synthetic Linux dispatch, two-node admission and
 selection, plus fixture recovery behavior for this source revision. They do
 not establish an installed worker/coordinator, live Viewer authentication or

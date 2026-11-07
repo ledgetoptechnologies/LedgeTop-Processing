@@ -129,7 +129,8 @@ def _server_main(config_path: Path):
     capability_fingerprint, options_fingerprint, allowed_options = discovered_policy(snapshot, config)
     settings = SimpleNamespace(viewer_bearers={VIEWER_BEARER: "staging"},
         viewer_receipt_keys={}, source_spool=spool,
-        source_attestation_keys=config_data["sourceKeys"])
+        source_attestation_keys=config_data["sourceKeys"],
+        source_bearer_principals={VIEWER_BEARER: "viewer-staging"})
     control = ReferenceControlAPI(ReferenceStore(queue, local_max_photos=MAX_NAMES,
         local_max_input_bytes=SYNTHETIC_AVAILABLE_BYTES),
         viewer_bearers=settings.viewer_bearers,
@@ -137,7 +138,9 @@ def _server_main(config_path: Path):
             "worker_instance_id": "scale-instance"}},
         capability_fingerprint=capability_fingerprint, options_fingerprint=options_fingerprint,
         allowed_odm_options=allowed_options, source_spool=spool,
-        source_attestation_keys=settings.source_attestation_keys, authority_id=queue.authority_id)
+        source_attestation_keys=settings.source_attestation_keys,
+        source_bearer_principals=settings.source_bearer_principals,
+        authority_id=queue.authority_id)
     api = _DynamicAPI(control, config, settings, lambda: snapshot,
         lambda: {node: {"ready": True, "maxImages": MAX_NAMES,
             "maxInputBytes": SYNTHETIC_AVAILABLE_BYTES, "taskQueueCount": 0}
@@ -393,10 +396,11 @@ class DynamicSourceIntakeScaleTests(unittest.TestCase):
                 self.assertEqual((busy_status, retry_after, connection_close), (429, "2", "close"))
 
                 connection = connect()
-                capability_status, _, _ = _json_response(connection, "GET", "/ltds/v2/capabilities",
+                capability_status, capability_body, _ = _json_response(connection, "GET", "/ltds/v2/capabilities",
                     bearer=VIEWER_BEARER)
                 self.assertEqual(capability_status, 200,
-                    "source intake backpressure must not block ordinary GET requests")
+                    "source intake backpressure must not block ordinary GET requests: " +
+                    capability_body.decode("utf-8", "replace"))
                 connection.close()
 
                 slow_thread.join(timeout=5)
