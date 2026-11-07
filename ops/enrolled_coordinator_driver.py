@@ -91,12 +91,16 @@ class ConcreteCutoverDriver:
             require_all_qualifications=True)
 
     def _live_spool(self):
-        from .local_spool_qualification import live_probe_source, verify_live
+        from .local_spool_qualification import live_probe_source, verify_host_binding, verify_live
         entry=self.bundle['qualifications']['nasQualificationSha256']
         raw=private_bytes(entry['path'],maximum=1024*1024)
         require(hashlib.sha256(raw).hexdigest()==entry['sha256'],'qualification_artifact_changed')
+        record=decode(raw)
+        verify_host_binding(record)
         observed=self.boundary.fresh(self._find('final')['Id'],live_probe_source())
-        return verify_live(decode(raw),observed)
+        result=verify_live(record,observed)
+        verify_host_binding(record)
+        return result
 
     def _original(self):
         item=self.docker.inspect(self.plan['predecessor']['containerId'])
@@ -294,6 +298,7 @@ finally:db.close()
                 if action=='resume-final-gate':
                     require(self._workers()==self._prior(state,'verify-final-readiness')['workers'],
                             'qualified_workers_changed_before_admission')
+                    self._live_spool()
         if action=='enable-final-restart':
             final=self._find('final');require(final is not None,'final_runtime_required');self._health(final)
             gate=self.boundary.gate(final['Id'])
@@ -343,6 +348,10 @@ finally:db.close()
         elif action=='stop-bootstrap':self.docker.stop(self._find('bootstrap')['Id'])
         elif action in ('intent-bootstrap-gate','drain-bootstrap-gate','seal-bootstrap-gate','resume-final-gate'):
             role='final' if action=='resume-final-gate' else 'bootstrap';item=self._find(role)
+            # Recheck at the transport seam after the dispatch marker, not just
+            # at the previous readiness observation. Inspection of a previously
+            # accepted/open gate never executes another resume request.
+            if action=='resume-final-gate':self._live_spool()
             request=self._gate_request(action,state)
             source=operator_script('POST','/v1/prototype/coordinator-freeze',request)
             request_id=str(uuid.uuid5(uuid.UUID(intent['intentId']),'operator:'+dispatch['dispatchId']))

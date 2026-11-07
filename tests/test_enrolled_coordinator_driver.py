@@ -223,6 +223,19 @@ class ConcreteDriverTests(unittest.TestCase):
         with self.assertRaises(t.TransportHeld):self.controller.advance()
         self.assertEqual(self.docker.gates[self.driver._find('final')['Id']]['phase'],'frozen')
 
+    def test_stale_spool_before_resume_keeps_gate_frozen(self):
+        self.advance_until('final-ready')
+        self.probe.side_effect=t.TransportHeld('live_final_spool_identity_or_capacity_changed')
+        with self.assertRaises(t.TransportHeld):self.controller.advance()
+        self.assertEqual(self.docker.gates[self.driver._find('final')['Id']]['phase'],'frozen')
+
+    def test_spool_change_after_guard_before_dispatch_does_not_resume(self):
+        self.advance_until('final-ready')
+        self.probe.side_effect=[{'synthetic':'spool-observation'},
+                                t.TransportHeld('live_final_spool_identity_or_capacity_changed')]
+        with self.assertRaises(j.CutoverHeld):self.controller.advance()
+        self.assertEqual(self.docker.gates[self.driver._find('final')['Id']]['phase'],'frozen')
+
     def test_declared_final_rollback_preserves_source_provenance_and_retains_candidate(self):
         self.advance_until('final-ready');started=self.driver._prior(self.controller.journal.read(),'start-final')
         self.controller.begin_rollback();state=self.advance_until('rolled-back-rebaseline-required')
@@ -284,6 +297,7 @@ class ConcreteDriverTests(unittest.TestCase):
         with self.assertRaises(j.CutoverHeld):self.controller.begin_rollback()
         # Inspection uses authenticated exact existing SQL receipt, not POST.
         self.driver.tracked=lambda *_a,**_k:(_ for _ in ()).throw(AssertionError('must not repost'))
+        self.probe.side_effect=AssertionError('already-open recovery must not require an idle spool')
         state=self.controller.inspect();self.assertTrue(state['admissionOpened']);self.assertEqual(count,1)
         with self.assertRaises(j.CutoverHeld):self.controller.begin_rollback()
 

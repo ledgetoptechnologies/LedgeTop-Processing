@@ -143,19 +143,9 @@ def validate(raw, config_bytes, final_recipe, *, expected_uid=10001, max_age_sec
     for name in ('rootDevice', 'rootInode', 'mountDevice', 'mountInode', 'markerDevice', 'markerInode', 'runtimeUid',
                  'safetyFloorBytes', 'requiredFreeBytes', 'availableBytes', 'observedUnixSeconds'):
         require(type(record[name]) is int and record[name] >= 0, 'invalid_spool_observation')
-    current = int(time.time()) if now is None else now
-    try:
-        source = Path(bind_source)
-        source_info = source.lstat()
-        require(not source.is_symlink() and source.resolve(strict=True) == source and
-                stat.S_ISDIR(source_info.st_mode) and
-                (source_info.st_dev, source_info.st_ino) == (record['mountDevice'], record['mountInode']),
-                'reviewed_spool_host_bind_changed')
-    except OSError:
-        require(False, 'reviewed_spool_host_bind_changed')
+    verify_host_binding(record)
+    verify_age(record, max_age_seconds=max_age_seconds, now=now)
     require(type(expected_uid) is int and expected_uid >= 0 and record['runtimeUid'] == expected_uid and
-            type(max_age_seconds) is int and 0 < max_age_seconds <= 86400 and type(current) is int and
-            0 <= current - record['observedUnixSeconds'] <= max_age_seconds and
             record['rootDevice'] == record['markerDevice'] == record['mountDevice'] and
             record['rootInode'] > 0 and record['mountInode'] > 0 and
             record['markerInode'] > 0 and record['probeBytes'] == PROBE_BYTES and
@@ -163,6 +153,28 @@ def validate(raw, config_bytes, final_recipe, *, expected_uid=10001, max_age_sec
             record['availableBytes'] >= record['safetyFloorBytes'] + record['requiredFreeBytes'] + PROBE_BYTES,
             'stale_or_insufficient_spool_observation')
     return record
+
+
+def verify_age(record, *, max_age_seconds=86400, now=None):
+    """A once-valid observation must not authorize a much later resume."""
+    current = int(time.time()) if now is None else now
+    require(type(record) is dict and type(record.get('observedUnixSeconds')) is int and
+            type(max_age_seconds) is int and 0 < max_age_seconds <= 86400 and type(current) is int and
+            0 <= current - record['observedUnixSeconds'] <= max_age_seconds,
+            'stale_or_insufficient_spool_observation')
+
+
+def verify_host_binding(record):
+    """Recheck that the host path would bind the same filesystem object."""
+    try:
+        source = Path(record['bindSource'])
+        source_info = source.lstat()
+        require(not source.is_symlink() and source.resolve(strict=True) == source and
+                stat.S_ISDIR(source_info.st_mode) and
+                (source_info.st_dev, source_info.st_ino) == (record['mountDevice'], record['mountInode']),
+                'reviewed_spool_host_bind_changed')
+    except OSError:
+        require(False, 'reviewed_spool_host_bind_changed')
 
 
 def live_probe_source():
@@ -182,6 +194,7 @@ def verify_live(record, live):
     """Fail closed if the final container sees different retained spool objects."""
     fields = ('finalConfigSha256', 'runtimeUid', 'rootDevice', 'rootInode',
               'mountDevice', 'mountInode', 'markerDevice', 'markerInode')
+    verify_age(record)
     require(type(record) is dict and type(live) is dict and
             all(field in live and field in record and live[field] == record[field] for field in fields) and
             type(live.get('availableBytes')) is int and

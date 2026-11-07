@@ -94,6 +94,15 @@ class LocalSpoolQualificationTests(unittest.TestCase):
             bad = dict(live, **{field: live[field] + 1})
             with self.assertRaises(TransportHeld): q.verify_live(observation, bad)
         with self.assertRaises(TransportHeld): q.verify_live(observation, dict(live, availableBytes=0))
+        with patch.object(q.time, 'time', return_value=observation['observedUnixSeconds'] + 86401):
+            with self.assertRaises(TransportHeld): q.verify_live(observation, live)
+        self.mount.rename(self.mount.with_name(self.mount.name + '-moved'))
+        self.mount.mkdir(mode=0o700)
+        try:
+            with self.assertRaises(TransportHeld): q.verify_host_binding(observation)
+        finally:
+            self.mount.rmdir()
+            self.mount.with_name(self.mount.name + '-moved').rename(self.mount)
 
 
 if __name__ == '__main__': unittest.main()
