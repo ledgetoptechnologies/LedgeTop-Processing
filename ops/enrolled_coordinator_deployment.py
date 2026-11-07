@@ -299,6 +299,12 @@ def verify_private_artifacts(bundle, plan, *, config_reader, require_all_qualifi
             result[name]=None;continue
         raw=private_bytes(entry['path'],maximum=1024*1024)
         require(hashlib.sha256(raw).hexdigest()==entry['sha256'],'qualification_artifact_changed')
+        if name == 'nasQualificationSha256':
+            # Historical field name; the approved photo queue uses a local bind.
+            # This validates point-in-time evidence, not ongoing mount health or
+            # crash/power-loss durability. Runtime checks remain mandatory.
+            from .local_spool_qualification import validate
+            validate(raw, policy_inputs['finalConfig'])
         if name == 'workerQualificationSha256':
             from .worker_prestart_review import validate
             validate(raw, bundle, plan)
