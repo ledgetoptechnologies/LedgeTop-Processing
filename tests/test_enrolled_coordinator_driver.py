@@ -171,6 +171,11 @@ class ConcreteDriverTests(unittest.TestCase):
         self.driver.tracked=tracked
         self.environment=patch.object(d,'environment_file',return_value=self.docker.env);self.environment.start();self.addCleanup(self.environment.stop)
         self.lock=patch.object(installer,'LOCK_PATH',self.root/'coordinator-install.lock');self.lock.start();self.addCleanup(self.lock.stop)
+        # This suite models the driver state machine and uses synthetic /private
+        # descriptors rather than real worker-review artifacts.  The separate
+        # worker_prestart_review suite validates the actual qualification gate.
+        self.worker_review=patch('ops.worker_prestart_review.verify',autospec=True)
+        self.review=self.worker_review.start();self.addCleanup(self.worker_review.stop)
         self.controller=j.FirstEnrolledCutover(self.operation,plan,self.driver);self.controller.prepare()
 
     def advance_until(self,phase):
@@ -182,6 +187,7 @@ class ConcreteDriverTests(unittest.TestCase):
 
     def test_full_production_journal_driver_sequence_opens_only_after_projection_and_worker_proof(self):
         result=self.advance_until('complete')
+        self.review.assert_called_with(self.driver.bundle,self.driver.plan)
         self.assertTrue(result['admissionOpened']);self.assertEqual(len(result['events']),22)
         self.assertEqual(result['events'][19]['action'],'verify-final-readiness')
         self.assertEqual(result['events'][20]['action'],'resume-final-gate')
