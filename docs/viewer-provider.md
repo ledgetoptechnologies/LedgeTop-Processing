@@ -38,7 +38,8 @@ Use the cluster's single existing coordinator and state volume. Never start a
 second real dispatcher for staging. `compose.viewer.yaml` requires the existing
 coordinator name and state volume, an immutable image, the private runtime env
 file, and explicit host paths for the existing authority-lease and coordinator-
-TLS directories. It preserves the loopback operator port, Viewer port, and
+TLS directories. It preserves the existing bridge network and loopback operator
+port, Viewer port, and
 reference TLS listener port during a container replacement. It also restores
 the two existing path settings that are injected outside the runtime env file.
 The TLS directory is read-only; the state volume and authority lease mount
