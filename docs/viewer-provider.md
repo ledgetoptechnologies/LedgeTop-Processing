@@ -39,9 +39,10 @@ second real dispatcher for staging. `compose.viewer.yaml` requires the existing
 coordinator name and state volume, an immutable image, the private runtime env
 file, and explicit host paths for the existing authority-lease and coordinator-
 TLS directories. It preserves the loopback operator port, Viewer port, and
-reference TLS listener port during a container replacement. The TLS directory
-is read-only; the state volume and authority lease mount retain their existing
-writable modes. The native facade is opt-in through
+reference TLS listener port during a container replacement. It also restores
+the two existing path settings that are injected outside the runtime env file.
+The TLS directory is read-only; the state volume and authority lease mount
+retain their existing writable modes. The native facade is opt-in through
 `PROCESSING_VIEWER_ENABLED=1`.
 
 Viewer registration uses an exact origin with no path or query. Add the origin

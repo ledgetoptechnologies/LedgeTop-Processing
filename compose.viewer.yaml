@@ -17,6 +17,9 @@ services:
       - "${VIEWER_BIND_ADDRESS:?set the cluster LAN address}:${VIEWER_PORT:-3005}:8080"
       - "${REFERENCE_BIND_ADDRESS:?set the reference listener LAN address}:${REFERENCE_PORT:-18443}:8443"
     env_file: ${PROCESSING_RUNTIME_ENV:?set the private operator-owned runtime env path}
+    environment:
+      PROCESSING_AUTHORITY_LEASE_DIR: /run/ledgetop-authority-lease
+      PROCESSING_REFERENCE_CONFIG: /run/processing-reference/runtime.json
     volumes:
       - type: volume
         source: state
