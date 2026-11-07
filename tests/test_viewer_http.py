@@ -46,6 +46,12 @@ class Service:
         self.tasks, self.uploads, self.calls = {}, {}, []
         self.result = bytes(range(256)) * 600
         self.download_stream = None
+        self.capacity_blocked = False
+
+    def ensure_upload_capacity(self, request_bytes):
+        if self.capacity_blocked:
+            from processing.viewer_tasks import StorageBackpressure
+            raise StorageBackpressure()
 
     def capabilities(self):
         return {'version': '2.2.3', 'engine': 'ledgetop-processing', 'engineVersion': '0.1.0',
@@ -236,6 +242,18 @@ class ViewerHTTPTests(unittest.TestCase):
                 ('images', 'same.jpg', b'x'), ('images', 'SAME.JPG', b'x')]),
                 headers={'Content-Type': 'multipart/form-data; boundary=' + BOUNDARY})
         self.assertEqual(caught.exception.code, 400)
+
+    def test_storage_backpressure_is_retryable_before_request_body_read(self):
+        self.initialize()
+        self.service.capacity_blocked = True
+        body = multipart([('images', 'photo.jpg', b'owned test bytes')])
+        handler = self.memory('/task/new/upload/' + IDENTIFIER, body,
+            Content_Type='multipart/form-data; boundary=' + BOUNDARY)
+        self.assertEqual(handler.status, 503)
+        self.assertEqual(handler.response_headers['Retry-After'], '30')
+        self.assertEqual(json.loads(handler.wfile.getvalue()), {'error': 'storage_backpressure'})
+        self.assertEqual(handler.rfile.tell(), 0)
+        self.assertFalse(self.service.uploads)
 
     def memory(self, path, body=b'', **headers):
         handler = MemoryHandler(path + '?token=' + TOKEN, body,

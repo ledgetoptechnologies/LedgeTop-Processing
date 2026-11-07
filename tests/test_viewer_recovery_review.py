@@ -12,6 +12,7 @@ class ViewerRecoveryReviewTests(unittest.TestCase):
         self.addCleanup(fixture.tearDown)
         identifier = fixture.submit()
         next_identifier = fixture.submit()
+        third_identifier = fixture.submit()
         fixture.engines['cluster'].fail = 'commit'
         fixture.service.tick()
         self.assertEqual(fixture.task(identifier)['phase'], 'commit_pending')
@@ -26,7 +27,8 @@ class ViewerRecoveryReviewTests(unittest.TestCase):
         fixture.service.cancel(identifier)
         fixture.service.tick()
         self.assertEqual(fixture.task(identifier)['job']['status'], 'running')
-        self.assertIsNone(fixture.task(next_identifier)['node_id'])
+        self.assertEqual(fixture.task(next_identifier)['node_id'], 'main')
+        self.assertIsNone(fixture.task(third_identifier)['node_id'])
         actions = fixture.engines['cluster'].calls
         self.assertEqual(sum(call[0] == 'commit' for call in actions), 1)
         self.assertEqual(sum(call[0] == 'cancel' for call in actions), 1)
@@ -34,8 +36,8 @@ class ViewerRecoveryReviewTests(unittest.TestCase):
         fixture.finish(identifier, 50)
         fixture.service.tick()
         self.assertEqual(fixture.service.info(identifier)['status']['code'], 50)
-        self.assertEqual(fixture.task(next_identifier)['node_id'], 'cluster')
-        self.assertEqual(fixture.fleet.max_active, 1)
+        self.assertEqual(fixture.task(third_identifier)['node_id'], 'cluster')
+        self.assertEqual(fixture.fleet.max_active, 2)
 
 
 if __name__ == '__main__':

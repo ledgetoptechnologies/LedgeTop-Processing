@@ -103,9 +103,10 @@ def _contains_secret(value, token):
     return False
 
 
-def discover_node(role, origin, token=''):
+def discover_node(role, origin, token='', *, allow_dynamic=False):
     """Fetch a fresh snapshot; errors contain no URL, credential or server body."""
-    if role not in ROLES:
+    if (role not in ROLES and not (allow_dynamic and isinstance(role, str)
+            and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', role))):
         raise ValueError('unknown configured node role')
     unavailable = {'role': role, 'configured': bool(origin), 'available': False,
                    'options': [], 'optionsSha256': None, 'capabilitiesSha256': None,

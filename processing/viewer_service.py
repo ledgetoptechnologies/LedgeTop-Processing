@@ -1,8 +1,9 @@
-"""Native Viewer facade service and cooperative, single-slot engine dispatcher.
+"""Native Viewer facade service and ordered, per-node engine dispatcher.
 
-Only fixed configured engines are contacted. Mutation intent is durable before
-HTTP; uncertain mutations hold the shared slot instead of replaying a job.
-Completed engine tasks and downloaded archives remain until operator cleanup.
+Only configured engine endpoints are contacted. Mutation intent is durable
+before HTTP; uncertain mutations hold that physical node's slot instead of
+replaying a job. Completed engine tasks and downloaded archives remain until
+operator cleanup.
 """
 
 import http.client
@@ -17,10 +18,10 @@ from urllib.request import Request, build_opener, ProxyHandler
 import uuid
 import zipfile
 
+from .config import ProcessingNode
 from .maintenance import Conflict
 from .odx_smoke_worker import Client, SmokeError
-from .options import catalog, _NoRedirect
-from .policy import plan
+from .options import discover_node, _NoRedirect
 from .prototype import VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
@@ -109,9 +110,17 @@ class ViewerService:
     def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node):
         self.queue, self.config = queue, config
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
-                                       config.viewer_max_input_bytes)
-        self.engines = engines or {'cluster': NativeEngine(config.local_node_url, config.local_node_token),
-                                  'main': NativeEngine(config.main_node_url, config.main_node_token)}
+                                       config.viewer_max_input_bytes,
+                                       getattr(config, 'viewer_min_free_bytes', 0))
+        self.nodes = tuple(getattr(config, 'processing_nodes', ()) or (
+            ProcessingNode('cluster', config.local_node_url, config.local_node_token,
+                           config.local_max_photos, config.local_max_input_bytes),
+            ProcessingNode('main', config.main_node_url, config.main_node_token)))
+        self.node_order = tuple(node.node_id for node in self.nodes)
+        if set(self.node_order) != set(queue.node_ids):
+            raise ValueError('ordered processing nodes must exactly match queue nodes')
+        self.engines = engines or {node.node_id: NativeEngine(node.origin, node.token)
+                                   for node in self.nodes}
         self.probe = probe
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -119,9 +128,33 @@ class ViewerService:
         self._backoff = {}
         self._downloads = {}
 
+    @staticmethod
+    def _probe_role(node_id):
+        # Keep the established fixed endpoint roles compatible while the
+        # scheduler and queue use stable configured node IDs.
+        return {'cluster': 'local', 'main': 'main'}.get(node_id, node_id)
+
     def _catalog(self):
-        return catalog([('local', self.config.local_node_url, self.config.local_node_token),
-                        ('main', self.config.main_node_url, self.config.main_node_token)])
+        nodes = []
+        for node in self.nodes:
+            health = self.probe(self._probe_role(node.node_id), node.origin, node.token)
+            options = discover_node(node.node_id, node.origin, node.token, allow_dynamic=True)
+            ready = health.get('ready') is True and options.get('available') is True
+            nodes.append({'nodeId': node.node_id, 'ready': ready, 'health': health,
+                          'options': options.get('options', []) if ready else []})
+        available = [node for node in nodes if node['ready']]
+        by_node = {node['nodeId']: {item['name']: item for item in node['options']}
+                   for node in available}
+        common = set.intersection(*(set(value) for value in by_node.values())) if by_node else set()
+        safe = [by_node[available[0]['nodeId']][name] for name in sorted(common)
+                if len({json.dumps(by_node[node['nodeId']][name], sort_keys=True,
+                                   separators=(',', ':'), allow_nan=False)
+                        for node in available}) == 1]
+        # An unavailable node contributes no stale options. The remaining live
+        # nodes can still accept and queue work; dispatch rechecks the selected
+        # node's own fresh definitions before claiming a task.
+        return {'ready': bool(available), 'reason': None if available else 'node_unavailable',
+                'nodes': nodes, 'commonOptions': safe}
 
     def options(self):
         current = self._catalog()
@@ -134,11 +167,11 @@ class ViewerService:
         self.options()
         jobs = self.queue.list()
         return {'version': '2.4.0', 'engine': 'ledgetop-processing', 'engineVersion': '0.2.0',
-                'maxImages': None, 'maxParallelTasks': 1, 'coordinator': True,
+                'maxImages': None, 'maxParallelTasks': len(self.nodes), 'coordinator': True,
                 'taskQueueCount': sum(j['status'] in ('queued', 'running', 'held') for j in jobs)}
 
-    def _check_options(self, options):
-        allowed = {item['name'] for item in self.options()}
+    def _check_options(self, options, definitions=None):
+        allowed = {item['name'] for item in (definitions if definitions is not None else self.options())}
         if (not isinstance(options, list) or any(not isinstance(item, dict)
                 or item.get('name') not in allowed for item in options)):
             raise ValueError('option unavailable on configured engines')
@@ -149,6 +182,12 @@ class ViewerService:
 
     def upload(self, identifier, filename, stream, length):
         return self.store.upload(identifier, filename, stream, length)
+
+    def ensure_upload_capacity(self, request_bytes):
+        # Reserve the incoming multipart temporary file before reading it. The
+        # per-file durable write performs a second check after that temporary
+        # copy exists, before creating its own temporary file.
+        return self.store.ensure_capacity(request_bytes, copies=1)
 
     def commit(self, identifier):
         return self.store.commit(identifier)
@@ -282,7 +321,7 @@ class ViewerService:
                 self._backoff[identifier] = (now + 2, 1)
                 return
             fields = {'progress': progress}
-            if code == 20 and task['phase'] == 'commit_pending':
+            if code == 20 and task['phase'] in ('commit_pending', 'awaiting_engine_start'):
                 fields.update(phase='processing', error=None)
             self.store.update(identifier, **fields)
             return
@@ -293,71 +332,166 @@ class ViewerService:
         self.store.update(identifier, stage='cancelled' if code == 50 else status,
                           phase='complete', progress=100 if code == 40 else task['progress'])
 
+    def _node_snapshots(self, current):
+        rows = current.get('nodes')
+        if isinstance(rows, list):
+            return {row.get('nodeId'): row for row in rows if isinstance(row, dict)}
+        # Test doubles and older callers may provide only a fleet-wide option
+        # catalog. Probe each configured node independently; no shared stale
+        # readiness bit may hide a healthy sibling.
+        result = {}
+        for node in self.nodes:
+            health = self.probe(self._probe_role(node.node_id), node.origin, node.token)
+            ready = current.get('ready') is True and health.get('ready') is True
+            result[node.node_id] = {'nodeId': node.node_id, 'ready': ready,
+                'health': health, 'options': current.get('commonOptions', []) if ready else []}
+        return result
+
+    def _can_run_on(self, task, node, snapshot, active_nodes):
+        if (snapshot is None or snapshot.get('ready') is not True
+                or node.node_id in active_nodes or node.node_id not in self.engines):
+            return False
+        try:
+            state = self.queue.get_node(node.node_id)['state']
+        except (KeyError, ValueError):
+            return False
+        if state not in ('active', 'scheduled'):
+            return False
+        health = snapshot.get('health') or {}
+        queued_count = health.get('taskQueueCount')
+        if type(queued_count) is not int or queued_count != 0:
+            return False
+        limits = [value for value in (node.max_photos, health.get('maxImages'))
+                  if type(value) is int and value > 0]
+        if limits and task['images_count'] > min(limits):
+            return False
+        if (type(node.max_input_bytes) is int and task['input_bytes'] > node.max_input_bytes):
+            return False
+        allowed = {item.get('name') for item in snapshot.get('options', []) if isinstance(item, dict)}
+        requested = {item.get('name') for item in task['options'] if isinstance(item, dict)}
+        return requested <= allowed
+
+    def _start_claimed(self, task, job, node_id):
+        try:
+            self.store.update(task['uuid'], stage='running', phase='claimed', node_id=node_id,
+                              claim_token=job['claimToken'], engine_uuid=str(uuid.uuid4()), error=None)
+            task = self.store.task(task['uuid'])
+            engine = self.engines[node_id]
+            self.store.update(task['uuid'], phase='init_pending')
+            engine.initialize(task)
+            self.store.update(task['uuid'], phase='initialized')
+            for item in task['files']:
+                self.store.update(task['uuid'], phase='upload_pending')
+                engine.upload(task['engine_uuid'], item)
+                self.store.update(task['uuid'], phase='uploaded')
+            self.store.update(task['uuid'], phase='commit_pending')
+            engine.action('commit', task['engine_uuid'])
+            # A successful commit response only means NodeODM accepted the
+            # task. Keep the public state queued until /info confirms that the
+            # engine has actually started processing it.
+            self.store.update(task['uuid'], phase='awaiting_engine_start')
+            self._poll(self.store.task(task['uuid']))
+        except Exception:
+            current = self.store.task(task['uuid'])
+            if current['phase'] == 'commit_pending':
+                # Exact assigned engine UUID lets us reconcile a lost commit
+                # ACK by reads. Never send commit again under uncertainty.
+                self.store.update(task['uuid'], error='commit_ack_uncertain')
+            else:
+                self._hold(current, 'engine_submission_uncertain')
+
     def tick(self):
         """One bounded scheduler turn; public for deterministic synthetic tests."""
         with self._lock:
-            tasks = self.store.list_tasks()
-            for task in tasks:
+            for task in self.store.list_tasks():
                 job = task['job']
                 if not job or job['status'] not in ('running', 'held'):
                     continue
                 if job['status'] == 'held' and job['heldReason'] != 'coordinator_restart':
                     continue
-                if (task['phase'] in ('processing', 'commit_pending', 'cancel_pending')
+                if (task['phase'] in ('processing', 'commit_pending', 'awaiting_engine_start', 'cancel_pending')
                         and task['engine_uuid'] and task['node_id'] and task['claim_token']):
                     self._poll(task)
                 else:
                     self._hold(task, 'submission_interrupted')
-            jobs = self.queue.list()
-            if any(j['status'] in ('running', 'held') for j in jobs):
+            catalogue = self._catalog()
+            snapshots = self._node_snapshots(catalogue)
+            if not catalogue.get('ready'):
                 return
-            queued = sorted((j for j in jobs if j['status'] == 'queued'),
-                            key=lambda j: (j['environment'] != 'production', jobs.index(j)))
-            if not queued or queued[0]['profile'] != VIEWER_PROFILE:
-                return
-            task = next((t for t in tasks if t['job_id'] == queued[0]['id']), None)
-            if task is None:
-                raise Conflict('execution metadata unavailable')
-            nodes = {}
-            for node, role, origin, token in (
-                    ('cluster', 'local', self.config.local_node_url, self.config.local_node_token),
-                    ('main', 'main', self.config.main_node_url, self.config.main_node_token)):
-                nodes[node] = {**self.probe(role, origin, token),
-                               'state': self.queue.get_node(node)['state']}
-            decision = plan(task['images_count'], task['input_bytes'], nodes['cluster'], nodes['main'],
-                            self.config.local_max_photos, self.config.local_max_input_bytes)
-            if decision['decision'] == 'wait':
-                self.store.update(task['uuid'], phase='waiting_node', error=decision['reason'])
-                return
-            node_id = 'cluster' if decision['decision'] == 'local' else 'main'
-            self._check_options(task['options'])
-            job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': node_id,
-                                   'profiles': [VIEWER_PROFILE], 'expectedJobId': task['job_id']})
-            if not job:
-                return
-            try:
-                self.store.update(task['uuid'], stage='running', phase='claimed', node_id=node_id,
-                                  claim_token=job['claimToken'], engine_uuid=str(uuid.uuid4()), error=None)
-                task = self.store.task(task['uuid'])
-                engine = self.engines[node_id]
-                self.store.update(task['uuid'], phase='init_pending')
-                engine.initialize(task)
-                self.store.update(task['uuid'], phase='initialized')
-                for item in task['files']:
-                    self.store.update(task['uuid'], phase='upload_pending')
-                    engine.upload(task['engine_uuid'], item)
-                    self.store.update(task['uuid'], phase='uploaded')
-                self.store.update(task['uuid'], phase='commit_pending')
-                engine.action('commit', task['engine_uuid'])
-                self.store.update(task['uuid'], phase='processing')
-            except Exception:
-                current = self.store.task(task['uuid'])
-                if current['phase'] == 'commit_pending':
-                    # Exact assigned engine UUID lets us reconcile a lost commit
-                    # ACK by reads. Never send commit again under uncertainty.
-                    self.store.update(task['uuid'], error='commit_ack_uncertain')
-                else:
-                    self._hold(current, 'engine_submission_uncertain')
+            active_nodes = set()
+            for job in self.queue.list():
+                if job['status'] in ('running', 'held'):
+                    if job['nodeId'] not in self.node_order:
+                        # An active job without a configured physical owner
+                        # fences all dispatch until an operator reconciles it.
+                        return
+                    active_nodes.add(job['nodeId'])
+
+            for node in self.nodes:
+                queue_snapshot = self.queue.dispatch_snapshot()
+                jobs = queue_snapshot['jobs']
+                if node.node_id in active_nodes:
+                    continue
+                queued = [job for job in jobs if job['status'] == 'queued']
+                if not queued:
+                    continue
+                # Production always precedes waiting staging work. Within that
+                # priority, skip jobs this node cannot run so a 5k-photo job
+                # cannot pin the small node's queue ahead of an eligible job.
+                production = [job for job in queued if job['environment'] == 'production']
+                priority_jobs = production or [job for job in queued if job['environment'] == 'staging']
+                # Only photo tasks are submitted by this adapter. Still account
+                # for every queue profile above so a waiting production job
+                # cannot be bypassed by a staging photo on another node.
+                priority_jobs = [job for job in priority_jobs if job['profile'] == VIEWER_PROFILE]
+                task_by_job = {task['job']['id']: task for task in self.store.list_tasks()
+                               if task.get('job') is not None}
+                ready_option_names = {
+                    item.get('name')
+                    for snapshot in snapshots.values() if snapshot.get('ready') is True
+                    for item in snapshot.get('options', []) if isinstance(item, dict)
+                }
+                eligible = []
+                node_options = (snapshots.get(node.node_id) or {}).get('options', [])
+                for candidate in priority_jobs:
+                    candidate_task = task_by_job.get(candidate['id'])
+                    if candidate_task is None:
+                        continue
+                    requested = {item.get('name') for item in candidate_task['options']
+                                 if isinstance(item, dict)}
+                    if not requested <= ready_option_names:
+                        # The Viewer admitted this option when the task was
+                        # initialized, but no currently ready engine exposes
+                        # it anymore. Keep the durable job queued and surface
+                        # the schema conflict instead of silently waiting.
+                        self._check_options(candidate_task['options'], [
+                            {'name': name} for name in ready_option_names])
+                    if self._can_run_on(candidate_task, node, snapshots.get(node.node_id), active_nodes):
+                        eligible.append((candidate, candidate_task))
+                if not eligible:
+                    for candidate in priority_jobs:
+                        candidate_task = task_by_job.get(candidate['id'])
+                        if candidate_task is not None and candidate_task['phase'] not in ('waiting_node', 'processing'):
+                            self.store.update(candidate_task['uuid'], phase='waiting_node', error='no_eligible_node')
+                    continue
+
+                candidate, task = eligible[0]
+                eligible_nodes = []
+                for other in self.nodes:
+                    if self._can_run_on(task, other, snapshots.get(other.node_id), active_nodes):
+                        eligible_nodes.append(other.node_id)
+                eligible_job_ids = [job['id'] for job, _ in eligible]
+                self._check_options(task['options'], node_options)
+                job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': node.node_id,
+                    'profiles': [VIEWER_PROFILE], 'expectedJobId': candidate['id']},
+                    eligible_job_ids=eligible_job_ids, eligible_node_ids=eligible_nodes,
+                    expected_queue_sequence=queue_snapshot['sequence'])
+                if job is None:
+                    # A concurrent submission or claim invalidated this
+                    # snapshot; do not try a lower-priority selection this turn.
+                    return
+                active_nodes.add(node.node_id)
+                self._start_claimed(task, job, node.node_id)
 
     def start(self):
         if self._thread:

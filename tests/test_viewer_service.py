@@ -9,7 +9,8 @@ import io
 import json
 from pathlib import Path
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -65,6 +66,7 @@ class FakeEngine:
         self.tasks = {}
         self.calls = []
         self.fail = None
+        self.commit_status = 20
         self.read_unavailable = False
         self.output_unavailable = False
         self.interrupt_download_once = False
@@ -96,9 +98,10 @@ class FakeEngine:
         if action == 'commit':
             if self.name + ':' + identifier in self.fleet.active:
                 raise AssertionError('duplicate engine commit')
-            task['status']['code'] = 20
-            self.fleet.active.add(self.name + ':' + identifier)
-            self.fleet.max_active = max(self.fleet.max_active, len(self.fleet.active))
+            task['status']['code'] = self.commit_status
+            if self.commit_status == 20:
+                self.fleet.active.add(self.name + ':' + identifier)
+                self.fleet.max_active = max(self.fleet.max_active, len(self.fleet.active))
             self.fleet.commits.append((self.name, identifier))
             if self.fail == 'commit':
                 raise SmokeError('synthetic commit response lost after start')
@@ -162,6 +165,11 @@ class ViewerServiceTests(unittest.TestCase):
         self.service._catalog = lambda: {'ready': self.catalog_ready,
                                          'commonOptions': [dict(item) for item in self.option_catalog]}
 
+    def set_cluster_max_photos(self, value):
+        self.config.local_max_photos = value
+        self.service.nodes = tuple(replace(node, max_photos=value) if node.node_id == 'cluster' else node
+                                   for node in self.service.nodes)
+
     def tearDown(self):
         self.service.close()
         self.queue.close()
@@ -212,28 +220,44 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.service.info(identifier)['status']['code'], 20)
         self.assertEqual(self.fleet.max_active, 1)
 
+    def test_commit_ack_keeps_viewer_queued_until_engine_confirms_start(self):
+        identifier = self.submit()
+        engine = self.engines['cluster']
+        engine.commit_status = 10
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['phase'], 'awaiting_engine_start')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'awaiting_engine_start')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        engine.tasks[task['engine_uuid']]['status']['code'] = 20
+        self.fleet.active.add('cluster:' + task['engine_uuid'])
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'processing')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+
     def test_over_cluster_photo_ceiling_uses_main_and_never_cluster(self):
         # A lowered synthetic threshold exercises the same boundary without
         # fabricating 1,001 files on disk; the policy's 1,000 boundary is separate.
-        self.config.local_max_photos = 2
+        self.set_cluster_max_photos(2)
         identifier = self.submit(count=3)
         self.service.tick()
         self.assertEqual(self.task(identifier)['node_id'], 'main')
         self.assertEqual(self.engines['cluster'].calls, [])
         self.assertEqual(self.fleet.max_active, 1)
 
-    def test_priority_fifo_and_global_execution_slot_across_nodes(self):
+    def test_priority_fifo_and_one_heavy_job_per_physical_node(self):
         staging = self.submit(environment='staging')
         production_first = self.submit(count=2)
         production_second = self.submit()
-        self.config.local_max_photos = 1
+        self.set_cluster_max_photos(1)
         self.service.tick()
         self.assertEqual(self.task(production_first)['node_id'], 'main')
-        self.assertIsNone(self.task(production_second)['node_id'])
-        self.assertIsNone(self.task(staging)['node_id'])
-        self.finish(production_first)
-        self.service.tick()
         self.assertEqual(self.task(production_second)['node_id'], 'cluster')
+        self.assertIsNone(self.task(staging)['node_id'])
+        self.assertEqual(self.fleet.max_active, 2)
+        self.finish(production_first)
         self.finish(production_second)
         self.service.tick()
         self.assertEqual(self.task(staging)['node_id'], 'cluster')
@@ -241,36 +265,37 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick()
         self.assertTrue(all(self.service.info(i)['status']['code'] == 40
                             for i in (production_first, production_second, staging)))
-        self.assertEqual(self.fleet.max_active, 1)
+        self.assertEqual(self.fleet.max_active, 2)
         self.assertEqual(len(self.fleet.commits), 3)
 
-    def test_tree_running_and_held_block_all_photogrammetry(self):
+    def test_tree_running_on_main_does_not_block_cluster_photo_slot(self):
         tree, _ = self.queue.submit({'requestId': 'tree', 'environment': 'production', 'profile': PROFILE})
         claim = self.queue.claim({'workerId': 'tree-worker', 'nodeId': 'main'})
         identifier = self.submit(environment='staging')
         self.service.tick()
-        self.assertIsNone(self.task(identifier)['node_id'])
-        self.queue.operator(tree['id'], 'hold', {'note': 'synthetic active TreeDar'})
-        self.service.tick()
-        self.assertIsNone(self.task(identifier)['node_id'])
-        self.assertFalse(self.fleet.commits)
-        self.queue.operator(tree['id'], 'resolve', {'note': 'confirmed synthetic stopped', 'workerStopped': True})
-        self.service.tick()
         self.assertEqual(self.task(identifier)['node_id'], 'cluster')
+        self.assertEqual(self.queue.get(tree['id'])['nodeId'], 'main')
         self.assertIsNotNone(claim)
 
-    def test_busy_small_node_waits_without_consuming_main(self):
+    def test_waiting_production_tree_keeps_staging_photo_queued(self):
+        self.queue.submit({'requestId': 'production-tree', 'environment': 'production',
+                           'profile': PROFILE})
+        identifier = self.submit(environment='staging')
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+        self.assertIsNone(self.task(identifier)['node_id'])
+        self.assertFalse(self.fleet.commits)
+
+    def test_busy_small_node_falls_back_to_available_main_for_small_job(self):
         identifier = self.submit()
         self.busy['cluster'] = 1
         self.service.tick()
-        self.assertIsNone(self.task(identifier)['node_id'])
-        self.assertFalse(self.engines['main'].calls)
-        self.busy['cluster'] = 0
-        self.service.tick()
-        self.assertEqual(self.task(identifier)['node_id'], 'cluster')
+        self.assertEqual(self.task(identifier)['node_id'], 'main')
+        self.assertTrue(self.engines['main'].calls)
+        self.assertFalse(self.engines['cluster'].calls)
 
     def test_large_job_waits_for_main_without_overflow_to_small_node(self):
-        self.config.local_max_photos = 1
+        self.set_cluster_max_photos(1)
         identifier = self.submit(count=2)
         self.unavailable.add('main')
         self.service.tick()
@@ -278,12 +303,14 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertFalse(self.fleet.commits)
 
     def test_maintenance_drain_keeps_priority_head_queued(self):
-        self.config.local_max_photos = 1
+        self.set_cluster_max_photos(1)
         production = self.submit(count=2)
         staging = self.submit(environment='staging')
-        now = datetime.now(timezone.utc).isoformat()
-        self.queue.schedule_node('main', {'expectedRevision': 0, 'drainAt': now,
-            'notBefore': now, 'afterJobId': None, 'targetImage': 'sha256:' + 'a' * 64})
+        now = datetime.now(timezone.utc)
+        drain = (now - timedelta(seconds=2)).isoformat()
+        not_before = (now + timedelta(hours=1)).isoformat()
+        self.queue.schedule_node('main', {'expectedRevision': 0, 'drainAt': drain,
+            'notBefore': not_before, 'afterJobId': None, 'targetImage': 'sha256:' + 'a' * 64})
         self.service.tick()
         self.assertEqual(self.task(production)['job']['status'], 'queued')
         self.assertEqual(self.task(staging)['job']['status'], 'queued')
@@ -294,15 +321,15 @@ class ViewerServiceTests(unittest.TestCase):
         production = self.initialize()
         self.upload(production, 'a.jpg')
         self.upload(production, 'b.jpg')
-        self.config.local_max_photos = 1
+        self.set_cluster_max_photos(1)
         original = self.queue.claim
         inserted = []
 
-        def insert_then_claim(payload):
+        def insert_then_claim(payload, **kwargs):
             if not inserted:
                 inserted.append(True)
                 self.service.commit(production)
-            return original(payload)
+            return original(payload, **kwargs)
 
         with patch.object(self.queue, 'claim', side_effect=insert_then_claim):
             self.service.tick()
@@ -326,24 +353,48 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
         self.assertEqual(len(self.fleet.commits), 1)
 
+    def test_restart_before_engine_start_keeps_viewer_queued_until_code20(self):
+        identifier = self.submit()
+        engine = self.engines['cluster']
+        engine.commit_status = 10
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['phase'], 'awaiting_engine_start')
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.assertEqual(self.task(identifier)['job']['status'], 'held')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        engine.tasks[task['engine_uuid']]['status']['code'] = 20
+        self.fleet.active.add('cluster:' + task['engine_uuid'])
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'processing')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        self.assertEqual(sum(call[0] == 'initialize' for call in engine.calls), 1)
+        self.assertEqual(len(self.fleet.commits), 1)
+
     def test_engine_read_outage_backs_off_and_retains_slot_then_recovers(self):
         first = self.submit()
         second = self.submit()
         self.service.tick()
+        self.assertEqual(self.task(first)['node_id'], 'cluster')
+        self.assertEqual(self.task(second)['node_id'], 'main')
         self.engines['cluster'].read_unavailable = True
         self.service.tick()
         initial = self.service._backoff[first]
         self.service.tick()
         self.assertEqual(self.service._backoff[first], initial)
         self.assertEqual(self.task(first)['job']['status'], 'running')
-        self.assertIsNone(self.task(second)['node_id'])
+        self.assertEqual(self.task(second)['job']['status'], 'running')
         self.finish(first)
         self.engines['cluster'].read_unavailable = False
         self.service._backoff[first] = (0, initial[1])
         self.service.tick()
         self.assertEqual(self.service.info(first)['status']['code'], 40)
-        self.assertEqual(self.task(second)['node_id'], 'cluster')
-        self.assertEqual(self.fleet.max_active, 1)
+        self.assertEqual(self.task(second)['node_id'], 'main')
+        self.assertEqual(self.fleet.max_active, 2)
 
     def test_repeated_public_commit_never_initializes_or_executes_twice(self):
         identifier = self.submit()
@@ -387,19 +438,21 @@ class ViewerServiceTests(unittest.TestCase):
     def test_running_cancel_does_not_release_slot_until_engine_reports_50(self):
         identifier = self.submit()
         next_id = self.submit()
+        third_id = self.submit()
         self.service.tick()
         self.service.cancel(identifier)
         self.service.cancel(identifier)
         self.assertEqual(self.task(identifier)['job']['status'], 'running')
-        self.assertIsNone(self.task(next_id)['node_id'])
+        self.assertEqual(self.task(next_id)['node_id'], 'main')
+        self.assertIsNone(self.task(third_id)['node_id'])
         self.service.tick()
-        self.assertIsNone(self.task(next_id)['node_id'])
+        self.assertIsNone(self.task(third_id)['node_id'])
         self.assertEqual(sum(c[0] == 'cancel' for c in self.engines['cluster'].calls), 1)
         self.finish(identifier, 50)
         self.service.tick()
         self.assertEqual(self.service.info(identifier)['status']['code'], 50)
-        self.assertEqual(self.task(next_id)['node_id'], 'cluster')
-        self.assertEqual(self.fleet.max_active, 1)
+        self.assertEqual(self.task(third_id)['node_id'], 'cluster')
+        self.assertEqual(self.fleet.max_active, 2)
 
     def test_lost_commit_ack_queued_upstream_retains_slot_until_later_completion(self):
         identifier = self.submit()

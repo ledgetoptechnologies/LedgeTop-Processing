@@ -3,11 +3,12 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import uuid
 
 from processing.maintenance import Conflict
 from processing.prototype import PROFILE, Queue
-from processing.viewer_tasks import TaskStore, VIEWER_PROFILE
+from processing.viewer_tasks import StorageBackpressure, TaskStore, VIEWER_PROFILE
 
 
 class ViewerTaskStoreTests(unittest.TestCase):
@@ -84,6 +85,23 @@ class ViewerTaskStoreTests(unittest.TestCase):
             self.photo(name='other.jpg', data=b'1')
         self.assertEqual(self.store.task(self.identifier)['input_bytes'], 8)
 
+    def test_low_disk_space_rejects_before_reading_or_spooling_upload(self):
+        self.store = TaskStore(self.queue, self.root / 'inputs', max_input_bytes=1024,
+                               min_free_bytes=4096)
+        self.initialize()
+        class Unreadable:
+            def read(self, *_):
+                raise AssertionError('backpressured upload body must not be read')
+        length = 100
+        required = length + self.store.min_free_bytes + 64 * 1024 ** 2
+        with patch('processing.viewer_tasks.shutil.disk_usage',
+                   return_value=type('Usage', (), {'free': required - 1})()):
+            with self.assertRaises(StorageBackpressure):
+                self.store.upload(self.identifier, 'photo.jpg', Unreadable(), length)
+        task = self.store.task(self.identifier)
+        self.assertEqual(task['files'], [])
+        self.assertFalse(list(Path(task['directory']).glob('.incoming-*')))
+
     def test_unsafe_names_identifiers_and_settings_rejected(self):
         for identifier in ('../task', self.identifier.upper(), 'not-a-uuid'):
             with self.subTest(identifier=identifier), self.assertRaises(ValueError):
@@ -118,7 +136,7 @@ class ViewerTaskStoreTests(unittest.TestCase):
             self.photo()
         claimed = self.claim()
         self.assertEqual(claimed['id'], task['job_id'])
-        self.assertEqual(self.store.info(self.identifier)['status']['code'], 20)
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 10)
 
     def test_preexisting_enqueue_is_reconciled_without_duplicate_job(self):
         self.initialize()
@@ -128,6 +146,17 @@ class ViewerTaskStoreTests(unittest.TestCase):
         self.store.commit(self.identifier)
         self.assertEqual(self.store.task(self.identifier)['job_id'], old['id'])
         self.assertEqual(len(self.queue.list()), 1)
+
+    def test_public_status_stays_queued_until_engine_start_is_confirmed(self):
+        task = self.ready()
+        claimed = self.claim()
+        self.assertEqual(claimed['id'], task['job_id'])
+        self.store.update(self.identifier, stage='running', phase='upload_pending',
+                          node_id='cluster', claim_token=claimed['claimToken'],
+                          engine_uuid=str(uuid.uuid4()))
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 10)
+        self.store.update(self.identifier, phase='processing')
+        self.assertEqual(self.store.info(self.identifier)['status']['code'], 20)
 
     def test_disabled_profile_and_identity_collision_fail_closed(self):
         self.initialize()
@@ -142,16 +171,24 @@ class ViewerTaskStoreTests(unittest.TestCase):
             self.store.commit(self.identifier)
         self.assertIsNone(self.store.task(self.identifier)['job_id'])
 
-    def test_tree_claim_and_held_work_block_viewer_claim_globally(self):
+    def test_tree_work_on_main_does_not_block_cluster_and_held_slot_stays_local(self):
         tree, _ = self.queue.submit({'requestId': 'tree-first', 'environment': 'production', 'profile': PROFILE})
         self.ready(environment='staging')
-        claimed = self.queue.claim({'workerId': 'trees', 'nodeId': 'main'})
-        self.assertEqual(claimed['id'], tree['id'])
-        self.assertIsNone(self.claim())
+        tree_claim = self.queue.claim({'workerId': 'trees', 'nodeId': 'main'})
+        self.assertEqual(tree_claim['id'], tree['id'])
+        first_photo = self.claim()
+        self.assertEqual(first_photo['nodeId'], 'cluster')
         self.queue.operator(tree['id'], 'hold', {'note': 'synthetic uncertain engine'})
         self.assertIsNone(self.claim())
+        second_identifier = str(uuid.uuid4())
+        self.ready(second_identifier, 'staging')
+        self.queue.complete(first_photo['id'], {'claimToken': first_photo['claimToken'],
+            'status': 'succeeded', 'result': {}})
+        second_photo = self.claim()
+        self.assertEqual(second_photo['nodeId'], 'cluster')
+        self.queue.complete(second_photo['id'], {'claimToken': second_photo['claimToken'],
+            'status': 'succeeded', 'result': {}})
         self.queue.operator(tree['id'], 'resolve', {'note': 'verified stopped', 'workerStopped': True})
-        self.assertIsNotNone(self.claim())
 
     def test_priority_with_shared_jobs_and_native_status_after_restart(self):
         staging = str(uuid.uuid4())

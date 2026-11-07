@@ -6,6 +6,17 @@ import re
 from urllib.parse import urlsplit
 
 
+@dataclass(frozen=True, repr=False)
+class ProcessingNode:
+    """One ordered physical engine endpoint used by the Viewer scheduler."""
+
+    node_id: str
+    origin: str
+    token: str = field(default='', repr=False)
+    max_photos: int | None = None
+    max_input_bytes: int | None = None
+
+
 @dataclass(frozen=True)
 class Config:
     api_token: str
@@ -28,7 +39,9 @@ class Config:
     viewer_staging_token: str = field(default='', repr=False)
     viewer_max_input_bytes: int = 20 * 1024 ** 3
     viewer_max_archive_bytes: int = 100 * 1024 ** 3
+    viewer_min_free_bytes: int = 20 * 1024 ** 3
     reference_config_path: str = field(default='', repr=False)
+    processing_nodes: tuple[ProcessingNode, ...] = field(default=(), repr=False)
 
 
 def _node_origin(value: str) -> str:
@@ -52,6 +65,10 @@ def _positive_int(value: str, name: str, maximum: int) -> int:
     return number
 
 
+def _optional_positive_int(value: str, name: str, maximum: int) -> int | None:
+    return None if value == '' else _positive_int(value, name, maximum)
+
+
 def from_environment() -> Config:
     token = os.environ.get("PROCESSING_API_TOKEN", "")
     if len(token) < 32 or any(ord(char) < 33 or ord(char) > 126 for char in token):
@@ -64,7 +81,11 @@ def from_environment() -> Config:
     if observer and (len(observer) < 32 or observer in (token, operator)
                      or any(ord(char) < 33 or ord(char) > 126 for char in observer)):
         raise ValueError("prototype observer token must be a separate printable credential of at least 32 characters")
-    node_ids = tuple(os.environ.get("PROCESSING_PROTOTYPE_NODE_IDS", "cluster").split(","))
+    # This list is also the Viewer scheduler's preference order. Existing
+    # deployments keep using PROCESSING_PROTOTYPE_NODE_IDS; the clearer alias
+    # lets a future fleet add/remove nodes without changing dispatch code.
+    node_ids = tuple(os.environ.get("PROCESSING_NODE_ORDER",
+                                   os.environ.get("PROCESSING_PROTOTYPE_NODE_IDS", "cluster")).split(","))
     if (not 1 <= len(node_ids) <= 8 or 'cluster' not in node_ids or len(set(node_ids)) != len(node_ids)
             or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", node) for node in node_ids)):
         raise ValueError("PROCESSING_PROTOTYPE_NODE_IDS must list 1 to 8 unique ASCII node IDs")
@@ -83,9 +104,8 @@ def from_environment() -> Config:
     viewer_token = os.environ.get('PROCESSING_VIEWER_TOKEN', '')
     viewer_staging = os.environ.get('PROCESSING_VIEWER_STAGING_TOKEN', '')
     if viewer == '1':
-        if (not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR') or 'main' not in node_ids
-                or not os.environ.get('LOCAL_NODE_URL') or not os.environ.get('MAIN_NODE_URL')):
-            raise ValueError('Viewer requires persistent state and both configured nodes')
+        if not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR') or not os.environ.get('LOCAL_NODE_URL'):
+            raise ValueError('Viewer requires persistent state and the ordered cluster node')
         credentials = (token, operator, observer)
         for value in (viewer_token, viewer_staging):
             if value and (len(value) < 32 or value in credentials
@@ -93,6 +113,40 @@ def from_environment() -> Config:
                 raise ValueError('Viewer credentials must be separate printable secrets')
         if not viewer_token or (viewer_staging and viewer_staging == viewer_token):
             raise ValueError('separate Viewer production credential required')
+    processing_nodes = ()
+    if viewer == '1':
+        processing_nodes_list = []
+        prefixes = set()
+        for node_id in node_ids:
+            if node_id == 'cluster':
+                origin, node_token = _node_origin(os.environ.get('LOCAL_NODE_URL', '')), node_tokens[0]
+                max_photos, max_bytes = (
+                    _positive_int(os.environ.get('LOCAL_MAX_PHOTOS', '1000'), 'LOCAL_MAX_PHOTOS', 1_000_000),
+                    _positive_int(os.environ.get('LOCAL_MAX_INPUT_BYTES', '21474836480'),
+                                  'LOCAL_MAX_INPUT_BYTES', 10**15))
+            elif node_id == 'main':
+                origin, node_token = _node_origin(os.environ.get('MAIN_NODE_URL', '')), node_tokens[1]
+                # The main machine has no application policy cap. The engine's
+                # live maxImages value, when present, still applies.
+                max_photos, max_bytes = None, None
+            else:
+                suffix = re.sub(r'[-.]', '_', node_id).upper()
+                if suffix in prefixes:
+                    raise ValueError('processing node IDs collide as environment variable names')
+                prefixes.add(suffix)
+                prefix = 'PROCESSING_NODE_' + suffix
+                origin = _node_origin(os.environ.get(prefix + '_URL', ''))
+                node_token = os.environ.get(prefix + '_TOKEN', '')
+                if len(node_token) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in node_token):
+                    raise ValueError('processing node token must contain at most 4096 printable characters')
+                max_photos = _optional_positive_int(os.environ.get(prefix + '_MAX_PHOTOS', ''),
+                                                    prefix + '_MAX_PHOTOS', 1_000_000)
+                max_bytes = _optional_positive_int(os.environ.get(prefix + '_MAX_INPUT_BYTES', ''),
+                                                   prefix + '_MAX_INPUT_BYTES', 10**15)
+            if not origin:
+                raise ValueError('every ordered processing node requires a configured origin')
+            processing_nodes_list.append(ProcessingNode(node_id, origin, node_token, max_photos, max_bytes))
+        processing_nodes = tuple(processing_nodes_list)
     if operator and (len(operator) < 32 or operator == token
                      or any(ord(char) < 33 or ord(char) > 126 for char in operator)):
         raise ValueError("prototype operator token must be a separate printable credential of at least 32 characters")
@@ -115,8 +169,11 @@ def from_environment() -> Config:
                                             'PROCESSING_VIEWER_MAX_INPUT_BYTES', 10 ** 15),
         viewer_max_archive_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', str(100 * 1024 ** 3)),
                                               'PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', 10 ** 15),
+        viewer_min_free_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MIN_FREE_BYTES', str(20 * 1024 ** 3)),
+                                            'PROCESSING_VIEWER_MIN_FREE_BYTES', 10 ** 15),
         prototype_observer_token=observer,
         local_node_token=node_tokens[0],
         main_node_token=node_tokens[1],
         reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),
+        processing_nodes=processing_nodes,
     )

@@ -13,10 +13,12 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import threading
 from urllib.parse import parse_qs, unquote, urlsplit
 import uuid as uuid_module
 
 from .maintenance import Conflict
+from .viewer_tasks import StorageBackpressure
 
 
 MAX_UPLOAD_BYTES = 2 * 1024 ** 3
@@ -179,21 +181,28 @@ class ViewerFacade:
         if not isinstance(token, str) or not token or not isinstance(staging_token, str) or staging_token == token:
             raise ValueError('distinct Viewer credentials required')
         self.service, self.token, self.staging_token = service, token, staging_token
+        self._upload_lock = threading.Lock()
         if temp_dir is not None:
             directory = Path(temp_dir)
             if (directory.is_symlink() or not directory.is_dir()
                     or (os.name != 'nt' and directory.stat().st_mode & 0o077)):
                 raise ValueError('private existing spool directory required')
+            store = getattr(service, 'store', None)
+            store_root = getattr(store, 'root', None)
+            if store_root is not None and os.stat(directory).st_dev != os.stat(store_root).st_dev:
+                raise ValueError('multipart spool and durable input store must share a filesystem')
             temp_dir = str(directory)
         self.temp_dir = temp_dir
 
     @staticmethod
-    def _reply(handler, status, value):
+    def _reply(handler, status, value, headers=None):
         raw = json.dumps(value, allow_nan=False, separators=(',', ':')).encode('utf-8')
         handler.send_response(status)
         handler.send_header('Content-Type', 'application/json')
         handler.send_header('Content-Length', str(len(raw)))
         handler.send_header('Cache-Control', 'no-store')
+        for name, value in (headers or {}).items():
+            handler.send_header(name, value)
         handler.end_headers()
         handler.wfile.write(raw)
 
@@ -235,6 +244,9 @@ class ViewerFacade:
         except Conflict:
             handler.close_connection = True
             self._reply(handler, 409, {'error': 'conflict'})
+        except StorageBackpressure:
+            handler.close_connection = True
+            self._reply(handler, 503, {'error': 'storage_backpressure'}, {'Retry-After': '30'})
         except (ValueError, TypeError, UnicodeError, RecursionError):
             handler.close_connection = True
             self._reply(handler, 400, {'error': 'invalid_request'})
@@ -324,19 +336,27 @@ class ViewerFacade:
             length = _length(handler, MAX_UPLOAD_BYTES)
             identifier = task_uuid(unquote(upload[1]))
             self._authorize(identifier, environment)
-            count, seen = 0, set()
-            for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
-                if name != 'images':
-                    raise RequestError(400, 'invalid_upload_form')
-                filename = safe_filename(filename)
-                if filename.casefold() in seen or not size:
-                    raise RequestError(400, 'duplicate_or_empty_upload')
-                seen.add(filename.casefold())
-                self.service.upload(identifier, filename, stream, size)
-                count += 1
-            if not count:
-                raise RequestError(400, 'empty_upload')
-            self._reply(handler, 200, {'success': True})
+            if not self._upload_lock.acquire(blocking=False):
+                raise StorageBackpressure()
+            try:
+                ensure_capacity = getattr(self.service, 'ensure_upload_capacity', None)
+                if callable(ensure_capacity):
+                    ensure_capacity(length)
+                count, seen = 0, set()
+                for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
+                    if name != 'images':
+                        raise RequestError(400, 'invalid_upload_form')
+                    filename = safe_filename(filename)
+                    if filename.casefold() in seen or not size:
+                        raise RequestError(400, 'duplicate_or_empty_upload')
+                    seen.add(filename.casefold())
+                    self.service.upload(identifier, filename, stream, size)
+                    count += 1
+                if not count:
+                    raise RequestError(400, 'empty_upload')
+                self._reply(handler, 200, {'success': True})
+            finally:
+                self._upload_lock.release()
             return
         commit = re.fullmatch(r'/task/new/commit/([^/]+)', path)
         if commit:

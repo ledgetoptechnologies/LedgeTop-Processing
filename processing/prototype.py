@@ -182,12 +182,21 @@ class Queue(Maintenance):
         with self._db() as db:
             return [self.public(row) for row in db.execute("SELECT * FROM jobs ORDER BY seq")]
 
+    def dispatch_snapshot(self):
+        """Read queue jobs and an insertion watermark from one SQLite snapshot."""
+        with self._db() as db:
+            db.execute('BEGIN')
+            sequence = db.execute('SELECT COALESCE(MAX(seq),0) FROM jobs').fetchone()[0]
+            rows = db.execute('SELECT * FROM jobs ORDER BY seq').fetchall()
+            return {'sequence': sequence, 'jobs': [self.public(row) for row in rows]}
+
     def get(self, identifier):
         with self._db() as db:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
             return self.public(row) if row else None
 
-    def claim(self, payload):
+    def claim(self, payload, *, eligible_job_ids=None, eligible_node_ids=None,
+              expected_queue_sequence=None):
         expected = ['workerId']
         if isinstance(payload, dict):
             expected.extend(key for key in ('profiles', 'nodeId', 'expectedJobId') if key in payload)
@@ -198,6 +207,18 @@ class Queue(Maintenance):
         expected_job = payload.get('expectedJobId')
         if expected_job is not None:
             self.slug(expected_job)
+        if expected_queue_sequence is not None and (type(expected_queue_sequence) is not int
+                or expected_queue_sequence < 0):
+            raise ValueError('invalid dispatch snapshot sequence')
+        if eligible_job_ids is not None and (type(eligible_job_ids) not in (list, tuple)
+                or len(eligible_job_ids) > 1000 or len(set(eligible_job_ids)) != len(eligible_job_ids)
+                or any(not isinstance(identifier, str) or not SLUG.fullmatch(identifier)
+                       for identifier in eligible_job_ids)):
+            raise ValueError('invalid eligible job set')
+        if eligible_node_ids is not None and (type(eligible_node_ids) not in (list, tuple, set, frozenset)
+                or len(eligible_node_ids) > len(self.node_ids)
+                or not set(eligible_node_ids) <= set(self.node_ids)):
+            raise ValueError('invalid eligible node set')
         profiles = payload.get("profiles", [PROFILE])
         if (not isinstance(profiles, list) or not 1 <= len(profiles) <= 3
                 or any(not isinstance(p, str) or p not in self.allowed_profiles for p in profiles)
@@ -205,14 +226,44 @@ class Queue(Maintenance):
             raise ValueError("worker must declare supported enabled profiles")
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            if expected_queue_sequence is not None:
+                current_sequence = db.execute('SELECT COALESCE(MAX(seq),0) FROM jobs').fetchone()[0]
+                # A job arrived since the health/eligibility snapshot. Let the
+                # scheduler refresh priorities and capabilities next turn.
+                if current_sequence != expected_queue_sequence:
+                    return None
             self._refresh_nodes(db)
             if self._node(db, node_id)['state'] not in ('active', 'scheduled'):
                 return None
             if db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1",
                           (node_id,)).fetchone():
                 return None
-            row = db.execute("""SELECT * FROM jobs WHERE status='queued'
-                ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
+            rows = db.execute("""SELECT * FROM jobs WHERE status='queued'
+                ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq""").fetchall()
+            # Production is a queue-wide priority tier, including work owned
+            # by a different worker/profile. A photo worker must not consume
+            # staging work while production TreeDar (or another enabled
+            # profile) is still waiting for its physical node.
+            priority_environment = rows[0]['environment'] if rows else None
+            row = None
+            for candidate in rows:
+                if candidate['environment'] != priority_environment:
+                    break
+                if candidate['profile'] not in profiles:
+                    # Preserve FIFO when this physical node can run the head
+                    # profile but this particular worker does not advertise
+                    # it. A node with no support for that profile can still
+                    # run independent work for the same priority tier.
+                    if candidate['profile'] in self.node_profiles(node_id):
+                        return None
+                    continue
+                if eligible_job_ids is not None and candidate['id'] not in eligible_job_ids:
+                    # The scheduler may skip an oversized photo for a later
+                    # eligible photo on this node, but never a different
+                    # profile at the queue head.
+                    continue
+                row = candidate
+                break
             if not row:
                 return None
             # Keep the configured node order meaningful when multiple nodes
@@ -222,6 +273,8 @@ class Queue(Maintenance):
                 if earlier == node_id:
                     break
                 if row["profile"] not in self.node_profiles(earlier):
+                    continue
+                if eligible_node_ids is not None and earlier not in eligible_node_ids:
                     continue
                 earlier_state = self._node(db, earlier)["state"]
                 earlier_busy = db.execute(

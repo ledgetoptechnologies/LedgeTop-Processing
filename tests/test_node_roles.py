@@ -58,6 +58,12 @@ class NodeRoleTests(unittest.TestCase):
         self.complete(cluster)
         self.complete(main)
 
+    def test_staging_photo_cannot_bypass_waiting_production_tree_job(self):
+        self.submit('production-trees', PROFILE, 'production')
+        staging = self.submit('staging-photo', PHOTO_PROFILE)
+        self.assertIsNone(self.claim('cluster', PHOTO_PROFILE))
+        self.assertEqual(self.queue.get(staging['id'])['status'], 'queued')
+
     def test_each_node_has_one_slot_and_other_nodes_can_work_concurrently(self):
         for first_profile, second_profile in ((PROFILE, PHOTO_PROFILE), (PHOTO_PROFILE, PROFILE)):
             with self.subTest(first=first_profile):
@@ -130,6 +136,7 @@ class NodeRoleConfigTests(unittest.TestCase):
         with self.environment():
             config = from_environment()
         self.assertEqual(config.local_max_photos, 1000)
+        self.assertEqual(config.viewer_min_free_bytes, 20 * 1024 ** 3)
         nodes = {'ready': True, 'maxImages': None}
         for count, expected in ((1000, 'local'), (1001, 'main')):
             self.assertEqual(plan(count, 1, nodes, nodes, config.local_max_photos,
@@ -141,5 +148,38 @@ class NodeRoleConfigTests(unittest.TestCase):
         for value in ('', 'main,main', 'missing', 'main, cluster'):
             with self.subTest(value=value), self.environment(PROCESSING_PROTOTYPE_NODE_IDS='cluster,main',
                                                             PROCESSING_TREEDAR_NODE_IDS=value):
+                with self.assertRaises(ValueError):
+                    from_environment()
+
+    def test_viewer_processing_nodes_are_ordered_and_dynamic(self):
+        values = {
+            'PROCESSING_VIEWER_ENABLED': '1',
+            'PROCESSING_PROTOTYPE_STATE_DIR': '/var/lib/processing',
+            'PROCESSING_VIEWER_TOKEN': 'v' * 32,
+            'PROCESSING_NODE_ORDER': 'cluster,main,aux-3',
+            'LOCAL_NODE_URL': 'http://cluster.internal:3000',
+            'MAIN_NODE_URL': 'http://main.internal:3000',
+            'PROCESSING_NODE_AUX_3_URL': 'http://aux3.internal:3000',
+            'PROCESSING_NODE_AUX_3_MAX_PHOTOS': '600',
+            'PROCESSING_NODE_AUX_3_MAX_INPUT_BYTES': '9000000000',
+        }
+        with self.environment(**values):
+            config = from_environment()
+        self.assertEqual([node.node_id for node in config.processing_nodes], ['cluster', 'main', 'aux-3'])
+        self.assertEqual([node.max_photos for node in config.processing_nodes], [1000, None, 600])
+        self.assertEqual(config.processing_nodes[2].max_input_bytes, 9_000_000_000)
+
+    def test_viewer_dynamic_node_requires_origin_and_rejects_duplicate_order(self):
+        base = {
+            'PROCESSING_VIEWER_ENABLED': '1',
+            'PROCESSING_PROTOTYPE_STATE_DIR': '/var/lib/processing',
+            'PROCESSING_VIEWER_TOKEN': 'v' * 32,
+            'LOCAL_NODE_URL': 'http://cluster.internal:3000',
+            'MAIN_NODE_URL': 'http://main.internal:3000',
+        }
+        for order, extra in (('cluster,aux', {}), ('cluster,aux-3,aux_3', {
+                'PROCESSING_NODE_AUX_3_URL': 'http://aux3.internal:3000',
+                'PROCESSING_NODE_AUX_3_URL': 'http://aux3.internal:3000'})):
+            with self.subTest(order=order), self.environment(PROCESSING_NODE_ORDER=order, **base, **extra):
                 with self.assertRaises(ValueError):
                     from_environment()

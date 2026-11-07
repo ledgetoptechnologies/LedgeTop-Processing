@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import stat
 import threading
 import uuid as uuid_module
@@ -28,6 +29,10 @@ PHASE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}\Z')
 ERROR = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}\Z')
 STAGES = frozenset(('uploading', 'queued', 'running', 'succeeded', 'failed', 'cancelled', 'held'))
 TERMINAL = frozenset(('succeeded', 'failed', 'cancelled'))
+
+
+class StorageBackpressure(Exception):
+    """Retryable rejection before accepting bytes into the durable spool."""
 
 
 def canonical(value):
@@ -56,10 +61,14 @@ def sync_directory(path):
 
 
 class TaskStore:
-    def __init__(self, queue, directory, max_input_bytes=20 * 1024 ** 3):
+    def __init__(self, queue, directory, max_input_bytes=20 * 1024 ** 3,
+                 min_free_bytes=0):
         if type(max_input_bytes) is not int or not 1 <= max_input_bytes <= 10 ** 15:
             raise ValueError('positive input limit required')
+        if type(min_free_bytes) is not int or not 0 <= min_free_bytes <= 10 ** 15:
+            raise ValueError('nonnegative free-space reserve required')
         self.queue = queue
+        self.min_free_bytes = min_free_bytes
         self.root = Path(directory).absolute()
         if self.root.resolve() != self.root:
             raise ValueError('input directory must not contain symlinks')
@@ -115,6 +124,22 @@ class TaskStore:
                 PRIMARY KEY(uuid,generation))''')
             db.execute('''CREATE UNIQUE INDEX IF NOT EXISTS viewer_engine_uuid
                 ON viewer_tasks(engine_uuid) WHERE engine_uuid IS NOT NULL''')
+
+    def ensure_capacity(self, additional_bytes, *, copies=1):
+        if (type(additional_bytes) is not int or additional_bytes < 0
+                or type(copies) is not int or not 1 <= copies <= 2):
+            raise ValueError('invalid storage reservation')
+        try:
+            available = shutil.disk_usage(self.root).free
+        except OSError:
+            raise StorageBackpressure() from None
+        # Leave room for filesystem metadata and avoid accepting an upload
+        # that consumes the configured reserve exactly.
+        margin = max(64 * 1024 ** 2, additional_bytes // 100)
+        required = additional_bytes * copies + self.min_free_bytes + margin
+        if available < required:
+            raise StorageBackpressure()
+        return available
 
     def _row(self, db, identifier, *, removed=False):
         checked_uuid(identifier)
@@ -230,6 +255,24 @@ class TaskStore:
                                    (identifier,)).fetchone()[0]
                 if existing is None and (total + length > self.max_input_bytes or count >= 100000):
                     raise ValueError('task input ceiling exceeded')
+            if existing is not None:
+                digest = hashlib.sha256()
+                remaining = length
+                while remaining:
+                    chunk = stream.read(min(1024 * 1024, remaining))
+                    if not isinstance(chunk, bytes) or not chunk or len(chunk) > remaining:
+                        raise ValueError('input stream length differs')
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                if stream.read(1):
+                    raise ValueError('input stream length differs')
+                existing_path = directory / existing['path']
+                if (digest.hexdigest() != existing['sha256'] or existing['bytes'] != length
+                        or existing_path.is_symlink() or not existing_path.is_file()
+                        or existing_path.stat().st_size != length):
+                    raise Conflict('input basename already contains different or missing bytes')
+                return {'success': True, 'uuid': identifier}
+            self.ensure_capacity(length)
             temporary = directory / ('.incoming-' + secrets.token_hex(16))
             final = directory / ('input-' + secrets.token_hex(16))
             try:
@@ -410,16 +453,24 @@ class TaskStore:
         job = task['job']
         state = job['status'] if job else task['stage']
         recovering = (job and state == 'held' and job['heldReason'] == 'coordinator_restart'
-                      and task['phase'] in ('processing', 'commit_pending', 'cancel_pending')
+                      and task['phase'] in ('processing', 'commit_pending', 'awaiting_engine_start', 'cancel_pending')
                       and task['engine_uuid'] and task['node_id'] and task['claim_token'])
         cancelled_result = (job and state == 'failed' and isinstance(job['result'], dict)
                             and job['result'].get('cancelled') is True)
+        engine_started = (state == 'running'
+                          and task['phase'] in ('processing', 'cancel_pending'))
         if task['stage'] == 'cancelled' or cancelled_result:
             code = 50
         elif recovering:
             # Retain the shared slot, but do not tell Viewer this recoverable
-            # engine execution failed before its exact UUID is reconciled.
-            code = 20
+            # engine execution failed before its exact UUID is reconciled. A
+            # restart does not itself prove NodeODM left its queued state.
+            code = 10 if task['phase'] in ('commit_pending', 'awaiting_engine_start') else 20
+        elif state == 'running' and not engine_started:
+            # A durable queue claim owns the task while the coordinator
+            # initializes NodeODM and transfers photos. Viewer must keep
+            # reporting queued until the engine itself confirms status 20.
+            code = 10
         else:
             code = {'uploading': 10, 'queued': 10, 'running': 20, 'held': 30,
                     'failed': 30, 'succeeded': 40}.get(state, 30)
