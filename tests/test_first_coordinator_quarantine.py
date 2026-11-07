@@ -140,8 +140,12 @@ class FirstCoordinatorQuarantineTests(unittest.TestCase):
                 result[name]=sorted([tuple(row) for row in db.execute('SELECT '+projection+' FROM "'+name+'"')],key=repr)
                 actual=[row[1] for row in db.execute('PRAGMA table_info("'+name+'")')]
                 extra=set(actual)-set(columns)
-                self.assertLessEqual(extra,{'target_engine_version'} if name=='nodes' else set())
-                if extra:self.assertEqual(db.execute('SELECT COUNT(*) FROM nodes WHERE target_engine_version IS NOT NULL').fetchone()[0],0)
+                allowed = {'nodes': {'target_engine_version'}, 'coordinator_identity': {'source_mode_version'}}
+                self.assertLessEqual(extra, allowed.get(name, set()))
+                if name == 'nodes' and extra:
+                    self.assertEqual(db.execute('SELECT COUNT(*) FROM nodes WHERE target_engine_version IS NOT NULL').fetchone()[0],0)
+                if name == 'coordinator_identity' and extra:
+                    self.assertEqual(db.execute('SELECT source_mode_version FROM coordinator_identity').fetchall(), [(1,)])
         return result
 
     def artifact_bytes(self):

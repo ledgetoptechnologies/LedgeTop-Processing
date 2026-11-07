@@ -177,6 +177,24 @@ class LegacyReadonlyDeliveryTests(unittest.TestCase):
         self.assert_error('/download/all.zip')
         self.assertEqual(self.get('/info')[0], 200)
 
+    def test_optional_original_archive_intent_must_match_and_remain_private(self):
+        receipt = json.loads((self.directory / 'all.zip.receipt').read_text())
+        identity = {key: receipt[key] for key in ('version', 'task', 'generation', 'job', 'node', 'engine')}
+        intent = self.directory / 'all.zip.intent'
+        raw = json.dumps(identity).encode()
+        intent.write_bytes(raw); intent.chmod(0o600)
+        self.fixture.start_child()
+        self.binary_download()
+        changed = dict(identity, generation=identity['generation'] + 1)
+        intent.write_text(json.dumps(changed)); self.assert_error('/download/all.zip')
+        intent.write_bytes(raw); intent.chmod(0o640); self.assert_error('/download/all.zip')
+        intent.chmod(0o600)
+        other = self.fixture.root / 'other-intent'; other.write_bytes(raw); other.chmod(0o600)
+        intent.unlink(); intent.symlink_to(other); self.assert_error('/download/all.zip')
+        intent.unlink(); os.link(other, intent); self.assert_error('/download/all.zip')
+        intent.unlink(); intent.write_bytes(raw); intent.chmod(0o600)
+        self.binary_download()
+
     def test_missing_archive_and_unknown_inventory_are_explicitly_unavailable(self):
         archive = self.directory / 'all.zip'; original = archive.read_bytes(); archive.unlink()
         self.fixture.start_child()
