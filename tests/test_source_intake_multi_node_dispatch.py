@@ -52,6 +52,7 @@ class SourceIntakeMultiNodeDispatchTests(unittest.TestCase):
             capability_fingerprint='a'*64,
             options_fingerprint=self.fixture.payload['pipeline']['odm']['optionsFingerprint'],
             source_spool=spool, source_attestation_keys=self.fixture.trusted_keys,
+            source_bearer_principals={'synthetic-multi-node-viewer-token': 'viewer-staging'},
             authority_id=self.queue.authority_id)
 
     def admit(self, images):
