@@ -4,6 +4,8 @@ Photo counts are scaled to a one-image cluster ceiling. No native engines or
 services run; mount qualification is simulated over task-owned temporary bytes.
 """
 import copy
+import base64
+import hashlib
 import io
 import os
 from pathlib import Path
@@ -17,6 +19,7 @@ from processing.prototype import Queue
 from processing.reference_control import ReferenceControlAPI
 from processing.reference_store import PROFILE, ReferenceStore
 from processing.source_spool import SourceSpool
+from processing import viewer_source_attestation as attest
 from tests import test_reference_source_intake as intake_fixture
 
 
@@ -41,21 +44,26 @@ class SourceIntakeMultiNodeDispatchTests(unittest.TestCase):
         self.fixture = intake_fixture.ReferenceSourceIntakeTests()
         self.fixture.setUp()
         self.fixture.authority_id = self.queue.authority_id
+        self.fixture.trusted_keys.append(dict(self.fixture.trusted_keys[0], environment='production',
+            principalId='viewer-production'))
         self.store = ReferenceStore(self.queue, local_max_photos=1)
         self.viewer_headers = {'Authorization':'Bearer synthetic-multi-node-viewer-token'}
+        self.production_headers = {'Authorization':'Bearer synthetic-multi-node-production-token'}
         self.worker_headers = {node:{'Authorization':'Bearer synthetic-multi-node-'+node+'-token'}
             for node in self.queue.node_ids}
         self.control = ReferenceControlAPI(self.store,
-            viewer_bearers={'synthetic-multi-node-viewer-token':'staging'},
+            viewer_bearers={'synthetic-multi-node-viewer-token':'staging',
+                'synthetic-multi-node-production-token':'production'},
             worker_bearers={'synthetic-multi-node-'+node+'-token':dict(node_id=node,
                 worker_id='worker-'+node,worker_instance_id='instance-'+node) for node in self.queue.node_ids},
             capability_fingerprint='a'*64,
             options_fingerprint=self.fixture.payload['pipeline']['odm']['optionsFingerprint'],
             source_spool=spool, source_attestation_keys=self.fixture.trusted_keys,
-            source_bearer_principals={'synthetic-multi-node-viewer-token': 'viewer-staging'},
+            source_bearer_principals={'synthetic-multi-node-viewer-token': 'viewer-staging',
+                'synthetic-multi-node-production-token': 'viewer-production'},
             authority_id=self.queue.authority_id)
 
-    def admit(self, images):
+    def admit(self, images, environment='staging'):
         payload = copy.deepcopy(self.fixture.payload)
         payload.update(submissionId=str(uuid.uuid4()),providerTaskId=str(uuid.uuid4()),
             viewerTaskId=str(uuid.uuid4()))
@@ -73,21 +81,29 @@ class SourceIntakeMultiNodeDispatchTests(unittest.TestCase):
             payload[name]['sha256'] = protocol.digest({key:value for key,value in payload[name].items() if key!='sha256'})
         payload['manifest']['sha256'] = protocol.manifest_sha256(payload['manifest'])
         payload['sourceAttestation'] = self.fixture.validate(payload)['sourceAttestation']
-        posted = self.control.handle('POST','/ltds/v2/jobs',self.viewer_headers,
+        if environment == 'production':
+            proof = payload['sourceAttestation']['proof']
+            proof.update(environment='production', principalId='viewer-production')
+            message = attest.DOMAIN + protocol.canonical_json(proof)
+            payload['sourceAttestation'].update(
+                signature=base64.urlsafe_b64encode(self.fixture.signing_key.sign(message)).decode('ascii').rstrip('='),
+                attestationSha256=hashlib.sha256(message).hexdigest())
+        headers = self.production_headers if environment == 'production' else self.viewer_headers
+        posted = self.control.handle('POST','/ltds/v2/jobs',headers,
             protocol.canonical_json(payload),protected_transport=True)
         self.assertEqual(posted.status,201,posted.body)
         job_id = posted.body['jobId']
         for item in objects:
             uploaded = self.control.stream_source_object(
                 '/ltds/v2/jobs/%s/source/%s?generation=1'%(job_id,item['id']),
-                dict(self.viewer_headers,**{'Content-SHA256':item['sha256']}),
+                dict(headers,**{'Content-SHA256':item['sha256']}),
                 io.BytesIO(b'abc'),3,protected_transport=True)
             self.assertEqual(uploaded.status,201,uploaded.body)
         completion = dict(generation=1,sourceManifestSha256=payload['sourceManifest']['sha256'],
             derivedManifestSha256=payload['derivedManifest']['sha256'],
             pipelineManifestSha256=payload['manifest']['sha256'])
         completed = self.control.handle('POST','/ltds/v2/jobs/'+job_id+'/source/complete',
-            self.viewer_headers,protocol.canonical_json(completion),protected_transport=True)
+            headers,protocol.canonical_json(completion),protected_transport=True)
         self.assertEqual(completed.status,201,completed.body)
         queued = self.store.get(job_id)
         self.assertEqual((queued['status'],queued['phase'],queued['nodeId']),('queued','queued',None))
@@ -106,12 +122,26 @@ class SourceIntakeMultiNodeDispatchTests(unittest.TestCase):
         return response
 
     def test_source_intake_production_over_the_small_cap_leaves_it_to_staging(self):
-        job_id = self.admit(2)  # This fixture's Viewer bearer is staging-scoped.
-        with self.queue._db() as db:
-            db.execute("UPDATE jobs SET environment='production' WHERE id=?",(job_id,))
-            db.execute("UPDATE reference_jobs SET environment='production' WHERE job_id=?",(job_id,))
+        job_id = self.admit(2, environment='production')
+        self.assertEqual(self.store.get(job_id)['environment'], 'production')
         self.assertTrue(self.queue.staging_open('cluster'))
         self.assertFalse(self.queue.staging_open('main'))
+
+    def test_signed_production_job_takes_priority_over_older_staging_job(self):
+        staging = self.admit(1)
+        production = self.admit(1, environment='production')
+        self.assertEqual(self.next_job('cluster')['jobId'], production)
+        self.assertEqual(self.claim('cluster', production).status, 200)
+        self.assertEqual(self.next_job('main')['jobId'], staging)
+
+    def test_signed_production_does_not_preempt_a_running_staging_job(self):
+        staging = self.admit(1)
+        self.assertEqual(self.claim('cluster', staging).status, 200)
+        production = self.admit(1, environment='production')
+        self.assertEqual(self.next_job('main')['jobId'], production)
+        self.assertEqual(self.claim('main', production).status, 200)
+        self.assertEqual((self.store.get(staging)['status'], self.store.get(staging)['nodeId']),
+                         ('running', 'cluster'))
 
     def test_two_small_jobs_claim_cluster_then_main_without_sharing_a_slot(self):
         first,second,third = self.admit(1),self.admit(1),self.admit(1)
