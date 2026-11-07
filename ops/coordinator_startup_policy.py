@@ -17,7 +17,8 @@ SOURCES=('processing/coordinator_freeze.py','processing/reference_store.py',
  'processing/reference_source_readers.py','processing/reference_terminal.py',
  'processing/reference_failure.py','processing/prototype.py','processing/reference_runtime.py',
  'processing/config.py','processing/reference_protocol.py','processing/authority_lease.py',
- 'processing/app.py','processing/runtime_source_custody.py','processing/maintenance.py')
+ 'processing/app.py','processing/runtime_source_custody.py','processing/maintenance.py',
+ 'processing/legacy_viewer_readonly.py')
 BINDINGS=('bootstrapStartupId','currentStartupId','planId','ownerSha256','requestIds',
  'operationBinding','sourceReaderBinding','sourceCustody','bootstrapWindow','finalWindow')
 BASE_ADDITIONS=frozenset(('coordinator_freeze_state','coordinator_freeze_receipts',

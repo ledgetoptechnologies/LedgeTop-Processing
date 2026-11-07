@@ -102,6 +102,21 @@ class ConcreteCutoverDriver:
         verify_host_binding(record)
         return result
 
+    def _legacy_custody(self,state):
+        """Bind the exact candidate reader observation to the frozen baseline."""
+        from .legacy_delivery_qualification import validate_capture_against_baseline
+        from .capture_legacy_delivery import helper_hashes
+        entry=self.bundle['qualifications']['legacyDeliverySha256']
+        raw=private_bytes(entry['path'],maximum=1024*1024)
+        require(hashlib.sha256(raw).hexdigest()==entry['sha256'],'qualification_artifact_changed')
+        reference=self._prior(state,'capture-full-custody')['reference']
+        baseline=self._custody().artifacts.load(reference,'baseline')['body']['baseline']
+        key=private_bytes(self.bundle['artifacts']['censusKey']['path'],maximum=32)
+        validate_capture_against_baseline(raw,self.plan,baseline,
+            reader_sha256=self.bundle['sourceHashes']['processing/legacy_viewer_readonly.py'],key=key,
+            state_volume=self.bundle['predecessor']['stateVolume'],helper_hashes=helper_hashes())
+        return True
+
     def _original(self):
         item=self.docker.inspect(self.plan['predecessor']['containerId'])
         require(item['Id']==self.plan['predecessor']['containerId'] and item['Image']==self.plan['predecessor']['imageId']
@@ -298,6 +313,7 @@ finally:db.close()
                 if action=='resume-final-gate':
                     require(self._workers()==self._prior(state,'verify-final-readiness')['workers'],
                             'qualified_workers_changed_before_admission')
+                    self._legacy_custody(state)
                     self._live_spool()
         if action=='enable-final-restart':
             final=self._find('final');require(final is not None,'final_runtime_required');self._health(final)
@@ -351,7 +367,9 @@ finally:db.close()
             # Recheck at the transport seam after the dispatch marker, not just
             # at the previous readiness observation. Inspection of a previously
             # accepted/open gate never executes another resume request.
-            if action=='resume-final-gate':self._live_spool()
+            if action=='resume-final-gate':
+                self._legacy_custody(state)
+                self._live_spool()
             request=self._gate_request(action,state)
             source=operator_script('POST','/v1/prototype/coordinator-freeze',request)
             request_id=str(uuid.uuid5(uuid.UUID(intent['intentId']),'operator:'+dispatch['dispatchId']))

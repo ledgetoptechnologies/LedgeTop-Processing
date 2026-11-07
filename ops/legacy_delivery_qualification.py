@@ -21,6 +21,7 @@ from .enrolled_coordinator_transport import canonical, decode, require
 PROTOCOL = 'ltds-legacy-delivery-observation-v1'
 TABLES = ('jobs', 'viewer_tasks', 'viewer_files')
 SCOPE = 'read-only-candidate-reader-with-test-queue-shim'
+CAPTURE_PROTOCOL = 'ltds-legacy-delivery-isolated-capture-v1'
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 
 
@@ -152,4 +153,41 @@ def validate_against_baseline(raw, plan, baseline, *, reader_sha256):
     require(all(baseline['tables'].get(name) == row for name, row in value['tables'].items())
             and all(baseline['files'].get(name) == row for name, row in value['archives'].items()),
             'legacy_observation_differs_from_frozen_custody')
+    return value
+
+
+def seal_capture(observation, *, key, container_id, state_volume, helper_hashes):
+    require(type(key) is bytes and len(key)==32 and type(container_id) is str and HEX.fullmatch(container_id)
+            and type(state_volume) is str and re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',state_volume)
+            and type(helper_hashes) is dict and helper_hashes
+            and all(type(k) is str and type(v) is str and HEX.fullmatch(v) for k,v in helper_hashes.items()),
+            'legacy_capture_binding_invalid')
+    value=dict(schemaVersion=1,protocol=CAPTURE_PROTOCOL,containerId=container_id,stateVolume=state_volume,
+               network='none',readOnlyRoot=True,readOnlyState=True,uid=10001,helpers=helper_hashes,
+               observation=observation)
+    value['mac']=hmac.new(key,b'legacy-capture\0'+canonical(value),hashlib.sha256).hexdigest()
+    return canonical(value)
+
+
+def validate_capture(raw, plan, *, reader_sha256, key, state_volume, helper_hashes):
+    value=decode(raw,1024*1024)
+    require(type(value) is dict and set(value)=={'schemaVersion','protocol','containerId','stateVolume','network',
+            'readOnlyRoot','readOnlyState','uid','helpers','observation','mac'} and raw==canonical(value)
+            and type(value['schemaVersion']) is int and value['schemaVersion']==1
+            and value['protocol']==CAPTURE_PROTOCOL and type(value['containerId']) is str
+            and HEX.fullmatch(value['containerId']) and value['stateVolume']==state_volume
+            and value['network']=='none' and value['readOnlyRoot'] is True and value['readOnlyState'] is True
+            and type(value['uid']) is int and value['uid']==10001 and value['helpers']==helper_hashes
+            and type(key) is bytes and len(key)==32 and type(value['mac']) is str and HEX.fullmatch(value['mac']),
+            'legacy_capture_receipt_invalid')
+    body={k:v for k,v in value.items() if k!='mac'}
+    require(hmac.compare_digest(value['mac'],hmac.new(key,b'legacy-capture\0'+canonical(body),hashlib.sha256).hexdigest()),
+            'legacy_capture_mac_changed')
+    validate_artifact(canonical(value['observation']),plan,reader_sha256=reader_sha256)
+    return value
+
+
+def validate_capture_against_baseline(raw,plan,baseline,*,reader_sha256,key,state_volume,helper_hashes):
+    value=validate_capture(raw,plan,reader_sha256=reader_sha256,key=key,state_volume=state_volume,helper_hashes=helper_hashes)
+    validate_against_baseline(canonical(value['observation']),plan,baseline,reader_sha256=reader_sha256)
     return value

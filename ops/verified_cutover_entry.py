@@ -20,7 +20,8 @@ import tempfile
 MAX_ARCHIVE = 64 * 1024 * 1024
 MAX_FILES = 10000
 MODULES = {'coordinator': 'ops.enrolled_coordinator_driver',
-           'worker-activation': 'ops.first_worker_activation'}
+           'worker-activation': 'ops.first_worker_activation',
+           'legacy-observe': 'ops.capture_legacy_delivery'}
 
 
 def _regular(path):

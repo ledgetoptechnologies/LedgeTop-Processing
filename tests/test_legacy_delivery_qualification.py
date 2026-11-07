@@ -7,6 +7,7 @@ from pathlib import Path
 import unittest
 
 from ops import legacy_delivery_qualification as q
+from ops import capture_legacy_delivery as runner
 from ops.enrolled_coordinator_transport import canonical
 from processing import legacy_viewer_readonly
 from tests import test_coordinator_predecessor_census as fixture
@@ -80,3 +81,61 @@ class LegacyDeliveryQualificationTests(unittest.TestCase):
         (directory/'all.zip.intent').unlink()
         (directory/'all.zip.partial').write_bytes(b'unknown'); (directory/'all.zip.partial').chmod(0o600)
         with self.assertRaises(Exception): self.observation()
+
+    def test_captured_observation_is_keyed_to_volume_helpers_and_frozen_baseline(self):
+        observed = self.observation(); hashes = runner.helper_hashes()
+        wire = q.seal_capture(observed,key=self.old.key,container_id='c'*64,state_volume='state',helper_hashes=hashes)
+        baseline = self.old.census()
+        checked = q.validate_capture_against_baseline(wire,self.plan,baseline,reader_sha256=self.reader,
+            key=self.old.key,state_volume='state',helper_hashes=hashes)
+        self.assertEqual(checked['observation'],observed)
+        for kwargs in (dict(key=b'x'*32,state_volume='state',helper_hashes=hashes),
+                       dict(key=self.old.key,state_volume='other',helper_hashes=hashes),
+                       dict(key=self.old.key,state_volume='state',helper_hashes={'changed':'f'*64})):
+            with self.assertRaises(Exception):
+                q.validate_capture(wire,self.plan,reader_sha256=self.reader,**kwargs)
+        changed=json.loads(wire); changed['observation']['archives'].clear()
+        with self.assertRaises(Exception):
+            q.validate_capture(canonical(changed),self.plan,reader_sha256=self.reader,key=self.old.key,
+                               state_volume='state',helper_hashes=hashes)
+
+    def test_capture_checks_exact_image_and_readonly_mount_before_start_and_cleans_owned_container(self):
+        result = canonical(self.observation()); image=self.image; commit=self.commit
+        class Docker:
+            def __init__(self, bad=False): self.bad=bad; self.started=False; self.removed=False
+            def image(self, ident): self.image_seen=ident
+            def command(self,*args,**kwargs):
+                if args[:2]==('volume','inspect'): return canonical([{'Name':'state'}])
+                if args[:2]==('container','create'):
+                    self.name=args[args.index('--name')+1]
+                    self.token=args[args.index('--label')+1].split('=',1)[1]
+                    bind=[item for item in args if item.startswith('type=bind,')][0]
+                    self.folder=bind.split(',')[1].split('=',1)[1]
+                    return ('d'*64+'\n').encode()
+                if args[:2]==('container','start'):
+                    self.started=True; self.assert_key=kwargs['input_bytes']; return result
+                if args[:2]==('container','rm'):
+                    self.removed=True; return b''
+                raise AssertionError(args)
+            def inspect(self, ident):
+                return dict(Id=ident,Image=image,Name='/'+self.name,
+                    Config=dict(Labels={runner.OWNER:self.token},User='10001:10001',Entrypoint=['python'],
+                                Cmd=['/qualification/observer.py',image,commit]),
+                    HostConfig=dict(NetworkMode='none',ReadonlyRootfs=True),
+                    State=dict(Running=False,ExitCode=0),Mounts=[
+                        dict(Type='volume',Name='state',Destination='/prototype-state',RW=self.bad),
+                        dict(Type='bind',Source=self.folder,Destination='/qualification',RW=False)])
+        for bad in (False,True):
+            docker=Docker(bad)
+            if bad:
+                with self.assertRaises(Exception):
+                    runner.capture(image=image,source_commit=commit,state_volume='state',authority=self.old.authority,
+                                   reader_sha256=self.reader,key=self.old.key,docker=docker)
+                self.assertFalse(docker.started)
+            else:
+                wire=runner.capture(image=image,source_commit=commit,state_volume='state',authority=self.old.authority,
+                                    reader_sha256=self.reader,key=self.old.key,docker=docker)
+                q.validate_capture_against_baseline(wire,self.plan,self.old.census(),reader_sha256=self.reader,
+                    key=self.old.key,state_volume='state',helper_hashes=runner.helper_hashes())
+                self.assertTrue(docker.started); self.assertEqual(docker.assert_key,self.old.key)
+            self.assertTrue(docker.removed)

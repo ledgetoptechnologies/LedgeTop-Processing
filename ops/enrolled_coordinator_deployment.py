@@ -305,6 +305,12 @@ def verify_private_artifacts(bundle, plan, *, config_reader, require_all_qualifi
             # crash/power-loss durability. Runtime checks remain mandatory.
             from .local_spool_qualification import validate
             validate(raw, policy_inputs['finalConfig'], bundle['recipes']['final'])
+        if name == 'legacyDeliverySha256':
+            from .legacy_delivery_qualification import validate_capture
+            from .capture_legacy_delivery import helper_hashes
+            key=private_bytes(bundle['artifacts']['censusKey']['path'],maximum=32)
+            validate_capture(raw,plan,reader_sha256=bundle['sourceHashes']['processing/legacy_viewer_readonly.py'],
+                key=key,state_volume=bundle['predecessor']['stateVolume'],helper_hashes=helper_hashes())
         if name == 'workerQualificationSha256':
             from .worker_prestart_review import validate
             validate(raw, bundle, plan)

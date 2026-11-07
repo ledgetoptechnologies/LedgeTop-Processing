@@ -178,6 +178,10 @@ class ConcreteDriverTests(unittest.TestCase):
         self.review=self.worker_review.start();self.addCleanup(self.worker_review.stop)
         self.spool_probe=patch.object(self.driver,'_live_spool',return_value={'synthetic':'spool-observation'})
         self.probe=self.spool_probe.start();self.addCleanup(self.spool_probe.stop)
+        # This suite models journal ordering with synthetic private paths; the
+        # actual legacy verifier is exercised by its dedicated custody tests.
+        self.legacy_probe=patch.object(self.driver,'_legacy_custody',return_value=True)
+        self.legacy=self.legacy_probe.start();self.addCleanup(self.legacy_probe.stop)
         self.controller=j.FirstEnrolledCutover(self.operation,plan,self.driver);self.controller.prepare()
 
     def advance_until(self,phase):
@@ -191,6 +195,7 @@ class ConcreteDriverTests(unittest.TestCase):
         result=self.advance_until('complete')
         self.review.assert_called_with(self.driver.bundle,self.driver.plan)
         self.probe.assert_called()
+        self.legacy.assert_called()
         self.assertTrue(result['admissionOpened']);self.assertEqual(len(result['events']),22)
         self.assertEqual(result['events'][19]['action'],'verify-final-readiness')
         self.assertEqual(result['events'][20]['action'],'resume-final-gate')
@@ -227,6 +232,18 @@ class ConcreteDriverTests(unittest.TestCase):
         self.advance_until('final-ready')
         self.probe.side_effect=t.TransportHeld('live_final_spool_identity_or_capacity_changed')
         with self.assertRaises(t.TransportHeld):self.controller.advance()
+        self.assertEqual(self.docker.gates[self.driver._find('final')['Id']]['phase'],'frozen')
+
+    def test_legacy_custody_mismatch_keeps_gate_frozen(self):
+        self.advance_until('final-ready')
+        self.legacy.side_effect=t.TransportHeld('legacy_observation_differs_from_frozen_custody')
+        with self.assertRaises(t.TransportHeld):self.controller.advance()
+        self.assertEqual(self.docker.gates[self.driver._find('final')['Id']]['phase'],'frozen')
+
+    def test_legacy_change_after_guard_before_dispatch_does_not_resume(self):
+        self.advance_until('final-ready')
+        self.legacy.side_effect=[True,t.TransportHeld('legacy_observation_differs_from_frozen_custody')]
+        with self.assertRaises(j.CutoverHeld):self.controller.advance()
         self.assertEqual(self.docker.gates[self.driver._find('final')['Id']]['phase'],'frozen')
 
     def test_spool_change_after_guard_before_dispatch_does_not_resume(self):
