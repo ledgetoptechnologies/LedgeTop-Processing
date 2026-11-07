@@ -21,16 +21,28 @@ running task. FIFO is maintained among eligible work.
 
 Last read-only host check, November 7: cluster `.89` had an older healthy
 `ledgetop-processing-prototype` container; the reference-worker systemd unit
-was inactive on both `.89` and main `.88`. Main NodeODM was running. The current
-photo-queue candidate is not installed on either PC. October 27 provider
+was inactive on both `.89` and main `.88`. Main NodeODM was running. Before this
+staging step, the current photo-queue candidate was not running on either PC.
+October 27 provider
 deployment details and receipts below are historical evidence for an earlier
-build, not acceptance evidence for the current candidate. Keep NodeODM behind
-its private ingress; do not expose the Docker daemon or engine ports to Viewer.
+build, not acceptance evidence for the current candidate. The exact candidate
+image for source commit `7b996000` is now staged in the cluster Docker image
+cache as `sha256:6f648732647e7c1dc74f8b74b71a41714640bfda39548cda70c415df5b43e505`.
+The running coordinator remains on its previous image; no container replacement
+or job submission occurred. The staged image's one-shot read-only probe passed
+authenticated `/info` and `/options` checks against both configured engines.
+Keep NodeODM behind its private ingress; do not expose the Docker daemon or
+engine ports to Viewer.
 
 Use the cluster's single existing coordinator and state volume. Never start a
-second real dispatcher for staging. `compose.viewer.yaml` requires explicit
-existing volume, immutable image, private runtime env path and LAN bind address.
-The native facade is opt-in through `PROCESSING_VIEWER_ENABLED=1`.
+second real dispatcher for staging. `compose.viewer.yaml` requires the existing
+coordinator name and state volume, an immutable image, the private runtime env
+file, and explicit host paths for the existing authority-lease and coordinator-
+TLS directories. It preserves the loopback operator port, Viewer port, and
+reference TLS listener port during a container replacement. The TLS directory
+is read-only; the state volume and authority lease mount retain their existing
+writable modes. The native facade is opt-in through
+`PROCESSING_VIEWER_ENABLED=1`.
 
 Viewer registration uses an exact origin with no path or query. Add the origin
 to the Viewer's existing processing-provider allowlist if necessary; use its

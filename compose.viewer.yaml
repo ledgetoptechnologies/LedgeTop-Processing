@@ -2,6 +2,7 @@
 services:
   coordinator:
     image: ${PROCESSING_IMAGE:?set the reviewed immutable image ID}
+    container_name: ${PROCESSING_CONTAINER_NAME:?set the existing coordinator name}
     init: true
     restart: unless-stopped
     read_only: true
@@ -14,9 +15,23 @@ services:
     ports:
       - "127.0.0.1:18080:8080"
       - "${VIEWER_BIND_ADDRESS:?set the cluster LAN address}:${VIEWER_PORT:-3005}:8080"
+      - "${REFERENCE_BIND_ADDRESS:?set the reference listener LAN address}:${REFERENCE_PORT:-18443}:8443"
     env_file: ${PROCESSING_RUNTIME_ENV:?set the private operator-owned runtime env path}
     volumes:
-      - state:/prototype-state
+      - type: volume
+        source: state
+        target: /prototype-state
+      - type: bind
+        source: ${PROCESSING_AUTHORITY_LEASE_SOURCE:?set the existing authority lease directory}
+        target: /run/ledgetop-authority-lease
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PROCESSING_REFERENCE_TLS_SOURCE:?set the existing coordinator TLS directory}
+        target: /run/processing-reference
+        read_only: true
+        bind:
+          create_host_path: false
 volumes:
   state:
     external: true
