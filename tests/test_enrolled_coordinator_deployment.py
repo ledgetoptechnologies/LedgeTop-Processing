@@ -56,6 +56,33 @@ def bundle():
 
 
 class DeploymentBundleTests(unittest.TestCase):
+    def test_configured_ordered_node_inventory_accepts_one_to_eight_and_rejects_mismatch(self):
+        value,plan=bundle()
+        third=copy.deepcopy(value['workers'][1]);third['nodeId']='gpu3';third['expected']['nodeId']='gpu3'
+        value['nodeEndpoints'].insert(1,dict(id='gpu3',url='http://192.0.2.3:3000'))
+        value['workers'].insert(1,third)
+        plan['bindings']['deploymentSha256']=d.digest(value)
+        self.assertEqual([n['id'] for n in d.validate_bundle(value,plan)['nodeEndpoints']],['cluster','gpu3','main'])
+        for mutate in (lambda b:b['nodeEndpoints'].append(copy.deepcopy(b['nodeEndpoints'][0])),
+                       lambda b:b['workers'].pop(),
+                       lambda b:b['workers'][0].update(nodeId='extra'),
+                       lambda b:b['workers'].reverse()):
+            bad=copy.deepcopy(value);mutate(bad);changed=copy.deepcopy(plan);changed['bindings']['deploymentSha256']=d.digest(bad)
+            with self.assertRaises((d.TransportHeld,ValueError,KeyError)):d.validate_bundle(bad,changed)
+        one=copy.deepcopy(value);one['nodeEndpoints']=one['nodeEndpoints'][:1];one['workers']=one['workers'][:1]
+        changed=copy.deepcopy(plan);changed['bindings']['deploymentSha256']=d.digest(one)
+        self.assertEqual(len(d.validate_bundle(one,changed)['workers']),1)
+        fleet=copy.deepcopy(one)
+        for index in range(1,8):
+            node='worker'+str(index);worker=copy.deepcopy(one['workers'][0]);worker['nodeId']=node;worker['expected']['nodeId']=node
+            fleet['workers'].append(worker);fleet['nodeEndpoints'].append(dict(id=node,url='http://192.0.2.1:3000'))
+        changed['bindings']['deploymentSha256']=d.digest(fleet)
+        self.assertEqual(len(d.validate_bundle(fleet,changed)['workers']),8)
+        too_many=copy.deepcopy(fleet);worker=copy.deepcopy(one['workers'][0]);worker['nodeId']='worker8';worker['expected']['nodeId']='worker8'
+        too_many['workers'].append(worker);too_many['nodeEndpoints'].append(dict(id='worker8',url='http://192.0.2.1:3000'))
+        changed['bindings']['deploymentSha256']=d.digest(too_many)
+        with self.assertRaises(d.TransportHeld):d.validate_bundle(too_many,changed)
+
     def test_service_owned_config_readback_uses_exact_original_ro_mount_not_operator_file_access(self):
         import hashlib
         value,plan=bundle();raw=b'{}'

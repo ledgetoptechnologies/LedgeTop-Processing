@@ -175,17 +175,18 @@ def validate_bundle(value, plan):
             budgets['maxArtifactBytes']<=1024**4 and budgets['maxBackupBytes']<=1024**4 and
             budgets['maxMetadataBytes']<=64*1024**2 and budgets['maxSeconds']<=600 and
             64*1024**2<=budgets['safetyFloorBytes']<=64*1024**3,'bounded_reviewed_custody_required')
-    endpoints=value['nodeEndpoints'];require(type(endpoints) is list and len(endpoints)==2,'exact_enrolled_node_inventory_required')
+    endpoints=value['nodeEndpoints'];require(type(endpoints) is list and 1<=len(endpoints)<=8,'exact_enrolled_node_inventory_required')
     nodes=set()
     for endpoint in endpoints:
         closed(endpoint,('id','url'),'closed_node_endpoint_required');slug(endpoint['id']);engine_origin(endpoint['url'])
         require(endpoint['id'] not in nodes,'duplicate_node_endpoint');nodes.add(endpoint['id'])
-    require(nodes=={'cluster','main'},'exact_enrolled_node_inventory_required')
     require(type(value['workers']) is list and len(value['workers'])==len(nodes),'complete_worker_readiness_inventory_required')
     seen=set()
     for item in value['workers']:
         worker(item,plan['authorityId']);require(item['nodeId'] not in seen,'duplicate_worker_reference');seen.add(item['nodeId'])
     require(seen==nodes,'worker_node_inventory_changed')
+    require([item['nodeId'] for item in value['workers']]==[item['id'] for item in endpoints],
+            'worker_node_order_changed')
     closed(value['qualifications'],plan['gates'],'closed_existing_qualification_map_required')
     for name,pin in plan['gates'].items():
         proof=value['qualifications'][name]

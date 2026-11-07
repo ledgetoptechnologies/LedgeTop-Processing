@@ -73,6 +73,18 @@ class StartupPolicyTests(unittest.TestCase):
         self.assertEqual(policy['startup']['inventory']['nodes']['cluster']['engineOrigin'],['http','127.0.0.1',19001])
         self.assertEqual(policy['startup']['recovery']['main']['authority_id'],self.authority)
 
+    def test_ordered_dynamic_inventory_and_exact_configuration_binding(self):
+        bootstrap,final=settings(self.authority)
+        worker=copy.deepcopy(bootstrap['workers']['main']);binding=copy.deepcopy(bootstrap['recoveryBindings']['main'])
+        worker['workerId']='worker-gpu3';worker['instanceId']='instance-gpu3';binding['engineId']='physical-gpu3'
+        for config in (bootstrap,final):
+            config['workers']['gpu3']=copy.deepcopy(worker);config['recoveryBindings']['gpu3']=copy.deepcopy(binding)
+        endpoints=[dict(id='cluster',url='http://127.0.0.1:19001'),dict(id='gpu3',url='http://127.0.0.1:19003'),dict(id='main',url='http://127.0.0.1:19002')]
+        inventory,_=s._inventory(bootstrap,final,endpoints,self.authority)
+        self.assertEqual(inventory['nodeOrder'],['cluster','gpu3','main'])
+        for bad in (endpoints+[endpoints[0]],endpoints[:-1],endpoints+[dict(id='extra',url='http://127.0.0.1:19004')],[]):
+            with self.assertRaises(old.CensusRefused):s._inventory(bootstrap,final,bad,self.authority)
+
     def test_bootstrap_does_not_invent_a_future_final_start_window(self):
         policy=json.loads(self.build());startup=str(uuid.uuid4());plan=str(uuid.uuid4())
         context=dict(bootstrapStartupId=startup,currentStartupId=startup,planId=plan,ownerSha256='a'*64,

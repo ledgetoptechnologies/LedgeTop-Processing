@@ -13,6 +13,25 @@ from tests.test_enrolled_coordinator_deployment import bundle as bundle_fixture
 from tests.test_prepare_reference_worker_config import PrivateWorkerPreparationTests
 
 
+class DynamicWorkerReviewInventoryTests(unittest.TestCase):
+    def test_exact_ordered_inventory_for_arbitrary_nodes(self):
+        bundle,plan=bundle_fixture()
+        third=copy.deepcopy(bundle['workers'][1]);third['nodeId']='gpu3';third['expected']['nodeId']='gpu3'
+        third['expected']['engineId']='engine-gpu3'
+        bundle['workers'][0]['expected']['engineId']='engine-small'
+        bundle['workers'][1]['expected']['engineId']='engine-large'
+        bundle['workers'].insert(1,third)
+        bundle['nodeEndpoints'].insert(1,dict(id='gpu3',url='http://192.0.2.3:3000'))
+        entries=[{}, {}, {}]
+        with patch.object(review,'_worker'),patch('ops.enrolled_coordinator_deployment.worker'):
+            self.assertEqual(len(json.loads(review.compose(bundle,plan,entries))['workers']),3)
+            for mutate in (lambda b,e:b['workers'].pop(),lambda b,e:b['workers'].reverse(),
+                           lambda b,e:b['nodeEndpoints'].append(copy.deepcopy(b['nodeEndpoints'][0])),
+                           lambda b,e:e.pop(),lambda b,e:b['workers'][0].update(nodeId='extra')):
+                bad=copy.deepcopy(bundle);bad_entries=copy.deepcopy(entries);mutate(bad,bad_entries)
+                with self.assertRaises(Exception):review.compose(bad,plan,bad_entries)
+
+
 @unittest.skipUnless(os.name == 'posix' and os.geteuid() != 0, 'private nonroot Linux preparation fixtures')
 class WorkerPrestartReviewTests(unittest.TestCase):
     def setUp(self):

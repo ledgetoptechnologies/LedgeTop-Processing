@@ -108,9 +108,15 @@ def compose(bundle, plan, entries):
     for key, value in plan['candidate'].items():
         if key != 'sourceCommit': _hash(value.removeprefix('sha256:'))
     workers = bundle['workers']
-    require(type(workers) is list and len(workers) == 2 and type(entries) is list and len(entries) == 2
-            and [w['nodeId'] for w in workers] == [n['id'] for n in bundle['nodeEndpoints']]
-            and {w['nodeId'] for w in workers} == {'main', 'cluster'}, 'exact_worker_review_inventory_required')
+    endpoints = bundle['nodeEndpoints']
+    require(type(endpoints) is list and 1 <= len(endpoints) <= 8
+            and all(type(n) is dict and type(n.get('id')) is str for n in endpoints)
+            and len({n['id'] for n in endpoints}) == len(endpoints)
+            and type(workers) is list and len(workers) == len(endpoints)
+            and type(entries) is list and len(entries) == len(endpoints)
+            and all(type(w) is dict and type(w.get('nodeId')) is str for w in workers)
+            and [w['nodeId'] for w in workers] == [n['id'] for n in endpoints],
+            'exact_worker_review_inventory_required')
     for entry, worker in zip(entries, workers):
         validate_worker(worker, plan['authorityId'])
         _worker(entry, worker, plan['authorityId'])

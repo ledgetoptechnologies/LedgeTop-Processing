@@ -69,8 +69,15 @@ def _inventory(bootstrap,final,endpoints,authority):
     require(bootstrap['schemaVersion']==2 and final['schemaVersion']==6 and
             bootstrap['workers']==final['workers'] and bootstrap['recoveryBindings']==final['recoveryBindings'] and
             'sourceRelease' not in final and final.get('viewerAcceptance')=={},'closed_first_startup_config_required')
-    require(type(endpoints) is list and len(endpoints)==2 and
-            {item['id'] for item in endpoints}=={'cluster','main'},'exact_enrolled_inventory_required')
+    require(type(endpoints) is list and 1<=len(endpoints)<=8 and
+            all(type(item) is dict and set(item)=={'id','url'} and
+                type(item['id']) is str and re.fullmatch('[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}',item['id'])
+                for item in endpoints) and
+            len({item['id'] for item in endpoints})==len(endpoints) and
+            type(bootstrap['workers']) is dict and type(bootstrap['recoveryBindings']) is dict and
+            set(bootstrap['workers'])=={item['id'] for item in endpoints} and
+            set(bootstrap['recoveryBindings'])=={item['id'] for item in endpoints},
+            'exact_enrolled_inventory_required')
     nodes={};physical={}
     for endpoint in endpoints:
         require(set(endpoint)=={'id','url'},'closed_node_endpoint_required')
