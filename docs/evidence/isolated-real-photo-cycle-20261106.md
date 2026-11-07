@@ -28,6 +28,10 @@ cleanup. The source files were not changed.
   `retry_wait` because the isolated engine was intentionally stopped; completion
   was checked in persistent state. Both cleanup hooks were disabled, and the
   worker archive and Viewer copy remained present.
+- A bounded read-only visual inspection found a recognizable orthophoto mosaic
+  (2,529 by 1,213 pixels, about 0.05 m pixel scale) and a GLB model in the
+  ingested assets. The overview showed no obvious gross mosaic failure; this is
+  not a survey-accuracy, complete-coverage, or 3D-appearance assessment.
 
 The original worker and engine results, test data and backups are retained in
 the task-owned `ltds-real-engine-*` volumes on the staging PC. The test used
