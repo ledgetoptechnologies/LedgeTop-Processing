@@ -18,13 +18,24 @@ extension metadata. Tokens are supplied privately through `LOCAL_NODE_TOKEN` and
 environment proxies are refused.
 
 The response contains each node's options, engine/API versions and hashes. Its
-`commonOptions` includes only definitions present and exactly equal on every
-configured node. Different defaults/help/types/domains are reported as conflicts;
-flags present on only one node stay in that node's catalog. An unavailable or
-malformed configured node closes the shared catalog rather than serving stale
-data. An unconfigured role is reported separately and does not restrict an
-otherwise valid single-node catalog. This conservative intersection can be
-smaller than the set of flags usable when a future job is pinned to one node.
+`commonOptions` includes definitions present on every configured node whose
+execution metadata is compatible. Different defaults, types, domains or other
+metadata remain conflicts; a help-text wording difference alone does not hide a
+shared option. Flags present on only one node stay in that node's catalog. An
+unavailable or malformed configured node closes the shared catalog rather than
+serving stale data. An unconfigured role is reported separately and does not
+restrict an otherwise valid single-node catalog. This conservative intersection
+can be smaller than the set of flags usable when a future job is pinned to one
+node.
+
+Live option check on November 7 found that both current nodes advertise
+`fast-orthophoto` as `bool` with the same default and domain, but with different
+help text. The installed image still reports it as conflicting because its
+comparison includes help. The current source change compares all other metadata
+exactly and ignores only help; tests cover both help-only compatibility and a
+type mismatch. This refinement is not yet installed. It prevents Viewer presets
+from silently losing a shared engine option only because the two versions use
+different descriptions.
 
 The reference-runtime candidate now admits typed booleans/numbers, bounded string
 enums and free-text strings up to 4,000 characters. It validates current choice
