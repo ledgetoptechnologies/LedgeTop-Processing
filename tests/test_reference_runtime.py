@@ -114,6 +114,35 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.assertNotIn(REFERENCE_PROFILE, handler.prototype_queue.allowed_profiles)
         self.assertIn(VIEWER_PROFILE, handler.prototype_queue.allowed_profiles)
 
+    def test_reference_profile_moves_nodeodm_routes_off_the_plaintext_listener(self):
+        config = replace(self.config, reference_config_path=str(self.path))
+        captured = []
+
+        class ReferenceStub:
+            def __init__(self, _queue, _config, _settings, *, viewer_facade=None):
+                self.viewer_facade = viewer_facade
+                captured.append(viewer_facade)
+
+        with patch('processing.reference_runtime.ReferenceRuntime', ReferenceStub):
+            handler = make_handler(config)
+        self.addCleanup(handler.viewer_service.close)
+        self.addCleanup(handler.prototype_queue.close)
+        self.assertEqual(len(captured), 1)
+        self.assertIsNotNone(captured[0])
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(2)))
+        connection = http.client.HTTPConnection(*server.server_address, timeout=2)
+        try:
+            connection.request('GET', '/info?token=' + config.viewer_token)
+            response = connection.getresponse()
+            self.assertEqual(response.status, 404)
+            self.assertEqual(json.loads(response.read()), {'error': 'not_found'})
+        finally:
+            connection.close()
+
     def recovery_config(self,authority='11111111-1111-4111-8111-111111111111'):
         value=copy.deepcopy(self.value);value['schemaVersion']=2
         value['recoveryBindings']={node:dict(engineId='physical-'+node,authorityId=authority,

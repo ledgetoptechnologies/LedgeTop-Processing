@@ -343,10 +343,12 @@ class _DynamicAPI:
 
 
 class ReferenceRuntime:
-    def __init__(self, queue, config, settings, *, discover=None, server_factory=None):
+    def __init__(self, queue, config, settings, *, discover=None, server_factory=None,
+                 viewer_facade=None):
         """Construct services around the existing authority; never create a Queue."""
         self.queue, self.config, self.settings = queue, config, settings
         self._server_factory = server_factory or create_reference_http_server
+        self._viewer_facade = viewer_facade
         self._server, self._thread = None, None
         try:
             recovery=settings.recovery_bindings
@@ -400,7 +402,8 @@ class ReferenceRuntime:
         if self._server is not None:
             return
         listener = self.settings.listener
-        server = self._server_factory(self.api, listener["host"], listener["port"], ssl_context=self._server_context)
+        server = self._server_factory(self.api, listener["host"], listener["port"],
+            ssl_context=self._server_context, viewer_facade=self._viewer_facade)
         # Join active requests before releasing the shared queue's authority lock.
         server.daemon_threads, server.block_on_close = False, True
         thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1},

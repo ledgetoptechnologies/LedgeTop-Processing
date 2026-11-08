@@ -1,20 +1,30 @@
 """Real HTTP and byte-boundary tests for the native Viewer transport."""
 
 import io
+import ipaddress
 import json
+import ssl
 from pathlib import Path
 from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+
 from processing.maintenance import Conflict
 from processing.viewer_http import ViewerFacade, CHUNK, MAX_FORM_BYTES
+from processing.reference_api import Response
+from processing.reference_http import create_reference_http_server
 
 
 TOKEN = 'native-viewer-test-token-1234567890123456'
@@ -352,6 +362,92 @@ class ViewerHTTPTests(unittest.TestCase):
         self.assertFalse(self.service.uploads)
         self.assertEqual(len(self.service.calls), 1)
         self.assertEqual(self.request('/task/' + IDENTIFIER + '/info')[1]['uuid'], IDENTIFIER)
+
+
+class ViewerTLSFacadeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.certdir = tempfile.TemporaryDirectory()
+        root = Path(cls.certdir.name)
+        cls.cert, cls.key = root / 'cert.pem', root / 'key.pem'
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, '127.0.0.1')])
+        now = datetime.now(timezone.utc)
+        certificate = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address('127.0.0.1'))]),
+                           critical=False)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256()))
+        cls.key.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
+        cls.cert.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.certdir.cleanup()
+
+    def setUp(self):
+        self.spool = tempfile.TemporaryDirectory()
+        self.service = Service()
+        self.facade = ViewerFacade(self.service, TOKEN, STAGING, temp_dir=self.spool.name)
+
+        class ReferenceAPI:
+            def handle(_self, method, path, *_args, **_kwargs):
+                return Response(200, {'route': path})
+
+        server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_context.load_cert_chain(str(self.cert), str(self.key))
+        self.server = create_reference_http_server(ReferenceAPI(), host='127.0.0.1', port=0,
+            ssl_context=server_context, viewer_facade=self.facade)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        trust = ssl.create_default_context(cafile=str(self.cert))
+        import urllib.request
+        self.opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=trust))
+        self.origin = 'https://127.0.0.1:' + str(self.server.server_port)
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
+        self.spool.cleanup()
+
+    def request(self, path, data=None, *, headers=None, method=None, token=TOKEN):
+        target = self.origin + path + (('?token=' + token) if token is not None else '')
+        request = Request(target, data=data,
+            headers=headers or {}, method=method)
+        with self.opener.open(request, timeout=4) as response:
+            raw = response.read()
+            return response.status, json.loads(raw) if 'json' in response.headers.get('Content-Type', '') else raw
+
+    def test_tls_facade_handles_nodeodm_lifecycle_and_keeps_reference_routes(self):
+        self.assertEqual(self.request('/info')[1]['engine'], 'ledgetop-processing')
+        self.assertEqual(self.request('/options')[0], 200)
+        initialized = self.request('/task/new/init', multipart([
+            ('name', None, b'tls synthetic'), ('options', None, b'[]')]),
+            headers={'Content-Type': 'multipart/form-data; boundary=' + BOUNDARY,
+                     'set-uuid': IDENTIFIER})
+        self.assertEqual(initialized, (200, {'uuid': IDENTIFIER}))
+        uploaded = self.request('/task/new/upload/' + IDENTIFIER,
+            multipart([('images', 'synthetic.jpg', b'synthetic image bytes')]),
+            headers={'Content-Type': 'multipart/form-data; boundary=' + BOUNDARY})
+        self.assertEqual(uploaded, (200, {'success': True}))
+        self.assertEqual(self.service.uploads[IDENTIFIER]['synthetic.jpg'], b'synthetic image bytes')
+        committed = self.request('/task/new/commit/' + IDENTIFIER, b'', method='POST')
+        self.assertEqual(committed, (200, {'uuid': IDENTIFIER}))
+        self.assertEqual(self.service.calls[0][-1], 'production')
+        self.assertEqual(self.request('/ltds/v1/capabilities', token=None)[1],
+                         {'route': '/ltds/v1/capabilities'})
+
+    def test_tls_facade_rejects_invalid_query_and_plaintext_configuration(self):
+        request = Request(self.origin + '/info?token=' + TOKEN + '&extra=1')
+        with self.assertRaises(HTTPError) as caught:
+            self.opener.open(request, timeout=4)
+        self.assertEqual(caught.exception.code, 400)
+        with self.assertRaises(ValueError):
+            create_reference_http_server(object(), viewer_facade=self.facade)
 
 
 if __name__ == '__main__':
