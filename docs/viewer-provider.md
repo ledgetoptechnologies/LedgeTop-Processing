@@ -61,16 +61,20 @@ stops serving those NodeODM routes while the TLS runtime is active; its health
 and operator APIs remain available. `/ltds/v1` continues to use its existing
 Bearer-authenticated contract. The focused patch is commit `2a0f27e7`, based
 directly on installed source `7b996000`; its equivalent diff on this stacked
-branch has the same patch ID. It passed 55 focused tests (4 skipped) and built
-locally as digest
-`sha256:1b17a171d1c34be39ec61369c3e83c8344920e5a38b767f40c56e8dee1844a8b`.
-It is not installed or published. The real-Compose maintenance smoke passed
-against this local image as its fixture base: drain blocked new claims, active
-work delayed the update, healthy replacement reopened admission, failed health
-restored the prior pinned image, an unrelated sibling and persistent-volume
-marker stayed intact, and temporary resources were removed. This is synthetic
-update/rollback evidence, not a live cluster rollback or real-engine job. See
-the [smoke receipt](evidence/maintenance-smoke-tls-facade-20261108.json).
+branch has the same patch ID. PR #369 is stacked on the accepted-copy branch;
+its exact source head at the November 8 checkpoint was
+`f4f8570cccd422c9623332117210f031eae43c2e`. That source passed 227 local tests
+across the queue/recovery, Viewer API, reference runtime and option suites, and
+passed an image startup/health smoke on cluster `.89`. The exact image
+`sha256:5275ef11703485fb4072775ebf3d45ad5a892424dfb3d1f4490c60ba10e1d2c4` is
+preloaded there but is not serving traffic. The live coordinator remains on
+`sha256:6f648732647e7c1dc74f8b74b71a41714640bfda39548cda70c415df5b43e505`.
+The disposable Compose maintenance smoke also passed against a synthetic
+NodeODX fixture: drain blocked new claims, active work delayed the update,
+healthy replacement reopened admission, failed health restored the prior
+pinned image, and unrelated sibling/state fixtures were preserved. These are
+synthetic checks, not a live cluster rollback or real-engine job. See the
+[smoke receipt](evidence/maintenance-smoke-tls-facade-20261108.json).
 
 Register the HTTPS listener's exact origin, typically
 `https://<certificate-hostname>:18443`, only after the certificate SAN matches
@@ -90,6 +94,43 @@ plaintext port. The existing NodeODM provider protocol transmits its saved
 credential in a query parameter, so use it only over HTTPS; this listener
 suppresses request and error logging. If a reverse proxy is added later, it
 must also omit query strings from access logs.
+
+#### Existing-cluster cutover and rollback
+
+The November 8 cluster installation uses the existing Compose project
+`photo-queue-7b996000`, working directory
+`/home/bkoltz/.local/share/ledgetop-processing/photo-queue-7b996000`, file
+`compose.viewer.yaml`, and project `.env`. The coordinator's `PROCESSING_IMAGE`
+value is its immutable image pin. The PR #369 candidate image above is already
+preloaded on that host; no second coordinator or state volume is needed.
+
+Immediately before cutover, verify the coordinator has no queued, running or
+held work; both physical worker slots and engine locks are idle; and Viewer has
+no active task, upload or result transfer. Capture the current container/image
+ID, exact `PROCESSING_IMAGE` value, mounts, ports and project configuration for
+rollback without printing other environment values. If any check is uncertain,
+defer replacement and leave the current service running.
+
+Change only `PROCESSING_IMAGE` in the existing project `.env` to the reviewed
+candidate image ID, then recreate only the existing `coordinator` service with
+the same Compose project, file, env file and working directory. Do not run
+`compose down`, create a new project/state volume, or change the lease, TLS,
+network or port settings. Verify the recreated existing service has the exact
+candidate image ID, is healthy, and retains the existing volume, writable lease,
+read-only TLS mount, bridge network and ports. Verify the protected NodeODM
+capability routes over HTTPS with normal CA validation and confirm the plaintext
+NodeODM credential route is rejected before switching the existing Viewer
+provider.
+
+For rollback before Viewer cutover or any accepted work, restore the captured
+old immutable `PROCESSING_IMAGE` value in the same `.env` and recreate that
+same service with the same Compose project and mounts. Verify its prior digest
+and health; do not roll back or replace the persistent state volume. After
+Viewer cutover or any accepted task, stop new admission and reconcile the exact
+task and transfer state before changing the image. Never delete input or result
+data during rollback. The currently preloaded candidate has passed its
+isolated startup check only; no live service replacement or rollback has yet
+been performed.
 
 Primary Viewer credentials label jobs production. A separate optional
 `PROCESSING_VIEWER_STAGING_TOKEN` labels jobs staging. Names are never used to
