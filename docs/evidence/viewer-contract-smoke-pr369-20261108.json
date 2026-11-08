@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "verifiedAt": "2026-11-08T15:11:08Z",
+  "kind": "synthetic-viewer-adapter-contract",
+  "processingRepository": "LedgeTop-Processing",
+  "processingPullRequest": 369,
+  "processingHead": "6ca7d798c706e900d7880e7156802550285afb60",
+  "processingRuntimeSourceHead": "f4f8570cccd422c9623332117210f031eae43c2e",
+  "processingImageId": "sha256:5275ef11703485fb4072775ebf3d45ad5a892424dfb3d1f4490c60ba10e1d2c4",
+  "viewerAdapterCommit": "1342c54d05d540311b093d6503697abaead46ea0",
+  "viewerAdapterSha256": "0024b45b83997ce0329aff195d10aca0b74bf54b0cc1d3fb16ccdec7c2992f8f",
+  "harness": {
+    "source": "scripts/viewer_contract_smoke.py",
+    "executionCopyChanges": [
+      "bound synthetic HTTP listeners to the WSL private interface so Windows Node could reach them",
+      "included child stderr in early-exit diagnostics"
+    ],
+    "assertionsChanged": false
+  },
+  "result": {
+    "passed": true,
+    "syntheticOnly": true,
+    "uploads": 62,
+    "completed": 3,
+    "cancelled": 1,
+    "executionOrder": [
+      "production-small",
+      "production-large",
+      "staging-small"
+    ],
+    "smallNodeFirst": true,
+    "globalTreeDarExclusion": true,
+    "stagingIsolation": true,
+    "repeatedCommit": "idempotent",
+    "outputCursorPreserved": true,
+    "repeatedDownloadSha256": "86180b44bfe34c66ae936cb1cd22ccb0ef0472854baa38a6f33b88ab1c1db74c",
+    "localEngineCommits": 2,
+    "mainEngineCommits": 1,
+    "realViewerIngestionValidated": false
+  },
+  "scope": {
+    "realPhotogrammetryRun": false,
+    "viewerDatabaseChanged": false,
+    "clientDataUsed": false,
+    "temporaryFilesRemoved": true,
+    "doesNotProve": [
+      "real-engine image/model output validity",
+      "installed Viewer workspace submission",
+      "viewer-worker or coordinator outage recovery",
+      "large-dataset capacity"
+    ]
+  }
+}

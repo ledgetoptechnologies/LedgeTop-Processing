@@ -191,6 +191,14 @@ exclusion, production order, small/main routing, cancellation, duplicate commit,
 output cursors, environment authorization, download/hash equality and retained
 results.
 
+The November 8 run against Viewer commit
+`1342c54d05d540311b093d6503697abaead46ea0` passed; see the [synthetic adapter
+receipt](evidence/viewer-contract-smoke-pr369-20261108.json). To bridge Windows
+Node 24 and WSL Python, its temporary execution copy changed only the synthetic
+listener bind address to WSL's private interface and surfaced child stderr; the
+assertions were unchanged. This test exercised the current Viewer adapter and
+Processing source, not the preloaded container image or a real engine.
+
 Synthetic engine doubles are opt-in and never perform photogrammetry. Their ZIPs
 are explicitly labelled transport fixtures. Passing these checks does not prove
 valid ODM geometry, final Viewer EPT/model ingestion, real-data throughput,
