@@ -64,7 +64,13 @@ directly on installed source `7b996000`; its equivalent diff on this stacked
 branch has the same patch ID. It passed 55 focused tests (4 skipped) and built
 locally as digest
 `sha256:1b17a171d1c34be39ec61369c3e83c8344920e5a38b767f40c56e8dee1844a8b`.
-It is not installed or published.
+It is not installed or published. The real-Compose maintenance smoke passed
+against this local image as its fixture base: drain blocked new claims, active
+work delayed the update, healthy replacement reopened admission, failed health
+restored the prior pinned image, an unrelated sibling and persistent-volume
+marker stayed intact, and temporary resources were removed. This is synthetic
+update/rollback evidence, not a live cluster rollback or real-engine job. See
+the [smoke receipt](evidence/maintenance-smoke-tls-facade-20261108.json).
 
 Register the HTTPS listener's exact origin, typically
 `https://<certificate-hostname>:18443`, only after the certificate SAN matches

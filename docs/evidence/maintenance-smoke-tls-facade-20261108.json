@@ -1,0 +1,36 @@
+{
+  "scope": "disposable NodeODX API fixture; no real engine processing",
+  "images": {
+    "old": "sha256:7dc72d696bb8f26fa9ba4799ee66512a3c9f8edcff115349203cd3f4a9d9ba0a",
+    "new": "sha256:e97639802152fb3c7af9c088e6c2b7bbf0e0129f808355b5c4cf44b270dfbc23",
+    "bad": "sha256:90af80f609cb7a1e67f22766f300e77fd1b7f3626f90bcdf8ccbfc77434df75c"
+  },
+  "drainBlockedClaim": true,
+  "busyJobDelayedUpdate": true,
+  "healthyUpdateResumedAdmission": true,
+  "failedHealthRestoredPinnedImage": true,
+  "failedUpdateKeptNodeBlocked": true,
+  "unrelatedContainerUnchanged": true,
+  "persistentVolumeMarkerPreserved": true,
+  "success": {
+    "status": "succeeded",
+    "nodeId": "cluster",
+    "healthy": true,
+    "image": "sha256:e97639802152fb3c7af9c088e6c2b7bbf0e0129f808355b5c4cf44b270dfbc23",
+    "previousImage": "sha256:7dc72d696bb8f26fa9ba4799ee66512a3c9f8edcff115349203cd3f4a9d9ba0a",
+    "composePinUpdateRequired": true
+  },
+  "failure": {
+    "status": "failed",
+    "nodeId": "cluster",
+    "healthy": false,
+    "rollbackHealthy": true,
+    "restoredImage": "sha256:e97639802152fb3c7af9c088e6c2b7bbf0e0129f808355b5c4cf44b270dfbc23"
+  },
+  "preexistingBaseImageRetained": true,
+  "retainedBaseTag": null,
+  "testResourcesRemoved": true,
+  "candidateImage": "sha256:1b17a171d1c34be39ec61369c3e83c8344920e5a38b767f40c56e8dee1844a8b",
+  "candidateSourceCommit": "2a0f27e7",
+  "fixtureBaseMethod": "Disposable copy of scripts/maintenance_smoke.py with BASE pinned to the local candidate image; source helper unchanged."
+}
