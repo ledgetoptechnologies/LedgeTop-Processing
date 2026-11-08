@@ -27,7 +27,8 @@ def _protected(connection):
     return _loopback(connection.getsockname()[0]) and _loopback(connection.getpeername()[0])
 
 
-def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=None, request_timeout=10):
+def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=None,
+                                request_timeout=10, viewer_facade=None):
     """Create a listener; caller must explicitly call serve_forever().
 
     Plaintext LAN/wildcard binding is forbidden. TLS is supplied by a real
@@ -41,6 +42,8 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
         raise ValueError("TLS requires a server SSLContext")
     if ssl_context is not None and ssl_context.protocol == ssl.PROTOCOL_TLS_CLIENT:
         raise ValueError("TLS requires a server SSLContext")
+    if viewer_facade is not None and ssl_context is None:
+        raise ValueError("Viewer NodeODM routes require TLS")
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     # Check before creating a socket, including hostname resolution. The actual
     # bound address is checked again below to avoid trusting a name alone.
@@ -161,6 +164,19 @@ def create_reference_http_server(api, host="127.0.0.1", port=0, *, ssl_context=N
             return False
 
         def _dispatch(self):
+            # The existing Viewer NodeODM adapter authenticates with a query
+            # token and streams multipart uploads directly from rfile. Route
+            # those requests before parsing/reference-body buffering, but only
+            # on the TLS listener. ViewerFacade validates query parameters,
+            # multipart framing and per-file byte limits without logging URLs.
+            if viewer_facade is not None and isinstance(self.connection, ssl.SSLSocket):
+                try:
+                    viewer_path = self.path.split("?", 1)[0].split("#", 1)[0]
+                except Exception:
+                    viewer_path = ""
+                if (viewer_path in ("/info", "/options") or viewer_path.startswith("/task/")):
+                    if viewer_facade.handle(self):
+                        return
             if "?" in self.path or "#" in self.path:
                 self._error(400, "invalid_request_target")
                 return

@@ -35,10 +35,31 @@ The native facade is opt-in through `PROCESSING_VIEWER_ENABLED=1`.
 Viewer registration uses an exact origin with no path or query. Add the origin
 to the Viewer's existing processing-provider allowlist if necessary; use its
 normal credential UI to enter the private `PROCESSING_VIEWER_TOKEN`. Do not put
-the token in URLs, notes, source files or chat. The detected type is `nodeodm`.
+the token in manually constructed URLs, notes, source files or chat. The
+detected type is `nodeodm`.
 Set provider **admissionLimit to 4** for a queued trial: the default1 would keep
 later jobs waiting inside Viewer rather than testing the orchestrator queue.
 This is only Viewer admission; it does not change the per-node execution slots.
+
+### Protected NodeODM origin (candidate source change; not installed)
+
+When the explicit `PROCESSING_REFERENCE_CONFIG` TLS runtime is enabled, the
+candidate also serves the same NodeODM `/info`, `/options` and `/task/...`
+routes on the protected reference listener. This lets the existing Viewer
+provider use its native protocol over HTTPS without changing its API. The
+plaintext listener stops serving those NodeODM routes while the TLS runtime is
+active; its health and operator APIs remain available. `/ltds/v1` continues to
+use its existing Bearer-authenticated contract.
+
+Register the HTTPS listener's exact origin, typically
+`https://<certificate-hostname>:18443`, only after the certificate SAN matches
+that hostname and the Viewer Node process trusts its issuing CA. Keep normal
+certificate validation enabled. Do not point the NodeODM provider at the
+`/ltds/v1` path, disable TLS verification, or place a NodeODM token on the
+plaintext port. The existing NodeODM provider protocol transmits its saved
+credential in a query parameter, so use it only over HTTPS; this listener
+suppresses request and error logging. If a reverse proxy is added later, it
+must also omit query strings from access logs.
 
 Primary Viewer credentials label jobs production. A separate optional
 `PROCESSING_VIEWER_STAGING_TOKEN` labels jobs staging. Names are never used to

@@ -39,13 +39,17 @@ def make_handler(config: Config):
     if reference_settings is not None:
         from .reference_runtime import ReferenceRuntime
         try:
-            reference_runtime = ReferenceRuntime(queue, config, reference_settings)
+            reference_runtime = ReferenceRuntime(queue, config, reference_settings,
+                viewer_facade=facade)
         except Exception:
             if service:
                 service.close()
             if queue:
                 queue.close()
             raise
+    # Once the protected listener is enabled, never serve NodeODM's query-token
+    # routes on the ordinary HTTP port. Keep that port for health/operator APIs.
+    native_viewer_facade = facade if reference_runtime is None else None
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "LedgeTopProcessing/0.1"
@@ -91,7 +95,7 @@ def make_handler(config: Config):
                     probe_node("main", config.main_node_url, config.main_node_token))
 
         def do_GET(self):
-            if facade and facade.handle(self):
+            if native_viewer_facade and native_viewer_facade.handle(self):
                 return
             if self.path.startswith("/v1/prototype/"):
                 prefix='/v1/prototype/nodes/'
@@ -155,7 +159,7 @@ def make_handler(config: Config):
                 self._reply(404, {"error": "not_found"})
 
         def do_POST(self):
-            if facade and facade.handle(self):
+            if native_viewer_facade and native_viewer_facade.handle(self):
                 return
             prototype = self.path.startswith("/v1/prototype/")
             if self.path != "/v1/plan" and not prototype:
