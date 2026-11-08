@@ -21,7 +21,7 @@ import zipfile
 from .config import ProcessingNode
 from .maintenance import Conflict
 from .odx_smoke_worker import Client, SmokeError
-from .options import discover_node, _NoRedirect
+from .options import discover_node, _NoRedirect, _compatibility_signature
 from .prototype import VIEWER_PROFILE
 from .provider import probe_node
 from .viewer_tasks import TaskStore, sync_directory
@@ -147,8 +147,8 @@ class ViewerService:
                    for node in available}
         common = set.intersection(*(set(value) for value in by_node.values())) if by_node else set()
         safe = [by_node[available[0]['nodeId']][name] for name in sorted(common)
-                if len({json.dumps(by_node[node['nodeId']][name], sort_keys=True,
-                                   separators=(',', ':'), allow_nan=False)
+                if len({json.dumps(_compatibility_signature(by_node[node['nodeId']][name]),
+                                   sort_keys=True, separators=(',', ':'), allow_nan=False)
                         for node in available}) == 1]
         # An unavailable node contributes no stale options. The remaining live
         # nodes can still accept and queue work; dispatch rechecks the selected

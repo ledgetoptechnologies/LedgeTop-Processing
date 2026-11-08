@@ -37,6 +37,13 @@ type mismatch. This refinement is not yet installed. It prevents Viewer presets
 from silently losing a shared engine option only because the two versions use
 different descriptions.
 
+The native Viewer `/options` facade builds its own catalog for job admission;
+it must apply the same compatibility signature as `/v1/options`. Otherwise a
+flag such as `fast-orthophoto` can be omitted from the capabilities stored by
+Viewer, and a valid Quick Preview submission is rejected before a task is
+created. The native-facade regression test covers help-only differences while
+still rejecting changes to execution metadata such as an enum domain.
+
 The reference-runtime candidate now admits typed booleans/numbers, bounded string
 enums and free-text strings up to 4,000 characters. It validates current choice
 arrays and recognized numeric bounds against the fresh definitions before queue
