@@ -19,20 +19,16 @@ running task. FIFO is maintained among eligible work.
 
 ## Operator setup
 
-Last read-only host check, November 7: cluster `.89` had an older healthy
-`ledgetop-processing-prototype` container; the reference-worker systemd unit
-was inactive on both `.89` and main `.88`. Main NodeODM was running. Before this
-staging step, the current photo-queue candidate was not running on either PC.
-October 27 provider
-deployment details and receipts below are historical evidence for an earlier
-build, not acceptance evidence for the current candidate. The exact candidate
-image for source commit `7b996000` is now staged in the cluster Docker image
-cache as `sha256:6f648732647e7c1dc74f8b74b71a41714640bfda39548cda70c415df5b43e505`.
-The running coordinator remains on its previous image; no container replacement
-or job submission occurred. The staged image's one-shot read-only probe passed
-authenticated `/info` and `/options` checks against both configured engines.
-Keep NodeODM behind its private ingress; do not expose the Docker daemon or
-engine ports to Viewer.
+Last read-only host check, November 8: cluster coordinator `.89` is running and
+healthy at image digest
+`sha256:6f648732647e7c1dc74f8b74b71a41714640bfda39548cda70c415df5b43e505`
+(source revision `7b996000`); main NodeODX is recorded at digest
+`sha256:b9d9a1a4603db9f092b790a6e58586fcf944758b7ca1149daefb2bd55dc6bdde`.
+The Hub acceptance checkpoint records real 20-photo Viewer-API jobs on both
+physical nodes, queued dispatch, retained inputs/results and coordinator
+restart recovery. This is API-path acceptance, not a Viewer-workspace
+submission. Automatic cleanup remains disabled. Keep NodeODM behind its private
+ingress; do not expose the Docker daemon or engine ports to Viewer.
 
 Use the cluster's single existing coordinator and state volume. Never start a
 second real dispatcher for staging. `compose.viewer.yaml` requires the existing
@@ -55,21 +51,35 @@ Set provider **admissionLimit to 4** for a queued trial: the default1 would keep
 later jobs waiting inside Viewer rather than testing the orchestrator queue.
 This is only Viewer admission; it does not change the per-node execution slots.
 
-### Protected NodeODM origin (candidate source change; not installed)
+### Protected NodeODM origin (TLS candidate; not installed)
 
 When the explicit `PROCESSING_REFERENCE_CONFIG` TLS runtime is enabled, the
-candidate also serves the same NodeODM `/info`, `/options` and `/task/...`
-routes on the protected reference listener. This lets the existing Viewer
-provider use its native protocol over HTTPS without changing its API. The
-plaintext listener stops serving those NodeODM routes while the TLS runtime is
-active; its health and operator APIs remain available. `/ltds/v1` continues to
-use its existing Bearer-authenticated contract.
+candidate serves the same NodeODM `/info`, `/options` and `/task/...` routes on
+the protected reference listener. This lets the existing Viewer provider use
+its native protocol over HTTPS without changing its API. The plaintext listener
+stops serving those NodeODM routes while the TLS runtime is active; its health
+and operator APIs remain available. `/ltds/v1` continues to use its existing
+Bearer-authenticated contract. The focused patch is commit `2a0f27e7`, based
+directly on installed source `7b996000`; its equivalent diff on this stacked
+branch has the same patch ID. It passed 55 focused tests (4 skipped) and built
+locally as digest
+`sha256:1b17a171d1c34be39ec61369c3e83c8344920e5a38b767f40c56e8dee1844a8b`.
+It is not installed or published.
 
 Register the HTTPS listener's exact origin, typically
 `https://<certificate-hostname>:18443`, only after the certificate SAN matches
-that hostname and the Viewer Node process trusts its issuing CA. Keep normal
-certificate validation enabled. Do not point the NodeODM provider at the
-`/ltds/v1` path, disable TLS verification, or place a NodeODM token on the
+that hostname and the Viewer Node process trusts its issuing CA. Viewer uses
+Node's built-in `fetch`; a bounded Node 24 check with the coordinator CA supplied
+through `NODE_EXTRA_CA_CERTS` validated the existing `.89:18443` certificate
+without credentials (the protected route returned HTTP 401 as expected). For a
+Viewer cutover, mount the public coordinator `ca.crt` read-only in both Viewer
+API and worker containers, set `NODE_EXTRA_CA_CERTS` to that mount in both, and
+restart them only while no Viewer job is active. After the coordinator candidate
+is installed, change the existing provider origin to
+`https://192.168.50.89:18443` and verify its healthy capability read before
+submitting a task. Preserve the current coordinator image digest for rollback.
+Keep normal certificate validation enabled. Do not point the NodeODM provider at
+the `/ltds/v1` path, disable TLS verification, or place a NodeODM token on the
 plaintext port. The existing NodeODM provider protocol transmits its saved
 credential in a query parameter, so use it only over HTTPS; this listener
 suppresses request and error logging. If a reverse proxy is added later, it
