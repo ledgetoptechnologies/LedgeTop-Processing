@@ -41,7 +41,8 @@ class SharedTreeDarProjectProvenanceVectors(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / "contracts/treedar-project-provenance-vectors.json"
         raw = path.read_bytes()
         cls.fixture = json.loads(raw)
-        cls.fixture_sha256 = hashlib.sha256(raw).hexdigest()
+        # Match the shared fixture's canonical LF bytes across Windows checkouts.
+        cls.fixture_sha256 = hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
 
     def test_vectors_match_viewer_draft_source_revision(self):
         self.assertEqual(self.fixture_sha256,
