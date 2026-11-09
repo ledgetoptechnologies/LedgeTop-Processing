@@ -498,6 +498,39 @@ class TaskStore:
             raise ValueError('Viewer ingestion time must include a timezone')
         encoded = canonical(receipt)
         digest = hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+        with self._lock:
+            with self.queue._db() as db:
+                row = self._row(db, identifier)
+                if row['environment'] != environment:
+                    raise Conflict('Viewer delivery environment mismatch')
+                old = db.execute('''SELECT event_id,attempt_id,receipt_sha256 FROM viewer_delivery_acceptances
+                    WHERE uuid=? AND generation=?''', (identifier, row['generation'])).fetchone()
+                if old:
+                    if (old['event_id'], old['attempt_id'], old['receipt_sha256']) != (
+                            receipt['eventId'], receipt['attemptId'], digest):
+                        raise Conflict('Viewer delivery receipt already differs')
+                    return {'accepted': True, 'replayed': True, 'eventId': receipt['eventId']}
+                task = self._task(db, row)
+                archive = Path(row['archive_path']) if row['archive_path'] else None
+                if (row['stage'] != 'succeeded' or row['phase'] != 'complete' or not task['job']
+                        or task['job']['status'] != 'succeeded' or archive is None
+                        or row['archive_sha256'] != receipt['archiveSha256']
+                        or archive.is_symlink() or not archive.is_file()):
+                    raise Conflict('Viewer delivery does not match a retained successful task')
+                directory = self._directory(row)
+                if archive.parent != directory or archive.resolve() != archive:
+                    raise Conflict('retained archive path is invalid')
+                generation = row['generation']
+                expected_archive_digest = row['archive_sha256']
+                archive_identity = archive.stat()
+
+        # Avoid holding the task lock or the queue's SQLite write lock while
+        # hashing a potentially large result. The commit below revalidates the
+        # captured task generation, path, and digest after this read-only pass.
+        actual_archive_digest = self._hash_retained_archive(archive, archive_identity)
+        if actual_archive_digest != expected_archive_digest:
+            raise Conflict('retained archive bytes differ from the downloaded result')
+
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, identifier)
@@ -510,25 +543,56 @@ class TaskStore:
                         receipt['eventId'], receipt['attemptId'], digest):
                     raise Conflict('Viewer delivery receipt already differs')
                 return {'accepted': True, 'replayed': True, 'eventId': receipt['eventId']}
+            task = self._task(db, row)
+            current_archive = Path(row['archive_path']) if row['archive_path'] else None
+            if (row['generation'] != generation or row['stage'] != 'succeeded'
+                    or row['phase'] != 'complete' or not task['job']
+                    or task['job']['status'] != 'succeeded'
+                    or current_archive != archive
+                    or row['archive_sha256'] != expected_archive_digest):
+                raise Conflict('Viewer delivery changed while validating retained result')
             duplicate = db.execute('''SELECT uuid,generation FROM viewer_delivery_acceptances
                 WHERE event_id=? OR attempt_id=?''', (receipt['eventId'], receipt['attemptId'])).fetchone()
             if duplicate:
                 raise Conflict('Viewer delivery identity already belongs to another task')
-            task = self._task(db, row)
-            archive = Path(row['archive_path']) if row['archive_path'] else None
-            if (row['stage'] != 'succeeded' or row['phase'] != 'complete' or not task['job']
-                    or task['job']['status'] != 'succeeded' or archive is None
-                    or row['archive_sha256'] != receipt['archiveSha256']
-                    or archive.is_symlink() or not archive.is_file()):
-                raise Conflict('Viewer delivery does not match a retained successful task')
-            directory = self._directory(row)
-            if archive.parent != directory or archive.resolve() != archive:
-                raise Conflict('retained archive path is invalid')
             db.execute('''INSERT INTO viewer_delivery_acceptances
                 (uuid,generation,event_id,attempt_id,receipt_sha256,receipt_json)
                 VALUES(?,?,?,?,?,?)''', (identifier, row['generation'], receipt['eventId'],
                     receipt['attemptId'], digest, encoded))
             return {'accepted': True, 'replayed': False, 'eventId': receipt['eventId']}
+
+    @staticmethod
+    def _hash_retained_archive(path, expected_stat):
+        descriptor = None
+        try:
+            flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
+            descriptor = os.open(path, flags)
+            opened = os.fstat(descriptor)
+            named = path.lstat()
+            if (not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(named.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+                    or (opened.st_dev, opened.st_ino, opened.st_size)
+                        != (expected_stat.st_dev, expected_stat.st_ino, expected_stat.st_size)):
+                raise Conflict('retained archive identity changed')
+            digest = hashlib.sha256()
+            with os.fdopen(descriptor, 'rb', closefd=False) as source:
+                while chunk := source.read(1024 ** 2):
+                    digest.update(chunk)
+            after = os.fstat(descriptor)
+            named_after = path.lstat()
+            identity = (opened.st_dev, opened.st_ino, opened.st_size,
+                        opened.st_mtime_ns)
+            if (identity != (after.st_dev, after.st_ino, after.st_size,
+                             after.st_mtime_ns)
+                    or identity != (named_after.st_dev, named_after.st_ino, named_after.st_size,
+                                    named_after.st_mtime_ns)):
+                raise Conflict('retained archive changed while validating')
+            return digest.hexdigest()
+        except OSError:
+            raise Conflict('retained archive is unavailable for verification') from None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
 
     def info(self, identifier):
         task = self.task(identifier)

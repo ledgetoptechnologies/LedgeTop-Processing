@@ -7,6 +7,7 @@ Viewer output ingestion. No network, Docker, real datasets or host writes.
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -762,6 +763,33 @@ class ViewerServiceTests(unittest.TestCase):
         changed = dict(receipt, archiveSha256='0' * 64)
         with self.assertRaises(Conflict):
             self.service.accept_viewer_delivery(identifier, 'staging', changed)
+
+    def test_viewer_acceptance_rehashes_retained_archive_before_first_ack(self):
+        identifier = self.submit(environment='staging')
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        stream, _ = self.service.download(identifier)
+        with stream as result:
+            result.read()
+        task = self.task(identifier)
+        expected = hashlib.sha256(self.engines['cluster'].archive).hexdigest()
+        with Path(task['archive_path']).open('r+b') as result:
+            first = result.read(1)
+            result.seek(0)
+            result.write(bytes([first[0] ^ 1]))
+            result.flush()
+            os.fsync(result.fileno())
+        receipt = dict(eventId='processing-ready-tampered-attempt-1',
+            providerTaskId=identifier, attemptId='attempt-tampered-1',
+            archiveSha256=expected, resultModelId='model-tampered',
+            resultModelVersionId='version-tampered', ingestedAt='2026-11-08T12:00:00Z')
+        with self.assertRaisesRegex(Conflict, 'retained archive bytes differ'):
+            self.service.accept_viewer_delivery(identifier, 'staging', receipt)
+        with self.service.store.queue._db() as db:
+            row = db.execute('SELECT 1 FROM viewer_delivery_acceptances WHERE uuid=?',
+                              (identifier,)).fetchone()
+        self.assertIsNone(row)
 
     def test_interrupted_archive_get_can_retry_without_new_execution(self):
         identifier = self.submit()
