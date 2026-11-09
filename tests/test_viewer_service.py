@@ -17,10 +17,12 @@ from unittest.mock import patch
 import uuid
 import zipfile
 
+from processing.config import ProcessingNode
 from processing.maintenance import Conflict
 from processing.odx_smoke_worker import SmokeError
 from processing.prototype import PROFILE, VIEWER_PROFILE, Queue
 from processing.viewer_service import EngineUnavailable, ViewerService
+from processing.viewer_tasks import TaskStore
 
 
 OPTIONS = [{'name': name, 'type': 'bool', 'value': False}
@@ -259,14 +261,131 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(self.service.info(identifier)['status']['code'], 20)
 
     def test_over_cluster_photo_ceiling_uses_main_and_never_cluster(self):
-        # A lowered synthetic threshold exercises the same boundary without
-        # fabricating 1,001 files on disk; the policy's 1,000 boundary is separate.
+        # A lowered synthetic threshold exercises scheduler dispatch without
+        # fabricating 1,001 files on disk; the exact configured ceiling is
+        # checked independently by test_cluster_photo_limit_boundary_is_1000.
         self.set_cluster_max_photos(2)
         identifier = self.submit(count=3)
         self.service.tick()
         self.assertEqual(self.task(identifier)['node_id'], 'main')
         self.assertEqual(self.engines['cluster'].calls, [])
         self.assertEqual(self.fleet.max_active, 1)
+
+    def test_cluster_photo_limit_boundary_is_1000(self):
+        node = next(node for node in self.service.nodes if node.node_id == 'cluster')
+        snapshot = {'ready': True, 'health': {'ready': True, 'taskQueueCount': 0,
+                                               'maxImages': 1000}, 'options': []}
+        base = {'input_bytes': 0, 'options': []}
+        self.assertTrue(self.service._can_run_on(
+            {**base, 'images_count': 1000}, node, snapshot, set()))
+        self.assertFalse(self.service._can_run_on(
+            {**base, 'images_count': 1001}, node, snapshot, set()))
+
+    def test_dynamic_third_node_dispatch_respects_order_and_its_photo_limit(self):
+        self.service.close()
+        self.queue.close()
+
+        config = SimpleNamespace(**vars(self.config))
+        config.prototype_state_dir = str(self.root / 'dynamic-three-node-state')
+        config.processing_nodes = (
+            ProcessingNode('cluster', 'http://synthetic-cluster.invalid:3000',
+                           'private-cluster', 1, 20 * 1024 ** 3),
+            ProcessingNode('main', 'http://synthetic-main.invalid:3000',
+                           'private-main'),
+            ProcessingNode('aux-3', 'http://synthetic-aux.invalid:3000',
+                           'private-aux', 3, 8 * 1024 ** 3),
+        )
+        self.config = config
+        self.engines = {node.node_id: FakeEngine(node.node_id, self.fleet)
+                        for node in config.processing_nodes}
+        self.busy = {'main': 1}
+        self.queue = Queue(self.root / 'dynamic-three-node-state', node_ids=('cluster', 'main', 'aux-3'),
+                           treedar_node_ids=('main',), viewer_enabled=True)
+
+        def dynamic_probe(role, origin, token):
+            node_id = {'local': 'cluster', 'main': 'main'}.get(role, role)
+            max_images = {'cluster': 1000, 'main': None, 'aux-3': 3}[node_id]
+            queued = self.busy.get(node_id, sum(name.startswith(node_id + ':')
+                                                for name in self.fleet.active))
+            return {'ready': node_id not in self.unavailable,
+                    'maxImages': max_images, 'taskQueueCount': queued}
+
+        self.service = ViewerService(self.queue, config, engines=self.engines, probe=dynamic_probe)
+
+        def discover(role, origin, token='', *, allow_dynamic=False):
+            self.assertTrue(allow_dynamic)
+            return {'role': role, 'available': True,
+                    'options': [dict(item) for item in OPTIONS]}
+
+        with patch('processing.viewer_service.discover_node', side_effect=discover) as discovery:
+            small = self.submit(count=2)
+            self.service.tick()
+            self.assertEqual(self.task(small)['node_id'], 'aux-3')
+            self.assertEqual(self.task(small)['phase'], 'processing')
+            discovery.assert_any_call('aux-3', 'http://synthetic-aux.invalid:3000',
+                                      'private-aux', allow_dynamic=True)
+
+            self.finish(small)
+            self.service.tick()
+            self.assertEqual(self.service.info(small)['status']['code'], 40)
+
+            too_large = self.submit(count=4)
+            self.service.tick()
+            self.assertIsNone(self.task(too_large)['node_id'])
+            self.assertEqual(self.task(too_large)['stage'], 'queued')
+            self.assertEqual(self.task(too_large)['phase'], 'waiting_node')
+            self.assertEqual(len([call for call in self.engines['aux-3'].calls
+                                  if call[0] == 'commit']), 1)
+            self.assertEqual(self.fleet.max_active, 1)
+
+    def test_dynamic_node_order_selects_first_of_multiple_eligible_nodes(self):
+        self.service.close()
+        self.queue.close()
+
+        config = SimpleNamespace(**vars(self.config))
+        config.prototype_state_dir = str(self.root / 'dynamic-order-state')
+        config.processing_nodes = (
+            ProcessingNode('aux-3', 'http://synthetic-aux.invalid:3000',
+                           'private-aux', 3, 8 * 1024 ** 3),
+            ProcessingNode('cluster', 'http://synthetic-cluster.invalid:3000',
+                           'private-cluster', 1000, 20 * 1024 ** 3),
+            ProcessingNode('main', 'http://synthetic-main.invalid:3000',
+                           'private-main'),
+        )
+        self.config = config
+        self.engines = {node.node_id: FakeEngine(node.node_id, self.fleet)
+                        for node in config.processing_nodes}
+        self.busy = {}
+        self.queue = Queue(self.root / 'dynamic-order-state',
+                           node_ids=('aux-3', 'cluster', 'main'),
+                           treedar_node_ids=('main',), viewer_enabled=True)
+
+        def dynamic_probe(role, origin, token):
+            node_id = {'local': 'cluster', 'main': 'main'}.get(role, role)
+            max_images = {'cluster': 1000, 'main': None, 'aux-3': 3}[node_id]
+            queued = self.busy.get(node_id, sum(name.startswith(node_id + ':')
+                                                for name in self.fleet.active))
+            return {'ready': node_id not in self.unavailable,
+                    'maxImages': max_images, 'taskQueueCount': queued}
+
+        self.service = ViewerService(self.queue, config, engines=self.engines,
+                                     probe=dynamic_probe)
+
+        def discover(role, origin, token='', *, allow_dynamic=False):
+            self.assertTrue(allow_dynamic)
+            return {'role': role, 'available': True,
+                    'options': [dict(item) for item in OPTIONS]}
+
+        with patch('processing.viewer_service.discover_node', side_effect=discover):
+            identifier = self.submit(count=2)
+            self.service.tick()
+            self.assertEqual(self.task(identifier)['node_id'], 'aux-3')
+            self.assertEqual(self.task(identifier)['phase'], 'processing')
+            self.assertEqual(len([call for call in self.engines['aux-3'].calls
+                                  if call[0] == 'commit']), 1)
+            self.assertEqual(self.engines['cluster'].calls, [])
+            self.assertEqual(self.engines['main'].calls, [])
+            self.assertEqual(self.fleet.max_active, 1)
 
     def test_priority_fifo_and_one_heavy_job_per_physical_node(self):
         staging = self.submit(environment='staging')
@@ -617,6 +736,32 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.remove(identifier)
         self.assertTrue(Path(task['archive_path']).is_file())
         self.assertTrue(Path(task['files'][0]['path']).is_file())
+
+    def test_viewer_acceptance_is_hash_bound_durable_and_idempotent(self):
+        identifier = self.submit(environment='staging')
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        stream, _ = self.service.download(identifier)
+        with stream as result:
+            result.read()
+        receipt = dict(eventId='processing-ready-attempt-1',
+            providerTaskId=identifier, attemptId='attempt-1',
+            archiveSha256=hashlib.sha256(self.engines['cluster'].archive).hexdigest(),
+            resultModelId='model-1', resultModelVersionId='version-1',
+            ingestedAt='2026-11-08T12:00:00Z')
+        first = self.service.accept_viewer_delivery(identifier, 'staging', receipt)
+        restarted_store = TaskStore(self.queue, self.service.store.root,
+            self.config.viewer_max_input_bytes)
+        second = restarted_store.accept_viewer_delivery(identifier, 'staging', receipt)
+        self.assertEqual(first, {'accepted': True, 'replayed': False, 'eventId': receipt['eventId']})
+        self.assertEqual(second, {'accepted': True, 'replayed': True, 'eventId': receipt['eventId']})
+        self.assertEqual(self.task(identifier)['archive_sha256'], receipt['archiveSha256'])
+        with self.assertRaises(Conflict):
+            self.service.accept_viewer_delivery(identifier, 'production', receipt)
+        changed = dict(receipt, archiveSha256='0' * 64)
+        with self.assertRaises(Conflict):
+            self.service.accept_viewer_delivery(identifier, 'staging', changed)
 
     def test_interrupted_archive_get_can_retry_without_new_execution(self):
         identifier = self.submit()

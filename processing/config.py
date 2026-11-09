@@ -37,6 +37,7 @@ class Config:
     viewer_enabled: bool = False
     viewer_token: str = field(default='', repr=False)
     viewer_staging_token: str = field(default='', repr=False)
+    viewer_tls_port: int | None = None
     viewer_max_input_bytes: int = 20 * 1024 ** 3
     viewer_max_archive_bytes: int = 100 * 1024 ** 3
     viewer_min_free_bytes: int = 20 * 1024 ** 3
@@ -103,6 +104,10 @@ def from_environment() -> Config:
         raise ValueError('PROCESSING_VIEWER_ENABLED must be 0 or 1')
     viewer_token = os.environ.get('PROCESSING_VIEWER_TOKEN', '')
     viewer_staging = os.environ.get('PROCESSING_VIEWER_STAGING_TOKEN', '')
+    viewer_tls_port = _optional_positive_int(os.environ.get('PROCESSING_VIEWER_TLS_PORT', ''),
+                                            'PROCESSING_VIEWER_TLS_PORT', 65535)
+    if viewer_tls_port is not None and (viewer != '1' or not os.environ.get('PROCESSING_REFERENCE_CONFIG')):
+        raise ValueError('Viewer TLS requires the enabled Viewer facade and configured reference TLS')
     if viewer == '1':
         if not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR') or not os.environ.get('LOCAL_NODE_URL'):
             raise ValueError('Viewer requires persistent state and the ordered cluster node')
@@ -165,6 +170,7 @@ def from_environment() -> Config:
         treedar_node_ids=treedar_node_ids,
         viewer_enabled=viewer == '1', viewer_token=viewer_token,
         viewer_staging_token=viewer_staging,
+        viewer_tls_port=viewer_tls_port,
         viewer_max_input_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_INPUT_BYTES', str(20 * 1024 ** 3)),
                                             'PROCESSING_VIEWER_MAX_INPUT_BYTES', 10 ** 15),
         viewer_max_archive_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', str(100 * 1024 ** 3)),

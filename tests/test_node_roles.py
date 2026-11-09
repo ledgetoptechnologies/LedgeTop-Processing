@@ -183,3 +183,13 @@ class NodeRoleConfigTests(unittest.TestCase):
             with self.subTest(order=order), self.environment(PROCESSING_NODE_ORDER=order, **base, **extra):
                 with self.assertRaises(ValueError):
                     from_environment()
+
+    def test_viewer_tls_listener_requires_reference_tls_configuration(self):
+        base = {'PROCESSING_VIEWER_ENABLED': '1', 'PROCESSING_PROTOTYPE_STATE_DIR': '/var/lib/processing',
+                'PROCESSING_VIEWER_TOKEN': 'v' * 32, 'LOCAL_NODE_URL': 'http://cluster.internal:3000',
+                'PROCESSING_VIEWER_TLS_PORT': '8444'}
+        with self.environment(**base):
+            with self.assertRaises(ValueError):
+                from_environment()
+        with self.environment(**base, PROCESSING_REFERENCE_CONFIG='/private/reference/runtime.json'):
+            self.assertEqual(from_environment().viewer_tls_port, 8444)

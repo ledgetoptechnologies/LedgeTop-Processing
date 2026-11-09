@@ -236,18 +236,38 @@ def make_handler(config: Config):
     return Handler
 
 
+def create_viewer_tls_server(handler, host, port):
+    """Create the HTTPS listener for the existing authenticated Viewer facade."""
+    runtime = getattr(handler, 'reference_listener', None)
+    context = getattr(runtime, '_server_context', None)
+    if runtime is None or context is None:
+        raise ValueError('Viewer TLS listener requires reference TLS configuration')
+    server = ThreadingHTTPServer((host, port), handler)
+    try:
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        server.viewer_tls = True
+        return server
+    except Exception:
+        server.server_close()
+        raise ValueError('Viewer TLS listener initialization failed') from None
+
+
 class CoordinatorService:
     """Supervise listeners and drain every queue consumer before unlocking state.
 
     Signals only set an Event. Shutdown runs outside serve_forever's thread;
     in-flight streams/mutations finish naturally, without timeout abandonment.
     """
-    def __init__(self, server, handler):
+    def __init__(self, server, handler, viewer_tls_server=None):
         self.server, self.handler = server, handler
+        self.viewer_tls_server = viewer_tls_server
         self.server.daemon_threads, self.server.block_on_close = False, True
+        if viewer_tls_server is not None:
+            viewer_tls_server.daemon_threads, viewer_tls_server.block_on_close = False, True
         self._lock = threading.Lock()
         self._state, self._reason = 'starting', None
         self._native_thread = None
+        self._viewer_tls_thread = None
         self._reference_server = self._reference_thread = None
         handler.lifecycle_service = self
 
@@ -261,12 +281,15 @@ class CoordinatorService:
         with self._lock:
             return dict(state=self._state, reason=self._reason,
                 nativeAlive=self._native_thread is not None and self._native_thread.is_alive(),
-                referenceAlive=reference is not None and self._reference_thread is not None and self._reference_thread.is_alive())
+                referenceAlive=reference is not None and self._reference_thread is not None and self._reference_thread.is_alive(),
+                viewerTlsAlive=self.viewer_tls_server is not None and self._viewer_tls_thread is not None
+                    and self._viewer_tls_thread.is_alive())
 
     def healthy(self):
         health = self.health()
         return (health['state'] == 'ready' and health['nativeAlive']
-                and (self.handler.reference_listener is None or health['referenceAlive']))
+                and (self.handler.reference_listener is None or health['referenceAlive'])
+                and (self.viewer_tls_server is None or health['viewerTlsAlive']))
 
     def _start_reference(self, stop):
         runtime = self.handler.reference_listener
@@ -298,6 +321,21 @@ class CoordinatorService:
             self._reference_thread = runtime._thread
         finally:
             runtime._server_factory = factory
+
+    def _start_viewer_tls(self, stop):
+        if self.viewer_tls_server is None:
+            return
+
+        def serve_viewer_tls():
+            try:
+                self.viewer_tls_server.serve_forever(poll_interval=0.1)
+                if not stop.is_set():
+                    self._failed('viewer_tls_listener_exited', stop)
+            except BaseException:
+                self._failed('viewer_tls_listener_failed', stop)
+
+        self._viewer_tls_thread = threading.Thread(target=serve_viewer_tls,
+            name='processing-viewer-https', daemon=False)
 
     def _close_server(self, server, thread, stop):
         if server is None:
@@ -337,6 +375,9 @@ class CoordinatorService:
             self._start_reference(stop)
             self._native_thread.start()
             native_started = True
+            self._start_viewer_tls(stop)
+            if self._viewer_tls_thread is not None:
+                self._viewer_tls_thread.start()
             with self._lock:
                 if self._state != 'failed':
                     self._state = 'ready'
@@ -346,6 +387,9 @@ class CoordinatorService:
                 if self.handler.reference_listener is not None and (
                         self._reference_thread is None or not self._reference_thread.is_alive()):
                     self._failed('reference_listener_exited', stop)
+                if self.viewer_tls_server is not None and (
+                        self._viewer_tls_thread is None or not self._viewer_tls_thread.is_alive()):
+                    self._failed('viewer_tls_listener_exited', stop)
         except BaseException:
             self._failed('coordinator_start_failed', stop)
         finally:
@@ -360,7 +404,8 @@ class CoordinatorService:
             # handlers. A slow native upload must not leave reference admission
             # open throughout the drain (or vice versa).
             for listener, thread in ((self.server, self._native_thread if native_started else None),
-                                     (self._reference_server, self._reference_thread)):
+                                     (self._reference_server, self._reference_thread),
+                                     (self.viewer_tls_server, self._viewer_tls_thread)):
                 if listener is not None and thread is not None and thread.is_alive():
                     try:
                         listener.shutdown()
@@ -374,6 +419,7 @@ class CoordinatorService:
                 except BaseException:
                     self._failed('reference_drain_failed', stop)
                 self._close_server(self._reference_server, self._reference_thread, stop)
+            self._close_server(self.viewer_tls_server, self._viewer_tls_thread, stop)
             if service is not None:
                 try:
                     service.close()
@@ -395,12 +441,20 @@ def main():
     config = from_environment()
     handler = make_handler(config)
     server = ThreadingHTTPServer((config.bind_host, config.port), handler)
+    try:
+        viewer_tls_server = (create_viewer_tls_server(handler, config.bind_host, config.viewer_tls_port)
+                             if config.viewer_tls_port is not None else None)
+    except Exception:
+        server.server_close()
+        raise
     stop = threading.Event()
     for name in ('SIGINT','SIGTERM'):
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), lambda *_args: stop.set())
     print(f"LedgeTop Processing listening on {config.bind_host}:{config.port}", flush=True)
-    service = CoordinatorService(server, handler)
+    if viewer_tls_server is not None:
+        print(f"LedgeTop Processing Viewer TLS listening on {config.bind_host}:{config.viewer_tls_port}", flush=True)
+    service = CoordinatorService(server, handler, viewer_tls_server)
     result = service.run(stop)
     if result:
         print('LedgeTop Processing unavailable: ' + service.health()['reason'], file=sys.stderr, flush=True)

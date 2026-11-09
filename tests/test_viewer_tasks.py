@@ -76,6 +76,24 @@ class ViewerTaskStoreTests(unittest.TestCase):
         self.assertEqual(self.store.task(self.identifier)['files'], [])
         self.assertFalse(list(Path(self.store.task(self.identifier)['directory']).glob('.incoming-*')))
 
+    def test_file_fsync_failure_does_not_accept_upload_and_retry_is_safe(self):
+        self.initialize()
+        data = b'upload bytes awaiting durable sync'
+        with patch('processing.viewer_tasks.os.fsync', side_effect=OSError('synthetic fsync failure')):
+            with self.assertRaises(OSError):
+                self.photo(data=data)
+
+        task = self.store.task(self.identifier)
+        self.assertEqual(task['files'], [])
+        directory = Path(task['directory'])
+        self.assertFalse(list(directory.glob('.incoming-*')))
+        self.assertFalse(list(directory.glob('input-*')))
+
+        self.photo(data=data)
+        task = self.store.task(self.identifier)
+        self.assertEqual(len(task['files']), 1)
+        self.assertEqual(Path(task['files'][0]['path']).read_bytes(), data)
+
     def test_input_ceiling_counts_task_bytes_and_duplicate_is_idempotent(self):
         self.store = TaskStore(self.queue, self.root / 'inputs', max_input_bytes=8)
         self.initialize()

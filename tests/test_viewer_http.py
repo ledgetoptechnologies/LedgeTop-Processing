@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -60,6 +61,10 @@ class Service:
     def options(self):
         return [{'name': 'pc-ept', 'type': 'bool', 'value': True}]
 
+    def accept_viewer_delivery(self, identifier, environment, receipt):
+        self.calls.append(('accept_viewer_delivery', identifier, environment, receipt))
+        return {'accepted': True, 'replayed': False, 'eventId': receipt['eventId']}
+
     def initialize(self, identifier, name, options, outputs, environment):
         self.calls.append(('initialize', identifier, name, options, outputs, environment))
         if identifier in self.tasks:
@@ -106,8 +111,9 @@ class Service:
 
 
 class MemoryHandler:
-    def __init__(self, path, body=b'', method='POST', **headers):
+    def __init__(self, path, body=b'', method='POST', viewer_tls=False, **headers):
         self.path, self.command = path, method
+        self.server = SimpleNamespace(viewer_tls=viewer_tls)
         self.headers = Message()
         for name, value in headers.items():
             self.headers[name.replace('_', '-')] = value
@@ -171,7 +177,14 @@ class ViewerHTTPTests(unittest.TestCase):
             headers={'Content-Type': 'multipart/form-data; boundary=' + BOUNDARY, 'set-uuid': IDENTIFIER})
 
     def test_native_lifecycle_and_streamed_download(self):
-        self.assertEqual(self.request('/info')[1]['engine'], 'ledgetop-processing')
+        info = self.request('/info')[1]
+        self.assertEqual(info['engine'], 'ledgetop-processing')
+        self.assertNotIn('viewerAcceptanceAck', info)
+        secure_info = MemoryHandler('/info?token=' + TOKEN, method='GET', viewer_tls=True)
+        self.facade.handle(secure_info)
+        self.assertEqual(secure_info.status, 200)
+        self.assertEqual(json.loads(secure_info.wfile.getvalue())['viewerAcceptanceAck'],
+            {'version': 1, 'transport': 'https', 'pathTemplate': '/task/{taskId}/viewer-acceptance'})
         self.assertEqual(self.request('/options')[1][0]['name'], 'pc-ept')
         with self.assertRaises(HTTPError) as caught:
             self.request('/task/' + IDENTIFIER + '/info')
@@ -228,6 +241,27 @@ class ViewerHTTPTests(unittest.TestCase):
             with self.subTest(path=path, query=query), self.assertRaises(HTTPError) as caught:
                 self.request(path, query=query)
             self.assertEqual(caught.exception.code, 400)
+
+    def test_https_only_viewer_ack_is_strict_and_does_not_accept_plaintext(self):
+        receipt = dict(eventId='processing-ready-1', providerTaskId=IDENTIFIER,
+            attemptId='attempt-1', archiveSha256='a' * 64, resultModelId='model-1',
+            resultModelVersionId='version-1', ingestedAt='2026-11-08T12:00:00Z')
+        body = json.dumps(receipt, separators=(',', ':')).encode()
+        route = f'/task/{IDENTIFIER}/viewer-acceptance?token=' + TOKEN
+        plain = MemoryHandler(route, body, Content_Type='application/json', Content_Length=str(len(body)))
+        self.facade.handle(plain)
+        self.assertEqual(plain.status, 403)
+        self.assertEqual(self.service.calls, [])
+        secure = MemoryHandler(route, body, viewer_tls=True,
+            Content_Type='application/json', Content_Length=str(len(body)))
+        self.facade.handle(secure)
+        self.assertEqual(secure.status, 202)
+        self.assertEqual(self.service.calls[-1], ('accept_viewer_delivery', IDENTIFIER, 'production', receipt))
+        duplicate_keys = b'{"eventId":"duplicate","eventId":"duplicate"}'
+        invalid = MemoryHandler(route, duplicate_keys, viewer_tls=True,
+            Content_Type='application/json', Content_Length=str(len(duplicate_keys)))
+        self.facade.handle(invalid)
+        self.assertEqual(invalid.status, 400)
 
     def test_upload_rejects_unsafe_and_duplicate_names(self):
         self.initialize()

@@ -269,7 +269,14 @@ class ViewerFacade:
         if handler.headers.get('Transfer-Encoding') or lengths not in ([], ['0']):
             raise RequestError(400, 'unexpected_body')
         if path == '/info':
-            value = self.service.capabilities()
+            value = dict(self.service.capabilities())
+            if (getattr(handler.server, 'viewer_tls', False)
+                    and callable(getattr(self.service, 'accept_viewer_delivery', None))):
+                value['viewerAcceptanceAck'] = {
+                    'version': 1,
+                    'transport': 'https',
+                    'pathTemplate': '/task/{taskId}/viewer-acceptance',
+                }
         elif path == '/options':
             value = self.service.options()
         else:
@@ -317,6 +324,35 @@ class ViewerFacade:
     def _post(self, handler, path, environment):
         if path in ('/info', '/options'):
             raise RequestError(405, 'method_not_allowed')
+        acknowledgement = re.fullmatch(r'/task/([^/]+)/viewer-acceptance', path)
+        if acknowledgement:
+            if not getattr(handler.server, 'viewer_tls', False):
+                raise RequestError(403, 'tls_required')
+            identifier = task_uuid(unquote(acknowledgement[1]))
+            self._authorize(identifier, environment)
+            length = _length(handler, MAX_FORM_BYTES)
+            if handler.headers.get_content_type() != 'application/json':
+                raise RequestError(415, 'json_required')
+            raw = handler.rfile.read(length)
+            if len(raw) != length:
+                raise RequestError(400, 'truncated_body')
+
+            def object_without_duplicates(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError('duplicate JSON member')
+                    result[key] = value
+                return result
+
+            receipt = json.loads(raw.decode('utf-8'), object_pairs_hook=object_without_duplicates)
+            accept = getattr(self.service, 'accept_viewer_delivery', None)
+            if not callable(accept):
+                raise RequestError(404, 'not_found')
+            result = accept(identifier, environment, receipt)
+            status = 200 if result.get('replayed') is True else 202
+            self._reply(handler, status, result)
+            return
         if path == '/task/new/init':
             length = _length(handler, MAX_FORM_BYTES)
             identifier = task_uuid(handler.headers.get('set-uuid', ''))

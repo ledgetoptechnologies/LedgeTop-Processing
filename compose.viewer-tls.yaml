@@ -1,0 +1,8 @@
+# Load only for the reviewed HTTPS Viewer-provider candidate:
+# docker compose -f compose.viewer.yaml -f compose.viewer-tls.yaml up -d
+services:
+  coordinator:
+    environment:
+      PROCESSING_VIEWER_TLS_PORT: "8444"
+    ports:
+      - "${VIEWER_BIND_ADDRESS:?set the cluster LAN address}:${VIEWER_TLS_PORT:-18444}:8444"

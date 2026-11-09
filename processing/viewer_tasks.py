@@ -17,6 +17,7 @@ import shutil
 import stat
 import threading
 import uuid as uuid_module
+from datetime import datetime
 
 from .maintenance import Conflict
 
@@ -111,7 +112,7 @@ class TaskStore:
                 job_id TEXT, node_id TEXT, engine_uuid TEXT, claim_token TEXT,
                 upload_cursor INTEGER NOT NULL DEFAULT 0,
                 error TEXT, progress REAL NOT NULL DEFAULT 0,
-                output_lines TEXT NOT NULL DEFAULT '[]', archive_path TEXT,
+                output_lines TEXT NOT NULL DEFAULT '[]', archive_path TEXT, archive_sha256 TEXT,
                 removed INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
@@ -129,6 +130,12 @@ class TaskStore:
             columns = {row['name'] for row in db.execute('PRAGMA table_info(viewer_tasks)')}
             if 'upload_cursor' not in columns:
                 db.execute('ALTER TABLE viewer_tasks ADD COLUMN upload_cursor INTEGER NOT NULL DEFAULT 0')
+            if 'archive_sha256' not in columns:
+                db.execute('ALTER TABLE viewer_tasks ADD COLUMN archive_sha256 TEXT')
+            db.execute('''CREATE TABLE IF NOT EXISTS viewer_delivery_acceptances (
+                uuid TEXT NOT NULL, generation INTEGER NOT NULL, event_id TEXT NOT NULL UNIQUE,
+                attempt_id TEXT NOT NULL UNIQUE, receipt_sha256 TEXT NOT NULL, receipt_json TEXT NOT NULL,
+                accepted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(uuid,generation))''')
             db.execute('''CREATE UNIQUE INDEX IF NOT EXISTS viewer_engine_uuid
                 ON viewer_tasks(engine_uuid) WHERE engine_uuid IS NOT NULL''')
 
@@ -406,7 +413,7 @@ class TaskStore:
 
     def update(self, identifier, **fields):
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
-                   'progress', 'output_lines', 'archive_path', 'upload_cursor'}
+                   'progress', 'output_lines', 'archive_path', 'archive_sha256', 'upload_cursor'}
         if not fields or not set(fields) <= allowed:
             raise ValueError('unexpected broker update fields')
         if 'stage' in fields and fields['stage'] not in STAGES:
@@ -418,6 +425,9 @@ class TaskStore:
             raise ValueError('unknown processing node')
         if 'engine_uuid' in fields and fields['engine_uuid'] is not None:
             checked_uuid(fields['engine_uuid'])
+        if 'archive_sha256' in fields and fields['archive_sha256'] is not None and not re.fullmatch(
+                r'[0-9a-f]{64}', fields['archive_sha256']):
+            raise ValueError('invalid archive digest')
         if 'claim_token' in fields and (not isinstance(fields['claim_token'], str)
                 or not 1 <= len(fields['claim_token']) <= 128
                 or any(ord(c) < 33 or ord(c) > 126 for c in fields['claim_token'])):
@@ -448,6 +458,9 @@ class TaskStore:
                     'SELECT 1 FROM viewer_tasks WHERE engine_uuid=? AND uuid<>?',
                     (fields['engine_uuid'], identifier)).fetchone():
                 raise Conflict('engine task identity belongs to another task')
+            if ('archive_sha256' in fields and row['archive_sha256'] is not None
+                    and fields['archive_sha256'] != row['archive_sha256']):
+                raise Conflict('retained archive digest is immutable')
             if 'archive_path' in fields and fields['archive_path'] is not None:
                 path = Path(fields['archive_path']).absolute()
                 directory = self._directory(row)
@@ -459,6 +472,63 @@ class TaskStore:
             db.execute('UPDATE viewer_tasks SET ' + assignments + ',updated_at=CURRENT_TIMESTAMP WHERE uuid=?',
                        (*fields.values(), identifier))
         return self.task(identifier)
+
+    def accept_viewer_delivery(self, identifier, environment, receipt):
+        checked_uuid(identifier)
+        required = {'eventId', 'providerTaskId', 'attemptId', 'archiveSha256',
+                    'resultModelId', 'resultModelVersionId', 'ingestedAt'}
+        if type(receipt) is not dict or set(receipt) != required:
+            raise ValueError('invalid Viewer delivery receipt')
+        if receipt['providerTaskId'] != identifier:
+            raise ValueError('invalid Viewer delivery identity')
+        safe_id = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z')
+        for field in ('eventId', 'attemptId', 'resultModelId', 'resultModelVersionId'):
+            if type(receipt[field]) is not str or not safe_id.fullmatch(receipt[field]):
+                raise ValueError('invalid Viewer delivery identifier')
+        if type(receipt['archiveSha256']) is not str or not re.fullmatch(r'[0-9a-f]{64}', receipt['archiveSha256']):
+            raise ValueError('invalid Viewer delivery archive digest')
+        ingested = receipt['ingestedAt']
+        if type(ingested) is not str or not 1 <= len(ingested) <= 40:
+            raise ValueError('invalid Viewer ingestion time')
+        try:
+            parsed = datetime.fromisoformat(ingested.replace('Z', '+00:00'))
+        except ValueError:
+            raise ValueError('invalid Viewer ingestion time') from None
+        if parsed.utcoffset() is None:
+            raise ValueError('Viewer ingestion time must include a timezone')
+        encoded = canonical(receipt)
+        digest = hashlib.sha256(encoded.encode('utf-8')).hexdigest()
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, identifier)
+            if row['environment'] != environment:
+                raise Conflict('Viewer delivery environment mismatch')
+            old = db.execute('''SELECT event_id,attempt_id,receipt_sha256 FROM viewer_delivery_acceptances
+                WHERE uuid=? AND generation=?''', (identifier, row['generation'])).fetchone()
+            if old:
+                if (old['event_id'], old['attempt_id'], old['receipt_sha256']) != (
+                        receipt['eventId'], receipt['attemptId'], digest):
+                    raise Conflict('Viewer delivery receipt already differs')
+                return {'accepted': True, 'replayed': True, 'eventId': receipt['eventId']}
+            duplicate = db.execute('''SELECT uuid,generation FROM viewer_delivery_acceptances
+                WHERE event_id=? OR attempt_id=?''', (receipt['eventId'], receipt['attemptId'])).fetchone()
+            if duplicate:
+                raise Conflict('Viewer delivery identity already belongs to another task')
+            task = self._task(db, row)
+            archive = Path(row['archive_path']) if row['archive_path'] else None
+            if (row['stage'] != 'succeeded' or row['phase'] != 'complete' or not task['job']
+                    or task['job']['status'] != 'succeeded' or archive is None
+                    or row['archive_sha256'] != receipt['archiveSha256']
+                    or archive.is_symlink() or not archive.is_file()):
+                raise Conflict('Viewer delivery does not match a retained successful task')
+            directory = self._directory(row)
+            if archive.parent != directory or archive.resolve() != archive:
+                raise Conflict('retained archive path is invalid')
+            db.execute('''INSERT INTO viewer_delivery_acceptances
+                (uuid,generation,event_id,attempt_id,receipt_sha256,receipt_json)
+                VALUES(?,?,?,?,?,?)''', (identifier, row['generation'], receipt['eventId'],
+                    receipt['attemptId'], digest, encoded))
+            return {'accepted': True, 'replayed': False, 'eventId': receipt['eventId']}
 
     def info(self, identifier):
         task = self.task(identifier)

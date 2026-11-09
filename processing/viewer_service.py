@@ -7,6 +7,7 @@ operator cleanup.
 """
 
 import http.client
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -229,6 +230,7 @@ class ViewerService:
                     # Only this exact incomplete local transfer is replaced.
                     partial.unlink()
                 total = 0
+                archive_digest = hashlib.sha256()
                 with self.engines[task['node_id']].download(task['engine_uuid']) as response:
                     if getattr(response, 'status', 200) != 200:
                         raise EngineUnavailable('archive_unavailable')
@@ -245,6 +247,7 @@ class ViewerService:
                             total += len(chunk)
                             if total > self.config.viewer_max_archive_bytes:
                                 raise Conflict('archive exceeds configured disk allowance')
+                            archive_digest.update(chunk)
                             output.write(chunk)
                         if declared is not None and total != int(declared):
                             raise EngineUnavailable('archive_transfer_incomplete')
@@ -254,10 +257,20 @@ class ViewerService:
                     raise EngineUnavailable('archive_transfer_incomplete')
                 os.replace(partial, path)
                 sync_directory(path.parent)
-                self.store.update(identifier, archive_path=str(path))
+                self.store.update(identifier, archive_path=str(path), archive_sha256=archive_digest.hexdigest())
             if path.is_symlink() or not path.is_file():
                 raise Conflict('retained archive unavailable')
+            task = self.store.task(identifier)
+            if not task['archive_sha256']:
+                digest = hashlib.sha256()
+                with path.open('rb') as archive:
+                    while chunk := archive.read(1024 ** 2):
+                        digest.update(chunk)
+                self.store.update(identifier, archive_sha256=digest.hexdigest())
             return path.open('rb'), path.stat().st_size
+
+    def accept_viewer_delivery(self, identifier, environment, receipt):
+        return self.store.accept_viewer_delivery(identifier, environment, receipt)
 
     def cancel(self, identifier):
         with self._lock:
