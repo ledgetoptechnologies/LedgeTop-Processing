@@ -551,6 +551,17 @@ class TaskStore:
                     or current_archive != archive
                     or row['archive_sha256'] != expected_archive_digest):
                 raise Conflict('Viewer delivery changed while validating retained result')
+            try:
+                current_identity = current_archive.lstat()
+            except OSError:
+                raise Conflict('retained archive changed before acceptance') from None
+            if (stat.S_ISLNK(current_identity.st_mode)
+                    or not stat.S_ISREG(current_identity.st_mode)
+                    or (current_identity.st_dev, current_identity.st_ino, current_identity.st_size,
+                        current_identity.st_mtime_ns)
+                        != (archive_identity.st_dev, archive_identity.st_ino, archive_identity.st_size,
+                            archive_identity.st_mtime_ns)):
+                raise Conflict('retained archive changed before acceptance')
             duplicate = db.execute('''SELECT uuid,generation FROM viewer_delivery_acceptances
                 WHERE event_id=? OR attempt_id=?''', (receipt['eventId'], receipt['attemptId'])).fetchone()
             if duplicate:

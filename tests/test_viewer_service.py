@@ -791,6 +791,40 @@ class ViewerServiceTests(unittest.TestCase):
                               (identifier,)).fetchone()
         self.assertIsNone(row)
 
+    def test_viewer_acceptance_rejects_archive_replacement_after_hash(self):
+        identifier = self.submit(environment='staging')
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        stream, _ = self.service.download(identifier)
+        with stream as result:
+            result.read()
+        archive = Path(self.task(identifier)['archive_path'])
+        expected = hashlib.sha256(self.engines['cluster'].archive).hexdigest()
+        original_hash = TaskStore._hash_retained_archive
+
+        def hash_then_replace(path, expected_stat):
+            value = original_hash(path, expected_stat)
+            with path.open('r+b') as result:
+                first = result.read(1)
+                result.seek(0)
+                result.write(bytes([first[0] ^ 1]))
+                result.flush()
+                os.fsync(result.fileno())
+            return value
+
+        receipt = dict(eventId='processing-ready-replaced-attempt-1',
+            providerTaskId=identifier, attemptId='attempt-replaced-1',
+            archiveSha256=expected, resultModelId='model-replaced',
+            resultModelVersionId='version-replaced', ingestedAt='2026-11-08T12:00:00Z')
+        with patch.object(TaskStore, '_hash_retained_archive', side_effect=hash_then_replace):
+            with self.assertRaisesRegex(Conflict, 'retained archive changed before acceptance'):
+                self.service.accept_viewer_delivery(identifier, 'staging', receipt)
+        with self.service.store.queue._db() as db:
+            row = db.execute('SELECT 1 FROM viewer_delivery_acceptances WHERE uuid=?',
+                              (identifier,)).fetchone()
+        self.assertIsNone(row)
+
     def test_interrupted_archive_get_can_retry_without_new_execution(self):
         identifier = self.submit()
         self.service.tick()
