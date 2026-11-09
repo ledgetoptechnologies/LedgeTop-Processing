@@ -63,12 +63,14 @@ specified and tested.
 ## Node selection
 
 - `local` is eligible only when healthy, idle or within its configured slots,
-  able to run the selected engine, below its verified photo/byte/RAM limits,
-  and able to reserve scratch space. The current 1,000-photo ceiling still needs
-  benchmarking. Small jobs wait for local while it is busy or unavailable.
-- `main` is selected for jobs above the local limit or requiring capabilities
-  unavailable locally. If `main` is down, the job remains pending with a clear
-  reason. It must not overflow to `local` merely to clear the queue.
+  able to run the selected engine, within its advertised photo-count limit,
+  and able to reserve the actual spool/scratch space it needs. Dataset byte
+  size is not a routing policy; intake checks live disk capacity instead. The
+  cluster's 1,000-photo boundary is exercised in the installed planning path.
+  Small jobs wait for local while it is busy or unavailable.
+- `main` is selected for jobs above the local photo-count limit or requiring
+  capabilities unavailable locally. If `main` is down, the job remains pending
+  with a clear reason. It must not overflow to `local` merely to clear the queue.
 - An operator may explicitly override the preferred node within hard resource
   limits. Every choice and override is recorded with the policy version.
 - Engine adapters publish comparable capabilities and health, but have their

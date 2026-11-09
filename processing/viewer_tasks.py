@@ -62,10 +62,7 @@ def sync_directory(path):
 
 
 class TaskStore:
-    def __init__(self, queue, directory, max_input_bytes=20 * 1024 ** 3,
-                 min_free_bytes=0):
-        if type(max_input_bytes) is not int or not 1 <= max_input_bytes <= 10 ** 15:
-            raise ValueError('positive input limit required')
+    def __init__(self, queue, directory, min_free_bytes=0):
         if type(min_free_bytes) is not int or not 0 <= min_free_bytes <= 10 ** 15:
             raise ValueError('nonnegative free-space reserve required')
         self.queue = queue
@@ -78,7 +75,6 @@ class TaskStore:
             raise ValueError('private input directory required')
         if os.name != 'nt' and self.root.stat().st_mode & 0o077:
             raise ValueError('private input directory required')
-        self.max_input_bytes = max_input_bytes
         self._lock = threading.RLock()
         # Claim credentials are stored in this shared database. Tighten the
         # exact existing, owned database before creating or updating secret
@@ -253,7 +249,7 @@ class TaskStore:
 
     def upload(self, identifier, filename, stream, length):
         key = self._filename(filename)
-        if type(length) is not int or not 0 < length <= self.max_input_bytes:
+        if type(length) is not int or length <= 0:
             raise ValueError('invalid input length')
         with self._lock:
             with self.queue._db() as db:
@@ -263,12 +259,10 @@ class TaskStore:
                 directory = self._directory(row)
                 existing = db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',
                                       (identifier, key)).fetchone()
-                total = db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',
-                                   (identifier,)).fetchone()[0]
                 count = db.execute('SELECT COUNT(*) FROM viewer_files WHERE uuid=?',
                                    (identifier,)).fetchone()[0]
-                if existing is None and (total + length > self.max_input_bytes or count >= 100000):
-                    raise ValueError('task input ceiling exceeded')
+                if existing is None and count >= 100000:
+                    raise ValueError('too many input files')
             if existing is not None:
                 digest = hashlib.sha256()
                 remaining = length
@@ -321,8 +315,6 @@ class TaskStore:
                         return {'success': True, 'uuid': identifier}
                     total = db.execute('SELECT COALESCE(SUM(bytes),0) FROM viewer_files WHERE uuid=?',
                                        (identifier,)).fetchone()[0]
-                    if total + length > self.max_input_bytes:
-                        raise ValueError('task input ceiling exceeded')
                     os.replace(temporary, final)
                     sync_directory(directory)
                     db.execute('''INSERT INTO viewer_files

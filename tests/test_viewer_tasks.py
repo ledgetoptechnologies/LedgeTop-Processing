@@ -94,18 +94,17 @@ class ViewerTaskStoreTests(unittest.TestCase):
         self.assertEqual(len(task['files']), 1)
         self.assertEqual(Path(task['files'][0]['path']).read_bytes(), data)
 
-    def test_input_ceiling_counts_task_bytes_and_duplicate_is_idempotent(self):
-        self.store = TaskStore(self.queue, self.root / 'inputs', max_input_bytes=8)
+    def test_total_input_bytes_are_not_capped_and_duplicate_is_idempotent(self):
+        self.store = TaskStore(self.queue, self.root / 'inputs')
         self.initialize()
         self.photo(data=b'12345678')
         self.photo(data=b'12345678')
-        with self.assertRaises(ValueError):
-            self.photo(name='other.jpg', data=b'1')
-        self.assertEqual(self.store.task(self.identifier)['input_bytes'], 8)
+        self.photo(name='other.jpg', data=b'1234')
+        self.assertEqual(self.store.task(self.identifier)['input_bytes'], 12)
+        self.assertEqual(len(self.store.task(self.identifier)['files']), 2)
 
     def test_low_disk_space_rejects_before_reading_or_spooling_upload(self):
-        self.store = TaskStore(self.queue, self.root / 'inputs', max_input_bytes=1024,
-                               min_free_bytes=4096)
+        self.store = TaskStore(self.queue, self.root / 'inputs', min_free_bytes=4096)
         self.initialize()
         class Unreadable:
             def read(self, *_):
@@ -121,8 +120,7 @@ class ViewerTaskStoreTests(unittest.TestCase):
         self.assertFalse(list(Path(task['directory']).glob('.incoming-*')))
 
     def test_low_space_must_fit_multipart_and_durable_temporary_copies(self):
-        self.store = TaskStore(self.queue, self.root / 'inputs', max_input_bytes=1024,
-                               min_free_bytes=4096)
+        self.store = TaskStore(self.queue, self.root / 'inputs', min_free_bytes=4096)
         self.initialize()
         length = 100
         margin = 64 * 1024 ** 2

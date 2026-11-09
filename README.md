@@ -91,7 +91,7 @@ native provider task lifecycle.
    `GET /v1/nodes` and `POST /v1/plan`. The planning JSON is:
 
    ```json
-   {"engine":"odm","photoCount":250,"inputBytes":1000000000}
+   {"engine":"odm","photoCount":250}
    ```
 
    The response includes `mode: routing_probe` and `executesWork: false` so a

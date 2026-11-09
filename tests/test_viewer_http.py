@@ -15,7 +15,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from processing.maintenance import Conflict
-from processing.viewer_http import ViewerFacade, CHUNK, MAX_FORM_BYTES
+from processing.viewer_http import ViewerFacade, CHUNK, MAX_FORM_BYTES, _length
 
 
 TOKEN = 'native-viewer-test-token-1234567890123456'
@@ -329,10 +329,12 @@ class ViewerHTTPTests(unittest.TestCase):
                 Content_Type='multipart/form-data; boundary=' + BOUNDARY)
             self.assertEqual(handler.status, 400)
 
-    def test_upload_limit_and_no_native_route_fallthrough(self):
-        with patch('processing.viewer_http.MAX_UPLOAD_BYTES', 4):
-            handler = self.memory('/task/new/upload/' + IDENTIFIER, b'12345')
-            self.assertEqual(handler.status, 413)
+    def test_upload_length_has_no_fixed_dataset_size_ceiling(self):
+        # A 50 GiB multipart request is accepted by the framing layer; the
+        # service then checks real available spool capacity before writing.
+        handler = MemoryHandler('/task/new/upload/' + IDENTIFIER,
+            Content_Length=str(50 * 1024 ** 3))
+        self.assertEqual(_length(handler), 50 * 1024 ** 3)
         handler = MemoryHandler('/v1/prototype/jobs', method='GET')
         self.assertFalse(self.facade.handle(handler))
         handler = MemoryHandler('/info?token=' + TOKEN, method='DELETE')

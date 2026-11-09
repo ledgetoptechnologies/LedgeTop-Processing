@@ -149,10 +149,9 @@ class ViewerServiceTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         self.config = SimpleNamespace(prototype_state_dir=str(self.root / 'state'),
-            viewer_max_input_bytes=20 * 1024 ** 3, viewer_max_archive_bytes=4 * 1024 ** 2,
             local_node_url='http://synthetic-cluster.invalid:3000', local_node_token='private-cluster',
             main_node_url='http://synthetic-main.invalid:3000', main_node_token='private-main',
-            local_max_photos=1000, local_max_input_bytes=20 * 1024 ** 3)
+            local_max_photos=1000)
         self.fleet = FakeFleet()
         self.engines = {name: FakeEngine(name, self.fleet) for name in ('cluster', 'main')}
         self.busy = {}
@@ -276,7 +275,9 @@ class ViewerServiceTests(unittest.TestCase):
         node = next(node for node in self.service.nodes if node.node_id == 'cluster')
         snapshot = {'ready': True, 'health': {'ready': True, 'taskQueueCount': 0,
                                                'maxImages': 1000}, 'options': []}
-        base = {'input_bytes': 0, 'options': []}
+        # Photo count controls node eligibility; large datasets remain eligible
+        # when the node supports the image count and disk reserve is available.
+        base = {'input_bytes': 50 * 1024 ** 3, 'options': []}
         self.assertTrue(self.service._can_run_on(
             {**base, 'images_count': 1000}, node, snapshot, set()))
         self.assertFalse(self.service._can_run_on(
@@ -290,11 +291,11 @@ class ViewerServiceTests(unittest.TestCase):
         config.prototype_state_dir = str(self.root / 'dynamic-three-node-state')
         config.processing_nodes = (
             ProcessingNode('cluster', 'http://synthetic-cluster.invalid:3000',
-                           'private-cluster', 1, 20 * 1024 ** 3),
+                           'private-cluster', 1),
             ProcessingNode('main', 'http://synthetic-main.invalid:3000',
                            'private-main'),
             ProcessingNode('aux-3', 'http://synthetic-aux.invalid:3000',
-                           'private-aux', 3, 8 * 1024 ** 3),
+                           'private-aux', 3),
         )
         self.config = config
         self.engines = {node.node_id: FakeEngine(node.node_id, self.fleet)
@@ -347,9 +348,9 @@ class ViewerServiceTests(unittest.TestCase):
         config.prototype_state_dir = str(self.root / 'dynamic-order-state')
         config.processing_nodes = (
             ProcessingNode('aux-3', 'http://synthetic-aux.invalid:3000',
-                           'private-aux', 3, 8 * 1024 ** 3),
+                           'private-aux', 3),
             ProcessingNode('cluster', 'http://synthetic-cluster.invalid:3000',
-                           'private-cluster', 1000, 20 * 1024 ** 3),
+                           'private-cluster', 1000),
             ProcessingNode('main', 'http://synthetic-main.invalid:3000',
                            'private-main'),
         )
@@ -752,9 +753,12 @@ class ViewerServiceTests(unittest.TestCase):
             resultModelId='model-1', resultModelVersionId='version-1',
             ingestedAt='2026-11-08T12:00:00Z')
         first = self.service.accept_viewer_delivery(identifier, 'staging', receipt)
-        restarted_store = TaskStore(self.queue, self.service.store.root,
-            self.config.viewer_max_input_bytes)
-        second = restarted_store.accept_viewer_delivery(identifier, 'staging', receipt)
+        # Reopen the durable queue and task store, not just another TaskStore
+        # wrapper over the same live Queue object, before replaying the ACK.
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        second = self.service.accept_viewer_delivery(identifier, 'staging', receipt)
         self.assertEqual(first, {'accepted': True, 'replayed': False, 'eventId': receipt['eventId']})
         self.assertEqual(second, {'accepted': True, 'replayed': True, 'eventId': receipt['eventId']})
         self.assertEqual(self.task(identifier)['archive_sha256'], receipt['archiveSha256'])

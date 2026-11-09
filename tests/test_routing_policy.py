@@ -10,8 +10,8 @@ class RoutingPolicyTests(unittest.TestCase):
         self.local = {"ready": True, "taskQueueCount": 0, "maxImages": 1000}
         self.main = {"ready": True, "taskQueueCount": 0, "maxImages": None}
 
-    def route(self, photos=50, size=100, **kwargs):
-        return plan(photos, size, self.local, self.main, 1000, 20_000, **kwargs)
+    def route(self, photos=50, **kwargs):
+        return plan(photos, self.local, self.main, 1000, **kwargs)
 
     def test_1000_photo_boundary_prefers_local_and_1001_requires_main(self):
         for count, expected in ((10, "local"), (50, "local"), (999, "local"),
@@ -19,9 +19,9 @@ class RoutingPolicyTests(unittest.TestCase):
             with self.subTest(count=count):
                 self.assertEqual(self.route(count)["decision"], expected)
 
-    def test_byte_boundary_requires_main_independent_of_photo_count(self):
-        self.assertEqual(self.route(size=20_000)["decision"], "local")
-        self.assertEqual(self.route(size=20_001)["decision"], "main")
+    def test_photo_count_is_the_only_dataset_eligibility_input(self):
+        self.assertEqual(self.route(1000)["decision"], "local")
+        self.assertEqual(self.route(1001)["decision"], "main")
 
     def test_busy_local_does_not_consume_idle_main(self):
         self.local["taskQueueCount"] = 1

@@ -111,11 +111,10 @@ class ViewerService:
     def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node):
         self.queue, self.config = queue, config
         self.store = store or TaskStore(queue, Path(config.prototype_state_dir) / 'viewer-tasks',
-                                       config.viewer_max_input_bytes,
-                                       getattr(config, 'viewer_min_free_bytes', 0))
+                                       min_free_bytes=getattr(config, 'viewer_min_free_bytes', 0))
         self.nodes = tuple(getattr(config, 'processing_nodes', ()) or (
             ProcessingNode('cluster', config.local_node_url, config.local_node_token,
-                           config.local_max_photos, config.local_max_input_bytes),
+                           config.local_max_photos),
             ProcessingNode('main', config.main_node_url, config.main_node_token)))
         self.node_order = tuple(node.node_id for node in self.nodes)
         if set(self.node_order) != set(queue.node_ids):
@@ -239,14 +238,15 @@ class ViewerService:
                                                           'application/x-zip-compressed'):
                         raise EngineUnavailable('archive_not_ready')
                     declared = response.headers.get('Content-Length')
-                    if declared is not None and (not declared.isdigit() or int(declared) > self.config.viewer_max_archive_bytes):
-                        raise Conflict('archive exceeds configured disk allowance')
+                    if declared is not None:
+                        if not declared.isdigit():
+                            raise EngineUnavailable('archive_transfer_incomplete')
+                        self.store.ensure_capacity(int(declared))
                     with partial.open('xb') as output:
                         os.chmod(partial, 0o600)
                         while chunk := response.read(1024 ** 2):
                             total += len(chunk)
-                            if total > self.config.viewer_max_archive_bytes:
-                                raise Conflict('archive exceeds configured disk allowance')
+                            self.store.ensure_capacity(len(chunk))
                             archive_digest.update(chunk)
                             output.write(chunk)
                         if declared is not None and total != int(declared):
@@ -376,8 +376,6 @@ class ViewerService:
         limits = [value for value in (node.max_photos, health.get('maxImages'))
                   if type(value) is int and value > 0]
         if limits and task['images_count'] > min(limits):
-            return False
-        if (type(node.max_input_bytes) is int and task['input_bytes'] > node.max_input_bytes):
             return False
         allowed = {item.get('name') for item in snapshot.get('options', []) if isinstance(item, dict)}
         requested = {item.get('name') for item in task['options'] if isinstance(item, dict)}

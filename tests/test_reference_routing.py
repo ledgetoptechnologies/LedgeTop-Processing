@@ -14,7 +14,7 @@ class ReferenceRoutingTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.queue = Queue(self.temp.name, node_ids=('cluster', 'main'),
                            treedar_node_ids=('main',), reference_enabled=True)
-        self.store = ReferenceStore(self.queue, local_max_input_bytes=3)
+        self.store = ReferenceStore(self.queue)
         self.payload = json.loads((Path(__file__).resolve().parents[1] /
             'contracts/reference-v1.contract.json').read_text())['submission']
 
@@ -43,11 +43,13 @@ class ReferenceRoutingTests(unittest.TestCase):
         self.assertEqual(self.queue.get(job['jobId'])['status'], 'queued')
         self.assertEqual(self.claim(job, 'cluster')['nodeId'], 'cluster')
 
-    def test_input_byte_limit_selects_main_without_local_overflow(self):
-        self.store = ReferenceStore(self.queue, local_max_input_bytes=2)
-        job = self.submit()
-        self.assertIsNone(self.claim(job, 'cluster'))
-        self.assertEqual(self.claim(job, 'main')['nodeId'], 'main')
+    def test_node_eligibility_uses_photo_count_not_total_bytes(self):
+        small_photo_count = dict(pipeline={'treedar': {'requested': False}},
+            manifest={'inputCounts': {'images': 1}, 'totalBytes': 50 * 1024**3})
+        large_photo_count = dict(pipeline={'treedar': {'requested': False}},
+            manifest={'inputCounts': {'images': 1001}, 'totalBytes': 1})
+        self.assertEqual(self.store._required_node(small_photo_count), 'cluster')
+        self.assertEqual(self.store._required_node(large_photo_count), 'main')
 
     def test_small_job_waits_while_cluster_held(self):
         job = self.submit()

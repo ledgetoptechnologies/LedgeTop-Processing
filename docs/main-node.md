@@ -134,11 +134,12 @@ not infer endpoint health from that old container's name alone. Health reported
 the legacy `photoSmokeEnabled` flag false, which is distinct from the Viewer
 provider readiness result.
 
-A read-only `/v1/plan` request for 25 photos and 125,000,000 input bytes returned
-`decision=local`, `reason=local_within_limits`, and `executesWork=false`; the
-local NodeODM advertised `maxImages=1000`, while main ODX had no photo-count
-cap. This verifies small-node-first planning at the probe endpoint, not an
-atomic reservation, queue dispatch or completed image-processing job.
+An earlier read-only `/v1/plan` probe included 125,000,000 input bytes and
+returned `decision=local` with `executesWork=false`; the local NodeODM
+advertised `maxImages=1000`, while main ODX had no photo-count cap. The current
+probe contract uses only `engine` and `photoCount`; request bytes no longer
+participate in admission. This verifies probe behavior, not an atomic
+reservation, queue dispatch or completed image-processing job.
 
 This verifies provider discovery and idle queue state, not a submitted photo
 job, small-node-first dispatch, image-cap enforcement during real processing,

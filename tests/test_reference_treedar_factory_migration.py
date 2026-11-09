@@ -32,7 +32,7 @@ class TreeDarFactoryMigrationTests(unittest.TestCase):
         self.host.setUp();self.addCleanup(self.host.doCleanups)
         self.queue=Queue(self.host.root/'coordinator',reference_enabled=True,node_ids=('cluster','main'),treedar_node_ids=('main',))
         self.addCleanup(self.queue.close)
-        self.store=ReferenceStore(self.queue,local_max_input_bytes=1)
+        self.store=ReferenceStore(self.queue)
         self.raw=json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())['submission']
         self.host.config['authorityId']=self.queue.authority_id
         self.host.route()

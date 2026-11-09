@@ -139,8 +139,7 @@ class NodeRoleConfigTests(unittest.TestCase):
         self.assertEqual(config.viewer_min_free_bytes, 20 * 1024 ** 3)
         nodes = {'ready': True, 'maxImages': None}
         for count, expected in ((1000, 'local'), (1001, 'main')):
-            self.assertEqual(plan(count, 1, nodes, nodes, config.local_max_photos,
-                                  config.local_max_input_bytes)['decision'], expected)
+            self.assertEqual(plan(count, nodes, nodes, config.local_max_photos)['decision'], expected)
 
     def test_main_role_and_invalid_environment_settings(self):
         with self.environment(PROCESSING_PROTOTYPE_NODE_IDS='cluster,main', PROCESSING_TREEDAR_NODE_IDS='main'):
@@ -167,7 +166,7 @@ class NodeRoleConfigTests(unittest.TestCase):
             config = from_environment()
         self.assertEqual([node.node_id for node in config.processing_nodes], ['cluster', 'main', 'aux-3'])
         self.assertEqual([node.max_photos for node in config.processing_nodes], [1000, None, 600])
-        self.assertEqual(config.processing_nodes[2].max_input_bytes, 9_000_000_000)
+        self.assertFalse(hasattr(config.processing_nodes[2], 'max_input_bytes'))
 
     def test_viewer_dynamic_node_requires_origin_and_rejects_duplicate_order(self):
         base = {

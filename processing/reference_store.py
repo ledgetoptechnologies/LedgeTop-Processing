@@ -45,7 +45,7 @@ def _reason(value):
 
 class ReferenceStore:
     def __init__(self, queue, max_queued_jobs=10_000, max_metadata_bytes=64 * 1024 * 1024,
-                 *, local_max_photos=1000, local_max_input_bytes=20 * 1024**3,
+                 *, local_max_photos=1000,
                  main_node_id=None):
         if PROFILE not in queue.allowed_profiles:
             raise ValueError("reference queue profile is disabled")
@@ -55,11 +55,9 @@ class ReferenceStore:
         self.queue = queue
         self.max_queued_jobs = max_queued_jobs
         self.max_metadata_bytes = max_metadata_bytes
-        for value in (local_max_photos, local_max_input_bytes):
-            if type(value) is not int or value < 1:
-                raise ValueError("local node limits must be positive integers")
+        if type(local_max_photos) is not int or local_max_photos < 1:
+            raise ValueError("local photo limit must be a positive integer")
         self.local_max_photos = local_max_photos
-        self.local_max_input_bytes = local_max_input_bytes
         self.main_node_id = main_node_id or next((n for n in queue.node_ids if n != 'cluster'), None)
         if self.main_node_id is not None and (self.main_node_id not in queue.node_ids or self.main_node_id == 'cluster'):
             raise ValueError("main node must be a configured node distinct from cluster")
@@ -234,8 +232,7 @@ class ReferenceStore:
 
     def _required_node(self, submission):
         requires_main = (submission['pipeline']['treedar']['requested']
-            or submission['manifest']['inputCounts']['images'] > self.local_max_photos
-            or submission['manifest']['totalBytes'] > self.local_max_input_bytes)
+            or submission['manifest']['inputCounts']['images'] > self.local_max_photos)
         return self.main_node_id if requires_main else 'cluster'
 
     def next_for_node(self, node_id):

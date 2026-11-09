@@ -263,7 +263,7 @@ def discovered_policy(snapshot, config):
     capability = p.digest(dict(protocol="reference-capabilities-v1", options=options_fingerprint,
         nodes=[{key: node.get(key) for key in ("role", "available", "capabilitiesSha256", "engine", "engineVersion")}
                for node in sorted(snapshot["nodes"], key=lambda node: node["role"])],
-        localMaxPhotos=config.local_max_photos, localMaxInputBytes=config.local_max_input_bytes,
+        localMaxPhotos=config.local_max_photos,
         treedar=False, gaussian_splat=False))
     return capability, options_fingerprint, frozenset(option["name"] for option in options)
 
@@ -368,7 +368,7 @@ class ReferenceRuntime:
             worker_context = verified_client_context(settings.listener["clientCA"])
             self._server_context = server_context
             self.store = ReferenceStore(queue, local_max_photos=config.local_max_photos,
-                local_max_input_bytes=config.local_max_input_bytes, main_node_id="main")
+                main_node_id="main")
             self._streams = threading.BoundedSemaphore(settings.stream_budget["maxConcurrent"])
             proxy = ResultProxy({node: worker["resultOrigin"] for node, worker in settings.workers.items()},
                 worker_bearers={node: worker["resultBearer"] for node, worker in settings.workers.items()},

@@ -21,7 +21,6 @@ from .maintenance import Conflict
 from .viewer_tasks import StorageBackpressure
 
 
-MAX_UPLOAD_BYTES = 2 * 1024 ** 3
 MAX_FORM_BYTES = 64 * 1024
 MAX_PART_HEADERS = 16 * 1024
 MAX_PARTS = 64
@@ -160,16 +159,21 @@ def _multipart(stream, length, content_type, temp_dir=None):
     raise RequestError(400, 'too_many_parts')
 
 
-def _length(handler, maximum, *, allow_empty=False):
+def _length(handler, maximum=None, *, allow_empty=False):
     values = handler.headers.get_all('Content-Length', [])
     if handler.headers.get('Transfer-Encoding'):
         raise RequestError(400, 'content_length_required')
     if not values and allow_empty:
         return 0
-    if len(values) != 1 or not re.fullmatch(r'0|[1-9][0-9]{0,12}', values[0]):
+    if len(values) != 1 or not re.fullmatch(r'0|[1-9][0-9]*', values[0]):
         raise RequestError(411, 'content_length_required')
-    length = int(values[0])
-    if length > maximum:
+    try:
+        length = int(values[0])
+    except ValueError:
+        # Includes impractically long decimal representations rejected by the
+        # runtime's integer parser; normal dataset sizes are disk-gated below.
+        raise RequestError(413, 'invalid_content_length') from None
+    if maximum is not None and length > maximum:
         raise RequestError(413, 'body_too_large')
     if length == 0 and not allow_empty:
         raise RequestError(400, 'empty_body')
@@ -369,7 +373,9 @@ class ViewerFacade:
             return
         upload = re.fullmatch(r'/task/new/upload/([^/]+)', path)
         if upload:
-            length = _length(handler, MAX_UPLOAD_BYTES)
+            # Dataset size is constrained by live spool capacity, not a fixed
+            # request-byte ceiling. Smaller control forms remain bounded.
+            length = _length(handler)
             identifier = task_uuid(unquote(upload[1]))
             self._authorize(identifier, environment)
             if not self._upload_lock.acquire(blocking=False):

@@ -14,7 +14,6 @@ class ProcessingNode:
     origin: str
     token: str = field(default='', repr=False)
     max_photos: int | None = None
-    max_input_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -23,7 +22,6 @@ class Config:
     local_node_url: str
     main_node_url: str
     local_max_photos: int
-    local_max_input_bytes: int
     bind_host: str = "127.0.0.1"
     port: int = 8080
     prototype_state_dir: str = ""
@@ -38,8 +36,7 @@ class Config:
     viewer_token: str = field(default='', repr=False)
     viewer_staging_token: str = field(default='', repr=False)
     viewer_tls_port: int | None = None
-    viewer_max_input_bytes: int = 20 * 1024 ** 3
-    viewer_max_archive_bytes: int = 100 * 1024 ** 3
+    # Intake uses image counts and live free-space checks; no fixed byte ceiling.
     viewer_min_free_bytes: int = 20 * 1024 ** 3
     reference_config_path: str = field(default='', repr=False)
     processing_nodes: tuple[ProcessingNode, ...] = field(default=(), repr=False)
@@ -125,15 +122,12 @@ def from_environment() -> Config:
         for node_id in node_ids:
             if node_id == 'cluster':
                 origin, node_token = _node_origin(os.environ.get('LOCAL_NODE_URL', '')), node_tokens[0]
-                max_photos, max_bytes = (
-                    _positive_int(os.environ.get('LOCAL_MAX_PHOTOS', '1000'), 'LOCAL_MAX_PHOTOS', 1_000_000),
-                    _positive_int(os.environ.get('LOCAL_MAX_INPUT_BYTES', '21474836480'),
-                                  'LOCAL_MAX_INPUT_BYTES', 10**15))
+                max_photos = _positive_int(os.environ.get('LOCAL_MAX_PHOTOS', '1000'), 'LOCAL_MAX_PHOTOS', 1_000_000)
             elif node_id == 'main':
                 origin, node_token = _node_origin(os.environ.get('MAIN_NODE_URL', '')), node_tokens[1]
                 # The main machine has no application policy cap. The engine's
                 # live maxImages value, when present, still applies.
-                max_photos, max_bytes = None, None
+                max_photos = None
             else:
                 suffix = re.sub(r'[-.]', '_', node_id).upper()
                 if suffix in prefixes:
@@ -146,11 +140,10 @@ def from_environment() -> Config:
                     raise ValueError('processing node token must contain at most 4096 printable characters')
                 max_photos = _optional_positive_int(os.environ.get(prefix + '_MAX_PHOTOS', ''),
                                                     prefix + '_MAX_PHOTOS', 1_000_000)
-                max_bytes = _optional_positive_int(os.environ.get(prefix + '_MAX_INPUT_BYTES', ''),
-                                                   prefix + '_MAX_INPUT_BYTES', 10**15)
+                # Legacy *_MAX_INPUT_BYTES settings are intentionally ignored.
             if not origin:
                 raise ValueError('every ordered processing node requires a configured origin')
-            processing_nodes_list.append(ProcessingNode(node_id, origin, node_token, max_photos, max_bytes))
+            processing_nodes_list.append(ProcessingNode(node_id, origin, node_token, max_photos))
         processing_nodes = tuple(processing_nodes_list)
     if operator and (len(operator) < 32 or operator == token
                      or any(ord(char) < 33 or ord(char) > 126 for char in operator)):
@@ -160,7 +153,6 @@ def from_environment() -> Config:
         local_node_url=_node_origin(os.environ.get("LOCAL_NODE_URL", "")),
         main_node_url=_node_origin(os.environ.get("MAIN_NODE_URL", "")),
         local_max_photos=_positive_int(os.environ.get("LOCAL_MAX_PHOTOS", "1000"), "LOCAL_MAX_PHOTOS", 1_000_000),
-        local_max_input_bytes=_positive_int(os.environ.get("LOCAL_MAX_INPUT_BYTES", "21474836480"), "LOCAL_MAX_INPUT_BYTES", 10**15),
         bind_host=os.environ.get("PROCESSING_BIND_HOST", "127.0.0.1"),
         port=_positive_int(os.environ.get("PROCESSING_PORT", "8080"), "PROCESSING_PORT", 65535),
         prototype_state_dir=os.environ.get("PROCESSING_PROTOTYPE_STATE_DIR", ""),
@@ -171,10 +163,6 @@ def from_environment() -> Config:
         viewer_enabled=viewer == '1', viewer_token=viewer_token,
         viewer_staging_token=viewer_staging,
         viewer_tls_port=viewer_tls_port,
-        viewer_max_input_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_INPUT_BYTES', str(20 * 1024 ** 3)),
-                                            'PROCESSING_VIEWER_MAX_INPUT_BYTES', 10 ** 15),
-        viewer_max_archive_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', str(100 * 1024 ** 3)),
-                                              'PROCESSING_VIEWER_MAX_ARCHIVE_BYTES', 10 ** 15),
         viewer_min_free_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MIN_FREE_BYTES', str(20 * 1024 ** 3)),
                                             'PROCESSING_VIEWER_MIN_FREE_BYTES', 10 ** 15),
         prototype_observer_token=observer,

@@ -217,10 +217,9 @@ def make_handler(config: Config):
                     return
                 if not isinstance(request, dict) or request.get("engine") != "odm":
                     raise ValueError("only the ODM planning contract is supported")
-                photos, size = request.get("photoCount"), request.get("inputBytes")
-                if (type(photos) is not int or not 1 <= photos <= 1_000_000
-                        or type(size) is not int or not 1 <= size <= 10**15):
-                    raise ValueError("photoCount and inputBytes must be positive integers")
+                photos = request.get("photoCount")
+                if type(photos) is not int or not 1 <= photos <= 1_000_000:
+                    raise ValueError("photoCount must be a positive integer")
             except Conflict as exc:
                 self._reply(409, {"error": "conflict", "detail": str(exc)})
                 return
@@ -228,8 +227,7 @@ def make_handler(config: Config):
                 self._reply(400, {"error": "invalid_request", "detail": str(exc)[:160]})
                 return
             local, main = self._nodes()
-            decision = plan(photos, size, local, main,
-                            config.local_max_photos, config.local_max_input_bytes)
+            decision = plan(photos, local, main, config.local_max_photos)
             self._reply(200, {"mode": "routing_probe", "executesWork": False,
                               **decision, "nodes": [local, main]})
 

@@ -2,15 +2,15 @@
 
 An otherwise small job waits for local while it is busy, unavailable or draining.
 Only an explicit ``allow_main_fallback=True`` permits it to consume main. Jobs
-above either local size ceiling always require main and never overflow to local.
+above the local photo-count limit always require main and never overflow to local.
 This helper reserves nothing: callers must atomically gate and recheck admission
 before dispatch. Missing queue/state fields retain legacy fixture compatibility;
 when supplied, queue counts must be zero and maintenance state must be active.
 """
 
 
-def plan(photo_count: int, input_bytes: int, local: dict, main: dict,
-         local_max_photos: int, local_max_input_bytes: int, *,
+def plan(photo_count: int, local: dict, main: dict,
+         local_max_photos: int, *,
          allow_main_fallback: bool = False) -> dict:
     def accepts(node: dict) -> bool:
         if not isinstance(node, dict) or node.get("ready") is not True:
@@ -23,13 +23,12 @@ def plan(photo_count: int, input_bytes: int, local: dict, main: dict,
         limit = node.get("maxImages")
         return limit is None or (type(limit) is int and limit > 0 and photo_count <= limit)
 
-    local_size_ok = photo_count <= local_max_photos and input_bytes <= local_max_input_bytes
-    if local_size_ok:
+    if photo_count <= local_max_photos:
         if accepts(local):
-            return {"decision": "local", "reason": "local_within_limits"}
+            return {"decision": "local", "reason": "local_within_photo_limit"}
         if allow_main_fallback is True and accepts(main):
             return {"decision": "main", "reason": "explicit_local_fallback"}
         return {"decision": "wait", "reason": "local_unavailable"}
     if accepts(main):
-        return {"decision": "main", "reason": "exceeds_local_limits"}
+        return {"decision": "main", "reason": "exceeds_local_photo_limit"}
     return {"decision": "wait", "reason": "main_unavailable"}

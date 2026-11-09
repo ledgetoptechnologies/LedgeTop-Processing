@@ -44,7 +44,7 @@ class ReferenceDriverRoutingTests(unittest.TestCase):
         self.root, self.ledger = self.host.root, self.host.ledger
         self.queue = Queue(self.root/'queue', reference_enabled=True, node_ids=('cluster','main'), treedar_node_ids=('main',))
         self.addCleanup(self.queue.close)
-        self.store = ReferenceStore(self.queue, local_max_input_bytes=1)
+        self.store = ReferenceStore(self.queue)
         self.fixture = json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())
         self.api = ReferenceControlAPI(self.store, viewer_bearers={VIEWER:'staging'},
             worker_bearers={TOKEN:dict(node_id='main',worker_id='worker-main',worker_instance_id='instance-main')},

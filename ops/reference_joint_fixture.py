@@ -153,7 +153,7 @@ def build_operational_fixture(root, tls, queue, store, engine_id, origin):
         private_json(worker_path,worker_config)
     driver, result_server = build_worker(load_config(str(worker_path)))
     config = Config(api_token='synthetic-legacy-api-token-00000000',local_node_url=backend.origin,
-        main_node_url=backend.origin,local_max_photos=1000,local_max_input_bytes=20*1024**3,
+        main_node_url=backend.origin,local_max_photos=1000,
         prototype_state_dir=str(root/'coordinator'),prototype_node_ids=('cluster','main'),treedar_node_ids=('main',))
     settings = dict(schemaVersion=1,listener=dict(host='0.0.0.0',port=9443,certificate=str(tls/'cert.pem'),
         privateKey=str(tls/'key.pem'),clientCA=str(tls/'cert.pem')),viewerBearers={'staging':VIEWER_TOKEN},

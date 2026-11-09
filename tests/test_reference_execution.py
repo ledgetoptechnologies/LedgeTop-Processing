@@ -63,7 +63,7 @@ class ExecutionRouterTests(unittest.TestCase):
         return job,identifier
 
     def new_odm(self):
-        self.fixture.store=ReferenceStore(self.fixture.queue,local_max_input_bytes=1)
+        self.fixture.store=ReferenceStore(self.fixture.queue)
         raw=copy.deepcopy(json.loads((Path(__file__).resolve().parents[1]/'contracts/reference-v1.contract.json').read_text())['submission'])
         raw['submissionId']=str(uuid.uuid4())
         raw['manifest']['objects'][0].update(name='survey_0042.DNG',mediaType='image/x-adobe-dng')

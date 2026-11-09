@@ -55,7 +55,7 @@ class ReferenceRuntimeTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.config = Config(api_token="legacy-api-" + "a"*32,
             local_node_url="http://127.0.0.1:19001", main_node_url="http://127.0.0.1:19002",
-            local_max_photos=1000, local_max_input_bytes=20*1024**3,
+            local_max_photos=1000,
             prototype_state_dir=str(self.root / "state"), prototype_node_ids=("cluster", "main"),
             treedar_node_ids=("main",), viewer_enabled=True,
             viewer_token="legacy-native-viewer-" + "b"*32)
