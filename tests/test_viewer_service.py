@@ -468,6 +468,38 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertTrue(self.engines['main'].calls)
         self.assertFalse(self.engines['cluster'].calls)
 
+    def test_removed_option_does_not_block_eligible_production_and_recovers(self):
+        waiting = self.submit(options=[{'name': 'pc-ept', 'value': True}])
+        eligible = self.submit(options=[{'name': 'gltf', 'value': True}])
+        self.option_catalog = [item for item in self.option_catalog if item['name'] != 'pc-ept']
+
+        self.service.tick()
+        self.assertEqual(self.task(waiting)['job']['status'], 'queued')
+        self.assertEqual(self.task(waiting)['phase'], 'waiting_node')
+        self.assertEqual(self.task(waiting)['error'], 'options_unavailable')
+        self.assertEqual(self.service.info(waiting)['ledgetopQueueReason'], 'waiting_node_options')
+        self.assertEqual(self.task(eligible)['node_id'], 'cluster')
+        self.assertEqual(len(self.fleet.commits), 1)
+
+        # The durable waiting task becomes eligible again when the node
+        # advertises its option; the already-running job is not preempted.
+        self.option_catalog = [dict(item) for item in OPTIONS]
+        self.service.tick()
+        self.assertEqual(self.task(waiting)['node_id'], 'main')
+        self.assertEqual(self.task(waiting)['job']['status'], 'running')
+        self.assertEqual(self.task(eligible)['job']['status'], 'running')
+        self.assertEqual(len(self.fleet.commits), 2)
+
+    def test_removed_production_option_does_not_let_staging_bypass_priority(self):
+        production = self.submit(options=[{'name': 'pc-ept', 'value': True}])
+        staging = self.submit(environment='staging', options=[{'name': 'gltf', 'value': True}])
+        self.option_catalog = [item for item in self.option_catalog if item['name'] != 'pc-ept']
+
+        self.service.tick()
+        self.assertEqual(self.task(production)['error'], 'options_unavailable')
+        self.assertEqual(self.task(staging)['job']['status'], 'queued')
+        self.assertFalse(self.fleet.commits)
+
     def test_large_job_waits_for_main_without_overflow_to_small_node(self):
         self.set_cluster_max_photos(1)
         identifier = self.submit(count=2)
@@ -880,9 +912,9 @@ class ViewerServiceTests(unittest.TestCase):
     def test_dynamic_options_removed_after_enqueue_prevent_dispatch(self):
         identifier = self.submit()
         self.option_catalog = [item for item in self.option_catalog if item['name'] != 'pc-ept']
-        with self.assertRaises((ValueError, Conflict)):
-            self.service.tick()
+        self.service.tick()
         self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+        self.assertEqual(self.task(identifier)['error'], 'options_unavailable')
         self.assertFalse(self.fleet.commits)
         with self.assertRaises(ValueError):
             self.service.initialize(str(uuid.uuid4()), options=[{'name': 'unsupported', 'value': True}])

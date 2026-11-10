@@ -532,12 +532,17 @@ class ViewerService:
                     requested = {item.get('name') for item in candidate_task['options']
                                  if isinstance(item, dict)}
                     if not requested <= ready_option_names:
-                        # The Viewer admitted this option when the task was
-                        # initialized, but no currently ready engine exposes
-                        # it anymore. Keep the durable job queued and surface
-                        # the schema conflict instead of silently waiting.
-                        self._check_options(candidate_task['options'], [
-                            {'name': name} for name in ready_option_names])
+                        # A node update can remove an option after admission.
+                        # Preserve this job for retry, but do not let it stop
+                        # other eligible work in the same priority tier.
+                        if (candidate_task['phase'] != 'waiting_node'
+                                or candidate_task.get('error') != 'options_unavailable'):
+                            self.store.update(candidate_task['uuid'], phase='waiting_node',
+                                              error='options_unavailable')
+                        continue
+                    if candidate_task.get('error') == 'options_unavailable':
+                        self.store.update(candidate_task['uuid'], phase='waiting_node',
+                                          error='no_eligible_node')
                     if self._can_run_on(candidate_task, node, snapshots.get(node.node_id), active_nodes):
                         eligible.append((candidate, candidate_task))
                 if not eligible:

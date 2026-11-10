@@ -634,7 +634,8 @@ class TaskStore:
         if job and state == 'queued':
             result['ledgetopQueueState'] = 'waiting_for_dispatch'
             if task['phase'] == 'waiting_node':
-                result['ledgetopQueueReason'] = 'waiting_node_capacity'
+                result['ledgetopQueueReason'] = ('waiting_node_options'
+                    if task['error'] == 'options_unavailable' else 'waiting_node_capacity')
         if job and job.get('nodeId'):
             result['ledgetopNodeId'] = job['nodeId']
         if job and state == 'held':
