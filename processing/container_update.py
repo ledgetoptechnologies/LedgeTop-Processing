@@ -1,4 +1,4 @@
-"""One planned NodeODX Compose-service update on an exclusively managed node.
+"""One planned ODM-family Compose-service update on an exclusively managed node.
 
 Host command only; never add a Docker socket to the coordinator. Images must
 already exist locally. Uncertain mutations retain the durable receipt and gate.
@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import stat
 import time
 from urllib.parse import urlsplit
 
@@ -75,8 +76,17 @@ class ComposeNode:
     """Only one operator-selected Compose service; no image pulls or pruning."""
     def __init__(self, args, root):
         self.args, self.root = args, root
+        self.expected_engine = getattr(args,'expected_engine','odx')
+        upload,process = getattr(args,'upload_layout',None),getattr(args,'process_layout',None)
+        if (self.expected_engine not in ('odx','odm')
+                or (self.expected_engine=='odm' and (upload is None or process is None))
+                or upload not in (None,'var-www-tmp-v1') or process not in (None,'node-var-www-v1')):
+            raise UpdateError('explicit verified engine and fixed layout required')
         self.base = ['docker', 'compose', '-p', args.project, '-f', str(Path(args.compose_file).resolve())]
-        self.node = Client(loopback(args.node_origin), os.environ.get('NODEODX_API_TOKEN', ''), node=True)
+        token = getattr(args,'node_token',os.environ.get('NODEODX_API_TOKEN',''))
+        if type(token) is not str or len(token)>4096 or not all(0x21<=ord(c)<=0x7e for c in token):
+            raise UpdateError('invalid private engine credential')
+        self.node = Client(loopback(args.node_origin), token, node=True)
 
     def docker(self, command, *, timeout=30):
         try:
@@ -134,12 +144,13 @@ class ComposeNode:
             raise UpdateError('engine must be running for independent idle checks')
         info = self.node.json('GET', '/info')
         tasks = self.node.json('GET', '/task/list')
-        if (not isinstance(info, dict) or info.get('engine') != 'odx'
+        if (not isinstance(info, dict) or info.get('engine') != self.expected_engine
                 or type(info.get('taskQueueCount')) is not int or info['taskQueueCount'] != 0
                 or tasks != []):
             return False
         # Unfinished uploads are not necessarily registered tasks. Never remove
-        # them automatically. The fixed NodeODX staging path is part of this adapter.
+        # them automatically. The explicitly verified fixed layout is shared by
+        # the supported NodeODX and NodeODM deployments.
         return self.uploads_idle(item['Id']) and self.processing_idle(item['Id'])
 
     def uploads_idle(self, identifier):
@@ -210,13 +221,16 @@ class ComposeNode:
             raise PreflightError('replacement validation failed before container mutation') from None
         self.docker(command, timeout=120)
 
-    def healthy(self, image):
+    def serving(self, image):
         item = self.inspect()
         if (item['Image'] != image or not item['State']['Running'] or item['State'].get('OOMKilled')
                 or item['State'].get('Health', {}).get('Status', 'healthy') != 'healthy'):
             return False
         info = self.node.json('GET', '/info')
-        return isinstance(info, dict) and info.get('engine') == 'odx' and self.idle()
+        return isinstance(info, dict) and info.get('engine') == self.expected_engine
+
+    def healthy(self, image):
+        return self.serving(image) and self.idle()
 
 
 def wait_healthy(adapter, image, seconds):
@@ -233,8 +247,13 @@ def wait_healthy(adapter, image, seconds):
 
 
 def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
-            health_seconds=30, poll_seconds=3, *, expected_plan_id=None, expected_target=None):
+            health_seconds=30, poll_seconds=3, *, expected_plan_id=None, expected_target=None,defer_finish=False,
+            on_reserved=None):
     path = root / 'update.json'
+    if type(defer_finish) is not bool:
+        raise UpdateError('explicit completion policy required')
+    if on_reserved is not None and not callable(on_reserved):
+        raise UpdateError('trusted reservation callback required')
     if path.exists() or path.is_symlink():
         raise UpdateError('existing update receipt; never replay an uncertain update')
     deadline = time.monotonic() + wait_seconds
@@ -266,10 +285,20 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
     # Both the queue fence and private intent exist before any container mutation.
     begun = operator.json('POST', '/v1/prototype/nodes/' + node_id + '/begin',
                           {'planId': node['planId'], 'expectedRevision': node['revision']})
-    receipt.update(stage='reserved', updateToken=begun['updateToken'])
+    receipt.update(stage='reserved', updateToken=begun['updateToken'],reservedRevision=begun['node']['revision'])
     save(path, receipt)
     if not adapter.idle():
         raise UpdateError('engine changed after reservation; leave gate for inspection')
+    if on_reserved is not None:
+        receipt['stage']='reserved_hook_pending';save(path,receipt)
+        # Deliberately outside replacement/rollback handling: an uncertain
+        # ingress drain must never recreate either container or finish success.
+        on_reserved(dict(nodeId=node_id,planId=receipt['planId'],targetImage=target,
+            reservedRevision=receipt['reservedRevision']))
+        if not adapter.idle():
+            raise UpdateError('engine changed while reserved ingress drained; inspect without replacement')
+        receipt.update(stage='reserved_ready',reservationCallbackCompleted=True)
+        save(path,receipt)
     try:
         receipt['stage'] = 'replace_pending'
         save(path, receipt)
@@ -290,14 +319,77 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
         adapter.replace(old)
         restored = wait_healthy(adapter, old, health_seconds)
         status, result = 'failed', {'healthy': False, 'rollbackHealthy': restored, 'restoredImage': old}
-    receipt.update(stage='finish_pending', status=status, result=result)
+    receipt.update(stage='finalization_pending' if status=='succeeded' and defer_finish else 'finish_pending', status=status, result=result)
     save(path, receipt)
+    if status=='succeeded' and defer_finish:
+        return {'status':status,'nodeId':node_id,**result,'finalizationRequired':True}
     operator.json('POST', '/v1/prototype/nodes/' + node_id + '/finish',
                   {'planId': receipt['planId'], 'updateToken': receipt['updateToken'],
                    'status': status, 'result': result})
     receipt['stage'] = 'completed'
     save(path, receipt)
     return {'status': status, 'nodeId': node_id, **result}
+
+
+def deferred_receipt(root, node_id, *, expected_plan_id, expected_target):
+    path=Path(root)/'update.json'
+    info=path.lstat()
+    if (path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_size>65536
+            or (os.name!='nt' and (info.st_uid!=os.geteuid() or info.st_mode & 0o077))):
+        raise UpdateError('private update receipt required')
+    receipt=json.loads(path.read_text())
+    if (receipt.get('nodeId')!=node_id or receipt.get('planId')!=expected_plan_id
+            or receipt.get('targetImage')!=expected_target or receipt.get('status')!='succeeded'
+            or type(expected_target) is not str or not PIN.fullmatch(expected_target)
+            or type(receipt.get('oldImage')) is not str or not PIN.fullmatch(receipt['oldImage'])
+            or receipt.get('stage') not in ('finalization_pending','finish_pending','completed')
+            or receipt.get('result',{}).get('image')!=expected_target
+            or receipt['result'].get('healthy') is not True
+            or type(receipt.get('reservedRevision')) is not int):
+        raise UpdateError('definite owned replacement success required')
+    return receipt
+
+
+def finish_matches(node,receipt,result):
+    return (node.get('id')==receipt['nodeId'] and node.get('planId')==receipt['planId']
+        and node.get('targetImage')==receipt['targetImage'] and node.get('state')=='active'
+        and type(node.get('revision')) is int and node['revision']==receipt['reservedRevision']+1 and node.get('result')==result)
+
+
+def finalize_deferred(coordinator,operator,node_id,root,*,expected_plan_id,expected_target,result):
+    """Finish only a frozen successful operation; never inspect/replace Docker.
+
+    Trusted managed callers must first prove durable Compose pin, exact backend
+    health and owned reopened ingress. Replays reconcile only this final CAS.
+    """
+    receipt=deferred_receipt(root,node_id,expected_plan_id=expected_plan_id,expected_target=expected_target)
+    if (type(result) is not dict or set(result)!={'healthy','image','previousImage','composePinUpdateRequired','persistentComposePin','ingress'}
+            or result.get('healthy') is not True or result.get('image')!=expected_target
+            or result.get('previousImage')!=receipt['oldImage'] or result.get('composePinUpdateRequired') is not False
+            or result.get('persistentComposePin')!=expected_target or result.get('ingress')!='open'):
+        raise UpdateError('verified managed finalization proof required')
+    if receipt.get('finishResult') is not None and receipt['finishResult']!=result:
+        raise UpdateError('final completion cannot change')
+    node=coordinator.json('GET','/v1/prototype/nodes/'+node_id)['node']
+    if not finish_matches(node,receipt,result):
+        if (node.get('state')!='updating' or node.get('revision')!=receipt['reservedRevision']
+                or node.get('planId')!=receipt['planId'] or node.get('targetImage')!=expected_target):
+            raise UpdateError('maintenance plan/revision changed before finalization')
+        receipt.update(stage='finish_pending',finishResult=result)
+        save(Path(root)/'update.json',receipt)
+        try:
+            operator.json('POST','/v1/prototype/nodes/'+node_id+'/finish',dict(planId=receipt['planId'],
+                updateToken=receipt['updateToken'],status='succeeded',result=result))
+        except SmokeError:
+            node=coordinator.json('GET','/v1/prototype/nodes/'+node_id)['node']
+            if not finish_matches(node,receipt,result):raise
+        else:
+            node=coordinator.json('GET','/v1/prototype/nodes/'+node_id)['node']
+        if not finish_matches(node,receipt,result):
+            raise UpdateError('final completion readback unavailable')
+    receipt.update(stage='completed',finishResult=result)
+    save(Path(root)/'update.json',receipt)
+    return {'status':'succeeded','nodeId':node_id,**result}
 
 
 def main():
@@ -308,6 +400,9 @@ def main():
     parser.add_argument('--exclusive-admission', action='store_true',
                         help='Attest all engine writers/uploads are fenced through this coordinator')
     parser.add_argument('--node-port', type=int, choices=range(1, 65536), default=3000)
+    parser.add_argument('--expected-engine',choices=('odx','odm'),default='odx')
+    parser.add_argument('--upload-layout',choices=('var-www-tmp-v1',))
+    parser.add_argument('--process-layout',choices=('node-var-www-v1',))
     parser.add_argument('--wait-seconds', type=int, choices=range(0, 86401), default=0)
     parser.add_argument('--health-seconds', type=int, choices=range(1, 121), default=30)
     args = parser.parse_args()

@@ -129,6 +129,27 @@ class OptionsTests(unittest.TestCase):
         self.assertEqual(result['unsupportedByNode'], {'local': ['main-only'], 'main': []})
         self.assertEqual(result['nodes'][1]['options'], other.options)
 
+    def test_help_text_difference_does_not_hide_compatible_execution_option(self):
+        other = Engine()
+        self.addCleanup(other.close)
+        other.options[0]['help'] = 'Different wording for the same engine option'
+        result = catalog([('local', self.engine.origin, self.engine.token),
+                          ('main', other.origin, other.token)])
+        self.assertTrue(result['ready'])
+        self.assertEqual(result['conflictingNames'], [])
+        self.assertEqual([item['name'] for item in result['commonOptions']], ['engine-new-flag'])
+        self.assertEqual(result['commonOptions'][0]['help'], self.engine.options[0]['help'])
+
+    def test_execution_metadata_difference_still_marks_option_conflicting(self):
+        other = Engine()
+        self.addCleanup(other.close)
+        other.options[0]['type'] = 'int'
+        result = catalog([('local', self.engine.origin, self.engine.token),
+                          ('main', other.origin, other.token)])
+        self.assertTrue(result['ready'])
+        self.assertEqual(result['conflictingNames'], ['engine-new-flag'])
+        self.assertEqual(result['commonOptions'], [])
+
     def test_configured_outage_closes_fleet_and_never_serves_stale_catalog(self):
         nodes = [('local', self.engine.origin, self.engine.token), ('main', self.engine.origin, self.engine.token)]
         self.assertTrue(catalog(nodes)['ready'])

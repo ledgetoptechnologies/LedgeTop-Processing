@@ -6,7 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PROCESSING_PORT=8080
 
 WORKDIR /app
-COPY processing ./processing
+COPY requirements.txt ./requirements.txt
+RUN python -m pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
+COPY --chown=10001:10001 processing ./processing
 RUN mkdir /prototype-state && chown 10001:10001 /prototype-state
 USER 10001:10001
 EXPOSE 8080

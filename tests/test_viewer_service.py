@@ -1,0 +1,900 @@
+"""Synthetic coordinator integration: real queue/store, exact fake engine bytes.
+
+These tests prove dispatch/transport contracts, not genuine photogrammetry or
+Viewer output ingestion. No network, Docker, real datasets or host writes.
+"""
+
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import tempfile
+from datetime import datetime, timedelta, timezone
+from dataclasses import replace
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+import uuid
+import zipfile
+
+from processing.config import ProcessingNode
+from processing.maintenance import Conflict
+from processing.odx_smoke_worker import SmokeError
+from processing.prototype import PROFILE, VIEWER_PROFILE, Queue
+from processing.viewer_service import EngineUnavailable, ViewerService
+from processing.viewer_tasks import TaskStore
+
+
+OPTIONS = [{'name': name, 'type': 'bool', 'value': False}
+           for name in ('pc-ept', 'gltf', '3d-tiles')]
+REQUEST_OPTIONS = [{'name': 'pc-ept', 'value': True}]
+
+
+def synthetic_zip():
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, 'w') as archive:
+        archive.writestr('synthetic-result.txt', b'owned synthetic transfer fixture\n')
+    return stream.getvalue()
+
+
+class DownloadResponse(io.BytesIO):
+    status = 200
+
+    def __init__(self, body, interrupt=False):
+        super().__init__(body)
+        self.headers = {'Content-Length': str(len(body))}
+        self.interrupt = interrupt
+        self.calls = 0
+
+    def read(self, length=-1):
+        self.calls += 1
+        if self.interrupt:
+            if self.calls > 1:
+                raise OSError('synthetic connection lost')
+            return super().read(7)
+        return super().read(length)
+
+
+class FakeFleet:
+    def __init__(self):
+        self.active = set()
+        self.max_active = 0
+        self.commits = []
+
+
+class FakeEngine:
+    def __init__(self, name, fleet):
+        self.name, self.fleet = name, fleet
+        self.tasks = {}
+        self.calls = []
+        self.fail = None
+        self.commit_status = 20
+        self.read_unavailable = False
+        self.output_unavailable = False
+        self.interrupt_download_once = False
+        self.archive = synthetic_zip()
+        self.download_calls = 0
+
+    def initialize(self, task):
+        identifier = task['engine_uuid']
+        self.calls.append(('initialize', identifier))
+        if identifier in self.tasks:
+            raise AssertionError('duplicate engine initialization')
+        self.tasks[identifier] = {'uuid': identifier, 'status': {'code': 10},
+                                  'progress': 0, 'files': {}, 'cancel_requested': False}
+        if self.fail == 'initialize':
+            raise SmokeError('synthetic init response lost')
+
+    def upload(self, identifier, item):
+        self.calls.append(('upload', identifier, item['name']))
+        content = Path(item['path']).read_bytes()
+        if len(content) != item['bytes'] or hashlib.sha256(content).hexdigest() != item['sha256']:
+            raise AssertionError('upload metadata does not match exact file bytes')
+        self.tasks[identifier]['files'][item['name']] = content
+        if self.fail == 'upload':
+            raise SmokeError('synthetic upload response lost')
+
+    def action(self, action, identifier):
+        self.calls.append((action, identifier))
+        task = self.tasks[identifier]
+        if action == 'commit':
+            if self.name + ':' + identifier in self.fleet.active:
+                raise AssertionError('duplicate engine commit')
+            task['status']['code'] = self.commit_status
+            if self.commit_status == 20:
+                self.fleet.active.add(self.name + ':' + identifier)
+                self.fleet.max_active = max(self.fleet.max_active, len(self.fleet.active))
+            self.fleet.commits.append((self.name, identifier))
+            if self.fail == 'commit':
+                raise SmokeError('synthetic commit response lost after start')
+        elif action == 'cancel':
+            task['cancel_requested'] = True
+            # Deliberately remains running until a later explicit finish(50).
+        else:
+            raise AssertionError('unexpected engine mutation')
+        return {'success': True, 'uuid': identifier}
+
+    def read(self, route, *, missing=False, **query):
+        _, _, identifier, kind = route.split('/')
+        self.calls.append(('read', identifier, kind))
+        if self.read_unavailable or (kind == 'output' and self.output_unavailable):
+            raise EngineUnavailable('synthetic_read_unavailable')
+        task = self.tasks.get(identifier)
+        if task is None:
+            if missing:
+                return None
+            raise EngineUnavailable('synthetic_task_not_found')
+        if kind == 'info':
+            return {'uuid': identifier, 'status': dict(task['status']), 'progress': task['progress']}
+        if kind == 'output':
+            return ['synthetic engine output', '', 'comma,record'][query.get('line', 0):]
+        raise AssertionError('unexpected engine read')
+
+    def finish(self, identifier, code=40):
+        self.tasks[identifier]['status']['code'] = code
+        self.tasks[identifier]['progress'] = 100 if code == 40 else 50
+        self.fleet.active.discard(self.name + ':' + identifier)
+
+    def download(self, identifier):
+        self.calls.append(('download', identifier))
+        self.download_calls += 1
+        interrupt = self.interrupt_download_once
+        self.interrupt_download_once = False
+        return DownloadResponse(self.archive, interrupt=interrupt)
+
+
+class ViewerServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.config = SimpleNamespace(prototype_state_dir=str(self.root / 'state'),
+            local_node_url='http://synthetic-cluster.invalid:3000', local_node_token='private-cluster',
+            main_node_url='http://synthetic-main.invalid:3000', main_node_token='private-main',
+            local_max_photos=1000)
+        self.fleet = FakeFleet()
+        self.engines = {name: FakeEngine(name, self.fleet) for name in ('cluster', 'main')}
+        self.busy = {}
+        self.unavailable = set()
+        self.option_catalog = [dict(item) for item in OPTIONS]
+        self.catalog_ready = True
+        self.make_queue_service()
+
+    def make_queue_service(self):
+        self.queue = Queue(self.root / 'state', node_ids=('cluster', 'main'),
+                           treedar_node_ids=('main',), viewer_enabled=True)
+        self.service = ViewerService(self.queue, self.config, engines=self.engines, probe=self.probe)
+        self.service._catalog = lambda: {'ready': self.catalog_ready,
+                                         'commonOptions': [dict(item) for item in self.option_catalog]}
+
+    def set_cluster_max_photos(self, value):
+        self.config.local_max_photos = value
+        self.service.nodes = tuple(replace(node, max_photos=value) if node.node_id == 'cluster' else node
+                                   for node in self.service.nodes)
+
+    def tearDown(self):
+        self.service.close()
+        self.queue.close()
+        self.temporary.cleanup()
+
+    def probe(self, role, origin, token):
+        node = 'cluster' if role == 'local' else 'main'
+        return {'ready': node not in self.unavailable,
+                'maxImages': 1000 if node == 'cluster' else None,
+                'taskQueueCount': self.busy.get(node, sum(x.startswith(node + ':') for x in self.fleet.active))}
+
+    def initialize(self, *, environment='production', options=None):
+        identifier = str(uuid.uuid4())
+        self.service.initialize(identifier, 'Synthetic survey',
+                                REQUEST_OPTIONS if options is None else options, None, environment)
+        return identifier
+
+    def upload(self, identifier, name='photo.jpg', content=b'owned synthetic photo bytes'):
+        self.service.upload(identifier, name, io.BytesIO(content), len(content))
+
+    def submit(self, *, environment='production', count=1, options=None):
+        identifier = self.initialize(environment=environment, options=options)
+        for index in range(count):
+            self.upload(identifier, name=f'photo-{index:05}.jpg')
+        self.service.commit(identifier)
+        return identifier
+
+    def task(self, identifier):
+        return self.service.store.task(identifier)
+
+    def engine_for(self, identifier):
+        return self.engines[self.task(identifier)['node_id']]
+
+    def finish(self, identifier, code=40):
+        task = self.task(identifier)
+        self.engines[task['node_id']].finish(task['engine_uuid'], code)
+
+    def restart_claimed_task(self, identifier, phase, *, cursor=0, engine_exists=False):
+        job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': 'cluster',
+                                'profiles': [VIEWER_PROFILE]})
+        self.assertIsNotNone(job)
+        task = self.task(identifier)
+        engine_uuid = str(uuid.uuid4())
+        self.service.store.update(identifier, stage='running', phase=phase, node_id='cluster',
+            engine_uuid=engine_uuid, claim_token=job['claimToken'], upload_cursor=cursor)
+        if engine_exists:
+            files = {}
+            if cursor:
+                item = task['files'][0]
+                files[item['name']] = Path(item['path']).read_bytes()
+            self.engines['cluster'].tasks[engine_uuid] = {
+                'uuid': engine_uuid, 'status': {'code': 10}, 'progress': 0,
+                'files': files, 'cancel_requested': False}
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        return engine_uuid
+
+    def test_exact_upload_bytes_use_small_node_and_main_is_untouched(self):
+        identifier = self.initialize()
+        content = b'\xff\xd8\0\r\n--binary' * 8192
+        self.upload(identifier, 'owned.jpg', content)
+        self.service.commit(identifier)
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['node_id'], 'cluster')
+        self.assertEqual(self.engines['cluster'].tasks[task['engine_uuid']]['files']['owned.jpg'], content)
+        self.assertEqual(self.engines['main'].calls, [])
+        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        self.assertEqual(self.fleet.max_active, 1)
+
+    def test_commit_ack_keeps_viewer_queued_until_engine_confirms_start(self):
+        identifier = self.submit()
+        engine = self.engines['cluster']
+        engine.commit_status = 10
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['phase'], 'awaiting_engine_start')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'awaiting_engine_start')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        engine.tasks[task['engine_uuid']]['status']['code'] = 20
+        self.fleet.active.add('cluster:' + task['engine_uuid'])
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'processing')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+
+    def test_over_cluster_photo_ceiling_uses_main_and_never_cluster(self):
+        # A lowered synthetic threshold exercises scheduler dispatch without
+        # fabricating 1,001 files on disk; the exact configured ceiling is
+        # checked independently by test_cluster_photo_limit_boundary_is_1000.
+        self.set_cluster_max_photos(2)
+        identifier = self.submit(count=3)
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['node_id'], 'main')
+        self.assertEqual(self.engines['cluster'].calls, [])
+        self.assertEqual(self.fleet.max_active, 1)
+
+    def test_cluster_photo_limit_boundary_is_1000(self):
+        node = next(node for node in self.service.nodes if node.node_id == 'cluster')
+        snapshot = {'ready': True, 'health': {'ready': True, 'taskQueueCount': 0,
+                                               'maxImages': 1000}, 'options': []}
+        # Photo count controls node eligibility; large datasets remain eligible
+        # when the node supports the image count and disk reserve is available.
+        base = {'input_bytes': 50 * 1024 ** 3, 'options': []}
+        self.assertTrue(self.service._can_run_on(
+            {**base, 'images_count': 1000}, node, snapshot, set()))
+        self.assertFalse(self.service._can_run_on(
+            {**base, 'images_count': 1001}, node, snapshot, set()))
+
+    def test_dynamic_third_node_dispatch_respects_order_and_its_photo_limit(self):
+        self.service.close()
+        self.queue.close()
+
+        config = SimpleNamespace(**vars(self.config))
+        config.prototype_state_dir = str(self.root / 'dynamic-three-node-state')
+        config.processing_nodes = (
+            ProcessingNode('cluster', 'http://synthetic-cluster.invalid:3000',
+                           'private-cluster', 1),
+            ProcessingNode('main', 'http://synthetic-main.invalid:3000',
+                           'private-main'),
+            ProcessingNode('aux-3', 'http://synthetic-aux.invalid:3000',
+                           'private-aux', 3),
+        )
+        self.config = config
+        self.engines = {node.node_id: FakeEngine(node.node_id, self.fleet)
+                        for node in config.processing_nodes}
+        self.busy = {'main': 1}
+        self.queue = Queue(self.root / 'dynamic-three-node-state', node_ids=('cluster', 'main', 'aux-3'),
+                           treedar_node_ids=('main',), viewer_enabled=True)
+
+        def dynamic_probe(role, origin, token):
+            node_id = {'local': 'cluster', 'main': 'main'}.get(role, role)
+            max_images = {'cluster': 1000, 'main': None, 'aux-3': 3}[node_id]
+            queued = self.busy.get(node_id, sum(name.startswith(node_id + ':')
+                                                for name in self.fleet.active))
+            return {'ready': node_id not in self.unavailable,
+                    'maxImages': max_images, 'taskQueueCount': queued}
+
+        self.service = ViewerService(self.queue, config, engines=self.engines, probe=dynamic_probe)
+
+        def discover(role, origin, token='', *, allow_dynamic=False):
+            self.assertTrue(allow_dynamic)
+            return {'role': role, 'available': True,
+                    'options': [dict(item) for item in OPTIONS]}
+
+        with patch('processing.viewer_service.discover_node', side_effect=discover) as discovery:
+            small = self.submit(count=2)
+            self.service.tick()
+            self.assertEqual(self.task(small)['node_id'], 'aux-3')
+            self.assertEqual(self.task(small)['phase'], 'processing')
+            discovery.assert_any_call('aux-3', 'http://synthetic-aux.invalid:3000',
+                                      'private-aux', allow_dynamic=True)
+
+            self.finish(small)
+            self.service.tick()
+            self.assertEqual(self.service.info(small)['status']['code'], 40)
+
+            too_large = self.submit(count=4)
+            self.service.tick()
+            self.assertIsNone(self.task(too_large)['node_id'])
+            self.assertEqual(self.task(too_large)['stage'], 'queued')
+            self.assertEqual(self.task(too_large)['phase'], 'waiting_node')
+            self.assertEqual(len([call for call in self.engines['aux-3'].calls
+                                  if call[0] == 'commit']), 1)
+            self.assertEqual(self.fleet.max_active, 1)
+
+    def test_dynamic_node_order_selects_first_of_multiple_eligible_nodes(self):
+        self.service.close()
+        self.queue.close()
+
+        config = SimpleNamespace(**vars(self.config))
+        config.prototype_state_dir = str(self.root / 'dynamic-order-state')
+        config.processing_nodes = (
+            ProcessingNode('aux-3', 'http://synthetic-aux.invalid:3000',
+                           'private-aux', 3),
+            ProcessingNode('cluster', 'http://synthetic-cluster.invalid:3000',
+                           'private-cluster', 1000),
+            ProcessingNode('main', 'http://synthetic-main.invalid:3000',
+                           'private-main'),
+        )
+        self.config = config
+        self.engines = {node.node_id: FakeEngine(node.node_id, self.fleet)
+                        for node in config.processing_nodes}
+        self.busy = {}
+        self.queue = Queue(self.root / 'dynamic-order-state',
+                           node_ids=('aux-3', 'cluster', 'main'),
+                           treedar_node_ids=('main',), viewer_enabled=True)
+
+        def dynamic_probe(role, origin, token):
+            node_id = {'local': 'cluster', 'main': 'main'}.get(role, role)
+            max_images = {'cluster': 1000, 'main': None, 'aux-3': 3}[node_id]
+            queued = self.busy.get(node_id, sum(name.startswith(node_id + ':')
+                                                for name in self.fleet.active))
+            return {'ready': node_id not in self.unavailable,
+                    'maxImages': max_images, 'taskQueueCount': queued}
+
+        self.service = ViewerService(self.queue, config, engines=self.engines,
+                                     probe=dynamic_probe)
+
+        def discover(role, origin, token='', *, allow_dynamic=False):
+            self.assertTrue(allow_dynamic)
+            return {'role': role, 'available': True,
+                    'options': [dict(item) for item in OPTIONS]}
+
+        with patch('processing.viewer_service.discover_node', side_effect=discover):
+            identifier = self.submit(count=2)
+            self.service.tick()
+            self.assertEqual(self.task(identifier)['node_id'], 'aux-3')
+            self.assertEqual(self.task(identifier)['phase'], 'processing')
+            self.assertEqual(len([call for call in self.engines['aux-3'].calls
+                                  if call[0] == 'commit']), 1)
+            self.assertEqual(self.engines['cluster'].calls, [])
+            self.assertEqual(self.engines['main'].calls, [])
+            self.assertEqual(self.fleet.max_active, 1)
+
+    def test_priority_fifo_and_one_heavy_job_per_physical_node(self):
+        staging = self.submit(environment='staging')
+        production_first = self.submit(count=2)
+        production_second = self.submit()
+        self.set_cluster_max_photos(1)
+        self.service.tick()
+        self.assertEqual(self.task(production_first)['node_id'], 'main')
+        self.assertEqual(self.task(production_second)['node_id'], 'cluster')
+        self.assertIsNone(self.task(staging)['node_id'])
+        self.assertEqual(self.fleet.max_active, 2)
+        self.finish(production_first)
+        self.finish(production_second)
+        self.service.tick()
+        self.assertEqual(self.task(staging)['node_id'], 'cluster')
+        self.finish(staging)
+        self.service.tick()
+        self.assertTrue(all(self.service.info(i)['status']['code'] == 40
+                            for i in (production_first, production_second, staging)))
+        self.assertEqual(self.fleet.max_active, 2)
+        self.assertEqual(len(self.fleet.commits), 3)
+
+    def test_production_arrival_does_not_preempt_running_staging_job(self):
+        # Keep main unavailable so production cannot run concurrently while
+        # the staging attempt owns the cluster node.
+        self.busy['main'] = 1
+        staging = self.submit(environment='staging')
+        self.service.tick()
+        staging_task = self.task(staging)
+        self.assertEqual(staging_task['node_id'], 'cluster')
+        self.assertEqual(staging_task['job']['status'], 'running')
+        engine_uuid = staging_task['engine_uuid']
+
+        production = self.submit(environment='production')
+        self.service.tick()
+
+        staging_task = self.task(staging)
+        production_task = self.task(production)
+        self.assertEqual(staging_task['node_id'], 'cluster')
+        self.assertEqual(staging_task['engine_uuid'], engine_uuid)
+        self.assertEqual(staging_task['job']['status'], 'running')
+        self.assertEqual(self.service.info(staging)['status']['code'], 20)
+        self.assertIsNone(production_task['node_id'])
+        self.assertEqual(production_task['job']['status'], 'queued')
+        self.assertEqual(sum(call[0] == 'cancel' for call in self.engines['cluster'].calls), 0)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+        self.finish(staging)
+        self.service.tick()
+        self.assertEqual(self.service.info(staging)['status']['code'], 40)
+        self.assertEqual(self.task(production)['node_id'], 'cluster')
+        self.assertEqual(self.service.info(production)['status']['code'], 20)
+        self.assertEqual(len(self.fleet.commits), 2)
+
+    def test_tree_running_on_main_does_not_block_cluster_photo_slot(self):
+        tree, _ = self.queue.submit({'requestId': 'tree', 'environment': 'production', 'profile': PROFILE})
+        claim = self.queue.claim({'workerId': 'tree-worker', 'nodeId': 'main'})
+        identifier = self.submit(environment='staging')
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['node_id'], 'cluster')
+        self.assertEqual(self.queue.get(tree['id'])['nodeId'], 'main')
+        self.assertIsNotNone(claim)
+
+    def test_waiting_production_tree_keeps_staging_photo_queued(self):
+        self.queue.submit({'requestId': 'production-tree', 'environment': 'production',
+                           'profile': PROFILE})
+        identifier = self.submit(environment='staging')
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+        self.assertIsNone(self.task(identifier)['node_id'])
+        self.assertFalse(self.fleet.commits)
+
+    def test_busy_small_node_falls_back_to_available_main_for_small_job(self):
+        identifier = self.submit()
+        self.busy['cluster'] = 1
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['node_id'], 'main')
+        self.assertTrue(self.engines['main'].calls)
+        self.assertFalse(self.engines['cluster'].calls)
+
+    def test_large_job_waits_for_main_without_overflow_to_small_node(self):
+        self.set_cluster_max_photos(1)
+        identifier = self.submit(count=2)
+        self.unavailable.add('main')
+        self.service.tick()
+        self.assertIsNone(self.task(identifier)['node_id'])
+        self.assertFalse(self.fleet.commits)
+
+    def test_maintenance_drain_keeps_priority_head_queued(self):
+        self.set_cluster_max_photos(1)
+        production = self.submit(count=2)
+        staging = self.submit(environment='staging')
+        now = datetime.now(timezone.utc)
+        drain = (now - timedelta(seconds=2)).isoformat()
+        not_before = (now + timedelta(hours=1)).isoformat()
+        self.queue.schedule_node('main', {'expectedRevision': 0, 'drainAt': drain,
+            'notBefore': not_before, 'afterJobId': None, 'targetImage': 'sha256:' + 'a' * 64})
+        self.service.tick()
+        self.assertEqual(self.task(production)['job']['status'], 'queued')
+        self.assertEqual(self.task(staging)['job']['status'], 'queued')
+        self.assertFalse(self.fleet.commits)
+
+    def test_new_production_during_selection_is_not_claimed_using_staging_routing(self):
+        staging = self.submit(environment='staging')
+        production = self.initialize()
+        self.upload(production, 'a.jpg')
+        self.upload(production, 'b.jpg')
+        self.set_cluster_max_photos(1)
+        original = self.queue.claim
+        inserted = []
+
+        def insert_then_claim(payload, **kwargs):
+            if not inserted:
+                inserted.append(True)
+                self.service.commit(production)
+            return original(payload, **kwargs)
+
+        with patch.object(self.queue, 'claim', side_effect=insert_then_claim):
+            self.service.tick()
+        self.assertFalse(self.fleet.commits)
+        self.assertEqual(self.task(staging)['job']['status'], 'queued')
+        self.service.tick()
+        self.assertEqual(self.task(production)['node_id'], 'main')
+
+    def test_completed_engine_is_reconciled_after_coordinator_restart_without_replay(self):
+        identifier = self.submit()
+        self.service.tick()
+        engine_uuid = self.task(identifier)['engine_uuid']
+        self.service.close()
+        self.queue.close()
+        self.engines['cluster'].finish(engine_uuid)
+        self.make_queue_service()
+        self.assertEqual(self.task(identifier)['job']['status'], 'held')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        self.assertTrue(self.service.info(identifier)['ledgetopHeld'])
+        self.assertEqual(self.service.info(identifier)['ledgetopNodeId'], 'cluster')
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['status']['code'], 40)
+        self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_restart_before_engine_start_keeps_viewer_queued_until_code20(self):
+        identifier = self.submit()
+        engine = self.engines['cluster']
+        engine.commit_status = 10
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['phase'], 'awaiting_engine_start')
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.assertEqual(self.task(identifier)['job']['status'], 'held')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        engine.tasks[task['engine_uuid']]['status']['code'] = 20
+        self.fleet.active.add('cluster:' + task['engine_uuid'])
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'processing')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+        self.assertEqual(sum(call[0] == 'initialize' for call in engine.calls), 1)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_restart_resumes_confirmed_upload_cursor_without_reuploading_prior_files(self):
+        identifier = self.submit(count=2)
+        engine_uuid = self.restart_claimed_task(identifier, 'uploaded', cursor=1, engine_exists=True)
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['phase'], 'processing')
+        self.assertEqual(task['engine_uuid'], engine_uuid)
+        upload_names = [call[2] for call in self.engines['cluster'].calls if call[0] == 'upload']
+        self.assertEqual(upload_names, [task['files'][1]['name']])
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.engines['cluster'].calls), 0)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_restart_reconciles_uncertain_init_by_exact_uuid_before_upload(self):
+        identifier = self.submit()
+        self.restart_claimed_task(identifier, 'init_pending')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'processing')
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.engines['cluster'].calls), 1)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_restart_initialization_read_outage_backs_off_without_losing_recovery_state(self):
+        identifier = self.submit()
+        self.restart_claimed_task(identifier, 'init_pending')
+        engine = self.engines['cluster']
+        engine.read_unavailable = True
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['job']['heldReason'], 'coordinator_restart')
+        self.assertEqual(task['phase'], 'init_pending')
+        self.assertFalse(any(call[0] in ('initialize', 'upload', 'commit') for call in engine.calls))
+        engine.read_unavailable = False
+        self.service._backoff[identifier] = (0, 1)
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'processing')
+        self.assertEqual(sum(call[0] == 'initialize' for call in engine.calls), 1)
+
+    def test_restart_resumes_confirmed_initialized_task(self):
+        identifier = self.submit()
+        self.restart_claimed_task(identifier, 'initialized', engine_exists=True)
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['phase'], 'processing')
+        self.assertEqual(sum(call[0] == 'initialize' for call in self.engines['cluster'].calls), 0)
+        self.assertEqual(sum(call[0] == 'upload' for call in self.engines['cluster'].calls), 1)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_restart_does_not_replay_ambiguous_upload_mutation(self):
+        identifier = self.submit()
+        self.restart_claimed_task(identifier, 'upload_pending', engine_exists=True)
+        self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['job']['status'], 'held')
+        self.assertEqual(task['job']['heldReason'], 'operator')
+        self.assertEqual(task['error'], 'submission_interrupted')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 30)
+        self.assertFalse(any(call[0] in ('upload', 'commit', 'initialize')
+                             for call in self.engines['cluster'].calls))
+
+    def test_engine_read_outage_backs_off_and_retains_slot_then_recovers(self):
+        first = self.submit()
+        second = self.submit()
+        self.service.tick()
+        self.assertEqual(self.task(first)['node_id'], 'cluster')
+        self.assertEqual(self.task(second)['node_id'], 'main')
+        self.engines['cluster'].read_unavailable = True
+        self.service.tick()
+        initial = self.service._backoff[first]
+        self.service.tick()
+        self.assertEqual(self.service._backoff[first], initial)
+        self.assertEqual(self.task(first)['job']['status'], 'running')
+        self.assertEqual(self.task(second)['job']['status'], 'running')
+        self.finish(first)
+        self.engines['cluster'].read_unavailable = False
+        self.service._backoff[first] = (0, initial[1])
+        self.service.tick()
+        self.assertEqual(self.service.info(first)['status']['code'], 40)
+        self.assertEqual(self.task(second)['node_id'], 'main')
+        self.assertEqual(self.fleet.max_active, 2)
+
+    def test_repeated_public_commit_never_initializes_or_executes_twice(self):
+        identifier = self.submit()
+        self.service.commit(identifier)
+        self.service.tick()
+        self.service.commit(identifier)
+        self.service.tick()
+        self.assertEqual(len(self.fleet.commits), 1)
+        self.assertEqual(sum(c[0] == 'initialize' for c in self.engines['cluster'].calls), 1)
+
+    def test_native_info_exposes_waiting_reason_and_assigned_node(self):
+        identifier = self.submit()
+        queued = self.service.info(identifier)
+        self.assertEqual(queued['ledgetopQueueState'], 'waiting_for_dispatch')
+        self.assertNotIn('ledgetopNodeId', queued)
+        self.service.store.update(identifier, phase='waiting_node', error='no_eligible_node')
+        waiting = self.service.info(identifier)
+        self.assertEqual(waiting['ledgetopQueueReason'], 'waiting_node_capacity')
+        self.service.tick()
+        assigned = self.service.info(identifier)
+        self.assertEqual(assigned['ledgetopNodeId'], 'cluster')
+        self.assertNotIn('ledgetopQueueState', assigned)
+        self.assertNotIn('ledgetopHeld', assigned)
+
+    def test_lost_init_or_upload_ack_holds_slot_and_never_replays(self):
+        for failure in ('initialize', 'upload'):
+            with self.subTest(failure=failure):
+                identifier = self.submit()
+                self.engines['cluster'].fail = failure
+                self.service.tick()
+                self.assertEqual(self.task(identifier)['job']['status'], 'held')
+                before = list(self.engines['cluster'].calls)
+                self.service.tick()
+                self.assertEqual(self.engines['cluster'].calls, before)
+                self.assertEqual(self.service.info(identifier)['status']['code'], 30)
+                # Resolve only the fake's known-not-started engine so the next
+                # independent subcase can use this shared test fixture.
+                job = self.task(identifier)['job']
+                self.queue.operator(job['id'], 'resolve', {'note': 'synthetic engine never committed',
+                                                         'workerStopped': True})
+                self.engines['cluster'].fail = None
+
+    def test_lost_commit_ack_polls_known_uuid_without_replay_and_completes(self):
+        identifier = self.submit()
+        self.engines['cluster'].fail = 'commit'
+        self.service.tick()
+        self.assertIn(self.task(identifier)['phase'], ('commit_pending', 'processing'))
+        self.assertEqual(self.task(identifier)['job']['status'], 'running')
+        self.finish(identifier)
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['status']['code'], 40)
+        self.assertEqual(len(self.fleet.commits), 1)
+        self.assertEqual(sum(c[0] == 'commit' for c in self.engines['cluster'].calls), 1)
+
+    def test_running_cancel_does_not_release_slot_until_engine_reports_50(self):
+        identifier = self.submit()
+        next_id = self.submit()
+        third_id = self.submit()
+        self.service.tick()
+        self.service.cancel(identifier)
+        self.service.cancel(identifier)
+        self.assertEqual(self.task(identifier)['job']['status'], 'running')
+        self.assertEqual(self.task(next_id)['node_id'], 'main')
+        self.assertIsNone(self.task(third_id)['node_id'])
+        self.service.tick()
+        self.assertIsNone(self.task(third_id)['node_id'])
+        self.assertEqual(sum(c[0] == 'cancel' for c in self.engines['cluster'].calls), 1)
+        self.finish(identifier, 50)
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['status']['code'], 50)
+        self.assertEqual(self.task(third_id)['node_id'], 'cluster')
+        self.assertEqual(self.fleet.max_active, 2)
+
+    def test_lost_commit_ack_queued_upstream_retains_slot_until_later_completion(self):
+        identifier = self.submit()
+        self.engines['cluster'].fail = 'commit'
+        self.service.tick()
+        task = self.task(identifier)
+        self.engines['cluster'].tasks[task['engine_uuid']]['status']['code'] = 10
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['job']['status'], 'running')
+        self.assertIn(self.task(identifier)['phase'], ('commit_pending', 'processing'))
+        self.engines['cluster'].tasks[task['engine_uuid']]['status']['code'] = 20
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['status']['code'], 40)
+        self.assertEqual(sum(c[0] == 'commit' for c in self.engines['cluster'].calls), 1)
+
+    def test_download_twice_matches_hash_and_retains_archive_and_inputs(self):
+        identifier = self.submit()
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        streams = []
+        for _ in range(2):
+            stream, length = self.service.download(identifier)
+            with stream:
+                body = stream.read()
+            self.assertEqual(length, len(body))
+            streams.append(hashlib.sha256(body).hexdigest())
+        self.assertEqual(streams, [hashlib.sha256(self.engines['cluster'].archive).hexdigest()] * 2)
+        self.assertEqual(self.engines['cluster'].download_calls, 1)
+        task = self.task(identifier)
+        self.service.remove(identifier)
+        self.assertTrue(Path(task['archive_path']).is_file())
+        self.assertTrue(Path(task['files'][0]['path']).is_file())
+
+    def test_viewer_acceptance_is_hash_bound_durable_and_idempotent(self):
+        identifier = self.submit(environment='staging')
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        stream, _ = self.service.download(identifier)
+        with stream as result:
+            result.read()
+        receipt = dict(eventId='processing-ready-attempt-1',
+            providerTaskId=identifier, attemptId='attempt-1',
+            archiveSha256=hashlib.sha256(self.engines['cluster'].archive).hexdigest(),
+            resultModelId='model-1', resultModelVersionId='version-1',
+            ingestedAt='2026-11-08T12:00:00Z')
+        first = self.service.accept_viewer_delivery(identifier, 'staging', receipt)
+        # Reopen the durable queue and task store, not just another TaskStore
+        # wrapper over the same live Queue object, before replaying the ACK.
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        second = self.service.accept_viewer_delivery(identifier, 'staging', receipt)
+        self.assertEqual(first, {'accepted': True, 'replayed': False, 'eventId': receipt['eventId']})
+        self.assertEqual(second, {'accepted': True, 'replayed': True, 'eventId': receipt['eventId']})
+        self.assertEqual(self.task(identifier)['archive_sha256'], receipt['archiveSha256'])
+        with self.assertRaises(Conflict):
+            self.service.accept_viewer_delivery(identifier, 'production', receipt)
+        changed = dict(receipt, archiveSha256='0' * 64)
+        with self.assertRaises(Conflict):
+            self.service.accept_viewer_delivery(identifier, 'staging', changed)
+
+    def test_viewer_acceptance_rehashes_retained_archive_before_first_ack(self):
+        identifier = self.submit(environment='staging')
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        stream, _ = self.service.download(identifier)
+        with stream as result:
+            result.read()
+        task = self.task(identifier)
+        expected = hashlib.sha256(self.engines['cluster'].archive).hexdigest()
+        with Path(task['archive_path']).open('r+b') as result:
+            first = result.read(1)
+            result.seek(0)
+            result.write(bytes([first[0] ^ 1]))
+            result.flush()
+            os.fsync(result.fileno())
+        receipt = dict(eventId='processing-ready-tampered-attempt-1',
+            providerTaskId=identifier, attemptId='attempt-tampered-1',
+            archiveSha256=expected, resultModelId='model-tampered',
+            resultModelVersionId='version-tampered', ingestedAt='2026-11-08T12:00:00Z')
+        with self.assertRaisesRegex(Conflict, 'retained archive bytes differ'):
+            self.service.accept_viewer_delivery(identifier, 'staging', receipt)
+        with self.service.store.queue._db() as db:
+            row = db.execute('SELECT 1 FROM viewer_delivery_acceptances WHERE uuid=?',
+                              (identifier,)).fetchone()
+        self.assertIsNone(row)
+
+    def test_viewer_acceptance_rejects_archive_replacement_after_hash(self):
+        identifier = self.submit(environment='staging')
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        stream, _ = self.service.download(identifier)
+        with stream as result:
+            result.read()
+        archive = Path(self.task(identifier)['archive_path'])
+        expected = hashlib.sha256(self.engines['cluster'].archive).hexdigest()
+        original_hash = TaskStore._hash_retained_archive
+
+        def hash_then_replace(path, expected_stat):
+            value = original_hash(path, expected_stat)
+            with path.open('r+b') as result:
+                first = result.read(1)
+                result.seek(0)
+                result.write(bytes([first[0] ^ 1]))
+                result.flush()
+                os.fsync(result.fileno())
+            return value
+
+        receipt = dict(eventId='processing-ready-replaced-attempt-1',
+            providerTaskId=identifier, attemptId='attempt-replaced-1',
+            archiveSha256=expected, resultModelId='model-replaced',
+            resultModelVersionId='version-replaced', ingestedAt='2026-11-08T12:00:00Z')
+        with patch.object(TaskStore, '_hash_retained_archive', side_effect=hash_then_replace):
+            with self.assertRaisesRegex(Conflict, 'retained archive changed before acceptance'):
+                self.service.accept_viewer_delivery(identifier, 'staging', receipt)
+        with self.service.store.queue._db() as db:
+            row = db.execute('SELECT 1 FROM viewer_delivery_acceptances WHERE uuid=?',
+                              (identifier,)).fetchone()
+        self.assertIsNone(row)
+
+    def test_interrupted_archive_get_can_retry_without_new_execution(self):
+        identifier = self.submit()
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        self.engines['cluster'].interrupt_download_once = True
+        with self.assertRaises((EngineUnavailable, OSError, Conflict)):
+            self.service.download(identifier)
+        stream, _ = self.service.download(identifier)
+        with stream:
+            body = stream.read()
+        self.assertEqual(hashlib.sha256(body).hexdigest(), hashlib.sha256(self.engines['cluster'].archive).hexdigest())
+        self.assertEqual(self.engines['cluster'].download_calls, 2)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_reset_public_uuid_assigns_new_private_engine_uuid(self):
+        identifier = self.submit()
+        self.service.tick()
+        first_engine_uuid = self.task(identifier)['engine_uuid']
+        self.finish(identifier)
+        self.service.tick()
+        self.service.remove(identifier)
+        self.service.initialize(identifier, 'Retry survey', REQUEST_OPTIONS, None, 'production')
+        self.upload(identifier)
+        self.service.commit(identifier)
+        self.service.tick()
+        self.assertNotEqual(self.task(identifier)['engine_uuid'], first_engine_uuid)
+        self.assertEqual(len(self.fleet.commits), 2)
+        self.assertEqual(len(self.engines['cluster'].tasks), 2)
+
+    def test_http200_asset_not_ready_json_is_not_cached_as_zip(self):
+        identifier = self.submit()
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        engine = self.engines['cluster']
+        expected = engine.archive
+        engine.archive = b'{"error":"Asset not ready"}'
+        with self.assertRaises(EngineUnavailable):
+            self.service.download(identifier)
+        self.assertIsNone(self.task(identifier)['archive_path'])
+        engine.archive = expected
+        stream, length = self.service.download(identifier)
+        with stream:
+            self.assertEqual(stream.read(), expected)
+        self.assertEqual(length, len(expected))
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_dynamic_options_removed_after_enqueue_prevent_dispatch(self):
+        identifier = self.submit()
+        self.option_catalog = [item for item in self.option_catalog if item['name'] != 'pc-ept']
+        with self.assertRaises((ValueError, Conflict)):
+            self.service.tick()
+        self.assertEqual(self.task(identifier)['job']['status'], 'queued')
+        self.assertFalse(self.fleet.commits)
+        with self.assertRaises(ValueError):
+            self.service.initialize(str(uuid.uuid4()), options=[{'name': 'unsupported', 'value': True}])
+
+    def test_native_output_cursor_preserves_blank_and_comma_records(self):
+        identifier = self.submit()
+        self.service.tick()
+        self.assertEqual(self.service.output(identifier, 1), ['', 'comma,record'])
+        self.engines['cluster'].output_unavailable = True
+        self.service.store.update(identifier, output_lines=['retained output'])
+        self.assertEqual(self.service.output(identifier, 0), ['retained output'])
+
+
+if __name__ == '__main__':
+    unittest.main()

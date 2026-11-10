@@ -6,6 +6,7 @@ from urllib.request import Request, urlopen
 
 from processing.app import make_handler
 from processing.config import Config
+from processing.prototype import PHOTO_PROFILE, PROFILE
 from tests.test_service import TOKEN, start_server
 from tests.test_prototype import submission
 
@@ -54,6 +55,28 @@ class PrototypeHTTPTests(unittest.TestCase):
             with self.assertRaises(HTTPError) as caught:
                 self.request(path, payload, token)
             self.assertEqual(caught.exception.code, expected)
+
+    def test_node_role_reads_and_claim_enforce_main_only_treedar(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.handler.prototype_queue.close()
+        self.handler = make_handler(Config(TOKEN, '', '', 1000, 20000,
+            prototype_state_dir=self.directory.name, photo_smoke_enabled=True,
+            prototype_node_ids=('cluster', 'main'), treedar_node_ids=('main',)))
+        self.server = start_server(self.handler)
+        self.origin = f'http://127.0.0.1:{self.server.server_port}'
+        _, listed = self.request('/v1/prototype/nodes')
+        nodes = {node['id']: node for node in listed['nodes']}
+        self.assertEqual(nodes['cluster']['allowedProfiles'], [PHOTO_PROFILE])
+        _, main = self.request('/v1/prototype/nodes/main')
+        self.assertEqual(main['node']['allowedProfiles'], sorted([PHOTO_PROFILE, PROFILE]))
+        self.request('/v1/prototype/jobs', submission('main-treedar', 'production'))
+        _, denied = self.request('/v1/prototype/claim', {'workerId': 'cluster-worker',
+                                                       'nodeId': 'cluster', 'profiles': [PROFILE]})
+        self.assertIsNone(denied['job'])
+        _, allowed = self.request('/v1/prototype/claim', {'workerId': 'main-worker',
+                                                        'nodeId': 'main', 'profiles': [PROFILE]})
+        self.assertEqual(allowed['job']['nodeId'], 'main')
 
     def test_default_probe_has_no_job_queue(self):
         disabled = start_server(make_handler(Config(TOKEN, "", "", 800, 20000)))
