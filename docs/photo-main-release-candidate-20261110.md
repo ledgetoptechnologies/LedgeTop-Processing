@@ -46,3 +46,19 @@ and rollback while excluding old concurrent writers; and verify that image
 publication and deployment are separate. In particular, the historical compose
 example does not expose the additional Viewer TLS port and is not included as a
 deployment recipe here. No client data or running services were changed.
+
+Disposable state qualification at source base `91701e58` uses exact
+Git-archive sources from compared main `7200fbf4` and deployed-source
+predecessor `ad7f0f57`. Four low-priority Linux tests passed: legacy
+queue-column migration; main-origin queued, running and terminal retention;
+predecessor Viewer task, input, archive and one ACK receipt retention; and
+old-writer locking. Running records become held at startup. The fixture checks
+SQLite integrity and uses synthetic bytes.
+
+Both actual old-main and ad7 source writers were blocked while the candidate
+owned its lock, but both reopened and mutated the upgraded state once that lock
+was released. This is a rollback gap: the lock alone does not exclude an older
+writer during handoff. An independent supervisor and reviewed state/census
+procedure must prevent an old writer starting until the handoff is safe. These
+tests do not prove live-image or dependency identity, real power-loss migration,
+or rollback of running engine work.
