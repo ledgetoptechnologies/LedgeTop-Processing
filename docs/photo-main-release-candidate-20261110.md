@@ -9,12 +9,26 @@ GitHub workflows were not changed; the existing main-only CI policy remains.
 
 This is a source extraction, not an installed-image rebuild or a deployment.
 The photo components share queue/config/maintenance modules with prototype and
-reference callers. Viewer TLS still uses the reference listener's context and
-the existing reference configuration; the separate reference listener and
-its startup code remain present. This draft does not decouple TLS, include a
-deployment compose override, or claim optional TreeDar/reference workflows
-are complete. Do not enable additional reference paths merely because their
-startup dependencies are present.
+reference callers. Viewer TLS can use the existing reference listener's context
+or an explicitly configured standalone certificate and private key. The
+separate reference listener and its startup code remain present when their
+existing configuration is supplied. This draft does not include a deployment
+compose override or claim optional TreeDar/reference workflows are complete. Do
+not enable additional reference paths merely because their startup dependencies
+are present.
+
+For standalone Viewer TLS, set `PROCESSING_VIEWER_TLS_CERTIFICATE` and
+`PROCESSING_VIEWER_TLS_PRIVATE_KEY` to absolute file paths, alongside an enabled
+Viewer and `PROCESSING_VIEWER_TLS_PORT`. Both paths are required. The key must
+be owner-private on POSIX; paths cannot contain symlinks and files must be
+single-link regular files. TLS 1.2 is the minimum. On Linux, OpenSSL loads from
+the checked file descriptors when procfs is available; other platforms use
+path identity checks before and after loading. Encrypted keys that need an
+interactive password are rejected. Startup validates the context before opening
+the queue. When neither standalone path is supplied, the existing reference
+context fallback is unchanged. If both standalone paths and reference config
+are supplied, standalone applies only to the Viewer listener; the reference
+runtime remains independently configured.
 
 Seven bounded Windows tests passed: production-priority per-node scheduling,
 busy-small-node fallback, large-job waiting, durable ACK replay, HTTPS-only ACK

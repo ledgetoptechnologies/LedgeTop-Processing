@@ -192,3 +192,32 @@ class NodeRoleConfigTests(unittest.TestCase):
                 from_environment()
         with self.environment(**base, PROCESSING_REFERENCE_CONFIG='/private/reference/runtime.json'):
             self.assertEqual(from_environment().viewer_tls_port, 8444)
+
+    def test_standalone_viewer_tls_requires_both_files_and_an_enabled_listener(self):
+        base = {'PROCESSING_VIEWER_ENABLED': '1', 'PROCESSING_PROTOTYPE_STATE_DIR': '/var/lib/processing',
+                'PROCESSING_VIEWER_TOKEN': 'v' * 32, 'LOCAL_NODE_URL': 'http://cluster.internal:3000',
+                'PROCESSING_VIEWER_TLS_PORT': '8444'}
+        cert, key = '/private/viewer-cert.pem', '/private/viewer-key.pem'
+        for extra in ({'PROCESSING_VIEWER_TLS_CERTIFICATE': cert},
+                      {'PROCESSING_VIEWER_TLS_PRIVATE_KEY': key}):
+            with self.subTest(extra=extra), self.environment(**base, **extra):
+                with self.assertRaises(ValueError):
+                    from_environment()
+        for reference in ('', '/private/reference/runtime.json'):
+            with self.subTest(reference=reference), self.environment(**base,
+                    PROCESSING_VIEWER_TLS_CERTIFICATE=cert, PROCESSING_VIEWER_TLS_PRIVATE_KEY=key,
+                    PROCESSING_REFERENCE_CONFIG=reference):
+                config = from_environment()
+                self.assertEqual((config.viewer_tls_certificate, config.viewer_tls_private_key, config.viewer_tls_port),
+                                 (cert, key, 8444))
+                self.assertNotIn(key, repr(config))
+        without_port = dict(base); without_port.pop('PROCESSING_VIEWER_TLS_PORT')
+        with self.environment(**without_port, PROCESSING_VIEWER_TLS_CERTIFICATE=cert,
+                              PROCESSING_VIEWER_TLS_PRIVATE_KEY=key):
+            with self.assertRaises(ValueError):
+                from_environment()
+        disabled = dict(base); disabled['PROCESSING_VIEWER_ENABLED'] = '0'
+        with self.environment(**disabled, PROCESSING_VIEWER_TLS_CERTIFICATE=cert,
+                              PROCESSING_VIEWER_TLS_PRIVATE_KEY=key):
+            with self.assertRaises(ValueError):
+                from_environment()

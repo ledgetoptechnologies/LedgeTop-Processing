@@ -36,6 +36,8 @@ class Config:
     viewer_token: str = field(default='', repr=False)
     viewer_staging_token: str = field(default='', repr=False)
     viewer_tls_port: int | None = None
+    viewer_tls_certificate: str = field(default='', repr=False)
+    viewer_tls_private_key: str = field(default='', repr=False)
     # Intake uses image counts and live free-space checks; no fixed byte ceiling.
     viewer_min_free_bytes: int = 20 * 1024 ** 3
     reference_config_path: str = field(default='', repr=False)
@@ -103,8 +105,14 @@ def from_environment() -> Config:
     viewer_staging = os.environ.get('PROCESSING_VIEWER_STAGING_TOKEN', '')
     viewer_tls_port = _optional_positive_int(os.environ.get('PROCESSING_VIEWER_TLS_PORT', ''),
                                             'PROCESSING_VIEWER_TLS_PORT', 65535)
-    if viewer_tls_port is not None and (viewer != '1' or not os.environ.get('PROCESSING_REFERENCE_CONFIG')):
-        raise ValueError('Viewer TLS requires the enabled Viewer facade and configured reference TLS')
+    viewer_certificate = os.environ.get('PROCESSING_VIEWER_TLS_CERTIFICATE', '')
+    viewer_private_key = os.environ.get('PROCESSING_VIEWER_TLS_PRIVATE_KEY', '')
+    if bool(viewer_certificate) != bool(viewer_private_key):
+        raise ValueError('Viewer TLS requires both certificate and private key')
+    if viewer_certificate and (viewer != '1' or viewer_tls_port is None):
+        raise ValueError('standalone Viewer TLS requires the enabled Viewer facade and TLS port')
+    if viewer_tls_port is not None and (viewer != '1' or not (viewer_certificate or os.environ.get('PROCESSING_REFERENCE_CONFIG'))):
+        raise ValueError('Viewer TLS requires the enabled Viewer facade and configured TLS')
     if viewer == '1':
         if not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR') or not os.environ.get('LOCAL_NODE_URL'):
             raise ValueError('Viewer requires persistent state and the ordered cluster node')
@@ -163,6 +171,7 @@ def from_environment() -> Config:
         viewer_enabled=viewer == '1', viewer_token=viewer_token,
         viewer_staging_token=viewer_staging,
         viewer_tls_port=viewer_tls_port,
+        viewer_tls_certificate=viewer_certificate, viewer_tls_private_key=viewer_private_key,
         viewer_min_free_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MIN_FREE_BYTES', str(20 * 1024 ** 3)),
                                             'PROCESSING_VIEWER_MIN_FREE_BYTES', 10 ** 15),
         prototype_observer_token=observer,

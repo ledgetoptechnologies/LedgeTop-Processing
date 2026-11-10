@@ -234,11 +234,11 @@ def make_handler(config: Config):
     return Handler
 
 
-def create_viewer_tls_server(handler, host, port):
+def create_viewer_tls_server(handler, host, port, *, server_context=None):
     """Create the HTTPS listener for the existing authenticated Viewer facade."""
     runtime = getattr(handler, 'reference_listener', None)
-    context = getattr(runtime, '_server_context', None)
-    if runtime is None or context is None:
+    context = server_context if server_context is not None else getattr(runtime, '_server_context', None)
+    if context is None:
         raise ValueError('Viewer TLS listener requires reference TLS configuration')
     server = ThreadingHTTPServer((host, port), handler)
     try:
@@ -437,10 +437,15 @@ class CoordinatorService:
 
 def main():
     config = from_environment()
+    standalone_tls = None
+    if config.viewer_tls_certificate:
+        from .viewer_tls import standalone_viewer_tls_context
+        standalone_tls = standalone_viewer_tls_context(config.viewer_tls_certificate, config.viewer_tls_private_key)
     handler = make_handler(config)
     server = ThreadingHTTPServer((config.bind_host, config.port), handler)
     try:
-        viewer_tls_server = (create_viewer_tls_server(handler, config.bind_host, config.viewer_tls_port)
+        viewer_tls_server = (create_viewer_tls_server(handler, config.bind_host, config.viewer_tls_port,
+                                                      server_context=standalone_tls)
                              if config.viewer_tls_port is not None else None)
     except Exception:
         server.server_close()
