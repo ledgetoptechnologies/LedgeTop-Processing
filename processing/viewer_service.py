@@ -20,6 +20,7 @@ import uuid
 import zipfile
 
 from .config import ProcessingNode
+from .engine_output import read_output_prefix
 from .maintenance import Conflict
 from .odx_smoke_worker import Client, SmokeError
 from .options import discover_node, _NoRedirect, _compatibility_signature
@@ -63,6 +64,22 @@ class NativeEngine:
             raise EngineUnavailable('engine_read_unavailable') from None
         except (OSError, ValueError, http.client.HTTPException):
             raise EngineUnavailable('engine_read_unavailable') from None
+
+    def output(self, identifier, line=0):
+        if type(line) is not int or not 0 <= line <= 2 ** 53 - 1:
+            raise ValueError('invalid output cursor')
+        try:
+            request = Request(self.origin + self.route('/task/' + identifier + '/output', line=line))
+            deadline = time.monotonic() + 5
+            with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=5) as response:
+                if 'json' not in response.headers.get('Content-Type', ''):
+                    raise ValueError()
+                return read_output_prefix(response, deadline=deadline)
+        except HTTPError as error:
+            error.close()
+            raise EngineUnavailable('engine_output_unavailable') from None
+        except (OSError, ValueError, http.client.HTTPException):
+            raise EngineUnavailable('engine_output_unavailable') from None
 
     def initialize(self, task):
         fields = {'name': task['name'], 'options': json.dumps(task['options'])}
@@ -202,7 +219,11 @@ class ViewerService:
         task = self.store.task(identifier)
         if task['engine_uuid'] and task['node_id'] and task['phase'] in ('processing', 'complete', 'cancel_pending'):
             try:
-                result = self.engines[task['node_id']].read('/task/' + task['engine_uuid'] + '/output', line=line)
+                engine = self.engines[task['node_id']]
+                # Older injected adapters keep their read-only output contract.
+                output = getattr(engine, 'output', None)
+                result = output(task['engine_uuid'], line) if callable(output) else engine.read(
+                    '/task/' + task['engine_uuid'] + '/output', line=line)
                 if not isinstance(result, list) or any(not isinstance(x, str) for x in result):
                     raise EngineUnavailable('engine_output_unavailable')
                 return result
