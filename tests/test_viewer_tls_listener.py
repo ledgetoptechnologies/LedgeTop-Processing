@@ -195,6 +195,33 @@ class ViewerTlsListenerTests(unittest.TestCase):
         finally:
             peer.close()
 
+    def test_unexpected_wrap_or_handshake_error_closes_socket_and_releases_slot(self):
+        for stage in ('wrap', 'handshake'):
+            with self.subTest(stage=stage):
+                class UnexpectedContext:
+                    def wrap_socket(self, sock, **_kwargs):
+                        if stage == 'wrap':
+                            raise ValueError('synthetic wrap failure')
+                        class Wrapped:
+                            def do_handshake(self):
+                                raise ValueError('synthetic handshake failure')
+                            def __getattr__(self, name):
+                                return getattr(sock, name)
+                        return Wrapped()
+                handler = type('Handler', (BaseHTTPRequestHandler,), {'reference_listener': None})
+                server = create_viewer_tls_server(handler, '127.0.0.1', 0, server_context=UnexpectedContext())
+                server.daemon_threads, server.block_on_close = False, True
+                server._tls_slots = threading.BoundedSemaphore(1)
+                accepted, peer = socket.socketpair()
+                try:
+                    server.process_request(accepted, ('127.0.0.1', 1))
+                    server.server_close()
+                    self.assertEqual(server._tls_slots._value, 1)
+                    peer.settimeout(2)
+                    self.assertEqual(peer.recv(1), b'')
+                finally:
+                    peer.close()
+
     def test_standalone_rejects_missing_mismatched_and_unprivate_key(self):
         with tempfile.TemporaryDirectory() as directory:
             cert, key = self._pair(directory, 'valid')

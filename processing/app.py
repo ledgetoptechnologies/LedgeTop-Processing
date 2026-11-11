@@ -5,7 +5,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import signal
-import ssl
 import sys
 import threading
 
@@ -274,10 +273,12 @@ class ViewerTLSHTTPServer(ThreadingHTTPServer):
                     request, server_side=True, do_handshake_on_connect=False)
                 wrapped.do_handshake()
                 wrapped.settimeout(None)
-            except (OSError, ssl.SSLError):
+            except BaseException as error:
                 # A stalled or invalid client must not block acceptance or expose
                 # TLS failures, request details, or credentials in logs.
                 self.shutdown_request(wrapped if wrapped is not None else request)
+                if not isinstance(error, Exception):
+                    raise
                 return
             super().process_request_thread(wrapped, client_address)
         finally:
