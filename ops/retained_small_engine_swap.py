@@ -263,6 +263,7 @@ class Runtime:
         with os.fdopen(fd, 'wb') as stream:
             stream.write(replacement); stream.flush()
             os.fchown(stream.fileno(), metadata.st_uid, metadata.st_gid)
+            os.fchmod(stream.fileno(), stat.S_IMODE(metadata.st_mode))
             os.fsync(stream.fileno())
         os.replace(temporary, NGINX)
         fd = os.open(NGINX.parent, os.O_RDONLY | os.O_DIRECTORY)

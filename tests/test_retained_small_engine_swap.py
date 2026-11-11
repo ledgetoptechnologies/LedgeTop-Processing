@@ -4,7 +4,9 @@ from contextlib import redirect_stdout
 from datetime import datetime, timezone
 import io
 import json
+import os
 from pathlib import Path
+import stat
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -218,6 +220,33 @@ class RetainedSwapTests(unittest.TestCase):
         self.assertFalse(report['writes'])
         self.assertNotIn('private-not-for-output', output.getvalue())
         self.assertEqual(runtime.method_calls, [('snapshot', (), {})])
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX fchmod/fchown and umask semantics')
+    def test_ingress_atomic_replace_preserves_mode_under_private_umask(self):
+        from ops import retained_small_engine_swap as swap
+        with tempfile.TemporaryDirectory() as temporary:
+            nginx = Path(temporary) / 'nginx.conf'
+            source = b'location / { ' + swap.PASS + b' }\n'
+            nginx.write_bytes(source)
+            nginx.chmod(0o644)
+            before = nginx.stat()
+            runtime = Runtime.__new__(Runtime)
+            runtime.nginx_workers = Mock(side_effect=[(123, {124}), (123, {125})])
+            runtime.engine_client = Mock(return_value=SimpleNamespace(token='synthetic'))
+            runtime.docker = Mock(return_value='')
+            runtime.run = Mock(return_value='503')
+            client = Mock()
+            client.request.side_effect = OSError('synthetic closed ingress')
+            old_umask = os.umask(0o077)
+            try:
+                with patch.object(swap, 'NGINX', nginx), patch.object(swap, 'Client', return_value=client):
+                    runtime.change_ingress({'nginxHex': source.hex(), 'requestId': str(uuid.uuid4())}, closed=True)
+            finally:
+                os.umask(old_umask)
+            after = nginx.stat()
+            self.assertEqual(stat.S_IMODE(after.st_mode), 0o644)
+            self.assertEqual((after.st_uid, after.st_gid), (before.st_uid, before.st_gid))
+            self.assertEqual(nginx.read_bytes(), source.replace(swap.PASS, b'return 503;'))
 
 
 class RealQueueRetentionFenceTests(unittest.TestCase):

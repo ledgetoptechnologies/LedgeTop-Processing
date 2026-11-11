@@ -106,3 +106,11 @@ No schedule, preparation, apply, backup, service change or other host write was
 performed in that check. This removes a read-only admission uncertainty; the
 mutating native steps remain separately unqualified. Recheck actual state
 before any later preparation/apply rather than treating revision31 as current.
+
+The subsequent ingress writer correction explicitly restores the original file
+mode with `fchmod` after `fchown`, before fsync/atomic replace. Without that step,
+the helper's private umask077 turned a0644 nginx configuration into0600, which
+would deny a nonroot nginx reader. The regression test uses an actual temporary
+file and replacement under umask077; only nginx/HTTP observations are mocked.
+It is POSIX-only, and the old read-only a8b67600 observation does not qualify this
+new mutating path. No live permissions were changed by the source correction.
