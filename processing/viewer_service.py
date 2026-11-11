@@ -144,6 +144,8 @@ class ViewerService:
         self._thread = None
         self._backoff = {}
         self._downloads = {}
+        # Registry lookup must never wait for the scheduler's whole upload turn.
+        self._downloads_lock = threading.Lock()
 
     @staticmethod
     def _probe_role(node_id):
@@ -236,10 +238,14 @@ class ViewerService:
         task = self.store.task(identifier)
         if not task['job'] or task['job']['status'] != 'succeeded':
             raise Conflict('task is not complete')
-        with self._lock:
+        with self._downloads_lock:
             lock = self._downloads.setdefault(identifier, threading.Lock())
         with lock:
             task = self.store.task(identifier)
+            # Removal/reset may occur while this request waits behind another
+            # result capture. Never reuse the completion observed before wait.
+            if not task['job'] or task['job']['status'] != 'succeeded':
+                raise Conflict('task is not complete')
             path = Path(task['archive_path']) if task['archive_path'] else Path(task['directory']) / 'all.zip'
             if not task['archive_path']:
                 partial = path.with_suffix('.zip.partial')
