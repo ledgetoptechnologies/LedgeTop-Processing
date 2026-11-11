@@ -403,6 +403,28 @@ class TaskStore:
             return [self._task(db, row) for row in db.execute(
                 'SELECT * FROM viewer_tasks WHERE removed=0 ORDER BY created_at,rowid').fetchall()]
 
+    def _task_state(self, db, row):
+        """Scheduler metadata only; never enumerate or resolve every input path."""
+        value = dict(row)
+        value['directory'] = str(self._directory(row))
+        for field in ('options', 'outputs'):
+            value[field] = json.loads(value[field])
+        counts = db.execute('SELECT COALESCE(SUM(is_photo),0),COALESCE(SUM(bytes),0) '
+                            'FROM viewer_files WHERE uuid=?', (row['uuid'],)).fetchone()
+        value['images_count'], value['input_bytes'] = counts
+        job = self._job(db, row)
+        value['job'] = self.queue.public(job) if job is not None else None
+        return value
+
+    def task_state(self, identifier):
+        with self._lock, self.queue._db() as db:
+            return self._task_state(db, self._row(db, identifier))
+
+    def list_task_states(self):
+        with self._lock, self.queue._db() as db:
+            return [self._task_state(db, row) for row in db.execute(
+                'SELECT * FROM viewer_tasks WHERE removed=0 ORDER BY created_at,rowid').fetchall()]
+
     def update(self, identifier, *, return_task=True, expected_result=None, **fields):
         if type(return_task) is not bool:
             raise ValueError('return_task must be a boolean')

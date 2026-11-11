@@ -146,6 +146,9 @@ class ViewerService:
         self._downloads = {}
         # Registry lookup must never wait for the scheduler's whole upload turn.
         self._downloads_lock = threading.Lock()
+        self._upload_manifests = {}
+        self._upload_files_per_turn = 4
+        self._upload_seconds_per_turn = 1.0
 
     @staticmethod
     def _probe_role(node_id):
@@ -337,11 +340,12 @@ class ViewerService:
             return self.store.remove(identifier)
 
     def _hold(self, task, reason):
+        self._upload_manifests.pop(task['uuid'], None)
         job = self.queue.get(task['job_id'])
         if job and (job['status'] == 'running' or
                     (job['status'] == 'held' and job['heldReason'] == 'coordinator_restart')):
             self.queue.operator(task['job_id'], 'hold', {'note': reason})
-        self.store.update(task['uuid'], stage='held', phase='held', error=reason)
+        self.store.update(task['uuid'], return_task=False, stage='held', phase='held', error=reason)
 
     def _poll(self, task):
         identifier = task['uuid']
@@ -362,6 +366,7 @@ class ViewerService:
             return
         self._backoff.pop(identifier, None)
         code = info['status']['code']
+        if code != 10:self._upload_manifests.pop(identifier, None)
         if code in (10, 20):
             # Queued10 may mean a delayed accepted commit or an uncommitted
             # upload. Keep ownership and poll; neither case permits a replay.
@@ -372,13 +377,13 @@ class ViewerService:
             fields = {'progress': progress}
             if code == 20 and task['phase'] in ('commit_pending', 'awaiting_engine_start'):
                 fields.update(phase='processing', error=None)
-            self.store.update(identifier, **fields)
+            self.store.update(identifier, return_task=False, **fields)
             return
         status = 'succeeded' if code == 40 else 'failed'
         result = {'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
                   'environment': task['environment'], 'cancelled': code == 50}
         self.queue.complete(task['job_id'], {'claimToken': task['claim_token'], 'status': status, 'result': result})
-        self.store.update(identifier, stage='cancelled' if code == 50 else status,
+        self.store.update(identifier, return_task=False, stage='cancelled' if code == 50 else status,
                           phase='complete', progress=100 if code == 40 else task['progress'])
 
     def _node_snapshots(self, current):
@@ -420,80 +425,138 @@ class ViewerService:
 
     def _start_claimed(self, task, job, node_id):
         try:
-            self.store.update(task['uuid'], stage='running', phase='claimed', node_id=node_id,
+            self.store.update(task['uuid'], return_task=False, stage='running', phase='claimed', node_id=node_id,
                               claim_token=job['claimToken'], engine_uuid=str(uuid.uuid4()),
                               upload_cursor=0, error=None)
-            task = self.store.task(task['uuid'])
+            task = self.store.task_state(task['uuid'])
             engine = self.engines[node_id]
-            self.store.update(task['uuid'], phase='init_pending')
+            if self._stop.is_set():
+                return False
+            self.store.update(task['uuid'], return_task=False, phase='init_pending')
+            if self._stop.is_set():
+                return True
             engine.initialize(task)
-            self.store.update(task['uuid'], phase='initialized', upload_cursor=0)
-            self._upload_and_commit(self.store.task(task['uuid']))
+            self.store.update(task['uuid'], return_task=False, phase='initialized', upload_cursor=0)
+            return self._upload_and_commit(self.store.task_state(task['uuid']))
         except Exception:
-            current = self.store.task(task['uuid'])
-            if current['phase'] == 'commit_pending':
-                # Exact assigned engine UUID lets us reconcile a lost commit
-                # ACK by reads. Never send commit again under uncertainty.
-                self.store.update(task['uuid'], error='commit_ack_uncertain')
-            else:
-                self._hold(current, 'engine_submission_uncertain')
+            self._submission_failed(task, 'engine_submission_uncertain')
+
+    def _submission_failed(self, task, reason):
+        current = self.store.task_state(task['uuid'])
+        if current['phase'] == 'commit_pending':
+            # Reconcile the original UUID by reads; never replay an uncertain
+            # commit, including one attempted on a later bounded turn.
+            self.store.update(task['uuid'], return_task=False, error='commit_ack_uncertain')
+        else:
+            self._hold(current, reason)
+
+    @staticmethod
+    def _upload_identity(task):
+        return {field: task[field] for field in
+                ('generation', 'job_id', 'engine_uuid', 'node_id', 'directory')}
 
     def _upload_and_commit(self, task):
+        """One bounded upload turn; only the dispatcher mutates engine state."""
+        if self._stop.is_set():
+            return False
+        identity = self._upload_identity(task)
+        cached = self._upload_manifests.get(task['uuid'])
+        if cached is None:
+            manifest = task if 'files' in task else self.store.task(task['uuid'])
+            if self._upload_identity(manifest) != identity:
+                raise Conflict('upload task identity changed')
+            cached = (identity, tuple(dict(item) for item in manifest['files']))
+            self._upload_manifests[task['uuid']] = cached
+        if cached[0] != identity:
+            raise Conflict('upload task identity changed')
+        files = cached[1]
         engine = self.engines[task['node_id']]
         cursor = task['upload_cursor']
-        if cursor > len(task['files']):
+        if cursor > len(files):
             raise SmokeError('durable upload cursor exceeds input manifest')
-        for index in range(cursor, len(task['files'])):
-            self.store.update(task['uuid'], return_task=False, phase='upload_pending', upload_cursor=index)
-            engine.upload(task['engine_uuid'], task['files'][index])
-            # Advance only after an acknowledged full-file upload. If the
-            # process stops in upload_pending, do not guess whether the engine
-            # received that file; keep the job held for inspection.
-            self.store.update(task['uuid'], return_task=False, phase='uploaded', upload_cursor=index + 1)
-        self.store.update(task['uuid'], phase='commit_pending')
+        advanced = False
+        started = time.monotonic()
+        sent = 0
+        while cursor < len(files):
+            if (self._stop.is_set() or sent >= self._upload_files_per_turn
+                    or (sent and time.monotonic() - started >= self._upload_seconds_per_turn)):
+                return advanced
+            self.store.update(task['uuid'], return_task=False, expected_result=identity,
+                              phase='upload_pending', upload_cursor=cursor)
+            if self._stop.is_set():
+                # No HTTP call began, so only this process can prove the intent
+                # had no side effect. Keep the acknowledged cursor resumable.
+                self.store.update(task['uuid'], return_task=False, expected_result=identity,
+                                  phase='uploaded', upload_cursor=cursor)
+                return True
+            engine.upload(task['engine_uuid'], files[cursor])
+            # Even if stop arrived during HTTP, persist its ACK before yielding.
+            self.store.update(task['uuid'], return_task=False, expected_result=identity,
+                              phase='uploaded', upload_cursor=cursor + 1)
+            cursor += 1
+            sent += 1
+            advanced = True
+        if (self._stop.is_set()
+                or (sent and time.monotonic() - started >= self._upload_seconds_per_turn)):
+            return advanced
+        self.store.update(task['uuid'], return_task=False, expected_result=identity, phase='commit_pending')
+        if self._stop.is_set():
+            # The commit client has not been called; do not leave an ambiguous
+            # commit intent when this process knows no mutation was attempted.
+            self.store.update(task['uuid'], return_task=False, expected_result=identity, phase='uploaded')
+            return True
         engine.action('commit', task['engine_uuid'])
-        # Commit acceptance does not mean ODM has begun processing yet.
-        self.store.update(task['uuid'], phase='awaiting_engine_start')
-        self._poll(self.store.task(task['uuid']))
+        self.store.update(task['uuid'], return_task=False, expected_result=identity, phase='awaiting_engine_start')
+        self._upload_manifests.pop(task['uuid'], None)
+        if not self._stop.is_set():
+            self._poll(self.store.task_state(task['uuid']))
+        return True
 
     def _resume_precommit(self, task):
         """Resume only restart phases whose last engine mutation is known."""
+        if self._stop.is_set():
+            return False
         engine = self.engines[task['node_id']]
         phase = task['phase']
         if phase == 'claimed':
             # The engine UUID was durably assigned before any engine request.
-            self.store.update(task['uuid'], phase='init_pending')
-            task = self.store.task(task['uuid'])
+            self.store.update(task['uuid'], return_task=False, phase='init_pending')
+            task = self.store.task_state(task['uuid'])
             phase = task['phase']
         if phase == 'init_pending':
             info = engine.read('/task/' + task['engine_uuid'] + '/info', missing=True)
             if info is None:
+                if self._stop.is_set():return False
                 engine.initialize(task)
             elif (not isinstance(info, dict) or info.get('uuid') != task['engine_uuid']
                   or not isinstance(info.get('status'), dict)
                   or info['status'].get('code') != 10):
                 raise SmokeError('engine initialization recovery uncertain')
-            self.store.update(task['uuid'], phase='initialized', upload_cursor=0)
+            self.store.update(task['uuid'], return_task=False, phase='initialized', upload_cursor=0)
         elif phase in ('initialized', 'uploaded'):
             info = engine.read('/task/' + task['engine_uuid'] + '/info', missing=True)
             if info is None:
                 # No engine task exists, so none of the previously acknowledged
                 # uploads remain. Reinitialize the same reserved UUID and replay
                 # only these known-absent side effects from the retained source.
+                if self._stop.is_set():return False
                 engine.initialize(task)
-                self.store.update(task['uuid'], phase='initialized', upload_cursor=0)
+                self.store.update(task['uuid'], return_task=False, phase='initialized', upload_cursor=0)
             elif (not isinstance(info, dict) or info.get('uuid') != task['engine_uuid']
                   or not isinstance(info.get('status'), dict)
                   or info['status'].get('code') != 10):
                 raise SmokeError('engine upload recovery uncertain')
         else:
             raise SmokeError('submission phase is not safely resumable')
-        self._upload_and_commit(self.store.task(task['uuid']))
+        return self._upload_and_commit(self.store.task_state(task['uuid']))
 
     def tick(self):
         """One bounded scheduler turn; public for deterministic synthetic tests."""
+        progressed = False
         with self._lock:
-            for task in self.store.list_tasks():
+            if self._stop.is_set():return False
+            for task in self.store.list_task_states():
+                if self._stop.is_set():return progressed
                 job = task['job']
                 if not job or job['status'] not in ('running', 'held'):
                     continue
@@ -506,13 +569,19 @@ class ViewerService:
                     if time.monotonic() < due:
                         continue
                     try:
-                        self._resume_precommit(task)
+                        progressed = self._resume_precommit(task) or progressed
                     except EngineUnavailable:
                         failures += 1
                         self._backoff[task['uuid']] = (
                             time.monotonic() + min(60, 2 ** min(failures, 6)), failures)
                     except Exception:
-                        self._hold(task, 'submission_interrupted')
+                        self._submission_failed(task, 'submission_interrupted')
+                elif (job['status'] == 'running' and task['phase'] in ('initialized', 'uploaded')
+                        and task['engine_uuid'] and task['node_id'] and task['claim_token']):
+                    try:
+                        progressed = self._upload_and_commit(task) or progressed
+                    except Exception:
+                        self._submission_failed(task, 'submission_interrupted')
                 elif (task['phase'] in ('processing', 'commit_pending', 'awaiting_engine_start', 'cancel_pending')
                         and task['engine_uuid'] and task['node_id'] and task['claim_token']):
                     self._poll(task)
@@ -523,20 +592,22 @@ class ViewerService:
                     self._hold(task, 'submission_interrupted')
                 else:
                     self._hold(task, 'submission_interrupted')
+            if self._stop.is_set():return progressed
             catalogue = self._catalog()
             snapshots = self._node_snapshots(catalogue)
             if not catalogue.get('ready'):
-                return
+                return progressed
             active_nodes = set()
             for job in self.queue.list():
                 if job['status'] in ('running', 'held'):
                     if job['nodeId'] not in self.node_order:
                         # An active job without a configured physical owner
                         # fences all dispatch until an operator reconciles it.
-                        return
+                        return progressed
                     active_nodes.add(job['nodeId'])
 
             for node in self.nodes:
+                if self._stop.is_set():return progressed
                 queue_snapshot = self.queue.dispatch_snapshot()
                 jobs = queue_snapshot['jobs']
                 if node.node_id in active_nodes:
@@ -553,7 +624,7 @@ class ViewerService:
                 # for every queue profile above so a waiting production job
                 # cannot be bypassed by a staging photo on another node.
                 priority_jobs = [job for job in priority_jobs if job['profile'] == VIEWER_PROFILE]
-                task_by_job = {task['job']['id']: task for task in self.store.list_tasks()
+                task_by_job = {task['job']['id']: task for task in self.store.list_task_states()
                                if task.get('job') is not None}
                 ready_option_names = {
                     item.get('name')
@@ -596,6 +667,7 @@ class ViewerService:
                         eligible_nodes.append(other.node_id)
                 eligible_job_ids = [job['id'] for job, _ in eligible]
                 self._check_options(task['options'], node_options)
+                if self._stop.is_set():return progressed
                 job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': node.node_id,
                     'profiles': [VIEWER_PROFILE], 'expectedJobId': candidate['id']},
                     eligible_job_ids=eligible_job_ids, eligible_node_ids=eligible_nodes,
@@ -603,9 +675,11 @@ class ViewerService:
                 if job is None:
                     # A concurrent submission or claim invalidated this
                     # snapshot; do not try a lower-priority selection this turn.
-                    return
+                    return progressed
                 active_nodes.add(node.node_id)
-                self._start_claimed(task, job, node.node_id)
+                progressed = self._start_claimed(task, job, node.node_id) or progressed
+
+        return progressed
 
     def start(self):
         if self._thread:
@@ -615,13 +689,14 @@ class ViewerService:
 
     def _run(self):
         while not self._stop.is_set():
+            progressed = False
             try:
-                self.tick()
+                progressed = self.tick()
             except Exception:
                 # No replay of mutations. Intents/claims remain durable; a
                 # restart retains their slot for reconciliation or inspection.
                 pass
-            self._stop.wait(2)
+            self._stop.wait(0 if progressed else 2)
 
     def close(self):
         self._stop.set()

@@ -370,6 +370,17 @@ class ViewerTaskStoreTests(unittest.TestCase):
             owned.unlink()
             displaced.rename(owned)
 
+    def test_scheduler_state_reads_counts_without_full_manifest(self):
+        original = self.ready()
+        with patch.object(self.store, '_task', side_effect=AssertionError('full manifest requested')):
+            state = self.store.task_state(self.identifier)
+            listed = self.store.list_task_states()
+        self.assertNotIn('files', state)
+        for field in ('uuid', 'generation', 'directory', 'job_id', 'phase', 'options',
+                      'images_count', 'input_bytes', 'job'):
+            self.assertEqual(state[field], original[field])
+        self.assertEqual(listed, [state])
+
     def test_result_identity_guard_refuses_each_changed_binding_before_write(self):
         self.ready()
         self.store.update(self.identifier, node_id='cluster', engine_uuid=str(uuid.uuid4()))
