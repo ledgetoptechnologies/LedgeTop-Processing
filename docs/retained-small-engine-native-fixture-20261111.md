@@ -15,8 +15,8 @@ Existing staging API/worker/proxy and shared builders are untouched.
 Required cached engines are the fixed5ce base and9c retention child. Nginx must
 already be cached as either the fixed84ed production ingress image or the
 fixed697 staging proxy image; the chosen digest is recorded. Missing images
-stop before Docker resource creation. Root must have base-image Size plus8GiB
-reserve plus256MiB before the single full-filesystem export; the helper checks
+stop before Docker resource creation. Root must have the fixed8GiB base-export
+budget plus8GiB reserve plus256MiB before the single full-filesystem export; the helper checks
 backup headroom again. Engine is limited to0.5CPU/768MiB and nginx to0.25CPU/64MiB.
 
 The disposable volume contains three freshly dated terminal task records plus
@@ -53,7 +53,7 @@ canonical path/marker/mount checks. A small root-private evidence directory
 remains for parent review. Failed-run artifacts remain private for inspection.
 Synthetic tokens are disposable; no production credential is read.
 
-Thirteen bounded source tests verify ownership refusal, exact banner handling,
+Fourteen bounded source tests verify ownership refusal, exact banner handling,
 resource/port constraints, private-module isolation, default plan-only behavior,
 partial-cleanup control flow and read-only HTTP adapters. These are source tests;
 they do not prove the native rehearsal passed. Parent must review the frozen
@@ -90,3 +90,9 @@ helper correction permits precisely that known default representation, with
 true/missing/numeric values and every other changed field rejected. This
 harness now pins that corrected helper's exact Git-LF source. Existing private
 binding diagnostics remain available; a fresh full native pass is still needed.
+
+The initial headroom gate no longer estimates exported bytes from Docker image
+Size, which the observed daemon underreported. Its fixed requirement is
+17,448,304,640bytes (8GiB export budget,8GiB reserve,256MiB fixture margin),
+followed by the helper's quiesced writable-layer/data/reserve check. This is
+restricted to the pinned base and is not a dataset-size eligibility limit.

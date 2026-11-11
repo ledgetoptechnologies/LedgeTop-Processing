@@ -20,7 +20,7 @@ import time
 import uuid
 
 
-HELPER_SHA = '84f2a10a5208e64b26f8b57987a09244f631b697dfb7470e312a71a534eb3ee8'
+HELPER_SHA = 'dc0e0bba415883af4b7fa0a5b61daa97b6ff1e2cb81fa440ee5ec0065a52b919'
 BASE = 'sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6'
 TARGET = 'sha256:9c9f7ed05e0a8d2e4a370a75dd7b8d8524a0603205e79dfc9046239818237940'
 NGINX_IMAGES = (
@@ -73,6 +73,11 @@ def sha(raw):
 def namespace(nonce):
     check(isinstance(nonce, str) and re.fullmatch('[0-9a-f]{32}', nonce), 'invalid fixture nonce')
     return 'lt-retention-native-' + nonce[:12]
+
+
+def initial_free_required(helper):
+    check(helper.BASE_EXPORT_BUDGET == 8 * 1024 ** 3, 'unreviewed base export budget')
+    return helper.BASE_EXPORT_BUDGET + RESERVE + 256 * 1024 ** 2
 
 
 def owned_object(item, nonce):
@@ -393,7 +398,7 @@ def _run_fixture(recovery):
     check(nginx_image is not None, 'no reviewed cached fixture nginx image')
     runtime.nginx_image = nginx_image
     check(all(v['Id'] == k and v['Architecture'] == 'amd64' for k, v in images.items()), 'image pin changed')
-    check(shutil.disk_usage('/').free > RESERVE + images[BASE]['Size'] + 256 * 1024 ** 2,
+    check(shutil.disk_usage('/').free > initial_free_required(helper),
           'one full export would breach staging reserve')
     os.umask(0o077); root.mkdir(mode=0o700)
     (root / '.fixture-marker').write_text(nonce + '\n')
@@ -561,7 +566,7 @@ def main():
         print(json.dumps({'mode': 'source-plan', 'writes': False, 'requiresSeparateReview': True,
                           'helperSha256': HELPER_SHA, 'host': 'staging90 only',
                           'imagesMustAlreadyBeCached': [BASE, TARGET, list(NGINX_IMAGES)],
-                          'minimumFreeBytes': 'base image Size plus 8GiB reserve plus 256MiB',
+                          'minimumFreeBytes': '8GiB pinned-base export budget plus 8GiB reserve plus 256MiB',
                           'publishedPorts': [], 'imageBuilds': 0, 'imagePulls': 0}))
         return 0
     try:

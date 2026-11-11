@@ -3,6 +3,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -12,6 +13,13 @@ from ops import retained_small_engine_swap as production
 
 class NativeFixtureSourceTests(unittest.TestCase):
     nonce = '0123456789abcdef0123456789abcdef'
+
+    def test_initial_export_headroom_is_conservative_for_the_fixed_base(self):
+        helper = SimpleNamespace(BASE_EXPORT_BUDGET=8 * 1024 ** 3)
+        self.assertEqual(fixture.initial_free_required(helper), 17448304640)
+        self.assertGreater(17686102016, fixture.initial_free_required(helper))
+        with self.assertRaises(RuntimeError):
+            fixture.initial_free_required(SimpleNamespace(BASE_EXPORT_BUDGET=3952627133))
 
     def test_exact_owner_and_namespace_required_before_cleanup(self):
         prefix = fixture.namespace(self.nonce)
