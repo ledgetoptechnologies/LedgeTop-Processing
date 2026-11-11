@@ -129,6 +129,19 @@ skips (21 main cases plus the unchanged small-helper cases). Main-specific tests
 include busy-before-schedule/backup, exact command/resource preservation, owned
 main receipt binding, real Queue main drain/claim gap, permanent hold behavior,
 metadata-sensitive task index, and exact new environment/fixture-label rules.
-POSIX ownership/fsync and actual bind/Compose/GPU mechanics remain unqualified.
+The exact a0d946d5 source then passed all 45 cases on cached Python 3.13 image
+`ae14d4ce...` as Linux root, zero skips/failures. This executed the real numeric
+ownership, private-umask, directory-fsync and dual-forward-pin metadata tests.
+All 80 archived files matched frozen LF Git blobs. The isolated runner had one
+CPU, 512 MiB memory, 128 MiB private tmpfs and 64 PIDs, no network/GPU/Docker
+socket/host data, read-only root/source and bytecode writes disabled. Only CHOWN,
+DAC_OVERRIDE and FOWNER were added to the otherwise dropped capabilities so
+UID1000 metadata tests could execute inside its tmpfs. The container exited 0
+without OOM and was removed, with absence verified. Safe hashes and limits are
+in `retained-main-engine-swap-source-20261111.json`.
+
+This is Linux **unit** proof. Actual data-bind backup, Compose 5.3.1 recreation,
+TMP/GPU profile, ingress, export duration/capacity and live host integration remain
+unqualified. No live apply or native fixture was run.
 Synthetic passes do not establish real job delivery, crash/power-loss safety,
 large-data backup duration, autonomous reboot recovery, or a completed goal.

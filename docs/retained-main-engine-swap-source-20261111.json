@@ -26,5 +26,41 @@
   },
   "helperSha256": "a4d2f545e6dd5246480593ee7ea5a6a6747538eec2c81a79f1eef676c598c2cc",
   "smallHelperSha256": "1cad9575bfe86647b7db0ccb55266823450878b6eabb009ad6af9b20f7b634bf",
-  "hashRepresentation": "frozen Git blob bytes (LF), not Windows checkout conversion"
+  "hashRepresentation": "frozen Git blob bytes (LF), not Windows checkout conversion",
+  "linuxUnitTests": {
+    "head": "a0d946d58fc6e12163737950b2cd84c0af476b4e",
+    "image": "sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1",
+    "filesVerifiedAgainstGitBlob": 80,
+    "sourceTarSha256": "8b20fba16e761eef46a1d93cba007f1028e0452ec25b53d0a185da93aabf75f9",
+    "scope": "Linux root unit tests only; no Docker socket, SSH, host data, native swap or network",
+    "capabilities": [
+      "CHOWN",
+      "DAC_OVERRIDE",
+      "FOWNER"
+    ],
+    "reason": "actual UID1000 root-owned metadata tests in isolated tmpfs",
+    "total": 45,
+    "passed": 45,
+    "skipped": 0,
+    "failed": 0,
+    "readOnlyRoot": true,
+    "readOnlySource": true,
+    "noDockerSocket": true,
+    "noHostData": true,
+    "network": "none",
+    "cpu": 1,
+    "memoryMiB": 512,
+    "tmpfsMiB": 128,
+    "pidsLimit": 64,
+    "bytecodeWritesDisabled": true,
+    "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderrSha256": "95e02749b084c94cd01abe44448797664b9072ecc204f3f2524e9976d9ecef5f",
+    "runnerExit": 0,
+    "state": {
+      "exitCode": 0,
+      "oom": false,
+      "running": false
+    },
+    "ownedContainerGone": true
+  }
 }
