@@ -15,6 +15,7 @@ import shutil
 import stat
 import subprocess
 import tarfile
+import threading
 import time
 import uuid
 
@@ -29,6 +30,25 @@ NGINX_IMAGES = (
 OWNER = 'ledgetop.retention.native-fixture'
 RESERVE = 8 * 1024 ** 3
 NODE_BANNER = 'Now using node v14.21.3 (npm v6.14.18)'
+NGINX_CONFIG = b'''pid /tmp/nginx.pid;
+error_log /dev/stderr warn;
+worker_processes 1;
+events { worker_connections 64; }
+http {
+ access_log off;
+ client_body_temp_path /tmp/body;
+ proxy_temp_path /tmp/proxy;
+ fastcgi_temp_path /tmp/fastcgi;
+ uwsgi_temp_path /tmp/uwsgi;
+ scgi_temp_path /tmp/scgi;
+ server { listen 0.0.0.0:3001;
+  location / { proxy_pass http://fixture-engine:3000;
+   proxy_http_version 1.1; proxy_set_header Connection "";
+   proxy_buffering off; proxy_request_buffering off;
+  }
+ }
+}
+'''
 HTTP_JS = r"""
 const http=require('http'),p=JSON.parse(process.env.FIXTURE_REQUEST);
 const q=p.token?'?token='+encodeURIComponent(p.token):'';
@@ -72,6 +92,77 @@ def node_reply(raw):
           type(reply['status']) is int and 100 <= reply['status'] <= 599 and
           isinstance(reply['body'], str), 'invalid synthetic HTTP envelope')
     return reply
+
+
+def failure_reason(error):
+    allowed = {'fixture proxy startup failed', 'initial synthetic engine startup failed',
+               'bounded host command failed', 'unexpected Node wrapper output',
+               'invalid synthetic HTTP envelope', 'fixture engine is not running',
+               'fixture HTTP request failed'}
+    reason = 'invalid_json' if isinstance(error, json.JSONDecodeError) else str(error)
+    return {'class': type(error).__name__, 'reason': reason if reason in allowed or reason == 'invalid_json'
+            else 'redacted_exception'}
+
+
+def bounded_logs(identifier, path, *, seconds=8, max_bytes=65536):
+    check(re.fullmatch('[0-9a-f]{64}', identifier), 'invalid diagnostic container ID')
+    check(0 < seconds <= 8 and 0 < max_bytes <= 65536, 'invalid diagnostic bounds')
+    command = ['docker', '--host', 'unix:///var/run/docker.sock', 'logs', '--tail', '80', identifier]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    expired = threading.Event()
+    def expire():
+        expired.set()
+        if process.poll() is None:
+            process.kill()  # Only this owned, bounded log-reader CLI process.
+    timer = threading.Timer(seconds, expire)
+    timer.start()
+    raw, truncated = b'', False
+    try:
+        raw = process.stdout.read(max_bytes + 1)
+        truncated = len(raw) > max_bytes
+        if truncated and process.poll() is None:
+            process.kill()
+        process.wait(timeout=3)
+    finally:
+        timer.cancel(); timer.join(timeout=1)
+        if process.poll() is None:
+            process.kill(); process.wait(timeout=3)
+        process.stdout.close()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'wb') as stream:
+        stream.write(raw[:max_bytes])
+    return {'file': path.name, 'bytes': min(len(raw), max_bytes),
+            'truncated': truncated, 'timedOut': expired.is_set(), 'exit': process.returncode}
+
+
+def record_failure_diagnostics(runtime, nonce, root, error, context):
+    """Private bounded evidence before cleanup; never stdout/config/environment."""
+    try:
+        check(root.resolve() == root and root.name == namespace(nonce) and
+              (root / '.fixture-marker').read_text() == nonce + '\n', 'diagnostic root ownership changed')
+        report = {'nonce': nonce, 'exception': failure_reason(error), 'context': context,
+                  'containers': [], 'diagnosticErrors': []}
+        for identifier in runtime.docker('ps', '--all', '--quiet', '--filter',
+                                         'label=' + OWNER + '=' + nonce).split():
+            try:
+                c = runtime.inspect(identifier)
+                owned_object(c, nonce)
+                row = {'id': c['Id'], 'name': c['Name'], 'image': c['Image'],
+                       'state': {k: c['State'].get(k) for k in
+                                 ('Status', 'Running', 'ExitCode', 'OOMKilled', 'Restarting')}}
+                try:
+                    row['logs'] = bounded_logs(c['Id'], root / ('diagnostic-' + c['Id'][:12] + '.log'))
+                except Exception as log_error:
+                    row['logsError'] = failure_reason(log_error)
+                report['containers'].append(row)
+            except Exception as diagnostic_error:
+                report['diagnosticErrors'].append(failure_reason(diagnostic_error))
+        fd = os.open(root / 'failure-diagnostics.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(report, stream, indent=2)
+        return True
+    except Exception:
+        return False  # Diagnostic failure must not suppress owned cleanup.
 
 
 def load_helper():
@@ -250,23 +341,8 @@ def _run_fixture(recovery):
     configuration.write_text(json.dumps({'logger': {'logDirectory': '/tmp'}})); configuration.chmod(0o444)
     compose_path, nginx = work / 'candidate-compose.json', public / 'nginx.conf'
     proxy_pass = b'proxy_pass http://fixture-engine:3000;'
-    nginx.write_bytes(b'''pid /tmp/nginx.pid;
-error_log /dev/stderr warn;
-worker_processes 1;
-events { worker_connections 64; }
-http {
- access_log off;
- client_body_temp_path /tmp/body;
- proxy_temp_path /tmp/proxy;
- server { listen 0.0.0.0:3001;
-  location / { proxy_pass http://fixture-engine:3000;
-   proxy_http_version 1.1; proxy_set_header Connection "";
-   proxy_buffering off; proxy_request_buffering off;
-  }
- }
-}
-'''); nginx.chmod(0o644)
-    recovery.update(runtime=runtime, nonce=nonce, network=network, volume=volume)
+    nginx.write_bytes(NGINX_CONFIG); nginx.chmod(0o644)
+    recovery.update(runtime=runtime, nonce=nonce, network=network, volume=volume, root=root)
     runtime.docker('network', 'create', '--internal', '--label', OWNER + '=' + nonce, network)
     runtime.docker('volume', 'create', '--label', OWNER + '=' + nonce, volume)
     data = Path(json.loads(runtime.docker('volume', 'inspect', volume))[0]['Mountpoint'])
@@ -288,7 +364,8 @@ http {
     config = engine_compose(prefix, network, volume, BASE, configuration, token, nonce)
     compose_path.write_text(json.dumps(config))
     compose = ['compose', '-p', prefix, '--project-directory', str(work), '-f', str(compose_path)]
-    result, success = {}, False
+    result, success, phase = {}, False, 'engine_startup'
+    proxy_observation = {'lastStatus': None, 'lastException': None}
     try:
         runtime.docker(*compose, 'up', '-d', '--no-deps', '--no-build', '--pull', 'never', 'nodeodm', timeout=90)
         engine = runtime.docker(*compose, 'ps', '--all', '--quiet', 'nodeodm').strip()
@@ -323,14 +400,16 @@ http {
             '-c', '/config/nginx.conf', '-g', 'daemon off;').strip()
         helper.INGRESS = ingress
         runtime.docker('start', ingress)
+        phase = 'proxy_startup'
         deadline = time.monotonic() + 30
         while True:
             try:
                 status, _ = runtime.internal_http(True, '/info', token)
+                proxy_observation['lastStatus'] = status
                 if status == 200:
                     break
-            except Exception:
-                pass
+            except Exception as error:
+                proxy_observation['lastException'] = failure_reason(error)
             check(time.monotonic() < deadline, 'fixture proxy startup failed')
             time.sleep(.25)
         old = runtime.inspect(engine)
@@ -341,23 +420,28 @@ http {
                         engine=before, composeSha256=sha(compose_path.read_bytes()),
                         candidate=helper.candidate_config(normalized, old['Config']['Cmd']))
         helper.save(backup / 'prepared.private.json', prepared)
+        phase = 'ingress_close'
         runtime.change_ingress(prepared, closed=True)
         check(stat.S_IMODE(nginx.stat().st_mode) == 0o644, 'closed nginx mode changed under umask077')
         runtime.engine_idle(engine, prepared['command'])
+        phase = 'backup'
         runtime.stop_and_backup(prepared, backup)
         # The actual Docker export must include old unmounted writable state.
         with tarfile.open(backup / 'engine-rootfs.tar', 'r:') as archive:
             stream = archive.extractfile('var/www/fixture-root-retained.bin')
             check(stream is not None and stream.read(1024).decode() == root_sentinel,
                   'full-root export omitted original writable state')
+        phase = 'recreate_and_verify'
         runtime.recreate_and_verify(prepared, backup)
         current = runtime.current_engine
         check(current != engine, 'Compose did not actually recreate the engine')
         check(runtime.docker('exec', current, 'stat', '-c', '%a %u %g', '/var/www/tmp/.gitignore').strip() ==
               '640 1001 1001', 'saved tmp ownership/mode was not preserved')
         runtime.persist_pin(prepared)
+        phase = 'ingress_reopen'
         runtime.change_ingress(prepared, closed=False)
         check(stat.S_IMODE(nginx.stat().st_mode) == 0o644, 'reopened nginx mode changed under umask077')
+        phase = 'candidate_stop'
         runtime.docker('stop', '--time', '15', current, timeout=25)
         stopped = runtime.inspect(current)['State']
         check(stopped['ExitCode'] == 0 and not stopped['OOMKilled'], 'candidate shutdown was not clean')
@@ -372,6 +456,10 @@ http {
                       scope='isolated native mechanics; no live-host/queue/client/GPU acceptance')
         helper.save(root / 'result.json', result)
         success = True
+    except Exception as error:
+        record_failure_diagnostics(runtime, nonce, root, error,
+                                   {'phase': phase, 'proxyStartup': proxy_observation})
+        raise
     finally:
         recovery['cleanupStarted'] = True
         cleanup_resources(runtime, nonce, network, volume)
@@ -387,6 +475,11 @@ def run_fixture():
     recovery = {}
     try:
         return _run_fixture(recovery)
+    except Exception as error:
+        if recovery and not recovery.get('cleanupStarted') and recovery.get('root'):
+            record_failure_diagnostics(recovery['runtime'], recovery['nonce'], recovery['root'],
+                                       error, {'phase': 'partial_setup'})
+        raise
     finally:
         # Setup can fail before the main rehearsal's try/finally is entered.
         # Inspect exact labels/names then clean only those partial resources.

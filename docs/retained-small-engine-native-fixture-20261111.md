@@ -53,8 +53,23 @@ canonical path/marker/mount checks. A small root-private evidence directory
 remains for parent review. Failed-run artifacts remain private for inspection.
 Synthetic tokens are disposable; no production credential is read.
 
-Seven bounded source tests verify ownership refusal, exact banner handling,
+Eleven bounded source tests verify ownership refusal, exact banner handling,
 resource/port constraints, private-module isolation, default plan-only behavior,
 partial-cleanup control flow and read-only HTTP adapters. These are source tests;
 they do not prove the native rehearsal passed. Parent must review the frozen
 script before executing and record actual results and remaining differences.
+
+The first parent-run native attempt reached engine admission but failed proxy
+startup before any backup/recreation/ingress swap. A separate bounded parent
+nginx syntax check identified missing fastcgi/uwsgi/scgi temp directives: the
+unprivileged, read-only fixture otherwise tried creating `/var/cache/nginx`
+defaults. The fixture now explicitly puts all five temp directory kinds under
+its existing tmpfs/tmp; production helper and root filesystem policy are unchanged.
+
+Failures now retain exact-nonce container status/exit/OOM and private
+`docker logs --tail80` evidence before cleanup, capped at64KiB and8seconds per
+owned container. Logs and raw configuration are never printed. Proxy startup
+records its last HTTP status and sanitized exception class/reason. Unknown
+exception text is redacted so credentials/environment cannot leak into metadata.
+Diagnostic failures do not suppress resource cleanup or replace the original
+failure. Actual native success remains unproven until parent reruns the candidate.

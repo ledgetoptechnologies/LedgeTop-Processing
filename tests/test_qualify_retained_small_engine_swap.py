@@ -2,6 +2,7 @@ from contextlib import redirect_stdout
 import io
 import json
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
@@ -94,6 +95,59 @@ class NativeFixtureSourceTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             client.request('POST', '/task/new/init')
         runtime.internal_http.assert_not_called()
+
+    def test_readonly_nginx_config_places_every_temp_directory_in_tmp(self):
+        for directive, directory in ((b'client_body_temp_path', b'body'), (b'proxy_temp_path', b'proxy'),
+                (b'fastcgi_temp_path', b'fastcgi'), (b'uwsgi_temp_path', b'uwsgi'), (b'scgi_temp_path', b'scgi')):
+            self.assertIn(directive + b' /tmp/' + directory + b';', fixture.NGINX_CONFIG)
+        self.assertNotIn(b'/var/cache/nginx', fixture.NGINX_CONFIG)
+
+    def test_failure_diagnostics_save_only_owned_state_and_private_bounded_logs(self):
+        identifier = 'a' * 64
+        runtime = Mock()
+        runtime.docker.return_value = identifier
+        runtime.inspect.return_value = {
+            'Id': identifier, 'Name': '/' + fixture.namespace(self.nonce) + '-ingress', 'Image': fixture.NGINX_IMAGES[1],
+            'Config': {'Labels': {fixture.OWNER: self.nonce}, 'Env': ['TOKEN=private-not-for-report']},
+            'State': {'Status': 'exited', 'Running': False, 'ExitCode': 1, 'OOMKilled': False,
+                      'Restarting': False, 'Error': 'private-not-for-report'}}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / fixture.namespace(self.nonce)
+            root.mkdir()
+            (root / '.fixture-marker').write_text(self.nonce + '\n')
+            with patch.object(fixture, 'bounded_logs', return_value={'bytes': 20}) as logs:
+                self.assertTrue(fixture.record_failure_diagnostics(runtime, self.nonce, root,
+                    RuntimeError('fixture proxy startup failed'), {'phase': 'proxy_startup'}))
+            logs.assert_called_once_with(identifier, root / ('diagnostic-' + identifier[:12] + '.log'))
+            raw = (root / 'failure-diagnostics.json').read_text()
+            report = json.loads(raw)
+            self.assertEqual(report['containers'][0]['state']['ExitCode'], 1)
+            self.assertEqual(report['exception']['reason'], 'fixture proxy startup failed')
+            self.assertNotIn('private-not-for-report', raw)
+            self.assertNotIn('Env', raw)
+
+    def test_log_reader_retains_only_bounded_prefix_without_printing_content(self):
+        process = Mock()
+        process.stdout = io.BytesIO(b'private log bytes' * 100)
+        process.poll.return_value = 0
+        process.wait.return_value = 0
+        process.returncode = 0
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(fixture.subprocess, 'Popen', return_value=process) as popen, \
+                redirect_stdout(io.StringIO()) as output:
+            path = Path(temporary) / 'private.log'
+            result = fixture.bounded_logs('b' * 64, path, max_bytes=64)
+            self.assertEqual(path.stat().st_size, 64)
+            self.assertTrue(result['truncated'])
+            self.assertFalse(result['timedOut'])
+            self.assertEqual(output.getvalue(), '')
+            self.assertIn('--tail', popen.call_args.args[0])
+            self.assertIn('80', popen.call_args.args[0])
+        self.assertTrue(process.stdout.closed)
+
+    def test_unknown_exception_text_is_not_written_to_proxy_failure_context(self):
+        report = fixture.failure_reason(RuntimeError('token=private-not-for-output'))
+        self.assertEqual(report, {'class': 'RuntimeError', 'reason': 'redacted_exception'})
 
 
 if __name__ == '__main__':
