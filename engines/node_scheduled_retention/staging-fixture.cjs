@@ -1,6 +1,6 @@
 'use strict';
 // REVIEW ONLY. Run only with the documented isolated synthetic mounts.
-const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict'),crypto=require('node:crypto'),Module=require('node:module');
+const fs=require('node:fs'),path=require('node:path'),assert=require('assert').strict,crypto=require('node:crypto'),Module=require('node:module');
 process.exitCode=1;const deadline=setTimeout(()=>{console.error('fixture timed out');process.exit(1)},30000);
 assert.equal(process.cwd(),'/var/www');
 const mode=process.env.FIXTURE_MODE;assert(['on-first','on-restart','off'].includes(mode));
