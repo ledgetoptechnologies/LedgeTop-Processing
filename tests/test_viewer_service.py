@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from types import SimpleNamespace
@@ -894,6 +895,176 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick()
         self.assertEqual(self.service.info(identifier)['status']['code'], 40)
         self.assertEqual(sum(c[0] == 'commit' for c in self.engines['cluster'].calls), 1)
+
+    def test_completed_download_proceeds_while_another_upload_holds_scheduler(self):
+        completed = self.submit()
+        self.service.tick()
+        self.finish(completed)
+        self.service.tick()
+        self.submit(count=2)
+        engine = self.engines['cluster']
+        original_upload = engine.upload
+        entered, release, downloaded = threading.Event(), threading.Event(), threading.Event()
+        errors, results = [], []
+        def upload(identifier, item):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError('fixture upload release deadline')
+            return original_upload(identifier, item)
+        def run(function):
+            try:function()
+            except BaseException as error:errors.append(error)
+        def read_result():
+            stream, length = self.service.download(completed)
+            with stream:results.append((stream.read(), length))
+            downloaded.set()
+        uploader = threading.Thread(target=lambda:run(self.service.tick))
+        reader = threading.Thread(target=lambda:run(read_result))
+        with patch.object(engine, 'upload', side_effect=upload):
+            try:
+                uploader.start()
+                self.assertTrue(entered.wait(2))
+                reader.start()
+                # This must finish BEFORE the scheduler's upload is released.
+                self.assertTrue(downloaded.wait(2), 'result waited on unrelated upload')
+            finally:
+                release.set()
+                for thread in (uploader, reader):
+                    if thread.ident is not None:thread.join(5)
+                    self.assertFalse(thread.is_alive(), 'owned fixture thread leaked')
+        self.assertFalse(errors)
+        self.assertEqual(results, [(engine.archive, len(engine.archive))])
+        self.assertEqual(engine.download_calls, 1)
+
+    def test_concurrent_same_result_requests_capture_only_once(self):
+        identifier = self.submit()
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        engine = self.engines['cluster']
+        original_download = engine.download
+        entered, release, second_entered = threading.Event(), threading.Event(), threading.Event()
+        results, errors = [], []
+        def download(engine_id):
+            response = original_download(engine_id)
+            original_read = response.read
+            def read(length=-1):
+                entered.set()
+                if not release.wait(5):raise AssertionError('fixture capture release deadline')
+                return original_read(length)
+            response.read = read
+            return response
+        def reader(second=False):
+            if second:second_entered.set()
+            try:
+                stream, length = self.service.download(identifier)
+                with stream:results.append((stream.read(), length))
+            except BaseException as error:errors.append(error)
+        readers = [threading.Thread(target=reader), threading.Thread(target=lambda:reader(True))]
+        with patch.object(engine, 'download', side_effect=download):
+            try:
+                readers[0].start()
+                self.assertTrue(entered.wait(2))
+                readers[1].start()
+                self.assertTrue(second_entered.wait(2))
+                self.assertEqual(engine.download_calls, 1)
+            finally:
+                release.set()
+                for thread in readers:
+                    if thread.ident is not None:thread.join(5)
+                    self.assertFalse(thread.is_alive(), 'owned fixture thread leaked')
+        self.assertFalse(errors)
+        self.assertEqual(results, [(engine.archive, len(engine.archive))] * 2)
+        self.assertEqual(engine.download_calls, 1)
+
+    def test_waiting_download_rechecks_completion_after_same_uuid_reset(self):
+        self.assert_waiting_download_rejects_reset(False)
+
+    def test_waiting_download_rejects_already_completed_replacement_generation(self):
+        self.assert_waiting_download_rejects_reset(True)
+
+    def assert_waiting_download_rejects_reset(self, complete_replacement):
+        identifier = self.submit()
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        original = self.task(identifier)
+        engine = self.engines['cluster']
+        capture_lock = threading.Lock()
+        with self.service._downloads_lock:self.service._downloads[identifier] = capture_lock
+        observed = threading.Event()
+        errors = []
+        original_task = self.service.store.task
+        def task(task_id):
+            result = original_task(task_id)
+            if threading.current_thread().name == 'waiting-result':observed.set()
+            return result
+        def reader():
+            try:
+                stream, _ = self.service.download(identifier)
+                stream.close()
+            except BaseException as error:errors.append(error)
+        thread = threading.Thread(target=reader, name='waiting-result')
+        capture_lock.acquire()
+        with patch.object(self.service.store, 'task', side_effect=task):
+            try:
+                thread.start()
+                self.assertTrue(observed.wait(2))
+                self.service.remove(identifier)
+                self.service.initialize(identifier, 'Synthetic survey', REQUEST_OPTIONS, None)
+                self.upload(identifier)
+                self.service.commit(identifier)
+                if complete_replacement:
+                    self.service.tick()
+                    self.finish(identifier)
+                    self.service.tick()
+                    self.assertEqual(self.task(identifier)['job']['status'], 'succeeded')
+            finally:
+                capture_lock.release()
+                thread.join(5)
+                self.assertFalse(thread.is_alive(), 'owned fixture thread leaked')
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], Conflict)
+        self.assertEqual(engine.download_calls, 0)
+        current = self.task(identifier)
+        self.assertEqual(current['generation'], original['generation'] + 1)
+        self.assertIsNone(current['archive_path'])
+        self.assertTrue(Path(original['files'][0]['path']).is_file())
+
+    def test_legacy_digest_update_cannot_write_replacement_after_precheck(self):
+        identifier = self.submit()
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        original = self.task(identifier)
+        archive = Path(original['directory']) / 'all.zip'
+        archive.write_bytes(self.engines['cluster'].archive)
+        # Synthetic legacy state: a retained path predates stored archive digest.
+        self.service.store.update(identifier, archive_path=str(archive))
+        original_update = self.service.store.update
+        replaced = []
+        def reset_before_write(task_id, **fields):
+            if fields.get('archive_sha256') and not replaced:
+                replaced.append(True)
+                self.service.remove(identifier)
+                self.service.initialize(identifier, 'Synthetic survey', REQUEST_OPTIONS, None)
+                self.upload(identifier)
+                self.service.commit(identifier)
+                self.service.tick()
+                self.finish(identifier)
+                self.service.tick()
+            return original_update(task_id, **fields)
+        with patch.object(self.service.store, 'update', side_effect=reset_before_write), \
+             self.assertRaisesRegex(Conflict, 'identity changed'):
+            self.service.download(identifier)
+        current = self.task(identifier)
+        self.assertEqual(current['generation'], original['generation'] + 1)
+        self.assertEqual(current['job']['status'], 'succeeded')
+        self.assertIsNone(current['archive_sha256'])
+        self.assertIsNone(current['archive_path'])
+        self.assertEqual(archive.read_bytes(), self.engines['cluster'].archive)
+        self.assertTrue(Path(original['files'][0]['path']).is_file())
+        self.assertEqual(self.engines['cluster'].download_calls, 0)
 
     def test_download_twice_matches_hash_and_retains_archive_and_inputs(self):
         identifier = self.submit()

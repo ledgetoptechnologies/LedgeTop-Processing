@@ -370,6 +370,26 @@ class ViewerTaskStoreTests(unittest.TestCase):
             owned.unlink()
             displaced.rename(owned)
 
+    def test_result_identity_guard_refuses_each_changed_binding_before_write(self):
+        self.ready()
+        self.store.update(self.identifier, node_id='cluster', engine_uuid=str(uuid.uuid4()))
+        task = self.store.task(self.identifier)
+        identity = {field: task[field] for field in
+                    ('generation', 'job_id', 'engine_uuid', 'node_id', 'directory')}
+        replacements = {'generation': task['generation'] + 1,
+                        'job_id': str(uuid.uuid4()), 'engine_uuid': str(uuid.uuid4()),
+                        'node_id': 'main', 'directory': str(self.root / 'other')}
+        for field, value in replacements.items():
+            with self.subTest(field=field), self.assertRaises(Conflict):
+                self.store.update(self.identifier, expected_result={**identity, field: value},
+                                  archive_sha256='a' * 64)
+            self.assertIsNone(self.store.task(self.identifier)['archive_sha256'])
+        for invalid in ({}, {**identity, 'generation': True}, {**identity, 'extra': 'value'}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                self.store.update(self.identifier, expected_result=invalid, archive_sha256='a' * 64)
+        accepted = self.store.update(self.identifier, expected_result=identity, archive_sha256='a' * 64)
+        self.assertEqual(accepted['archive_sha256'], 'a' * 64)
+
     def test_update_return_task_requires_bool_and_keeps_mutation_validation(self):
         self.ready()
         before = self.store.task(self.identifier)

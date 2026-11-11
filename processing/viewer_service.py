@@ -144,6 +144,8 @@ class ViewerService:
         self._thread = None
         self._backoff = {}
         self._downloads = {}
+        # Registry lookup must never wait for the scheduler's whole upload turn.
+        self._downloads_lock = threading.Lock()
 
     @staticmethod
     def _probe_role(node_id):
@@ -236,10 +238,20 @@ class ViewerService:
         task = self.store.task(identifier)
         if not task['job'] or task['job']['status'] != 'succeeded':
             raise Conflict('task is not complete')
-        with self._lock:
+        identity = {field: task[field] for field in
+                    ('generation', 'job_id', 'engine_uuid', 'node_id', 'directory')}
+        def current_result():
+            current = self.store.task(identifier)
+            if {field: current[field] for field in identity} != identity:
+                raise Conflict('task result identity changed')
+            if not current['job'] or current['job']['status'] != 'succeeded':
+                raise Conflict('task is not complete')
+            return current
+        with self._downloads_lock:
             lock = self._downloads.setdefault(identifier, threading.Lock())
         with lock:
-            task = self.store.task(identifier)
+            # Completion alone cannot bind a waiter across a same-UUID reset.
+            task = current_result()
             path = Path(task['archive_path']) if task['archive_path'] else Path(task['directory']) / 'all.zip'
             if not task['archive_path']:
                 partial = path.with_suffix('.zip.partial')
@@ -278,16 +290,20 @@ class ViewerService:
                     raise EngineUnavailable('archive_transfer_incomplete')
                 os.replace(partial, path)
                 sync_directory(path.parent)
-                self.store.update(identifier, archive_path=str(path), archive_sha256=archive_digest.hexdigest())
+                current_result()
+                self.store.update(identifier, expected_result=identity, archive_path=str(path),
+                                  archive_sha256=archive_digest.hexdigest())
             if path.is_symlink() or not path.is_file():
                 raise Conflict('retained archive unavailable')
-            task = self.store.task(identifier)
+            task = current_result()
             if not task['archive_sha256']:
                 digest = hashlib.sha256()
                 with path.open('rb') as archive:
                     while chunk := archive.read(1024 ** 2):
                         digest.update(chunk)
-                self.store.update(identifier, archive_sha256=digest.hexdigest())
+                current_result()
+                self.store.update(identifier, expected_result=identity, archive_sha256=digest.hexdigest())
+            current_result()
             return path.open('rb'), path.stat().st_size
 
     def accept_viewer_delivery(self, identifier, environment, receipt):

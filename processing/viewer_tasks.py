@@ -403,9 +403,15 @@ class TaskStore:
             return [self._task(db, row) for row in db.execute(
                 'SELECT * FROM viewer_tasks WHERE removed=0 ORDER BY created_at,rowid').fetchall()]
 
-    def update(self, identifier, *, return_task=True, **fields):
+    def update(self, identifier, *, return_task=True, expected_result=None, **fields):
         if type(return_task) is not bool:
             raise ValueError('return_task must be a boolean')
+        result_fields = {'generation', 'job_id', 'engine_uuid', 'node_id', 'directory'}
+        if expected_result is not None and (
+                type(expected_result) is not dict or set(expected_result) != result_fields
+                or type(expected_result['generation']) is not int or expected_result['generation'] < 1
+                or any(type(expected_result[field]) is not str for field in result_fields - {'generation'})):
+            raise ValueError('invalid expected result identity')
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
                    'progress', 'output_lines', 'archive_path', 'archive_sha256', 'upload_cursor'}
         if not fields or not set(fields) <= allowed:
@@ -446,6 +452,11 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, identifier)
+            if expected_result is not None:
+                current_result = {field: row[field] for field in result_fields - {'directory'}}
+                current_result['directory'] = str(self._directory(row))
+                if current_result != expected_result:
+                    raise Conflict('task result identity changed')
             if not return_task:
                 # Preserve the owned-directory fence without rebuilding every
                 # file entry for an ignored upload-checkpoint return value.
