@@ -2,6 +2,7 @@ import datetime
 import ipaddress
 import json
 import os
+import socket
 import ssl
 import tempfile
 import threading
@@ -83,11 +84,49 @@ class ViewerTlsListenerTests(unittest.TestCase):
         server = create_viewer_tls_server(handler, '127.0.0.1', 0, server_context=standalone)
         try:
             self.assertTrue(server.viewer_tls)
-            self.assertEqual(standalone.calls, [True])
+            self.assertEqual(standalone.calls, [])
+            self.assertIs(server.viewer_tls_context, standalone)
             self.assertEqual(fallback.calls, [])
             self.assertIs(handler.reference_listener._server_context, fallback)
         finally:
             server.server_close()
+
+    def test_stalled_tls_handshake_does_not_block_valid_client_and_times_out(self):
+        for use_standalone in (True, False):
+            with self.subTest(standalone=use_standalone), tempfile.TemporaryDirectory() as directory:
+                cert, key = self._pair(directory, 'handshake')
+                context = standalone_viewer_tls_context(str(cert), str(key))
+                class Handler(BaseHTTPRequestHandler):
+                    reference_listener = None if use_standalone else SimpleNamespace(_server_context=context)
+                    def do_GET(self):
+                        self.send_response(200)
+                        self.end_headers()
+                        self.wfile.write(b'ok')
+                    def log_message(self, *_):
+                        pass
+                server = create_viewer_tls_server(Handler, '127.0.0.1', 0,
+                                                  server_context=context if use_standalone else None)
+                server.daemon_threads, server.block_on_close = False, True
+                server.handshake_timeout = 2.0
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                stalled = socket.create_connection(('127.0.0.1', server.server_port), timeout=2)
+                try:
+                    client = ssl.create_default_context(cafile=str(cert))
+                    with urllib.request.urlopen(f'https://127.0.0.1:{server.server_port}/',
+                                                context=client, timeout=1) as response:
+                        self.assertEqual(response.read(), b'ok')
+                    stalled.close()
+                    server.handshake_timeout = .25
+                    with socket.create_connection(('127.0.0.1', server.server_port), timeout=2) as second:
+                        second.settimeout(2)
+                        self.assertEqual(second.recv(1), b'')
+                finally:
+                    stalled.close()
+                    server.shutdown()
+                    thread.join(timeout=3)
+                    server.server_close()
+                    self.assertFalse(thread.is_alive())
 
     def test_standalone_rejects_missing_mismatched_and_unprivate_key(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -242,7 +281,8 @@ class ViewerTlsListenerTests(unittest.TestCase):
 
         viewer_tls = create_viewer_tls_server(handler, '127.0.0.1', 0)
         self.assertTrue(viewer_tls.viewer_tls)
-        self.assertEqual(context.calls, [True])
+        self.assertEqual(context.calls, [])
+        self.assertIs(viewer_tls.viewer_tls_context, context)
         handler.reference_listener = None
         native = ThreadingHTTPServer(('127.0.0.1', 0), handler)
         service = CoordinatorService(native, handler, viewer_tls)

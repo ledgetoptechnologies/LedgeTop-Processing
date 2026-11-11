@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import signal
+import ssl
 import sys
 import threading
 
@@ -234,15 +235,39 @@ def make_handler(config: Config):
     return Handler
 
 
+class ViewerTLSHTTPServer(ThreadingHTTPServer):
+    """Accept TCP promptly; perform bounded TLS handshakes in request threads."""
+
+    handshake_timeout = 5.0
+
+    def __init__(self, address, handler, context):
+        self.viewer_tls_context = context
+        super().__init__(address, handler)
+
+    def process_request_thread(self, request, client_address):
+        wrapped = None
+        try:
+            request.settimeout(self.handshake_timeout)
+            wrapped = self.viewer_tls_context.wrap_socket(
+                request, server_side=True, do_handshake_on_connect=False)
+            wrapped.do_handshake()
+            wrapped.settimeout(None)
+        except (OSError, ssl.SSLError):
+            # A stalled or invalid client must not block acceptance or expose
+            # TLS failures, request details, or credentials in logs.
+            self.shutdown_request(wrapped if wrapped is not None else request)
+            return
+        super().process_request_thread(wrapped, client_address)
+
+
 def create_viewer_tls_server(handler, host, port, *, server_context=None):
     """Create the HTTPS listener for the existing authenticated Viewer facade."""
     runtime = getattr(handler, 'reference_listener', None)
     context = server_context if server_context is not None else getattr(runtime, '_server_context', None)
     if context is None:
         raise ValueError('Viewer TLS listener requires reference TLS configuration')
-    server = ThreadingHTTPServer((host, port), handler)
+    server = ViewerTLSHTTPServer((host, port), handler, context)
     try:
-        server.socket = context.wrap_socket(server.socket, server_side=True)
         server.viewer_tls = True
         return server
     except Exception:
