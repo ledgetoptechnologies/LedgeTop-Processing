@@ -19,6 +19,7 @@ from ops.retained_small_engine_swap import (
     digest, no_cluster_claims, snapshot_tree, terminal_inventory, verify_owned_receipt, verify_retained,
     host_config_equivalent,
     BASE_EXPORT_BUDGET, RESERVE, require_backup_headroom,
+    verified_empty_environment,
 )
 from processing.maintenance import Conflict
 from processing.prototype import Queue, VIEWER_PROFILE
@@ -95,6 +96,47 @@ class FakeRuntime:
 
 
 class RetainedSwapTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix' and getattr(os, 'geteuid', lambda: -1)() == 0,
+                         'root-owned POSIX private-file admission')
+    def test_empty_environment_requires_exact_private_empty_file_and_old_label(self):
+        from ops import retained_small_engine_swap as swap
+        with tempfile.TemporaryDirectory() as temporary:
+            compose = Path(temporary) / 'candidate-compose.json'
+            environment = compose.parent / 'empty.env'
+            environment.write_bytes(b''); environment.chmod(0o600)
+            with patch.object(swap, 'COMPOSE', compose):
+                self.assertEqual(verified_empty_environment(str(environment)), environment)
+                for label in (None, str(environment) + '.other'):
+                    with self.subTest(label=label), self.assertRaises(Held):
+                        verified_empty_environment(label)
+                environment.write_bytes(b'UNEXPECTED=value\n')
+                with self.assertRaisesRegex(Held, 'empty Compose environment file changed'):
+                    verified_empty_environment(str(environment))
+                environment.write_bytes(b''); environment.chmod(0o644)
+                with self.assertRaises(Held):
+                    verified_empty_environment(str(environment))
+
+    @unittest.skipUnless(os.name == 'posix' and getattr(os, 'geteuid', lambda: -1)() == 0,
+                         'root-owned POSIX alias and ownership admission')
+    def test_empty_environment_rejects_alias_hardlink_and_wrong_owner(self):
+        from ops import retained_small_engine_swap as swap
+        with tempfile.TemporaryDirectory() as temporary:
+            compose = Path(temporary) / 'candidate-compose.json'
+            environment = compose.parent / 'empty.env'
+            target = compose.parent / 'other-empty'
+            target.write_bytes(b''); target.chmod(0o600)
+            with patch.object(swap, 'COMPOSE', compose):
+                environment.symlink_to(target)
+                with self.assertRaises(Held):
+                    verified_empty_environment(str(environment))
+                environment.unlink(); os.link(target, environment)
+                with self.assertRaises(Held):
+                    verified_empty_environment(str(environment))
+                environment.unlink(); target.unlink()
+                environment.write_bytes(b''); environment.chmod(0o600); os.chown(environment, 1001, 1001)
+                with self.assertRaisesRegex(Held, 'empty Compose environment file changed'):
+                    verified_empty_environment(str(environment))
+
     def test_pinned_base_export_budget_does_not_use_underreported_image_size(self):
         measured_export, daemon_image_size = 6365878272, 3952627133
         self.assertGreater(measured_export, daemon_image_size)

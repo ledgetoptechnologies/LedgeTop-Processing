@@ -137,3 +137,14 @@ The conservative8GiB base budget applies only to the exact fixed5ce image,
 whose identity is rechecked before backup. It is not a generic storage quota
 or a change to photo-count routing. Accounting and exact-boundary tests require
 strictly more free space than export budget plus writable/data copies/reserve.
+
+Read-only inspection of the actual original small container also identified
+its exact Compose `project.environment_file` label: the canonical `empty.env`
+beside the operator Compose JSON. The helper now preserves this provenance by
+passing that same explicit `--env-file` to rendering and recreation. Before
+snapshot/admission/recreation it requires the old label to match and the file
+to be canonical, regular, root-owned0600, nlink1 and empty. A nonempty file,
+alias, hardlink, missing/wrong label or changed owner is refused. No secret or
+runtime environment is introduced; the actual existing file is not modified.
+The recreated label remains subject to strict equality instead of being added
+to the bookkeeping exceptions.

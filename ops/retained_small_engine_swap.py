@@ -36,6 +36,7 @@ COMPOSE = Path('/var/lib/ledgetop-node89-migration-1120ae14a8988e84513a4a8a46b78
 NGINX = Path('/home/bkoltz/.local/share/ledgetop-processing-prototype/viewer-e82b795/cluster-node/ingress/public-config/nginx.conf')
 PASS = b'proxy_pass http://127.0.0.1:13001;'
 FLAG = '--disable_scheduled_cleanup'
+ENVIRONMENT_LABEL = 'com.docker.compose.project.environment_file'
 SOURCE_HASHES = {
     'config.js': 'cc422dceebea33876082c17084e165e40bd2f389df63f0e3afe3ba37e3edf2a5',
     'libs/TaskManager.js': '326639d70c12cf62acf979633937861ff929da7eda9d3805b9bf4f43af2ea2c5',
@@ -70,6 +71,15 @@ def regular(path, private=False):
     require(stat.S_ISREG(s.st_mode) and s.st_nlink == 1, 'operator file is not regular')
     require(not s.st_mode & (0o077 if private else 0o022), 'operator file permissions changed')
     return s
+
+
+def verified_empty_environment(label):
+    path = COMPOSE.parent / 'empty.env'
+    info = regular(path, private=True)
+    require(info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o600 and
+            info.st_size == 0 and path.read_bytes() == b'', 'empty Compose environment file changed')
+    require(label == str(path), 'old Compose environment-file binding changed')
+    return path
 
 
 def command_with_retention(command):
@@ -343,6 +353,7 @@ class Runtime:
 
     def revalidate(self, prepared):
         self.physical_host()
+        verified_empty_environment(prepared['oldContainer']['Config']['Labels'].get(ENVIRONMENT_LABEL))
         require(self.docker('info', '--format', '{{.ID}}').strip() == prepared['dockerEngineId'],
                 'physical Docker Engine changed')
         require(self.authority() == prepared['authorityId'], 'coordinator authority changed')
@@ -403,6 +414,7 @@ class Runtime:
             os.close(fd)
 
     def recreate_and_verify(self, prepared, root):
+        empty_env = verified_empty_environment(prepared['oldContainer']['Config']['Labels'].get(ENVIRONMENT_LABEL))
         require((root / 'backup-verified.json').is_file(), 'verified backup required before recreation')
         self.exclusive_volume(ENGINE)
         require(not self.inspect(ENGINE)['State']['Running'], 'old engine restarted unexpectedly')
@@ -410,7 +422,8 @@ class Runtime:
                 'closed ingress source changed')
         config = root / 'candidate.json'
         save(config, prepared['candidate'])
-        compose = ['compose', '-p', PROJECT, '--project-directory', str(COMPOSE.parent), '-f', str(config)]
+        compose = ['compose', '-p', PROJECT, '--project-directory', str(COMPOSE.parent),
+                   '--env-file', str(empty_env), '-f', str(config)]
         require(json.loads(self.docker(*compose, 'config', '--format', 'json')) == prepared['candidate'],
                 'resolved candidate changed')
         self.docker(*compose, 'up', '--no-start', '--no-deps', '--no-build', '--pull', 'never',
@@ -506,6 +519,7 @@ class Runtime:
         self.physical_host()
         regular(COMPOSE, private=True); regular(NGINX)
         c = self.inspect(ENGINE)
+        empty_env = verified_empty_environment(c['Config']['Labels'].get(ENVIRONMENT_LABEL))
         require(c['Id'] == ENGINE and c['Image'] == BASE and c['State']['Running'] and
                 c['Config']['Entrypoint'] == ['/usr/bin/node', '/var/www/index.js'] and
                 c['HostConfig']['RestartPolicy']['Name'] == 'unless-stopped', 'old engine binding changed')
@@ -527,7 +541,8 @@ class Runtime:
         no_cluster_claims(self.claims())
         node = self.node()
         require(node['state'] == 'active', 'small node already has maintenance')
-        current = json.loads(self.docker('compose', '-p', PROJECT, '-f', str(COMPOSE), 'config', '--format', 'json'))
+        current = json.loads(self.docker('compose', '-p', PROJECT, '--env-file', str(empty_env),
+                                        '-f', str(COMPOSE), 'config', '--format', 'json'))
         candidate = candidate_config(current, c['Config']['Cmd'])
         target = json.loads(self.docker('image', 'inspect', TARGET))[0]
         require(target['Id'] == TARGET and target['Architecture'] == 'amd64' and
