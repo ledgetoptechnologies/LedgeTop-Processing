@@ -17,6 +17,7 @@ import uuid
 from ops.retained_small_engine_swap import (
     BASE, TARGET, FLAG, Held, Runtime, apply, candidate_config, canonical, command_with_retention, main,
     digest, no_cluster_claims, snapshot_tree, terminal_inventory, verify_owned_receipt, verify_retained,
+    host_config_equivalent,
 )
 from processing.maintenance import Conflict
 from processing.prototype import Queue, VIEWER_PROFILE
@@ -93,6 +94,36 @@ class FakeRuntime:
 
 
 class RetainedSwapTests(unittest.TestCase):
+    def test_only_observed_oom_default_representation_is_equivalent(self):
+        base = {'OomKillDisable': None, 'Memory': 805306368, 'NanoCpus': 500000000,
+                'ReadonlyRootfs': False, 'Binds': ['owned-volume:/var/www/data']}
+        for before, after in ((None, False), (False, None), (None, None), (False, False), (True, True)):
+            with self.subTest(before=before, after=after):
+                self.assertTrue(host_config_equivalent(dict(base, OomKillDisable=before),
+                                                       dict(base, OomKillDisable=after)))
+        for before, after in ((None, True), (True, None), (False, True), (True, False),
+                              (0, False), (False, 0), (0, 0), (0.0, False), (1, True), ('false', False)):
+            with self.subTest(before=before, after=after):
+                self.assertFalse(host_config_equivalent(dict(base, OomKillDisable=before),
+                                                        dict(base, OomKillDisable=after)))
+        missing = {k: v for k, v in base.items() if k != 'OomKillDisable'}
+        for before, after in ((missing, base), (base, missing), (missing, missing)):
+            with self.subTest(missing_before='OomKillDisable' not in before,
+                              missing_after='OomKillDisable' not in after):
+                self.assertFalse(host_config_equivalent(before, after))
+
+    def test_oom_default_exception_preserves_every_other_host_field_exactly(self):
+        base = {'OomKillDisable': None, 'Memory': 805306368, 'MemorySwap': 805306368,
+                'NanoCpus': 500000000, 'ReadonlyRootfs': False,
+                'RestartPolicy': {'Name': 'no', 'MaximumRetryCount': 0}}
+        for patch_value in ({'Memory': 123}, {'MemorySwap': -1}, {'NanoCpus': 1000000000},
+                            {'ReadonlyRootfs': True}, {'ReadonlyRootfs': 0},
+                            {'RestartPolicy': {'Name': 'no', 'MaximumRetryCount': False}},
+                            {'NetworkMode': 'another-network'}):
+            with self.subTest(patch=patch_value):
+                self.assertFalse(host_config_equivalent(base, dict(base, OomKillDisable=False, **patch_value)))
+        self.assertIsNone(base['OomKillDisable'])
+
     def test_command_and_all_other_configuration_are_preserved(self):
         command = ['--max-images', '1000', '--token', 'synthetic-private']
         current = {'services': {'nodeodm': {'image': BASE, 'command': command,

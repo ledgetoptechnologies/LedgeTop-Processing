@@ -114,3 +114,14 @@ would deny a nonroot nginx reader. The regression test uses an actual temporary
 file and replacement under umask077; only nginx/HTTP observations are mocked.
 It is POSIX-only, and the old read-only a8b67600 observation does not qualify this
 new mutating path. No live permissions were changed by the source correction.
+
+A subsequent isolated no-backup Docker diagnostic identified precisely one
+generated representation difference after resolved Compose rendering:
+`HostConfig.OomKillDisable` changed from JSONnull to booleanfalse. Both leave
+OOM killing enabled. The candidate comparison now permits only that specific
+pair when the key exists on both sides; true remains a distinct policy, and
+missing keys/numeric substitutes are rejected. All other HostConfig fields
+retain exact canonical JSON comparison; mount equality is unchanged. This
+exception applies only to the recreated candidate comparison, never to the
+original container's immutable preparation/admission checks. No arbitrary
+Docker defaults are normalized, and no live OOM policy is changed by this patch.

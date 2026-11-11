@@ -75,6 +75,29 @@ def command_with_retention(command):
     return [*command, FLAG]
 
 
+def host_config_equivalent(before, after):
+    """One observed Docker default representation, not general normalization.
+
+    Compose rendering can make OomKillDisable:null explicit false. Both permit
+    OOM killing; true is a different policy. Unknown/missing/numeric values are
+    refused. Every other field retains exact canonical JSON comparison.
+    """
+    if type(before) is not dict or type(after) is not dict or set(before) != set(after):
+        return False
+    if 'OomKillDisable' not in before or 'OomKillDisable' not in after:
+        return False
+    a, b = before['OomKillDisable'], after['OomKillDisable']
+    if any(value is not None and type(value) is not bool for value in (a, b)):
+        return False
+    if (a is True or b is True) and a is not b:
+        return False
+    try:
+        return canonical({k: v for k, v in before.items() if k != 'OomKillDisable'}) == \
+               canonical({k: v for k, v in after.items() if k != 'OomKillDisable'})
+    except (ValueError, TypeError):
+        return False
+
+
 def candidate_config(current, command):
     candidate = json.loads(json.dumps(current))
     require(set(candidate.get('services', {})) == {'nodeodm'}, 'unexpected Compose services')
@@ -388,7 +411,7 @@ class Runtime:
         require(c['Image'] == TARGET and c['State']['Status'] == 'created' and
                 c['Name'] == old['Name'] and c['Config']['Cmd'] == command_with_retention(prepared['command']),
                 'candidate image or command changed')
-        require(c['HostConfig'] == old['HostConfig'] and c['Mounts'] == old['Mounts'] and
+        require(host_config_equivalent(old['HostConfig'], c['HostConfig']) and c['Mounts'] == old['Mounts'] and
                 set(c['NetworkSettings']['Networks']) == set(old['NetworkSettings']['Networks']),
                 'candidate host configuration or volume changed')
         # Docker changes hostname/Compose bookkeeping and the child-image label.
