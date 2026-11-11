@@ -13,6 +13,7 @@ from .policy import plan
 from .provider import probe_node
 from .prototype import Queue, Conflict
 from .options import catalog
+from .viewer_tls_deadlines import DeadlineSocket, ViewerTLSDeadlineExceeded
 
 MAX_BODY = 8192
 
@@ -235,10 +236,18 @@ def make_handler(config: Config):
 
 
 class ViewerTLSHTTPServer(ThreadingHTTPServer):
-    """Bound connections before allocating threads; handshake in the worker."""
+    """Bound connections before allocating threads; handshake in the worker.
+
+    After the handshake, request headers have an absolute deadline and every
+    transfer must keep moving (see viewer_tls_deadlines). No fixed lifetime or
+    size cap applies to uploads or downloads that keep making progress.
+    """
 
     handshake_timeout = 5.0
     max_connections = 32
+    header_deadline = 15.0
+    progress_window = 30.0
+    progress_bytes = 16 * 1024
 
     def __init__(self, address, handler, context):
         self.viewer_tls_context = context
@@ -272,7 +281,10 @@ class ViewerTLSHTTPServer(ThreadingHTTPServer):
                 wrapped = self.viewer_tls_context.wrap_socket(
                     request, server_side=True, do_handshake_on_connect=False)
                 wrapped.do_handshake()
-                wrapped.settimeout(None)
+                connection = DeadlineSocket(
+                    wrapped, header_deadline=self.header_deadline,
+                    progress_window=self.progress_window,
+                    progress_bytes=self.progress_bytes)
             except BaseException as error:
                 # A stalled or invalid client must not block acceptance or expose
                 # TLS failures, request details, or credentials in logs.
@@ -280,9 +292,16 @@ class ViewerTLSHTTPServer(ThreadingHTTPServer):
                 if not isinstance(error, Exception):
                     raise
                 return
-            super().process_request_thread(wrapped, client_address)
+            super().process_request_thread(connection, client_address)
         finally:
             self._tls_slots.release()
+
+    def handle_error(self, request, client_address):
+        # A missed Viewer TLS deadline is expected client behaviour; keep peer
+        # and request details out of logs. Other errors keep default handling.
+        if isinstance(sys.exc_info()[1], ViewerTLSDeadlineExceeded):
+            return
+        super().handle_error(request, client_address)
 
 
 def create_viewer_tls_server(handler, host, port, *, server_context=None):
