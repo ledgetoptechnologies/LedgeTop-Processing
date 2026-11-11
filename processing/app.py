@@ -4,6 +4,7 @@ import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+from urllib.parse import urlsplit
 import signal
 import sys
 import threading
@@ -91,6 +92,23 @@ def make_handler(config: Config):
                     probe_node("main", config.main_node_url, config.main_node_token))
 
         def do_GET(self):
+            parsed = urlsplit(self.path)
+            if parsed.path == '/v1/observer/dashboard':
+                token = config.prototype_observer_token
+                supplied = self.headers.get('Authorization', '')
+                if not token:
+                    self._reply(403, {'error': 'observer_disabled'}); return
+                if not hmac.compare_digest(supplied.encode(), f'Bearer {token}'.encode()):
+                    self._reply(401, {'error': 'unauthorized'}); return
+                if queue is None:
+                    self._reply(404, {'error': 'prototype_disabled'}); return
+                from .observer_dashboard import parse_query, snapshot
+                try:
+                    params = parse_query(parsed.query)
+                    self._reply(200, snapshot(queue, config.viewer_enabled, *params))
+                except ValueError:
+                    self._reply(400, {'error': 'invalid_query'})
+                return
             if facade and facade.handle(self):
                 return
             if self.path.startswith("/v1/prototype/"):
