@@ -140,6 +140,33 @@ def recreation_labels_equivalent(before, after, old_name):
         return False
 
 
+def environment_map(entries):
+    require(type(entries) is list, 'invalid container environment')
+    result = {}
+    for entry in entries:
+        require(type(entry) is str and '=' in entry and '\x00' not in entry,
+                'invalid container environment')
+        name, value = entry.split('=', 1)
+        require(re.fullmatch('[A-Za-z_][A-Za-z0-9_]*', name) and name not in result,
+                'invalid container environment')
+        result[name] = value
+    return result
+
+
+def application_config_equivalent(before, after):
+    """Only environment ordering is nonsemantic; names/values stay exact."""
+    if type(before) is not dict or type(after) is not dict or 'Env' not in before or 'Env' not in after:
+        return False
+    ignored = {'Hostname', 'Image', 'Cmd', 'Labels'}
+    try:
+        left = {k: v for k, v in before.items() if k not in ignored}
+        right = {k: v for k, v in after.items() if k not in ignored}
+        left['Env'], right['Env'] = environment_map(left['Env']), environment_map(right['Env'])
+        return canonical(left) == canonical(right)
+    except (Held, ValueError, TypeError):
+        return False
+
+
 def candidate_config(current, command):
     candidate = json.loads(json.dumps(current))
     require(set(candidate.get('services', {})) == {'nodeodm'}, 'unexpected Compose services')
@@ -452,6 +479,9 @@ class Runtime:
         require(len(identifiers) == 1, 'candidate service identity ambiguous')
         identifier = identifiers[0]
         c = self.inspect(identifier)
+        # Preserve exact private evidence before any comparison can reject it.
+        # This receipt already contains the original full inspect/credentials.
+        save(root / 'candidate-inspect.private.json', c)
         old = prepared['oldContainer']
         require(c['Image'] == TARGET and c['State']['Status'] == 'created' and
                 c['Name'] == old['Name'] and c['Config']['Cmd'] == command_with_retention(prepared['command']),
@@ -460,9 +490,7 @@ class Runtime:
                 set(c['NetworkSettings']['Networks']) == set(old['NetworkSettings']['Networks']),
                 'candidate host configuration or volume changed')
         # Docker changes hostname/Compose bookkeeping and the child-image label.
-        ignored = {'Hostname', 'Image', 'Cmd', 'Labels'}
-        require({k: v for k, v in c['Config'].items() if k not in ignored} ==
-                {k: v for k, v in old['Config'].items() if k not in ignored},
+        require(application_config_equivalent(old['Config'], c['Config']),
                 'candidate application configuration changed')
         require(recreation_labels_equivalent(old['Config']['Labels'], c['Config']['Labels'], old['Name']),
                 'candidate labels changed outside approved bookkeeping')

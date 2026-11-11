@@ -21,6 +21,7 @@ from ops.retained_small_engine_swap import (
     BASE_EXPORT_BUDGET, RESERVE, require_backup_headroom,
     verified_empty_environment,
     recreation_labels_equivalent,
+    application_config_equivalent, environment_map,
 )
 from processing.maintenance import Conflict
 from processing.prototype import Queue, VIEWER_PROFILE
@@ -97,6 +98,61 @@ class FakeRuntime:
 
 
 class RetainedSwapTests(unittest.TestCase):
+    def test_application_config_accepts_only_unique_exact_environment_reordering(self):
+        before = {'Hostname': 'old', 'Image': BASE, 'Cmd': ['old'], 'Labels': {'generated': 'old'},
+                  'Env': ['OMP_NUM_THREADS=1', 'OPENBLAS_NUM_THREADS=1', 'NVIDIA_VISIBLE_DEVICES=void',
+                          'VALUE=a=b=c', 'EMPTY='], 'User': 'odm', 'WorkingDir': '/var/www', 'AttachStdout': True}
+        after = dict(before, Hostname='new', Image=TARGET, Cmd=['new'], Labels={'generated': 'new'},
+                     Env=list(reversed(before['Env'])))
+        self.assertTrue(application_config_equivalent(before, after))
+        self.assertEqual(environment_map(['VALUE=a=b=c', 'EMPTY=']), {'VALUE': 'a=b=c', 'EMPTY': ''})
+        self.assertEqual(before['Env'][0], 'OMP_NUM_THREADS=1')
+        for env in (before['Env'][:-1], before['Env'] + ['EXTRA=value'],
+                    ['OMP_NUM_THREADS=2'] + before['Env'][1:],
+                    ['omp_num_threads=1'] + before['Env'][1:]):
+            with self.subTest(env=env):
+                self.assertFalse(application_config_equivalent(before, dict(after, Env=env)))
+        for changed in ({'User': 'root'}, {'WorkingDir': '/different'}, {'AttachStdout': 1}):
+            with self.subTest(changed=changed):
+                self.assertFalse(application_config_equivalent(before, dict(after, **changed)))
+
+    def test_environment_duplicates_malformed_names_types_and_missing_env_fail(self):
+        valid = {'Env': ['A=one', 'B=two'], 'User': 'odm'}
+        for env in (None, 'A=one', [None], ['missing-separator'], ['=value'], ['BAD NAME=value'],
+                    ['A=one', 'A=one'], ['A=one', 'A=changed'], ['A=value\x00'], ['1BAD=value']):
+            with self.subTest(env=env):
+                self.assertFalse(application_config_equivalent(valid, dict(valid, Env=env)))
+                self.assertFalse(application_config_equivalent(dict(valid, Env=env), valid))
+        self.assertFalse(application_config_equivalent({'User': 'odm'}, valid))
+        self.assertFalse(application_config_equivalent(valid, {'User': 'odm'}))
+
+    def test_created_candidate_full_inspect_is_retained_before_failed_comparison(self):
+        from ops import retained_small_engine_swap as swap
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'backup-verified.json').write_text('{}')
+            nginx = root / 'nginx.conf'
+            nginx.write_bytes(b'return 503;')
+            candidate = {'Id': 'synthetic-new-id', 'Image': 'unqualified-image',
+                         'State': {'Status': 'created'},
+                         'Config': {'Env': ['SYNTHETIC=private'], 'Cmd': ['synthetic-private']}}
+            prepared = {'oldContainer': {'Config': {'Labels': {}}, 'Name': '/synthetic-old'},
+                        'nginxHex': swap.PASS.hex(), 'candidate': {'services': {'nodeodm': {}}},
+                        'command': ['--max-images', '1000', '--token', 'synthetic']}
+            runtime = Runtime.__new__(Runtime)
+            runtime.exclusive_volume = Mock()
+            runtime.inspect = Mock(side_effect=[{'State': {'Running': False}}, candidate])
+            runtime.docker = Mock(side_effect=[json.dumps(prepared['candidate']), '', 'synthetic-new-id'])
+            with patch.object(swap, 'NGINX', nginx), \
+                    patch.object(swap, 'verified_empty_environment', return_value=root / 'empty.env'), \
+                    redirect_stdout(io.StringIO()) as output, self.assertRaises(Held):
+                runtime.recreate_and_verify(prepared, root)
+            captured = root / 'candidate-inspect.private.json'
+            self.assertEqual(json.loads(captured.read_text()), candidate)
+            self.assertEqual(output.getvalue(), '')
+            if os.name == 'posix':
+                self.assertEqual(stat.S_IMODE(captured.stat().st_mode), 0o600)
+
     def test_compose_replace_label_only_names_the_exact_original_container(self):
         before = {'com.docker.compose.project': 'owned-project',
                   'com.docker.compose.project.environment_file': '/private/work/empty.env', 'operator.label': 'same'}

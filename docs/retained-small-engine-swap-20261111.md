@@ -157,3 +157,15 @@ only the verified generated key for the existing label comparison. Wrong names,
 types, unrelated label changes and changed preexisting replacement labels still
 fail. Original admission immutability, environment-file label, host settings
 and mount checks are unchanged; this is not a general label allowlist expansion.
+
+The next native comparison exposed only order variation in the same three
+Compose environment overrides. Candidate application comparison now converts
+only Env lists into exact NAME/value maps, splitting once at the first equals
+sign. Entries must be unique valid names and strings; duplicates, malformed
+entries, missing/changed names or values and changed other application fields
+still fail. Existing Hostname/Image/Cmd/Labels handling remains separate and
+unchanged. This does not alter source-container admission equality or accept
+new environment settings. The created candidate's full inspect is now saved
+immediately to root-private `candidate-inspect.private.json` before comparisons,
+so subsequent failures can be diagnosed without another recreation. It includes
+private command/environment data and must never be copied to public evidence.
