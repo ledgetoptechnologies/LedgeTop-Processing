@@ -540,7 +540,7 @@ class Runtime:
         h = c['HostConfig']
         require(h['Memory'] == 0 and h['NanoCpus'] == 0 and not h['ReadonlyRootfs'] and
                 h['DeviceRequests'] == [{'Driver': 'nvidia', 'Count': -1, 'DeviceIDs': None,
-                                         'Capabilities': [['gpu']], 'Options': {}}], 'main resource/GPU profile changed')
+                                         'Capabilities': [['gpu']], 'Options': None}], 'main resource/GPU profile changed')
         require(len(c['Mounts']) == 1 and c['Mounts'][0]['Type'] == 'bind' and
                 c['Mounts'][0]['Destination'] == '/var/www/data' and c['Mounts'][0]['RW'] and
                 c['Mounts'][0]['Source'] == str(DATA), 'main retained bind changed')

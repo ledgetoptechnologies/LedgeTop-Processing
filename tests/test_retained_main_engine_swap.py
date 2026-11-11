@@ -191,22 +191,35 @@ class MainRetainedSwapTests(unittest.TestCase):
         result=r.hold_closed({'requestId':str(uuid.uuid4())},{})
         self.assertEqual(result['reason'],'own_current_plan_not_proven_no_ingress_mutation');r.change_ingress.assert_not_called()
 
-    def test_busy_snapshot_does_not_walk_data_or_inspect_target_image(self):
+    def snapshot_container(self):
         labels={'com.docker.compose.project':swap.PROJECT,'com.docker.compose.service':swap.SERVICE,
                 'com.docker.compose.project.working_dir':str(swap.COMPOSE_ROOT),
                 'com.docker.compose.project.config_files':str(swap.COMPOSE)+','+str(swap.OVERRIDE)}
         container={'Id':swap.ENGINE,'Image':BASE,'State':{'Running':True},
             'Config':{'Entrypoint':['/usr/bin/node','/var/www/index.js'],'User':'0:0','Cmd':None,'Labels':labels},
             'HostConfig':{'RestartPolicy':{'Name':'unless-stopped'},'Memory':0,'NanoCpus':0,'ReadonlyRootfs':False,
-                'DeviceRequests':[{'Driver':'nvidia','Count':-1,'DeviceIDs':None,'Capabilities':[['gpu']],'Options':{}}]},
+                'DeviceRequests':[{'Driver':'nvidia','Count':-1,'DeviceIDs':None,'Capabilities':[['gpu']],'Options':None}]},
             'NetworkSettings':{'Ports':{'3000/tcp':[{'HostIp':'127.0.0.1','HostPort':'13004'}]},'Networks':{'ledgetop-main-processing_default':{}}},
             'Mounts':[{'Type':'bind','Destination':'/var/www/data','RW':True,'Source':str(swap.DATA)}]}
+        return container
+
+    def test_busy_snapshot_does_not_walk_data_or_inspect_target_image(self):
+        container=self.snapshot_container()
         r=Runtime.__new__(Runtime);r.physical_host=Mock();r.inspect=Mock(return_value=container);r.ingress_inspect=Mock();r.claims=Mock(return_value=[{'nodeId':'main','status':'running'}]);r.docker=Mock();r.engine_idle=Mock()
         with tempfile.TemporaryDirectory() as root:
             nginx=Path(root)/'nginx.conf';nginx.write_bytes(b'listen 3004; '+swap.PASS)
             with patch.object(swap,'source_record',return_value={}),patch.object(swap,'regular'),patch.object(swap,'NGINX',nginx),patch.object(swap,'root_identity',side_effect=AssertionError('busy data walk')),patch.object(swap,'snapshot_tree',side_effect=AssertionError('busy hash')):
-                with self.assertRaises(Held):r.snapshot()
+                with self.assertRaisesRegex(Held,'main owns unfinished claim'):r.snapshot()
         r.docker.assert_not_called();r.engine_idle.assert_not_called()
+
+    def test_empty_gpu_options_object_is_not_the_actual_fixed_main_profile(self):
+        container=self.snapshot_container();container['HostConfig']['DeviceRequests'][0]['Options']={}
+        r=Runtime.__new__(Runtime);r.physical_host=Mock();r.inspect=Mock(return_value=container);r.claims=Mock();r.docker=Mock()
+        with tempfile.TemporaryDirectory() as root:
+            nginx=Path(root)/'nginx.conf';nginx.write_bytes(b'listen 3004; '+swap.PASS)
+            with patch.object(swap,'source_record',return_value={}),patch.object(swap,'regular'),patch.object(swap,'NGINX',nginx):
+                with self.assertRaisesRegex(Held,'main resource/GPU profile changed'):r.snapshot()
+        r.claims.assert_not_called();r.docker.assert_not_called()
 
     def test_task_index_reserialization_preserves_semantics_separately_but_not_file_metadata(self):
         before={'tasks.json':{'type':'file','mode':0o600,'uid':0,'gid':0,'bytes':1,'sha256':'a'}}
