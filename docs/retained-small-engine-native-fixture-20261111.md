@@ -102,3 +102,10 @@ that exact `--env-file` on its initial Compose invocation. The corrected helper
 verifies and preserves that same binding during rendering/recreation, matching
 the observed production metadata requirement instead of ignoring the label.
 No actual production environment file or runtime credential is changed.
+
+Parent's later no-start parity diagnostic passed host settings, mounts and
+application configuration, then identified Compose's generated replacement
+label. The separately corrected helper now validates that label against the
+exact prior container name before comparison. This harness pins those reviewed
+bytes without discarding other labels or mount differences. Full native success
+is still a separate required observation.
