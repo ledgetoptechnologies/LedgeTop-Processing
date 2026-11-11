@@ -75,11 +75,26 @@ actual container and receipt manually before any recovery.
 
 The source tests cover ordered state transitions, failure checkpoints,
 retained-terminal admission, command/config preservation, receipt binding,
-default read-only behavior and retained-file verification. Native Docker export,
-GNU tar comparison, nginx worker draining, recreated-container field equality
-and the installed maintenance protocol still require independent Linux review
-and qualification before this helper is used for a live swap. These source
-tests do not establish installed retention, outage recovery or power-loss safety.
+default read-only behavior and retained-file verification. At source
+`b7a8a19bd746ddfa41872470a3ff13cca4d1d6c8`, all 39 focused checks passed on
+Linux without skips. The unchanged helper bytes have SHA-256
+`1cad9575bfe86647b7db0ccb55266823450878b6eabb009ad6af9b20f7b634bf`.
+
+The isolated native rehearsal then passed actual Docker export, GNU tar
+comparison, nginx close/reopen with old-worker draining, no-start recreation,
+source/config checks, tmp metadata restoration, retained terminal files and a
+clean candidate shutdown. The fixture matches this target's single data mount
+and writable root. Its dedicated internal bridge and container-exec HTTP adapter
+are explicit fixture exceptions; it never contacted the live queue. All owned
+containers/volumes/networks and its bulk backup were removed; a parent readback
+confirmed removal. Hashes/results are in
+`retained-small-engine-swap-qualification-20261111.json`.
+
+This proves native mechanics on staging, not a completed live swap, coordinator
+or Viewer outage recovery, forced crash or power-loss safety. The real cluster's
+read-only inspection separately passed with ten retained terminal tasks and its
+verified empty environment-file binding; installed changes still require a
+fresh sealed preparation, current authority/state checks and one-shot apply.
 
 The focused real-Queue tests additionally exercise stale eligible snapshots
 against draining/updating state, the linked ViewerTask assignment gap, an actual
