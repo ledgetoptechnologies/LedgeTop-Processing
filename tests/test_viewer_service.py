@@ -22,7 +22,7 @@ from processing.config import ProcessingNode
 from processing.maintenance import Conflict
 from processing.odx_smoke_worker import SmokeError
 from processing.prototype import PROFILE, VIEWER_PROFILE, Queue
-from processing.viewer_service import EngineUnavailable, ViewerService
+from processing.viewer_service import EngineUnavailable, NativeEngine, ViewerService
 from processing.viewer_tasks import TaskStore
 
 
@@ -626,6 +626,83 @@ class ViewerServiceTests(unittest.TestCase):
             [('upload_pending', index, engine_id), ('uploaded', index + 1, engine_id)]])
         self.assertEqual(row(), ('awaiting_engine_start', count, engine_id))
         self.assertEqual(len(self.fleet.commits), 1)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX ancestor symlink fixture')
+    def test_replaced_task_ancestor_blocks_upload_and_checkpoint(self):
+        identifier = self.submit()
+        job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': 'cluster',
+                                'profiles': [VIEWER_PROFILE]})
+        engine_id = str(uuid.uuid4())
+        self.service.store.update(identifier, stage='running', phase='initialized',
+            node_id='cluster', engine_uuid=engine_id, claim_token=job['claimToken'])
+        task = self.task(identifier)
+        engine = self.engines['cluster']
+        engine.initialize(task)
+        owned = self.service.store.root
+        displaced = self.root / 'displaced-inputs'
+        owned.rename(displaced)
+        owned.symlink_to(displaced, target_is_directory=True)
+        try:
+            with patch.object(engine, 'upload', wraps=engine.upload) as upload, \
+                 self.assertRaises(Conflict):
+                self.service._upload_and_commit(task)
+            upload.assert_not_called()
+            self.assertFalse(self.fleet.commits)
+        finally:
+            owned.unlink()
+            displaced.rename(owned)
+        current = self.task(identifier)
+        self.assertEqual(current['phase'], 'initialized')
+        self.assertEqual(current['upload_cursor'], 0)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX ancestor symlink fixture')
+    def test_replaced_task_ancestor_after_ack_blocks_cursor_and_commit(self):
+        identifier = self.submit(count=2)
+        job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': 'cluster',
+                                'profiles': [VIEWER_PROFILE]})
+        engine_id = str(uuid.uuid4())
+        self.service.store.update(identifier, stage='running', phase='initialized',
+            node_id='cluster', engine_uuid=engine_id, claim_token=job['claimToken'])
+        task = self.task(identifier)
+        engine = self.engines['cluster']
+        engine.initialize(task)
+        owned = self.service.store.root
+        displaced = self.root / 'displaced-inputs'
+        original_upload = engine.upload
+        def acknowledge_then_replace(engine_uuid, item):
+            original_upload(engine_uuid, item)
+            owned.rename(displaced)
+            owned.symlink_to(displaced, target_is_directory=True)
+        try:
+            with patch.object(engine, 'upload', side_effect=acknowledge_then_replace), \
+                 self.assertRaises(Conflict):
+                self.service._upload_and_commit(task)
+            self.assertEqual(sum(call[0] == 'upload' for call in engine.calls), 1)
+            self.assertFalse(self.fleet.commits)
+        finally:
+            if owned.is_symlink():
+                owned.unlink()
+                displaced.rename(owned)
+        current = self.task(identifier)
+        self.assertEqual(current['phase'], 'upload_pending')
+        self.assertEqual(current['upload_cursor'], 0)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX ancestor symlink fixture')
+    def test_native_upload_rejects_cached_file_with_replaced_ancestor_before_http(self):
+        identifier = self.submit()
+        item = self.task(identifier)['files'][0]
+        owned = Path(item['path']).parent
+        displaced = self.root / 'displaced-task-directory'
+        owned.rename(displaced)
+        owned.symlink_to(displaced, target_is_directory=True)
+        engine = NativeEngine('http://synthetic.invalid:3000')
+        try:
+            with patch.object(engine.client, 'request') as request, self.assertRaises(SmokeError):
+                engine.upload(str(uuid.uuid4()), item)
+            request.assert_not_called()
+        finally:
+            owned.unlink()
+            displaced.rename(owned)
 
     def test_upload_ack_loss_retains_cursor_and_never_replays_mutation(self):
         identifier = self.submit(count=3)

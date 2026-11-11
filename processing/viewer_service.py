@@ -92,7 +92,7 @@ class NativeEngine:
 
     def upload(self, identifier, item):
         path = Path(item['path'])
-        if path.is_symlink() or not path.is_file() or path.stat().st_size != item['bytes']:
+        if path.resolve() != path or path.is_symlink() or not path.is_file() or path.stat().st_size != item['bytes']:
             raise SmokeError('input file changed')
         boundary = 'processing-' + uuid.uuid4().hex
         prefix = (f'--{boundary}\r\nContent-Disposition: form-data; name="images"; '

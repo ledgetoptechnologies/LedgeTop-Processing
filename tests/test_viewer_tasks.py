@@ -348,6 +348,28 @@ class ViewerTaskStoreTests(unittest.TestCase):
         self.assertEqual(row, ('uploaded', 1))
         self.assertEqual(len(self.store.task(self.identifier)['files']), 1)
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX ancestor symlink fixture')
+    def test_nonmaterializing_update_rejects_replaced_task_ancestor_before_write(self):
+        import sqlite3
+        from contextlib import closing
+        self.ready()
+        original = self.store.task(self.identifier)
+        owned = self.store.root
+        displaced = self.root / 'displaced-inputs'
+        owned.rename(displaced)
+        owned.symlink_to(displaced, target_is_directory=True)
+        try:
+            with self.assertRaises(Conflict):
+                self.store.update(self.identifier, return_task=False,
+                                  phase='upload_pending', upload_cursor=0)
+            with closing(sqlite3.connect(self.queue.path.as_uri() + '?mode=ro', uri=True)) as reader:
+                row = reader.execute('SELECT phase,upload_cursor FROM viewer_tasks WHERE uuid=?',
+                                     (self.identifier,)).fetchone()
+            self.assertEqual(row, (original['phase'], original['upload_cursor']))
+        finally:
+            owned.unlink()
+            displaced.rename(owned)
+
     def test_update_return_task_requires_bool_and_keeps_mutation_validation(self):
         self.ready()
         before = self.store.task(self.identifier)

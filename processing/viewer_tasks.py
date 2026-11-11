@@ -446,6 +446,10 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, identifier)
+            if not return_task:
+                # Preserve the owned-directory fence without rebuilding every
+                # file entry for an ignored upload-checkpoint return value.
+                self._directory(row)
             if row['engine_uuid'] and fields.get('engine_uuid', row['engine_uuid']) != row['engine_uuid']:
                 raise Conflict('engine task identity is immutable')
             if fields.get('engine_uuid') and db.execute(
