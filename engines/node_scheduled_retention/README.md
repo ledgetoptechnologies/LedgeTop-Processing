@@ -11,7 +11,38 @@ Verify source hashes, apply the corresponding patch to a disposable source copy 
 
 The flag skips automatic terminal-task, orphan-directory and stale-upload sweeps at startup and hourly; default behavior and explicit operator removal remain. It does not cover request-error deletion: task creation can remove an existing same-ID destination and can remove a destination after initialization failure. No general no-deletion guarantee is claimed. When enabled, automatic scheduled reclamation stops: the operator must monitor space and manually remove only confirmed safe data under the agreed retention policy.
 
-## Proposed staged fixture — unexecuted
+## Qualification — November 11, 2026
+
+The patch bytes and four resulting source hashes above are unchanged at source
+commit `984f8bc4bae76b2a1c854f94d4dfa73bb989f250`. Both variants were independently
+materialized from their installed original files; all original/patched hashes
+matched. The four source mock tests passed again against those exact LF files.
+
+The small Node 14 image passed 12 real-parser/lifecycle cases, followed by actual
+server startup and clean restart with three expired terminal tasks and five
+retained file sentinels. Its child image is
+`sha256:9c9f7ed05e0a8d2e4a370a75dd7b8d8524a0603205e79dfc9046239818237940`.
+Both server processes exposed 82 options and stopped with exit 0 and no OOM.
+
+The main NodeODX image passed actual server startup and clean restart on local
+Docker Desktop staging, using Linux named volumes, its default root user,
+three expired terminal tasks and eight retained file sentinels. Its child is
+`sha256:d1b3a6af8806b867a96c75ba2b22e35c45fd937217ccb9860c3fcbe6e75499bd`.
+Both processes exposed 80 options and stopped with exit 0 and no OOM. This image
+also carries the test's owner label; installation must review its exact labels
+and preserve the live service settings. The main host was not changed.
+
+Both tests used read-only roots, bounded CPU/memory, no GPU/network/published
+ports and only synthetic state. Their containers/state were cleaned; qualified
+images remain cached. Machine-readable summaries are in
+`qualification-20261111.json`. These cases prove synthetic scheduled-retention
+behavior, not real-photo processing, production installation, forced crash,
+network recovery or power-loss safety. A clean restart does not prove those
+failure modes. The opt-in flag still must be supplied at deployment; building
+the image alone does not disable cleanup. Neither production engine has been
+changed by this qualification.
+
+## Isolated fixture procedure
 
 The first actual-image parser probe stopped before configuration loading because the pinned engine uses Node14.21.3, which does not provide the `node:assert/strict` builtin subpath. The staging helpers use `require('assert').strict` for that runtime. This is a fixture compatibility correction; no engine source or data changed. Actual parser and lifecycle results must still be recorded after the correction.
 
