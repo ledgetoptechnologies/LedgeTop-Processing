@@ -1,9 +1,28 @@
 """Narrow observer-only queue projection; no paths, names, credentials or result bodies."""
 from datetime import datetime, timezone
+import re
 from urllib.parse import parse_qs
 
 _ALLOWED_STATUS = {'queued', 'running', 'held', 'succeeded', 'failed', 'cancelled'}
 _ALLOWED_ENV = {'production', 'staging'}
+_SQLITE_UTC = re.compile(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$')
+_ISO_OFFSET = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$')
+
+def utc_wire(value):
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError('invalid stored timestamp')
+    try:
+        if _SQLITE_UTC.fullmatch(value):
+            parsed = datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+        elif _ISO_OFFSET.fullmatch(value):
+            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        else:
+            raise ValueError('invalid stored timestamp')
+        return parsed.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+    except (ValueError, OverflowError):
+        raise ValueError('invalid stored timestamp') from None
 
 def parse_query(query):
     try:
@@ -45,13 +64,13 @@ def snapshot(queue, viewer_enabled, after, limit, status, environment):
              'nodeId': r['node_id'], 'phase': r['phase'], 'uploadedFiles': r['upload_cursor'],
              'totalFiles': None,
              'progress': r['progress'], 'errorCode': r['error'], 'heldReason': r['held_reason'],
-             'createdAt': r['created_at'], 'queueUpdatedAt': r['updated_at'],
-             'viewerUpdatedAt': r['viewer_updated_at']} for r in rows]
+             'createdAt': utc_wire(r['created_at']), 'queueUpdatedAt': utc_wire(r['updated_at']),
+             'viewerUpdatedAt': utc_wire(r['viewer_updated_at'])} for r in rows]
     ordered_nodes = {r['id']: r for r in nodes}
     nodes = [ordered_nodes[n] for n in queue.node_ids if n in ordered_nodes]
     return {'observedAt': observed, 'consistency': 'per_page_database_snapshot',
             'pagination': 'creation_sequence_not_change_feed',
             'refresh': 'restart_at_zero_and_read_all_pages', 'jobs': jobs,
             'nodes': [{'nodeId': r['id'], 'maintenanceState': r['state'], 'revision': r['revision'],
-                       'drainAt': r['drain_at'], 'notBefore': r['not_before']} for r in nodes],
+                       'drainAt': utc_wire(r['drain_at']), 'notBefore': utc_wire(r['not_before'])} for r in nodes],
             'nextAfter': rows[-1]['seq'] if more and rows else None}

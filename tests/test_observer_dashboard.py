@@ -48,11 +48,11 @@ class DashboardJoinTests(unittest.TestCase):
                 first, _ = q.submit(submission('dashboard-join'))
                 with q._db() as db:
                     db.execute('CREATE TABLE viewer_tasks (uuid TEXT, engine_uuid TEXT, job_id TEXT, removed INTEGER, phase TEXT, upload_cursor INTEGER, progress REAL, error TEXT, claim_token TEXT, directory TEXT, updated_at TEXT)')
-                    db.execute('INSERT INTO viewer_tasks VALUES (?,?,?,?,?,?,?,?,?,?,?)', ('provider-uuid', 'engine-uuid', first['id'], 0, 'upload_pending', 22, 0, None, 'secret-claim', '/private/path', 'viewer-fresh'))
+                    db.execute('INSERT INTO viewer_tasks VALUES (?,?,?,?,?,?,?,?,?,?,?)', ('provider-uuid', 'engine-uuid', first['id'], 0, 'upload_pending', 22, 0, None, 'secret-claim', '/private/path', '2026-11-10T23:20:00Z'))
                 out=snapshot(q, True, 0, 50, None, None)
                 row=out['jobs'][0]
                 self.assertEqual((row['jobId'],row['providerTaskId'],row['engineTaskId']), (first['id'],'provider-uuid','engine-uuid'))
-                self.assertEqual(row['uploadedFiles'],22); self.assertEqual(row['viewerUpdatedAt'],'viewer-fresh'); self.assertNotEqual(row['queueUpdatedAt'],'viewer-fresh')
+                self.assertEqual(row['uploadedFiles'],22); self.assertEqual(row['viewerUpdatedAt'],'2026-11-10T23:20:00Z'); self.assertNotEqual(row['queueUpdatedAt'],'2026-11-10T23:20:00Z')
                 self.assertNotIn('secret-claim',str(out)); self.assertNotIn('/private/path',str(out))
             finally: q.close()
 
@@ -68,12 +68,22 @@ class DashboardJoinTests(unittest.TestCase):
                 page=snapshot(q,False,0,1,None,None)
                 self.assertEqual([n['nodeId'] for n in page['nodes']], ['main','cluster'])
                 with q._db() as db:
-                    db.execute("UPDATE jobs SET status='running',updated_at='new-time' WHERE id=?",(first['id'],))
+                    db.execute("UPDATE jobs SET status='running',updated_at='2026-11-10 23:25:00' WHERE id=?",(first['id'],))
                 tail=snapshot(q,False,page['nextAfter'],1,None,None)
                 self.assertNotIn(first['id'],[r['jobId'] for r in tail['jobs']])
                 fresh=snapshot(q,False,0,1,None,None)
                 self.assertEqual(fresh['jobs'][0]['status'],'running')
-                self.assertEqual(fresh['jobs'][0]['queueUpdatedAt'],'new-time')
+                self.assertEqual(fresh['jobs'][0]['queueUpdatedAt'],'2026-11-10T23:25:00Z')
                 self.assertIsNone(fresh['jobs'][0]['viewerUpdatedAt'])
                 self.assertEqual(fresh['refresh'],'restart_at_zero_and_read_all_pages')
             finally: q.close()
+
+class DashboardTimestampTests(unittest.TestCase):
+    def test_timestamp_contract(self):
+        from processing.observer_dashboard import utc_wire
+        self.assertIsNone(utc_wire(None))
+        self.assertEqual(utc_wire('2026-11-10 23:25:00'), '2026-11-10T23:25:00Z')
+        self.assertEqual(utc_wire('2026-11-10T17:25:00-06:00'), '2026-11-10T23:25:00Z')
+        self.assertEqual(utc_wire('2026-11-10T23:25:00.125Z'), '2026-11-10T23:25:00.125000Z')
+        for bad in ('2026-11-10T23:25:00', 'yesterday', '2026-13-10 00:00:00', '', 1):
+            with self.subTest(value=bad), self.assertRaises(ValueError): utc_wire(bad)
