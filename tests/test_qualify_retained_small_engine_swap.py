@@ -58,7 +58,7 @@ class NativeFixtureSourceTests(unittest.TestCase):
     def test_fixture_compose_has_bounded_resources_no_published_ports_build_or_pull(self):
         prefix = fixture.namespace(self.nonce)
         config = fixture.engine_compose(prefix, prefix + '-network', prefix + '-data',
-                fixture.BASE, Path('/private/fixture-config.json'), 'synthetic-token', self.nonce)
+                fixture.BASE, 'synthetic-token', self.nonce)
         service = config['services']['nodeodm']
         self.assertEqual(service['labels'][fixture.OWNER], self.nonce)
         self.assertNotIn('ports', service)
@@ -68,6 +68,9 @@ class NativeFixtureSourceTests(unittest.TestCase):
         self.assertEqual(service['cpus'], .5)
         self.assertEqual(service['mem_limit'], service['memswap_limit'])
         self.assertEqual(service['environment']['NVIDIA_VISIBLE_DEVICES'], 'void')
+        self.assertEqual(service['volumes'], [{'type': 'volume', 'source': 'data', 'target': '/var/www/data'}])
+        self.assertFalse(service['read_only'])
+        self.assertNotIn('--config', service['command'])
 
     def test_private_helper_module_does_not_rebind_production_import(self):
         before = production.ENGINE

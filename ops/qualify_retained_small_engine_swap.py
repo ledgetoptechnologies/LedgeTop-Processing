@@ -243,18 +243,18 @@ def load_helper():
     return helper
 
 
-def engine_compose(prefix, network, volume, image, configuration, token, nonce):
+def engine_compose(prefix, network, volume, image, token, nonce):
     check(prefix == namespace(nonce), 'fixture namespace differs from owner')
     return {'name': prefix, 'services': {'nodeodm': {
         'image': image, 'container_name': prefix + '-engine', 'pull_policy': 'never',
         'command': ['--max-images', '1000', '--token', token], 'restart': 'no', 'runtime': 'runc',
+        'read_only': False,
         'cpus': .5, 'mem_limit': '768m', 'memswap_limit': '768m', 'pids_limit': 128,
         'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges'],
         'environment': {'NVIDIA_VISIBLE_DEVICES': 'void', 'OMP_NUM_THREADS': '1', 'OPENBLAS_NUM_THREADS': '1'},
         'tmpfs': ['/tmp:rw,nosuid,nodev,size=64m'],
         'labels': {OWNER: nonce},
-        'volumes': [{'type': 'volume', 'source': 'data', 'target': '/var/www/data'},
-                    {'type': 'bind', 'source': str(configuration), 'target': '/var/www/config-default.json', 'read_only': True}],
+        'volumes': [{'type': 'volume', 'source': 'data', 'target': '/var/www/data'}],
         'networks': {'isolated': {'aliases': ['fixture-engine']}}}},
         'volumes': {'data': {'external': True, 'name': volume}},
         'networks': {'isolated': {'external': True, 'name': network}}}
@@ -412,8 +412,6 @@ def _run_fixture(recovery):
     backup.mkdir(mode=0o700); work.mkdir(mode=0o700); public.mkdir(mode=0o755)
     public.chmod(0o755)
     (backup / '.fixture-marker').write_text(nonce + '\n')
-    configuration = work / 'fixture-config.json'
-    configuration.write_text(json.dumps({'logger': {'logDirectory': '/tmp'}})); configuration.chmod(0o444)
     empty_environment = work / 'empty.env'
     empty_environment.write_bytes(b''); empty_environment.chmod(0o600)
     compose_path, nginx = work / 'candidate-compose.json', public / 'nginx.conf'
@@ -438,7 +436,7 @@ def _run_fixture(recovery):
                           dateCreated=now, processingTime=1, status={'code': (30, 40, 50)[i]}))
     index = data / 'tasks.json'; index.write_text(json.dumps(tasks)); os.chown(index, 1001, 1001)
     token = secrets.token_hex(32)
-    config = engine_compose(prefix, network, volume, BASE, configuration, token, nonce)
+    config = engine_compose(prefix, network, volume, BASE, token, nonce)
     compose_path.write_text(json.dumps(config))
     compose = fixture_compose_command(prefix, work, compose_path)
     result, success, phase = {}, False, 'engine_startup'

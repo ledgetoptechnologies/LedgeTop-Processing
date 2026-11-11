@@ -34,8 +34,10 @@ observations inside that isolated network; the helper's curl503 observation is
 redirected through the same adapter. There are no host HTTP requests. Only
 the exact known Node14 wrapper banner is removed; unknown output fails closed.
 Ingress inspection is overridden to check the fixture network/owned pins rather
-than a production host-network identity. A read-only synthetic logger-config
-bind uses the fixture's tmpfs/tmp; it is preserved through Compose recreation.
+than a production host-network identity. The engine matches the supported
+one-volume profile: only its synthetic data volume is mounted, with writable
+root and the base image's ordinary logger configuration. The existing tmpfs/tmp
+remains isolated; no synthetic logger-config bind or override is introduced.
 This does not qualify production network isolation or credential wiring.
 
 The native nginx code must atomically close/reopen with mode0644 under umask077,
@@ -116,3 +118,13 @@ unique names/values. The corrected helper compares those exact environment
 maps while retaining strict checks elsewhere. It saves the created candidate's
 full inspect privately before rejecting any comparison. This harness pins the
 new source; prior failed attempts remain qualification evidence, not a success.
+
+Inspection of that saved candidate identified an additional *fixture-only*
+two-mount ordering difference: the unnecessary logger bind and data volume
+were reordered. The real supported small-node profile has exactly one data
+volume and unmounted `/var/www/tmp`. This fixture now uses that same one-volume
+shape instead of weakening mount comparison. The pinned base configuration
+defaults its logger directory to the application directory; the fixture's
+writable root permits this normal behavior, whose old state is included in the
+full root export. Global log writes are expected outside DATA; retained DATA
+files must still verify unchanged. Production helper/comparators remain intact.
