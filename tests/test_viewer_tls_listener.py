@@ -2,9 +2,11 @@ import datetime
 import ipaddress
 import json
 import os
+import socket
 import ssl
 import tempfile
 import threading
+import time
 import unittest
 from urllib.error import HTTPError
 import urllib.request
@@ -83,11 +85,142 @@ class ViewerTlsListenerTests(unittest.TestCase):
         server = create_viewer_tls_server(handler, '127.0.0.1', 0, server_context=standalone)
         try:
             self.assertTrue(server.viewer_tls)
-            self.assertEqual(standalone.calls, [True])
+            self.assertEqual(standalone.calls, [])
+            self.assertIs(server.viewer_tls_context, standalone)
             self.assertEqual(fallback.calls, [])
             self.assertIs(handler.reference_listener._server_context, fallback)
         finally:
             server.server_close()
+
+    def test_stalled_tls_handshake_does_not_block_valid_client_and_times_out(self):
+        for use_standalone in (True, False):
+            with self.subTest(standalone=use_standalone), tempfile.TemporaryDirectory() as directory:
+                cert, key = self._pair(directory, 'handshake')
+                context = standalone_viewer_tls_context(str(cert), str(key))
+                class Handler(BaseHTTPRequestHandler):
+                    reference_listener = None if use_standalone else SimpleNamespace(_server_context=context)
+                    def do_GET(self):
+                        self.send_response(200)
+                        self.end_headers()
+                        self.wfile.write(b'ok')
+                    def log_message(self, *_):
+                        pass
+                server = create_viewer_tls_server(Handler, '127.0.0.1', 0,
+                                                  server_context=context if use_standalone else None)
+                server.daemon_threads, server.block_on_close = False, True
+                server.handshake_timeout = 2.0
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                stalled = socket.create_connection(('127.0.0.1', server.server_port), timeout=2)
+                try:
+                    client = ssl.create_default_context(cafile=str(cert))
+                    with urllib.request.urlopen(f'https://127.0.0.1:{server.server_port}/',
+                                                context=client, timeout=1) as response:
+                        self.assertEqual(response.read(), b'ok')
+                    stalled.close()
+                    server.handshake_timeout = .25
+                    with socket.create_connection(('127.0.0.1', server.server_port), timeout=2) as second:
+                        second.settimeout(2)
+                        self.assertEqual(second.recv(1), b'')
+                finally:
+                    stalled.close()
+                    server.shutdown()
+                    thread.join(timeout=3)
+                    server.server_close()
+                    self.assertFalse(thread.is_alive())
+
+    def test_stalled_connection_burst_is_bounded_and_service_recovers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cert, key = self._pair(directory, 'bounded')
+            context = standalone_viewer_tls_context(str(cert), str(key))
+            class Handler(BaseHTTPRequestHandler):
+                reference_listener = None
+                def do_GET(self):
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'ok')
+                def log_message(self, *_):
+                    pass
+            server = create_viewer_tls_server(Handler, '127.0.0.1', 0, server_context=context)
+            server.daemon_threads, server.block_on_close = False, True
+            server._tls_slots = threading.BoundedSemaphore(2)
+            server.handshake_timeout = 2.0
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            stalled = []
+            try:
+                for _ in range(2):
+                    stalled.append(socket.create_connection(('127.0.0.1', server.server_port), timeout=2))
+                deadline = time.monotonic() + 1
+                while server._tls_slots._value and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertEqual(server._tls_slots._value, 0)
+                with socket.create_connection(('127.0.0.1', server.server_port), timeout=2) as excess:
+                    excess.settimeout(1)
+                    try:
+                        self.assertEqual(excess.recv(1), b'')
+                    except ConnectionResetError:
+                        pass
+                self.assertLessEqual(sum(t.is_alive() for t in server._threads), 2)
+                deadline = time.monotonic() + 4
+                while server._tls_slots._value != 2 and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertEqual(server._tls_slots._value, 2)
+                client = ssl.create_default_context(cafile=str(cert))
+                with urllib.request.urlopen(f'https://127.0.0.1:{server.server_port}/',
+                                            context=client, timeout=2) as response:
+                    self.assertEqual(response.read(), b'ok')
+            finally:
+                for s in stalled:
+                    s.close()
+                server.shutdown()
+                thread.join(timeout=3)
+                server.server_close()
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(server._tls_slots._value, 2)
+
+    def test_failed_worker_start_closes_socket_releases_slot_and_drains(self):
+        handler = type('Handler', (BaseHTTPRequestHandler,), {'reference_listener': None})
+        server = create_viewer_tls_server(handler, '127.0.0.1', 0, server_context=PassThroughContext())
+        server.daemon_threads, server.block_on_close = False, True
+        server._tls_slots = threading.BoundedSemaphore(1)
+        accepted, peer = socket.socketpair()
+        try:
+            with patch('processing.app.threading.Thread.start', side_effect=RuntimeError('synthetic start failure')):
+                server.process_request(accepted, ('127.0.0.1', 1))
+            self.assertEqual(server._tls_slots._value, 1)
+            peer.settimeout(2)
+            self.assertEqual(peer.recv(1), b'')
+            server.server_close()  # Must not attempt to join an unstarted thread.
+        finally:
+            peer.close()
+
+    def test_unexpected_wrap_or_handshake_error_closes_socket_and_releases_slot(self):
+        for stage in ('wrap', 'handshake'):
+            with self.subTest(stage=stage):
+                class UnexpectedContext:
+                    def wrap_socket(self, sock, **_kwargs):
+                        if stage == 'wrap':
+                            raise ValueError('synthetic wrap failure')
+                        class Wrapped:
+                            def do_handshake(self):
+                                raise ValueError('synthetic handshake failure')
+                            def __getattr__(self, name):
+                                return getattr(sock, name)
+                        return Wrapped()
+                handler = type('Handler', (BaseHTTPRequestHandler,), {'reference_listener': None})
+                server = create_viewer_tls_server(handler, '127.0.0.1', 0, server_context=UnexpectedContext())
+                server.daemon_threads, server.block_on_close = False, True
+                server._tls_slots = threading.BoundedSemaphore(1)
+                accepted, peer = socket.socketpair()
+                try:
+                    server.process_request(accepted, ('127.0.0.1', 1))
+                    server.server_close()
+                    self.assertEqual(server._tls_slots._value, 1)
+                    peer.settimeout(2)
+                    self.assertEqual(peer.recv(1), b'')
+                finally:
+                    peer.close()
 
     def test_standalone_rejects_missing_mismatched_and_unprivate_key(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -242,7 +375,8 @@ class ViewerTlsListenerTests(unittest.TestCase):
 
         viewer_tls = create_viewer_tls_server(handler, '127.0.0.1', 0)
         self.assertTrue(viewer_tls.viewer_tls)
-        self.assertEqual(context.calls, [True])
+        self.assertEqual(context.calls, [])
+        self.assertIs(viewer_tls.viewer_tls_context, context)
         handler.reference_listener = None
         native = ThreadingHTTPServer(('127.0.0.1', 0), handler)
         service = CoordinatorService(native, handler, viewer_tls)

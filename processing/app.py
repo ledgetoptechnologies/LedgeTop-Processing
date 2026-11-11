@@ -258,15 +258,65 @@ def make_handler(config: Config):
     return Handler
 
 
+class ViewerTLSHTTPServer(ThreadingHTTPServer):
+    """Bound connections before allocating threads; handshake in the worker."""
+
+    handshake_timeout = 5.0
+    max_connections = 32
+
+    def __init__(self, address, handler, context):
+        self.viewer_tls_context = context
+        self._tls_slots = threading.BoundedSemaphore(self.max_connections)
+        super().__init__(address, handler)
+
+    def process_request(self, request, client_address):
+        if not self._tls_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException as error:
+            # ThreadingMixIn tracks a non-daemon thread before starting it;
+            # remove an unstarted thread so server_close can still join.
+            try:
+                threads = getattr(self, '_threads', None)
+                if hasattr(threads, 'reap'):
+                    threads.reap()
+                self.shutdown_request(request)
+            finally:
+                self._tls_slots.release()
+            if not isinstance(error, Exception):
+                raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            wrapped = None
+            try:
+                request.settimeout(self.handshake_timeout)
+                wrapped = self.viewer_tls_context.wrap_socket(
+                    request, server_side=True, do_handshake_on_connect=False)
+                wrapped.do_handshake()
+                wrapped.settimeout(None)
+            except BaseException as error:
+                # A stalled or invalid client must not block acceptance or expose
+                # TLS failures, request details, or credentials in logs.
+                self.shutdown_request(wrapped if wrapped is not None else request)
+                if not isinstance(error, Exception):
+                    raise
+                return
+            super().process_request_thread(wrapped, client_address)
+        finally:
+            self._tls_slots.release()
+
+
 def create_viewer_tls_server(handler, host, port, *, server_context=None):
     """Create the HTTPS listener for the existing authenticated Viewer facade."""
     runtime = getattr(handler, 'reference_listener', None)
     context = server_context if server_context is not None else getattr(runtime, '_server_context', None)
     if context is None:
         raise ValueError('Viewer TLS listener requires reference TLS configuration')
-    server = ThreadingHTTPServer((host, port), handler)
+    server = ViewerTLSHTTPServer((host, port), handler, context)
     try:
-        server.socket = context.wrap_socket(server.socket, server_side=True)
         server.viewer_tls = True
         return server
     except Exception:
