@@ -148,3 +148,12 @@ alias, hardlink, missing/wrong label or changed owner is refused. No secret or
 runtime environment is introduced; the actual existing file is not modified.
 The recreated label remains subject to strict equality instead of being added
 to the bookkeeping exceptions.
+
+The next exact-config no-start rehearsal found one additional generated label:
+`com.docker.compose.replace`, absent originally and newly set to the original
+container name without its leading slash. Recreation now accepts only that
+precise absent-to-exact-name case after type/value verification, then removes
+only the verified generated key for the existing label comparison. Wrong names,
+types, unrelated label changes and changed preexisting replacement labels still
+fail. Original admission immutability, environment-file label, host settings
+and mount checks are unchanged; this is not a general label allowlist expansion.

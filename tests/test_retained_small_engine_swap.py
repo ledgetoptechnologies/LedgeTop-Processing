@@ -20,6 +20,7 @@ from ops.retained_small_engine_swap import (
     host_config_equivalent,
     BASE_EXPORT_BUDGET, RESERVE, require_backup_headroom,
     verified_empty_environment,
+    recreation_labels_equivalent,
 )
 from processing.maintenance import Conflict
 from processing.prototype import Queue, VIEWER_PROFILE
@@ -96,6 +97,37 @@ class FakeRuntime:
 
 
 class RetainedSwapTests(unittest.TestCase):
+    def test_compose_replace_label_only_names_the_exact_original_container(self):
+        before = {'com.docker.compose.project': 'owned-project',
+                  'com.docker.compose.project.environment_file': '/private/work/empty.env', 'operator.label': 'same'}
+        key, name = 'com.docker.compose.replace', '/owned-project-engine'
+        after = dict(before, **{key: name.lstrip('/'), 'com.docker.compose.config-hash': 'generated'})
+        self.assertTrue(recreation_labels_equivalent(before, after, name))
+        self.assertTrue(recreation_labels_equivalent(before, before, name))
+        self.assertNotIn(key, before)
+        self.assertIn(key, after)
+        for value in ('wrong-container', name, '', None, True, 123, [name.lstrip('/')]):
+            with self.subTest(value=value):
+                self.assertFalse(recreation_labels_equivalent(before, dict(after, **{key: value}), name))
+        for invalid_name in (None, '', '/', 123):
+            with self.subTest(name=invalid_name):
+                self.assertFalse(recreation_labels_equivalent(before, after, invalid_name))
+
+    def test_valid_replace_label_never_hides_other_label_changes(self):
+        key, name = 'com.docker.compose.replace', '/owned-project-engine'
+        before = {'com.docker.compose.project': 'owned-project', 'operator.label': 'same',
+                  'com.docker.compose.project.environment_file': '/private/work/empty.env'}
+        replaced = dict(before, **{key: name.lstrip('/')})
+        for other in ({'operator.label': 'changed'}, {'unexpected.label': 'new'},
+                      {'com.docker.compose.project.environment_file': '/different/empty.env'}):
+            with self.subTest(change=other):
+                self.assertFalse(recreation_labels_equivalent(before, dict(replaced, **other), name))
+        missing = {k: v for k, v in replaced.items() if k != 'operator.label'}
+        self.assertFalse(recreation_labels_equivalent(before, missing, name))
+        preexisting = dict(before, **{key: 'previous-engine'})
+        self.assertTrue(recreation_labels_equivalent(preexisting, preexisting, name))
+        self.assertFalse(recreation_labels_equivalent(preexisting, replaced, name))
+
     @unittest.skipUnless(os.name == 'posix' and getattr(os, 'geteuid', lambda: -1)() == 0,
                          'root-owned POSIX private-file admission')
     def test_empty_environment_requires_exact_private_empty_file_and_old_label(self):

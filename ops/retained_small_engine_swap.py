@@ -120,6 +120,26 @@ def host_config_equivalent(before, after):
         return False
 
 
+def recreation_labels_equivalent(before, after, old_name):
+    """Preserve labels except existing bookkeeping and one proven replacement."""
+    if type(before) is not dict or type(after) is not dict:
+        return False
+    replacement = 'com.docker.compose.replace'
+    adjusted = dict(after)
+    if replacement in adjusted and replacement not in before:
+        if (type(old_name) is not str or not old_name.lstrip('/') or
+                type(adjusted[replacement]) is not str or adjusted[replacement] != old_name.lstrip('/')):
+            return False
+        del adjusted[replacement]
+    allowed = {'com.docker.compose.config-hash', 'com.docker.compose.image',
+               'com.docker.compose.project.config_files', 'com.ledgetop.retention.commit'}
+    try:
+        return canonical({k: v for k, v in before.items() if k not in allowed}) == \
+               canonical({k: v for k, v in adjusted.items() if k not in allowed})
+    except (ValueError, TypeError):
+        return False
+
+
 def candidate_config(current, command):
     candidate = json.loads(json.dumps(current))
     require(set(candidate.get('services', {})) == {'nodeodm'}, 'unexpected Compose services')
@@ -444,10 +464,7 @@ class Runtime:
         require({k: v for k, v in c['Config'].items() if k not in ignored} ==
                 {k: v for k, v in old['Config'].items() if k not in ignored},
                 'candidate application configuration changed')
-        labels_allowed = {'com.docker.compose.config-hash', 'com.docker.compose.image',
-                          'com.docker.compose.project.config_files', 'com.ledgetop.retention.commit'}
-        require({k: v for k, v in c['Config']['Labels'].items() if k not in labels_allowed} ==
-                {k: v for k, v in old['Config']['Labels'].items() if k not in labels_allowed},
+        require(recreation_labels_equivalent(old['Config']['Labels'], c['Config']['Labels'], old['Name']),
                 'candidate labels changed outside approved bookkeeping')
         for relative, expected in SOURCE_HASHES.items():
             copied = root / ('candidate-' + relative.replace('/', '-'))
