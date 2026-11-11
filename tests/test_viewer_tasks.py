@@ -323,6 +323,42 @@ class ViewerTaskStoreTests(unittest.TestCase):
         self.store.update(self.identifier, claim_token=claim['claimToken'])
         self.assertEqual(self.queue.path.stat().st_mode & 0o777, 0o600)
 
+    def test_update_default_and_explicit_true_keep_full_task_return_contract(self):
+        self.ready()
+        for fields in ({'phase': 'initialized'}, {'phase': 'uploaded', 'upload_cursor': 1}):
+            with self.subTest(fields=fields):
+                result = self.store.update(self.identifier, **fields)
+                self.assertEqual(result, self.store.task(self.identifier))
+                self.assertEqual(len(result['files']), 1)
+        result = self.store.update(self.identifier, return_task=True, phase='processing')
+        self.assertEqual(result, self.store.task(self.identifier))
+
+    def test_update_without_materialization_commits_before_return(self):
+        import sqlite3
+        from contextlib import closing
+        self.ready()
+        with patch.object(self.store, '_task', side_effect=AssertionError('full manifest materialized')):
+            self.assertIsNone(self.store.update(self.identifier, return_task=False,
+                                               phase='uploaded', upload_cursor=1))
+        # A distinct connection sees the committed checkpoint, not an uncommitted
+        # value on the writer connection. This does not simulate hardware loss.
+        with closing(sqlite3.connect(self.queue.path.as_uri() + '?mode=ro', uri=True)) as reader:
+            row = reader.execute('SELECT phase,upload_cursor FROM viewer_tasks WHERE uuid=?',
+                                 (self.identifier,)).fetchone()
+        self.assertEqual(row, ('uploaded', 1))
+        self.assertEqual(len(self.store.task(self.identifier)['files']), 1)
+
+    def test_update_return_task_requires_bool_and_keeps_mutation_validation(self):
+        self.ready()
+        before = self.store.task(self.identifier)
+        for value in (0, 1, None, 'false', [], {}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.store.update(self.identifier, return_task=value, phase='uploaded')
+        for fields in ({'upload_cursor': -1}, {'unknown': 1}, {}):
+            with self.subTest(fields=fields), self.assertRaises(ValueError):
+                self.store.update(self.identifier, return_task=False, **fields)
+        self.assertEqual(self.store.task(self.identifier), before)
+
     def test_private_updates_output_cursor_and_owned_archive(self):
         self.ready()
         engine_id = str(uuid.uuid4())

@@ -583,6 +583,72 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(sum(call[0] == 'initialize' for call in engine.calls), 1)
         self.assertEqual(len(self.fleet.commits), 1)
 
+    def test_each_upload_checkpoint_is_committed_without_materializing_manifest(self):
+        import sqlite3
+        from contextlib import closing
+        count = 7
+        identifier = self.submit(count=count)
+        job = self.queue.claim({'workerId': 'viewer-dispatch', 'nodeId': 'cluster',
+                                'profiles': [VIEWER_PROFILE]})
+        engine_id = str(uuid.uuid4())
+        self.service.store.update(identifier, stage='running', phase='initialized',
+            node_id='cluster', engine_uuid=engine_id, claim_token=job['claimToken'])
+        task = self.task(identifier)
+        engine = self.engines['cluster']
+        engine.initialize(task)
+        original_update = self.service.store.update
+        original_upload = engine.upload
+        checkpoints = []
+        def row():
+            with closing(sqlite3.connect(self.queue.path.as_uri() + '?mode=ro', uri=True)) as reader:
+                return reader.execute('SELECT phase,upload_cursor,engine_uuid FROM viewer_tasks WHERE uuid=?',
+                                      (identifier,)).fetchone()
+        def checkpoint_update(task_id, **fields):
+            result = original_update(task_id, **fields)
+            if 'upload_cursor' in fields:
+                self.assertFalse(fields['return_task'])
+                self.assertIsNone(result)
+                checkpoints.append(row())
+            return result
+        def upload(engine_uuid, item):
+            index = len([call for call in engine.calls if call[0] == 'upload'])
+            self.assertEqual(row(), ('upload_pending', index, engine_id))
+            self.assertEqual(materialize.call_count, 0)
+            return original_upload(engine_uuid, item)
+        with patch.object(self.service.store, '_task', wraps=self.service.store._task) as materialize, \
+             patch.object(self.service.store, 'update', side_effect=checkpoint_update), \
+             patch.object(engine, 'upload', side_effect=upload), \
+             patch.object(self.service, '_poll'):
+            self.service._upload_and_commit(task)
+            # Only two post-upload transitions and the final poll input read.
+            self.assertEqual(materialize.call_count, 3)
+        self.assertEqual(checkpoints, [entry for index in range(count) for entry in
+            [('upload_pending', index, engine_id), ('uploaded', index + 1, engine_id)]])
+        self.assertEqual(row(), ('awaiting_engine_start', count, engine_id))
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_upload_ack_loss_retains_cursor_and_never_replays_mutation(self):
+        identifier = self.submit(count=3)
+        engine = self.engines['cluster']
+        engine.fail = 'upload'
+        self.service.tick()
+        task = self.task(identifier)
+        engine_id = task['engine_uuid']
+        self.assertEqual(task['upload_cursor'], 0)
+        self.assertEqual(task['job']['status'], 'held')
+        self.assertEqual(task['job']['heldReason'], 'operator')
+        self.assertEqual(task['error'], 'engine_submission_uncertain')
+        self.assertEqual(len(engine.tasks[engine_id]['files']), 1)
+        self.assertFalse(self.fleet.commits)
+        before_calls = list(engine.calls)
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.service.tick()
+        self.assertEqual(engine.calls, before_calls)
+        self.assertEqual(self.task(identifier)['engine_uuid'], engine_id)
+        self.assertEqual(self.task(identifier)['upload_cursor'], 0)
+
     def test_restart_resumes_confirmed_upload_cursor_without_reuploading_prior_files(self):
         identifier = self.submit(count=2)
         engine_uuid = self.restart_claimed_task(identifier, 'uploaded', cursor=1, engine_exists=True)
