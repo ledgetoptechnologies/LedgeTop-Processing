@@ -20,7 +20,7 @@ import time
 import uuid
 
 
-HELPER_SHA = 'dc0e0bba415883af4b7fa0a5b61daa97b6ff1e2cb81fa440ee5ec0065a52b919'
+HELPER_SHA = '704a2ac8460046cfc6cc826042bdc1489a0679a99c69210388c4f25be2ee0fec'
 BASE = 'sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6'
 TARGET = 'sha256:9c9f7ed05e0a8d2e4a370a75dd7b8d8524a0603205e79dfc9046239818237940'
 NGINX_IMAGES = (
@@ -260,6 +260,12 @@ def engine_compose(prefix, network, volume, image, configuration, token, nonce):
         'networks': {'isolated': {'external': True, 'name': network}}}
 
 
+def fixture_compose_command(prefix, work, compose_path):
+    check(compose_path.parent == work, 'fixture Compose working directory changed')
+    return ['compose', '-p', prefix, '--project-directory', str(work),
+            '--env-file', str(work / 'empty.env'), '-f', str(compose_path)]
+
+
 class FixtureClient:
     def __init__(self, runtime, origin, token='', node=False):
         check(origin in ('http://127.0.0.1:13001', 'http://127.0.0.1:3001'), 'unexpected fixture HTTP origin')
@@ -408,6 +414,8 @@ def _run_fixture(recovery):
     (backup / '.fixture-marker').write_text(nonce + '\n')
     configuration = work / 'fixture-config.json'
     configuration.write_text(json.dumps({'logger': {'logDirectory': '/tmp'}})); configuration.chmod(0o444)
+    empty_environment = work / 'empty.env'
+    empty_environment.write_bytes(b''); empty_environment.chmod(0o600)
     compose_path, nginx = work / 'candidate-compose.json', public / 'nginx.conf'
     proxy_pass = b'proxy_pass http://fixture-engine:3000;'
     nginx.write_bytes(NGINX_CONFIG); nginx.chmod(0o644)
@@ -432,7 +440,7 @@ def _run_fixture(recovery):
     token = secrets.token_hex(32)
     config = engine_compose(prefix, network, volume, BASE, configuration, token, nonce)
     compose_path.write_text(json.dumps(config))
-    compose = ['compose', '-p', prefix, '--project-directory', str(work), '-f', str(compose_path)]
+    compose = fixture_compose_command(prefix, work, compose_path)
     result, success, phase = {}, False, 'engine_startup'
     proxy_observation = {'lastStatus': None, 'lastException': None}
     try:

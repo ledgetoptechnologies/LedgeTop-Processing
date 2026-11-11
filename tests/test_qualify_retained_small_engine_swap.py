@@ -21,6 +21,15 @@ class NativeFixtureSourceTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             fixture.initial_free_required(SimpleNamespace(BASE_EXPORT_BUDGET=3952627133))
 
+    def test_fixture_baseline_preserves_explicit_empty_environment_metadata(self):
+        work = Path('owned-fixture') / 'work'
+        command = fixture.fixture_compose_command(fixture.namespace(self.nonce), work,
+                                                  work / 'candidate-compose.json')
+        self.assertEqual(command[command.index('--env-file') + 1], str(work / 'empty.env'))
+        self.assertEqual(command[command.index('--project-directory') + 1], str(work))
+        with self.assertRaises(RuntimeError):
+            fixture.fixture_compose_command(fixture.namespace(self.nonce), work, Path('other') / 'compose.json')
+
     def test_exact_owner_and_namespace_required_before_cleanup(self):
         prefix = fixture.namespace(self.nonce)
         fixture.owned_object({'Name': '/' + prefix + '-engine',

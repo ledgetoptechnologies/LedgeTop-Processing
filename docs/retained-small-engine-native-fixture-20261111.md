@@ -53,7 +53,7 @@ canonical path/marker/mount checks. A small root-private evidence directory
 remains for parent review. Failed-run artifacts remain private for inspection.
 Synthetic tokens are disposable; no production credential is read.
 
-Fourteen bounded source tests verify ownership refusal, exact banner handling,
+Fifteen bounded source tests verify ownership refusal, exact banner handling,
 resource/port constraints, private-module isolation, default plan-only behavior,
 partial-cleanup control flow and read-only HTTP adapters. These are source tests;
 they do not prove the native rehearsal passed. Parent must review the frozen
@@ -96,3 +96,9 @@ Size, which the observed daemon underreported. Its fixed requirement is
 17,448,304,640bytes (8GiB export budget,8GiB reserve,256MiB fixture margin),
 followed by the helper's quiesced writable-layer/data/reserve check. This is
 restricted to the pinned base and is not a dataset-size eligibility limit.
+
+The fixture baseline now creates a root-private empty `work/empty.env` and uses
+that exact `--env-file` on its initial Compose invocation. The corrected helper
+verifies and preserves that same binding during rendering/recreation, matching
+the observed production metadata requirement instead of ignoring the label.
+No actual production environment file or runtime credential is changed.
