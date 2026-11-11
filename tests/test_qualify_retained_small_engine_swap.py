@@ -149,6 +149,48 @@ class NativeFixtureSourceTests(unittest.TestCase):
         report = fixture.failure_reason(RuntimeError('token=private-not-for-output'))
         self.assertEqual(report, {'class': 'RuntimeError', 'reason': 'redacted_exception'})
 
+    def test_binding_difference_summary_contains_paths_and_no_changed_values(self):
+        before = {'HostConfig': {'NetworkMode': 'old-private-network', 'Memory': 123},
+                  'Mounts': [{'Source': '/private/old', 'RW': True}], 'networkKeys': ['old-network']}
+        after = {'HostConfig': {'NetworkMode': 'new-private-network', 'Memory': 123},
+                 'Mounts': [{'Source': '/private/new', 'RW': True}], 'networkKeys': ['new-network']}
+        paths = fixture.differing_field_paths(before, after)
+        self.assertEqual(paths, ['HostConfig.NetworkMode', 'Mounts[0].Source', 'networkKeys[0]'])
+        self.assertNotIn('private', json.dumps(paths))
+
+    def test_owned_candidate_private_bindings_are_saved_before_cleanup_comparison(self):
+        old_id, new_id = 'a' * 64, 'b' * 64
+        common = {'Name': '/' + fixture.namespace(self.nonce) + '-engine',
+                  'Config': {'Labels': {fixture.OWNER: self.nonce, 'com.docker.compose.service': 'nodeodm'},
+                             'Env': ['TOKEN=private-not-for-safe-output']},
+                  'Mounts': [{'Source': '/private/fixture-volume', 'RW': True}],
+                  'NetworkSettings': {'Networks': {'owned-fixture-network': {}}}}
+        old = dict(common, Id=old_id, Image=fixture.BASE, HostConfig={'Memory': 123})
+        current = dict(common, Id=new_id, Image=fixture.TARGET, HostConfig={'Memory': 456},
+                       State={'Status': 'created', 'Running': False, 'ExitCode': 0, 'OOMKilled': False})
+        runtime = Mock()
+        runtime.docker.return_value = new_id
+        runtime.inspect.return_value = current
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / fixture.namespace(self.nonce)
+            root.mkdir(); (root / '.fixture-marker').write_text(self.nonce + '\n')
+            (root / 'backup').mkdir()
+            (root / 'backup' / 'prepared.private.json').write_text(json.dumps({'oldContainer': old}))
+            with patch.object(fixture, 'bounded_logs', return_value={'bytes': 20}):
+                self.assertTrue(fixture.record_failure_diagnostics(runtime, self.nonce, root,
+                    RuntimeError('candidate host configuration or volume changed'), {'phase': 'recreate_and_verify'}))
+            binding = json.loads((root / ('diagnostic-' + new_id + '.binding.private.json')).read_text())
+            self.assertEqual(binding['HostConfig']['Memory'], 456)
+            self.assertNotIn('Config', binding)
+            safe = (root / 'binding-differences.safe.json').read_text()
+            report = json.loads(safe)
+            self.assertEqual(report['differingFieldPaths'], ['HostConfig.Memory'])
+            self.assertEqual(report['candidateBindingsCompared'], 1)
+            self.assertTrue(report['comparisonAvailable'])
+            self.assertNotIn('456', safe)
+            self.assertNotIn('private', safe)
+            self.assertNotIn('TOKEN', safe)
+
 
 if __name__ == '__main__':
     unittest.main()

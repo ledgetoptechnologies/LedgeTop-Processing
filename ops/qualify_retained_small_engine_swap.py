@@ -135,6 +135,42 @@ def bounded_logs(identifier, path, *, seconds=8, max_bytes=65536):
             'truncated': truncated, 'timedOut': expired.is_set(), 'exit': process.returncode}
 
 
+def binding_view(container):
+    return {'HostConfig': container['HostConfig'], 'Mounts': container['Mounts'],
+            'networkKeys': sorted(container.get('NetworkSettings', {}).get('Networks', {}))}
+
+
+def differing_field_paths(before, after):
+    """Names/indices only; never stringify changed values into safe metadata."""
+    found = []
+    def visit(left, right, path, depth=0):
+        if len(found) >= 256:
+            return
+        if depth > 16 or type(left) is not type(right):
+            found.append(path)
+        elif isinstance(left, dict):
+            for key in sorted(set(left) | set(right)):
+                component = key if re.fullmatch('[A-Za-z0-9_.-]{1,80}', key) else 'key-' + sha(key.encode())[:12]
+                field = path + ('.' if path else '') + component
+                if key not in left or key not in right:
+                    found.append(field)
+                else:
+                    visit(left[key], right[key], field, depth + 1)
+                if len(found) >= 256:
+                    break
+        elif isinstance(left, list):
+            if len(left) != len(right):
+                found.append(path + '.length')
+            for i, (a, b) in enumerate(zip(left, right)):
+                visit(a, b, path + '[' + str(i) + ']', depth + 1)
+                if len(found) >= 256:
+                    break
+        elif left != right:
+            found.append(path)
+    visit(before, after, '')
+    return found
+
+
 def record_failure_diagnostics(runtime, nonce, root, error, context):
     """Private bounded evidence before cleanup; never stdout/config/environment."""
     try:
@@ -142,6 +178,18 @@ def record_failure_diagnostics(runtime, nonce, root, error, context):
               (root / '.fixture-marker').read_text() == nonce + '\n', 'diagnostic root ownership changed')
         report = {'nonce': nonce, 'exception': failure_reason(error), 'context': context,
                   'containers': [], 'diagnosticErrors': []}
+        old_binding = None
+        prepared_path = root / 'backup' / 'prepared.private.json'
+        if prepared_path.exists():
+            try:
+                check(prepared_path.resolve() == prepared_path, 'prepared diagnostic source alias')
+                old = json.loads(prepared_path.read_text())['oldContainer']
+                owned_object(old, nonce)
+                old_binding = binding_view(old)
+            except Exception as old_error:
+                report['diagnosticErrors'].append(failure_reason(old_error))
+        safe_binding = {'comparisonAvailable': old_binding is not None,
+                        'candidateBindingsCompared': 0, 'differingFieldPaths': []}
         for identifier in runtime.docker('ps', '--all', '--quiet', '--filter',
                                          'label=' + OWNER + '=' + nonce).split():
             try:
@@ -150,6 +198,19 @@ def record_failure_diagnostics(runtime, nonce, root, error, context):
                 row = {'id': c['Id'], 'name': c['Name'], 'image': c['Image'],
                        'state': {k: c['State'].get(k) for k in
                                  ('Status', 'Running', 'ExitCode', 'OOMKilled', 'Restarting')}}
+                if c['Image'] == TARGET and c['Config'].get('Labels', {}).get('com.docker.compose.service') == 'nodeodm':
+                    check(re.fullmatch('[0-9a-f]{64}', c['Id']), 'invalid candidate diagnostic identity')
+                    binding = binding_view(c)
+                    path = root / ('diagnostic-' + c['Id'] + '.binding.private.json')
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    with os.fdopen(fd, 'w') as stream:
+                        json.dump(binding, stream, indent=2)
+                    row['bindingFile'] = path.name
+                    if old_binding is not None:
+                        paths = differing_field_paths(old_binding, binding)
+                        row['differingBindingFieldPaths'] = paths
+                        safe_binding['candidateBindingsCompared'] += 1
+                        safe_binding['differingFieldPaths'].extend(paths)
                 try:
                     row['logs'] = bounded_logs(c['Id'], root / ('diagnostic-' + c['Id'][:12] + '.log'))
                 except Exception as log_error:
@@ -160,6 +221,9 @@ def record_failure_diagnostics(runtime, nonce, root, error, context):
         fd = os.open(root / 'failure-diagnostics.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, 'w') as stream:
             json.dump(report, stream, indent=2)
+        fd = os.open(root / 'binding-differences.safe.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'w') as stream:
+            json.dump(safe_binding, stream, indent=2)
         return True
     except Exception:
         return False  # Diagnostic failure must not suppress owned cleanup.

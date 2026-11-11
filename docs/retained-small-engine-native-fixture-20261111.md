@@ -53,7 +53,7 @@ canonical path/marker/mount checks. A small root-private evidence directory
 remains for parent review. Failed-run artifacts remain private for inspection.
 Synthetic tokens are disposable; no production credential is read.
 
-Eleven bounded source tests verify ownership refusal, exact banner handling,
+Thirteen bounded source tests verify ownership refusal, exact banner handling,
 resource/port constraints, private-module isolation, default plan-only behavior,
 partial-cleanup control flow and read-only HTTP adapters. These are source tests;
 they do not prove the native rehearsal passed. Parent must review the frozen
@@ -73,3 +73,13 @@ records its last HTTP status and sanitized exception class/reason. Unknown
 exception text is redacted so credentials/environment cannot leak into metadata.
 Diagnostic failures do not suppress resource cleanup or replace the original
 failure. Actual native success remains unproven until parent reruns the candidate.
+
+The next parent rehearsal completed the actual stopped-engine backup, then
+the unchanged helper refused a candidate host-configuration/volume comparison
+before starting it. Candidate diagnostics now retain only its HostConfig,
+Mounts and network-key list in an exact-container-ID private JSON, alongside
+the existing pre-cleanup logs/state. A separate safe summary compares these
+bindings with the old prepared container and reports differing field paths
+only. It never publishes raw bindings, changed values, environment or tokens.
+This characterizes Docker-generated differences; it does not relax the
+production helper's comparison or claim the swap completed.
