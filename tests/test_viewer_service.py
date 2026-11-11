@@ -931,6 +931,17 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.store.update(identifier, output_lines=['retained output'])
         self.assertEqual(self.service.output(identifier, 0), ['retained output'])
 
+    def test_output_prefers_engine_bounded_method_without_generic_read(self):
+        identifier = self.submit()
+        self.service.tick()
+        engine = self.engines['cluster']
+        calls = []
+        engine.output = lambda task_id, line: calls.append((task_id, line)) or ['', 'unicode 🌳']
+        before = list(engine.calls)
+        self.assertEqual(self.service.output(identifier, 17), ['', 'unicode 🌳'])
+        self.assertEqual(calls, [(self.task(identifier)['engine_uuid'], 17)])
+        self.assertEqual(engine.calls, before)
+
 
 if __name__ == '__main__':
     unittest.main()
