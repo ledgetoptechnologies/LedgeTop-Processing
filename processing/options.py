@@ -103,9 +103,10 @@ def _contains_secret(value, token):
     return False
 
 
-def discover_node(role, origin, token=''):
+def discover_node(role, origin, token='', *, allow_dynamic=False):
     """Fetch a fresh snapshot; errors contain no URL, credential or server body."""
-    if role not in ROLES:
+    if (role not in ROLES and not (allow_dynamic and isinstance(role, str)
+            and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', role))):
         raise ValueError('unknown configured node role')
     unavailable = {'role': role, 'configured': bool(origin), 'available': False,
                    'options': [], 'optionsSha256': None, 'capabilitiesSha256': None,
@@ -135,13 +136,20 @@ def discover_node(role, origin, token=''):
         return {**unavailable, 'reason': 'invalid_response_or_configuration'}
 
 
+def _compatibility_signature(option):
+    """Keep execution metadata strict while ignoring presentation-only help."""
+    return {key: value for key, value in option.items() if key != 'help'}
+
+
 def catalog(nodes):
-    """Exact-definition intersection across every configured node, never a cache.
+    """Compatible-option intersection across every configured node, never a cache.
 
     ``nodes`` contains at most the unique fixed roles local/main, each as
     (role, configured_origin, optional_token). Unconfigured roles are reported
     but do not constrain the intersection. Any configured unavailable node closes
     the fleet catalog; healthy per-node snapshots remain available for inspection.
+    Execution metadata must match exactly; presentation-only ``help`` text may
+    differ between otherwise compatible engines.
     """
     nodes = list(nodes)
     if (not 1 <= len(nodes) <= 2 or any(not isinstance(node, (tuple, list)) or len(node) != 3 for node in nodes)
@@ -157,7 +165,7 @@ def catalog(nodes):
     union = set().union(*(set(options) for options in by_role.values())) if by_role else set()
     common = set.intersection(*(set(options) for options in by_role.values())) if by_role else set()
     conflicting = sorted(name for name in common
-        if len({_canonical(options[name]) for options in by_role.values()}) > 1)
+        if len({_canonical(_compatibility_signature(options[name])) for options in by_role.values()}) > 1)
     safe_names = common - set(conflicting) if ready else set()
     reference = next(iter(by_role.values()), {})
     common_options = [reference[name] for name in sorted(safe_names)]

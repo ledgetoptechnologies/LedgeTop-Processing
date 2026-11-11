@@ -1,4 +1,4 @@
-"""Durable, single-slot queue for the isolated synthetic TreeDar prototype.
+"""Durable, per-node-slot queue for the isolated synthetic processing prototype.
 
 This is not a Viewer API or a production dataset admission path. A process lock
 prevents a second coordinator from resetting another coordinator's live claims.
@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 
@@ -22,17 +23,35 @@ from .maintenance import Conflict, Maintenance
 SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 PROFILE = "treedar-synthetic-v1"
 PHOTO_PROFILE = "odx-photo-smoke-v1"
+VIEWER_PROFILE = "odm-viewer-v1"
+REFERENCE_PROFILE = "reference-pipeline-v1"
 
 
 class Queue(Maintenance):
-    def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',), clock=None):
+    def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
+                 treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None):
         if (not isinstance(node_ids, (tuple, list)) or not node_ids
                 or any(not isinstance(node, str) or not SLUG.fullmatch(node) for node in node_ids)
                 or len(set(node_ids)) != len(node_ids) or 'cluster' not in node_ids):
             raise ValueError("node_ids must be unique configured slugs including cluster")
+        self._creator_pid = os.getpid()
+        self._lifecycle_lock = threading.RLock()
+        self._database_users = 0
         self.node_ids = tuple(node_ids)
+        if treedar_node_ids is None:
+            # Isolated legacy fixtures retain their original node capabilities.
+            treedar_node_ids = self.node_ids
+        if (not isinstance(treedar_node_ids, (tuple, list)) or not treedar_node_ids
+                or any(not isinstance(node, str) or node not in self.node_ids for node in treedar_node_ids)
+                or len(set(treedar_node_ids)) != len(treedar_node_ids)):
+            raise ValueError("treedar_node_ids must be unique configured node IDs")
+        self.treedar_node_ids = tuple(treedar_node_ids)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.allowed_profiles = {PROFILE, PHOTO_PROFILE} if photo_smoke_enabled else {PROFILE}
+        if viewer_enabled:
+            self.allowed_profiles.add(VIEWER_PROFILE)
+        if reference_enabled:
+            self.allowed_profiles.add(REFERENCE_PROFILE)
         root = Path(directory)
         root.mkdir(parents=True, exist_ok=True)
         self._lock = (root / "coordinator.lock").open("a+b")
@@ -55,6 +74,9 @@ class Queue(Maintenance):
             except OSError:
                 self._lock.close()
                 raise RuntimeError("prototype state already owned") from None
+        # One ownership period, generated only after the OS lease is acquired.
+        # Optional recovery persists this epoch with its restart overlay.
+        self.startup_id = str(uuid.uuid4())
         self.path = root / "jobs.sqlite3"
         with self._db() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS jobs (
@@ -75,18 +97,43 @@ class Queue(Maintenance):
             self._init_maintenance(db)
 
     def close(self):
-        self._lock.close()
+        if os.getpid() != self._creator_pid:
+            raise RuntimeError('coordinator process changed')
+        with self._lifecycle_lock:
+            if self._database_users:
+                raise RuntimeError('coordinator transaction still active')
+            self._lock.close()
+
+    def node_profiles(self, node_id):
+        return sorted(profile for profile in self.allowed_profiles
+                      if profile != PROFILE or node_id in self.treedar_node_ids)
+
+    def _node_public(self, row):
+        return {**super()._node_public(row), "allowedProfiles": self.node_profiles(row['id'])}
 
     @contextmanager
     def _db(self):
-        db = sqlite3.connect(self.path, timeout=10)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA synchronous=FULL")
-        try:
-            with db:
-                yield db
-        finally:
-            db.close()
+        # Check the PID before acquiring an inherited mutex after fork. Keep
+        # close() from releasing the authority lease until COMMIT/ROLLBACK ends.
+        if os.getpid() != self._creator_pid:
+            raise RuntimeError('coordinator process changed')
+        with self._lifecycle_lock:
+            if self._lock.closed:
+                raise RuntimeError('coordinator ownership closed')
+            db = sqlite3.connect(self.path, timeout=10)
+            db.row_factory = sqlite3.Row
+            self._database_users += 1
+            try:
+                db.execute("PRAGMA synchronous=FULL")
+                with db:
+                    yield db
+                    if os.getpid() != self._creator_pid or self._lock.closed:
+                        raise RuntimeError('coordinator ownership changed before commit')
+            finally:
+                try:
+                    db.close()
+                finally:
+                    self._database_users -= 1
 
     def public(self, row):
         return {"id": row["id"], "requestId": row["request_id"],
@@ -109,6 +156,8 @@ class Queue(Maintenance):
 
     def submit(self, payload):
         self.fields(payload, ("requestId", "environment", "profile"))
+        if payload['profile'] == REFERENCE_PROFILE:
+            raise ValueError('reference submissions require the reference metadata API')
         self.slug(payload["requestId"])
         if (payload["environment"] not in ("production", "staging")
                 or not isinstance(payload["profile"], str) or payload["profile"] not in self.allowed_profiles):
@@ -133,36 +182,114 @@ class Queue(Maintenance):
         with self._db() as db:
             return [self.public(row) for row in db.execute("SELECT * FROM jobs ORDER BY seq")]
 
+    def dispatch_snapshot(self):
+        """Read queue jobs and an insertion watermark from one SQLite snapshot."""
+        with self._db() as db:
+            db.execute('BEGIN')
+            sequence = db.execute('SELECT COALESCE(MAX(seq),0) FROM jobs').fetchone()[0]
+            rows = db.execute('SELECT * FROM jobs ORDER BY seq').fetchall()
+            return {'sequence': sequence, 'jobs': [self.public(row) for row in rows]}
+
     def get(self, identifier):
         with self._db() as db:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (identifier,)).fetchone()
             return self.public(row) if row else None
 
-    def claim(self, payload):
+    def claim(self, payload, *, eligible_job_ids=None, eligible_node_ids=None,
+              expected_queue_sequence=None):
         expected = ['workerId']
         if isinstance(payload, dict):
-            expected.extend(key for key in ('profiles', 'nodeId') if key in payload)
+            expected.extend(key for key in ('profiles', 'nodeId', 'expectedJobId') if key in payload)
         self.fields(payload, expected)
         self.slug(payload["workerId"])
         node_id = payload.get('nodeId', 'cluster')
         self._known_node(node_id)
+        expected_job = payload.get('expectedJobId')
+        if expected_job is not None:
+            self.slug(expected_job)
+        if expected_queue_sequence is not None and (type(expected_queue_sequence) is not int
+                or expected_queue_sequence < 0):
+            raise ValueError('invalid dispatch snapshot sequence')
+        if eligible_job_ids is not None and (type(eligible_job_ids) not in (list, tuple)
+                or len(eligible_job_ids) > 1000 or len(set(eligible_job_ids)) != len(eligible_job_ids)
+                or any(not isinstance(identifier, str) or not SLUG.fullmatch(identifier)
+                       for identifier in eligible_job_ids)):
+            raise ValueError('invalid eligible job set')
+        if eligible_node_ids is not None and (type(eligible_node_ids) not in (list, tuple, set, frozenset)
+                or len(eligible_node_ids) > len(self.node_ids)
+                or not set(eligible_node_ids) <= set(self.node_ids)):
+            raise ValueError('invalid eligible node set')
         profiles = payload.get("profiles", [PROFILE])
-        if (not isinstance(profiles, list) or not 1 <= len(profiles) <= 2
+        if (not isinstance(profiles, list) or not 1 <= len(profiles) <= 3
                 or any(not isinstance(p, str) or p not in self.allowed_profiles for p in profiles)
                 or len(profiles) != len(set(profiles))):
             raise ValueError("worker must declare supported enabled profiles")
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
+            if expected_queue_sequence is not None:
+                current_sequence = db.execute('SELECT COALESCE(MAX(seq),0) FROM jobs').fetchone()[0]
+                # A job arrived since the health/eligibility snapshot. Let the
+                # scheduler refresh priorities and capabilities next turn.
+                if current_sequence != expected_queue_sequence:
+                    return None
             self._refresh_nodes(db)
             if self._node(db, node_id)['state'] not in ('active', 'scheduled'):
                 return None
-            if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():
+            if db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1",
+                          (node_id,)).fetchone():
                 return None
-            row = db.execute("""SELECT * FROM jobs WHERE status='queued'
-                ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq LIMIT 1""").fetchone()
+            rows = db.execute("""SELECT * FROM jobs WHERE status='queued'
+                ORDER BY CASE environment WHEN 'production' THEN 0 ELSE 1 END, seq""").fetchall()
+            # Production is a queue-wide priority tier, including work owned
+            # by a different worker/profile. A photo worker must not consume
+            # staging work while production TreeDar (or another enabled
+            # profile) is still waiting for its physical node.
+            priority_environment = rows[0]['environment'] if rows else None
+            row = None
+            for candidate in rows:
+                if candidate['environment'] != priority_environment:
+                    break
+                if candidate['profile'] not in profiles:
+                    # Preserve FIFO when this physical node can run the head
+                    # profile but this particular worker does not advertise
+                    # it. A node with no support for that profile can still
+                    # run independent work for the same priority tier.
+                    if candidate['profile'] in self.node_profiles(node_id):
+                        return None
+                    continue
+                if eligible_job_ids is not None and candidate['id'] not in eligible_job_ids:
+                    # The scheduler may skip an oversized photo for a later
+                    # eligible photo on this node, but never a different
+                    # profile at the queue head.
+                    continue
+                row = candidate
+                break
             if not row:
                 return None
-            if row["profile"] not in profiles:
+            # Keep the configured node order meaningful when multiple nodes
+            # advertise the same profile: a later node may take the queue head
+            # only when every earlier capable node is occupied or unavailable.
+            for earlier in self.node_ids:
+                if earlier == node_id:
+                    break
+                if row["profile"] not in self.node_profiles(earlier):
+                    continue
+                if eligible_node_ids is not None and earlier not in eligible_node_ids:
+                    continue
+                earlier_state = self._node(db, earlier)["state"]
+                earlier_busy = db.execute(
+                    "SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1",
+                    (earlier,)).fetchone()
+                if (earlier_state in ("active", "scheduled")
+                        and not earlier_busy):
+                    return None
+            if row['profile'] == REFERENCE_PROFILE:
+                # Reference claims also persist an idempotent private envelope
+                # and enforce input-dependent routing in ReferenceStore.claim.
+                return None
+            if expected_job is not None and row['id'] != expected_job:
+                return None
+            if row["profile"] not in profiles or row["profile"] not in self.node_profiles(node_id):
                 # Do not bypass earlier work or production for a worker that
                 # cannot run it. Legacy TreeDar workers never claim photo jobs.
                 return None

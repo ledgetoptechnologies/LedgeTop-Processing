@@ -112,3 +112,17 @@ the routing probe's engine contract remains unchanged by the code migration.
 
 No live deployment, DNS, TrueNAS configuration, or existing Viewer provider
 setting is changed by this document.
+
+## Retained archive acceptance boundary
+
+Viewer acceptance rehashes the retained archive and checks its file identity and
+metadata again before recording the receipt. The coordinator application writes
+the final archive by replacing a completed temporary file and does not modify a
+recorded final archive in place. This guard depends on exclusive application
+ownership of those final bytes: privileged or same-UID out-of-band writers are
+not fenced. An in-place write can leave the same size, inode, and filesystem
+timestamps, including on tmpfs, so metadata checks cannot prove that such a
+write did not occur between the hash and receipt commit. An atomic replacement
+with a different inode is rejected even when size and modification time match.
+Do not authorize cleanup based on this check alone; retain source and output
+copies until the separately verified durable handoff and cleanup policy allow it.

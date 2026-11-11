@@ -50,7 +50,7 @@ class ServiceTests(unittest.TestCase):
         origin = f"http://127.0.0.1:{cls.node.server_port}"
         cls.api = start_server(make_handler(Config(
             api_token=TOKEN, local_node_url=origin, main_node_url=origin,
-            local_max_photos=800, local_max_input_bytes=20_000,
+            local_max_photos=800,
         )))
         cls.origin = f"http://127.0.0.1:{cls.api.server_port}"
 
@@ -71,8 +71,8 @@ class ServiceTests(unittest.TestCase):
             return response.status, json.load(response)
 
     def test_local_and_large_job_route_without_dispatching(self):
-        _, small = self.request("/v1/plan", {"engine": "odm", "photoCount": 200, "inputBytes": 4000})
-        _, large = self.request("/v1/plan", {"engine": "odm", "photoCount": 801, "inputBytes": 4000})
+        _, small = self.request("/v1/plan", {"engine": "odm", "photoCount": 200})
+        _, large = self.request("/v1/plan", {"engine": "odm", "photoCount": 801})
         self.assertEqual(small["decision"], "local")
         self.assertEqual(large["decision"], "main")
         self.assertFalse(small["executesWork"])
@@ -80,14 +80,15 @@ class ServiceTests(unittest.TestCase):
     def test_large_job_waits_when_main_unavailable(self):
         local = {"ready": True, "maxImages": 1000}
         main = {"ready": False, "maxImages": None}
-        self.assertEqual(plan(801, 4000, local, main, 800, 20000),
+        self.assertEqual(plan(801, local, main, 800),
                          {"decision": "wait", "reason": "main_unavailable"})
 
-    def test_small_job_falls_back_to_main_when_local_unavailable(self):
-        self.assertEqual(plan(300, 4000, {"ready": False}, {"ready": True, "maxImages": 1000}, 800, 20000)["decision"], "main")
+    def test_small_job_waits_for_local_when_local_unavailable(self):
+        self.assertEqual(plan(300, {"ready": False}, {"ready": True, "maxImages": 1000}, 800)["decision"], "wait")
 
-    def test_byte_limit_prevents_small_photo_count_overloading_local(self):
-        self.assertEqual(plan(10, 20001, {"ready": True}, {"ready": False}, 800, 20000)["decision"], "wait")
+    def test_routing_contract_requires_only_photo_count(self):
+        _, result = self.request("/v1/plan", {"engine": "odm", "photoCount": 10})
+        self.assertEqual(result["decision"], "local")
 
     def test_requires_authentication(self):
         with self.assertRaises(HTTPError) as exc:
@@ -101,7 +102,7 @@ class ServiceTests(unittest.TestCase):
 
     def test_rejects_invalid_job_body(self):
         with self.assertRaises(HTTPError) as exc:
-            self.request("/v1/plan", {"engine": "odm", "photoCount": True, "inputBytes": 1})
+            self.request("/v1/plan", {"engine": "odm", "photoCount": True})
         self.assertEqual(exc.exception.code, 400)
 
 

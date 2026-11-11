@@ -3,23 +3,57 @@
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+from pathlib import Path
+import signal
+import sys
+import threading
 
 from .config import Config, from_environment
 from .policy import plan
 from .provider import probe_node
 from .prototype import Queue, Conflict
 from .options import catalog
+from .viewer_tls_deadlines import DeadlineSocket, ViewerTLSDeadlineExceeded
 
 MAX_BODY = 8192
 
 
 def make_handler(config: Config):
+    reference_settings = None
+    if config.reference_config_path:
+        from .reference_runtime import load_reference_settings
+        reference_settings = load_reference_settings(config.reference_config_path, config)
     queue = Queue(config.prototype_state_dir, config.photo_smoke_enabled,
-                  node_ids=config.prototype_node_ids) if config.prototype_state_dir else None
+                  node_ids=config.prototype_node_ids,
+                  treedar_node_ids=config.treedar_node_ids,
+                  viewer_enabled=config.viewer_enabled,
+                  reference_enabled=reference_settings is not None) if config.prototype_state_dir else None
+    service = facade = None
+    if config.viewer_enabled:
+        from .viewer_service import ViewerService
+        from .viewer_http import ViewerFacade
+        service = ViewerService(queue, config)
+        spool = Path(config.prototype_state_dir) / 'viewer-spool'
+        spool.mkdir(mode=0o700, exist_ok=True)
+        facade = ViewerFacade(service, config.viewer_token, config.viewer_staging_token, temp_dir=spool)
+    reference_runtime = None
+    if reference_settings is not None:
+        from .reference_runtime import ReferenceRuntime
+        try:
+            reference_runtime = ReferenceRuntime(queue, config, reference_settings)
+        except Exception:
+            if service:
+                service.close()
+            if queue:
+                queue.close()
+            raise
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "LedgeTopProcessing/0.1"
         prototype_queue = queue
+        viewer_service = service
+        reference_listener = reference_runtime
+        lifecycle_service = None
 
         def setup(self):
             super().setup()
@@ -58,7 +92,26 @@ def make_handler(config: Config):
                     probe_node("main", config.main_node_url, config.main_node_token))
 
         def do_GET(self):
+            if facade and facade.handle(self):
+                return
             if self.path.startswith("/v1/prototype/"):
+                prefix='/v1/prototype/nodes/'
+                if self.path.startswith(prefix) and '/schedule-owned' in self.path[len(prefix):]:
+                    if not self._authorized(operator=True):return
+                    if queue is None:
+                        self._reply(404,{'error':'prototype_disabled'});return
+                    parts=self.path[len(prefix):].split('/')
+                    if len(parts)!=3 or parts[1]!='schedule-owned':
+                        self._reply(404,{'error':'not_found'});return
+                    try:
+                        receipt=queue.owned_schedule_receipt(parts[0],parts[2])
+                        self._reply(200 if receipt is not None else 404,
+                            {'receipt':receipt} if receipt is not None else {'error':'owned_schedule_not_found'})
+                    except Conflict:
+                        self._reply(409,{'error':'conflict'})
+                    except ValueError:
+                        self._reply(400,{'error':'invalid_request'})
+                    return
                 if not self._authorized(observer=True):
                     return
                 if queue is None:
@@ -82,15 +135,20 @@ def make_handler(config: Config):
                     self._reply(404, {"error": "not_found"})
                 return
             if self.path == "/healthz":
-                self._reply(200, {"status": "ok", "mode": "routing_probe",
+                ready = self.lifecycle_service is None or self.lifecycle_service.healthy()
+                self._reply(200 if ready else 503, {"status": "ok" if ready else "unavailable", "mode": "routing_probe",
                                   "syntheticPrototypeEnabled": queue is not None,
-                                  "photoSmokeEnabled": config.photo_smoke_enabled})
+                                  "photoSmokeEnabled": config.photo_smoke_enabled,
+                                  "viewerEnabled": config.viewer_enabled})
             elif self.path == '/v1/options':
                 if self._authorized(observer=True):
-                    self._reply(200, {'mode': 'engine_option_discovery', 'executesWork': False,
-                        'viewerProviderReady': False, 'snapshotConsistency': 'best_effort_read_only', **catalog([
+                    snapshot = catalog([
                         ('local', config.local_node_url, config.local_node_token),
-                        ('main', config.main_node_url, config.main_node_token)])})
+                        ('main', config.main_node_url, config.main_node_token)])
+                    self._reply(200, {'mode': 'engine_option_discovery', 'executesWork': False,
+                        'viewerNativeApiEnabled': config.viewer_enabled,
+                        'viewerProviderReady': config.viewer_enabled and snapshot['ready'],
+                        'snapshotConsistency': 'best_effort_read_only', **snapshot})
             elif self.path == "/v1/nodes":
                 if self._authorized():
                     self._reply(200, {"nodes": self._nodes()})
@@ -98,6 +156,8 @@ def make_handler(config: Config):
                 self._reply(404, {"error": "not_found"})
 
         def do_POST(self):
+            if facade and facade.handle(self):
+                return
             prototype = self.path.startswith("/v1/prototype/")
             if self.path != "/v1/plan" and not prototype:
                 self._reply(404, {"error": "not_found"})
@@ -120,7 +180,17 @@ def make_handler(config: Config):
                 self._reply(413, {"error": "invalid_body_size"})
                 return
             try:
-                request = json.loads(self.rfile.read(length))
+                raw=self.rfile.read(length)
+                if self.path.startswith('/v1/prototype/nodes/') and self.path.endswith('/schedule-owned'):
+                    def unique(pairs):
+                        value={}
+                        for key,item in pairs:
+                            if key in value:raise ValueError('duplicate JSON field')
+                            value[key]=item
+                        return value
+                    request=json.loads(raw,object_pairs_hook=unique)
+                else:
+                    request=json.loads(raw)
                 if prototype:
                     if self.path == "/v1/prototype/jobs":
                         job, created = queue.submit(request)
@@ -129,14 +199,14 @@ def make_handler(config: Config):
                         self._reply(200, {"job": queue.claim(request)})
                     elif self.path.startswith("/v1/prototype/nodes/"):
                         identifier, _, action = self.path[len("/v1/prototype/nodes/"):].rpartition("/")
-                        methods = {"schedule": queue.schedule_node, "cancel": queue.cancel_node,
+                        methods = {"schedule": queue.schedule_node, "schedule-owned":queue.schedule_node_owned,"cancel": queue.cancel_node,
                                    "begin": queue.begin_node_update, "finish": queue.finish_node_update,
                                    "hold": queue.hold_node, "resume": queue.resume_node}
                         if action not in methods:
                             self._reply(404, {"error": "not_found"})
                         else:
                             result = methods[action](identifier, request)
-                            self._reply(200, result if action == "begin" else {"node": result})
+                            self._reply(200,result if action=='begin' else {'receipt':result} if action=='schedule-owned' else {'node':result})
                     elif operator and self.path.startswith("/v1/prototype/jobs/"):
                         identifier, _, action = self.path[len("/v1/prototype/jobs/"):].rpartition("/")
                         self._reply(200, {"job": queue.operator(identifier, action, request)})
@@ -148,10 +218,9 @@ def make_handler(config: Config):
                     return
                 if not isinstance(request, dict) or request.get("engine") != "odm":
                     raise ValueError("only the ODM planning contract is supported")
-                photos, size = request.get("photoCount"), request.get("inputBytes")
-                if (type(photos) is not int or not 1 <= photos <= 1_000_000
-                        or type(size) is not int or not 1 <= size <= 10**15):
-                    raise ValueError("photoCount and inputBytes must be positive integers")
+                photos = request.get("photoCount")
+                if type(photos) is not int or not 1 <= photos <= 1_000_000:
+                    raise ValueError("photoCount must be a positive integer")
             except Conflict as exc:
                 self._reply(409, {"error": "conflict", "detail": str(exc)})
                 return
@@ -159,26 +228,310 @@ def make_handler(config: Config):
                 self._reply(400, {"error": "invalid_request", "detail": str(exc)[:160]})
                 return
             local, main = self._nodes()
-            decision = plan(photos, size, local, main,
-                            config.local_max_photos, config.local_max_input_bytes)
+            decision = plan(photos, local, main, config.local_max_photos)
             self._reply(200, {"mode": "routing_probe", "executesWork": False,
                               **decision, "nodes": [local, main]})
 
     return Handler
 
 
+class ViewerTLSHTTPServer(ThreadingHTTPServer):
+    """Bound connections before allocating threads; handshake in the worker.
+
+    After the handshake, request headers have an absolute deadline and every
+    transfer must keep moving (see viewer_tls_deadlines). No fixed lifetime or
+    size cap applies to uploads or downloads that keep making progress.
+    """
+
+    handshake_timeout = 5.0
+    max_connections = 32
+    header_deadline = 15.0
+    progress_window = 30.0
+    progress_bytes = 16 * 1024
+
+    def __init__(self, address, handler, context):
+        self.viewer_tls_context = context
+        self._tls_slots = threading.BoundedSemaphore(self.max_connections)
+        super().__init__(address, handler)
+
+    def process_request(self, request, client_address):
+        if not self._tls_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException as error:
+            # ThreadingMixIn tracks a non-daemon thread before starting it;
+            # remove an unstarted thread so server_close can still join.
+            try:
+                threads = getattr(self, '_threads', None)
+                if hasattr(threads, 'reap'):
+                    threads.reap()
+                self.shutdown_request(request)
+            finally:
+                self._tls_slots.release()
+            if not isinstance(error, Exception):
+                raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            wrapped = None
+            try:
+                request.settimeout(self.handshake_timeout)
+                wrapped = self.viewer_tls_context.wrap_socket(
+                    request, server_side=True, do_handshake_on_connect=False)
+                wrapped.do_handshake()
+                connection = DeadlineSocket(
+                    wrapped, header_deadline=self.header_deadline,
+                    progress_window=self.progress_window,
+                    progress_bytes=self.progress_bytes)
+            except BaseException as error:
+                # A stalled or invalid client must not block acceptance or expose
+                # TLS failures, request details, or credentials in logs.
+                self.shutdown_request(wrapped if wrapped is not None else request)
+                if not isinstance(error, Exception):
+                    raise
+                return
+            super().process_request_thread(connection, client_address)
+        finally:
+            self._tls_slots.release()
+
+    def handle_error(self, request, client_address):
+        # A missed Viewer TLS deadline is expected client behaviour; keep peer
+        # and request details out of logs. Other errors keep default handling.
+        if isinstance(sys.exc_info()[1], ViewerTLSDeadlineExceeded):
+            return
+        super().handle_error(request, client_address)
+
+
+def create_viewer_tls_server(handler, host, port, *, server_context=None):
+    """Create the HTTPS listener for the existing authenticated Viewer facade."""
+    runtime = getattr(handler, 'reference_listener', None)
+    context = server_context if server_context is not None else getattr(runtime, '_server_context', None)
+    if context is None:
+        raise ValueError('Viewer TLS listener requires reference TLS configuration')
+    server = ViewerTLSHTTPServer((host, port), handler, context)
+    try:
+        server.viewer_tls = True
+        return server
+    except Exception:
+        server.server_close()
+        raise ValueError('Viewer TLS listener initialization failed') from None
+
+
+class CoordinatorService:
+    """Supervise listeners and drain every queue consumer before unlocking state.
+
+    Signals only set an Event. Shutdown runs outside serve_forever's thread;
+    in-flight streams/mutations finish naturally, without timeout abandonment.
+    """
+    def __init__(self, server, handler, viewer_tls_server=None):
+        self.server, self.handler = server, handler
+        self.viewer_tls_server = viewer_tls_server
+        self.server.daemon_threads, self.server.block_on_close = False, True
+        if viewer_tls_server is not None:
+            viewer_tls_server.daemon_threads, viewer_tls_server.block_on_close = False, True
+        self._lock = threading.Lock()
+        self._state, self._reason = 'starting', None
+        self._native_thread = None
+        self._viewer_tls_thread = None
+        self._reference_server = self._reference_thread = None
+        handler.lifecycle_service = self
+
+    def _failed(self, reason, stop):
+        with self._lock:
+            self._state, self._reason = 'failed', reason
+        stop.set()
+
+    def health(self):
+        reference = self.handler.reference_listener
+        with self._lock:
+            return dict(state=self._state, reason=self._reason,
+                nativeAlive=self._native_thread is not None and self._native_thread.is_alive(),
+                referenceAlive=reference is not None and self._reference_thread is not None and self._reference_thread.is_alive(),
+                viewerTlsAlive=self.viewer_tls_server is not None and self._viewer_tls_thread is not None
+                    and self._viewer_tls_thread.is_alive())
+
+    def healthy(self):
+        health = self.health()
+        return (health['state'] == 'ready' and health['nativeAlive']
+                and (self.handler.reference_listener is None or health['referenceAlive'])
+                and (self.viewer_tls_server is None or health['viewerTlsAlive']))
+
+    def _start_reference(self, stop):
+        runtime = self.handler.reference_listener
+        if runtime is None:
+            return
+        # The runtime owns start/close; wrap only this instance's server factory
+        # so an unexpected serving exception is sanitized and fails supervision.
+        factory = runtime._server_factory
+
+        def supervised_factory(*args, **kwargs):
+            server = factory(*args, **kwargs)
+            serve = server.serve_forever
+
+            def supervised(*serve_args, **serve_kwargs):
+                try:
+                    serve(*serve_args, **serve_kwargs)
+                    if not stop.is_set():
+                        self._failed('reference_listener_exited', stop)
+                except BaseException:
+                    self._failed('reference_listener_failed', stop)
+
+            server.serve_forever = supervised
+            self._reference_server = server
+            return server
+
+        runtime._server_factory = supervised_factory
+        try:
+            runtime.start()
+            self._reference_thread = runtime._thread
+        finally:
+            runtime._server_factory = factory
+
+    def _start_viewer_tls(self, stop):
+        if self.viewer_tls_server is None:
+            return
+
+        def serve_viewer_tls():
+            try:
+                self.viewer_tls_server.serve_forever(poll_interval=0.1)
+                if not stop.is_set():
+                    self._failed('viewer_tls_listener_exited', stop)
+            except BaseException:
+                self._failed('viewer_tls_listener_failed', stop)
+
+        self._viewer_tls_thread = threading.Thread(target=serve_viewer_tls,
+            name='processing-viewer-https', daemon=False)
+
+    def _close_server(self, server, thread, stop):
+        if server is None:
+            return
+        if thread is not None:
+            if thread.is_alive():
+                try:
+                    server.shutdown()
+                except BaseException:
+                    self._failed('listener_drain_failed', stop)
+            thread.join()
+        try:
+            server.server_close()  # ThreadingMixIn joins active non-daemon handlers.
+        except BaseException:
+            self._failed('listener_drain_failed', stop)
+            handlers = getattr(server, '_threads', None)
+            if handlers is not None:
+                handlers.join()
+
+    def run(self, stop):
+        if self._native_thread is not None:
+            raise ValueError('coordinator service already started')
+
+        def serve_native():
+            try:
+                self.server.serve_forever(poll_interval=0.1)
+                if not stop.is_set():
+                    self._failed('native_listener_exited', stop)
+            except BaseException:
+                self._failed('native_listener_failed', stop)
+
+        self._native_thread = threading.Thread(target=serve_native, name='processing-native-http', daemon=False)
+        native_started = False
+        try:
+            if self.handler.viewer_service:
+                self.handler.viewer_service.start()
+            self._start_reference(stop)
+            self._native_thread.start()
+            native_started = True
+            self._start_viewer_tls(stop)
+            if self._viewer_tls_thread is not None:
+                self._viewer_tls_thread.start()
+            with self._lock:
+                if self._state != 'failed':
+                    self._state = 'ready'
+            while not stop.wait(0.1):
+                if not self._native_thread.is_alive():
+                    self._failed('native_listener_exited', stop)
+                if self.handler.reference_listener is not None and (
+                        self._reference_thread is None or not self._reference_thread.is_alive()):
+                    self._failed('reference_listener_exited', stop)
+                if self.viewer_tls_server is not None and (
+                        self._viewer_tls_thread is None or not self._viewer_tls_thread.is_alive()):
+                    self._failed('viewer_tls_listener_exited', stop)
+        except BaseException:
+            self._failed('coordinator_start_failed', stop)
+        finally:
+            stop.set()
+            with self._lock:
+                if self._state != 'failed':
+                    self._state = 'draining'
+            service = self.handler.viewer_service
+            if service is not None and hasattr(service, '_stop'):
+                service._stop.set()  # Prevent another dispatcher tick during HTTP drain.
+            # Stop admission on BOTH listeners before waiting for either set of
+            # handlers. A slow native upload must not leave reference admission
+            # open throughout the drain (or vice versa).
+            for listener, thread in ((self.server, self._native_thread if native_started else None),
+                                     (self._reference_server, self._reference_thread),
+                                     (self.viewer_tls_server, self._viewer_tls_thread)):
+                if listener is not None and thread is not None and thread.is_alive():
+                    try:
+                        listener.shutdown()
+                    except BaseException:
+                        self._failed('listener_drain_failed', stop)
+            self._close_server(self.server, self._native_thread if native_started else None, stop)
+            runtime = self.handler.reference_listener
+            if runtime is not None:
+                try:
+                    runtime.close()
+                except BaseException:
+                    self._failed('reference_drain_failed', stop)
+                self._close_server(self._reference_server, self._reference_thread, stop)
+            self._close_server(self.viewer_tls_server, self._viewer_tls_thread, stop)
+            if service is not None:
+                try:
+                    service.close()
+                except BaseException:
+                    self._failed('dispatcher_drain_failed', stop)
+                thread = getattr(service, '_thread', None)
+                if thread is not None:
+                    thread.join()  # close()'s legacy ten-second join is insufficient.
+            if self.handler.prototype_queue:
+                self.handler.prototype_queue.close()
+            with self._lock:
+                failed = self._state == 'failed'
+                if not failed:
+                    self._state = 'stopped'
+        return 2 if failed else 0
+
+
 def main():
     config = from_environment()
+    standalone_tls = None
+    if config.viewer_tls_certificate:
+        from .viewer_tls import standalone_viewer_tls_context
+        standalone_tls = standalone_viewer_tls_context(config.viewer_tls_certificate, config.viewer_tls_private_key)
     handler = make_handler(config)
     server = ThreadingHTTPServer((config.bind_host, config.port), handler)
-    print(f"LedgeTop Processing listening on {config.bind_host}:{config.port}", flush=True)
     try:
-        server.serve_forever()
-    finally:
+        viewer_tls_server = (create_viewer_tls_server(handler, config.bind_host, config.viewer_tls_port,
+                                                      server_context=standalone_tls)
+                             if config.viewer_tls_port is not None else None)
+    except Exception:
         server.server_close()
-        if handler.prototype_queue:
-            handler.prototype_queue.close()
+        raise
+    stop = threading.Event()
+    for name in ('SIGINT','SIGTERM'):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), lambda *_args: stop.set())
+    print(f"LedgeTop Processing listening on {config.bind_host}:{config.port}", flush=True)
+    if viewer_tls_server is not None:
+        print(f"LedgeTop Processing Viewer TLS listening on {config.bind_host}:{config.viewer_tls_port}", flush=True)
+    service = CoordinatorService(server, handler, viewer_tls_server)
+    result = service.run(stop)
+    if result:
+        print('LedgeTop Processing unavailable: ' + service.health()['reason'], file=sys.stderr, flush=True)
+    return result
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -1,0 +1,4 @@
+# The extracted photo coordinator runtime uses the Python standard library.
+# Optional TreeDar/LiDAR integrations have separate dependencies and are not
+# enabled or qualified by this image. Test-only dependencies are pinned in
+# requirements-test.txt.

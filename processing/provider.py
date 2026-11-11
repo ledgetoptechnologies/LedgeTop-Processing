@@ -48,6 +48,11 @@ def _viewer_type(info: dict) -> str | None:
         return "clusterodm"
     if info["version"].startswith("2.") and not sentinel:
         return "nodeodm"
+    # The installed ODM 3 API reports the same semantic version for API and
+    # engine. Do not broaden this compatibility rule to unknown 3.x engines.
+    if (info["version"].startswith("3.") and not sentinel
+            and info["engine"] == "odm" and info["engineVersion"] == info["version"]):
+        return "nodeodm"
     return None
 
 
