@@ -1,0 +1,30 @@
+{
+  "observedAt": "2026-11-11T15:12:54Z",
+  "scope": "read-only main binding metadata; no live swap or deep data walk",
+  "base": "sha256:a53446d53dee7de001f6cdc0dd877fcca7844f8b31e3773f463b915f8c9ac654",
+  "target": "sha256:d1b3a6af8806b867a96c75ba2b22e35c45fd937217ccb9860c3fcbe6e75499bd",
+  "oldContainerId": "a22ca003c7b5e9a0dafb40e4f5019df22e70dd5b5ce92a40a8224e8cae8d67fc",
+  "ingressContainerId": "7147630118a3b25c6e84317314d02ff957ff8e5b7cc523036b5fe67e16a60ac0",
+  "sourceComposeSha256": {
+    "rollback": "00ce4bb15dac8e5f66d05d7de533d9095a861c94c7606bebc7e9cc989c13372d",
+    "override": "61ddb43bb5b4e7701ce8abcf5c49c04a86e04c7a027563cb389254d1497e29e9",
+    "bootstrapRole": "235b5e192fc74c0e26dbd9fa8de55e756e9321ca9561b76cb0fa659f54161191"
+  },
+  "nginxSha256": "9a0f3baa33182de300b76fed8ab680968789b399cc8b050cdf66b9c18c36c482",
+  "docker": "29.6.2",
+  "compose": "5.3.1",
+  "smallHelperUnchanged": true,
+  "nativeSwapQualified": false,
+  "installed": false,
+  "unitTests": {
+    "runner": "python -m unittest tests.test_retained_main_engine_swap tests.test_retained_small_engine_swap",
+    "total": 45,
+    "passed": 39,
+    "skipped": 6,
+    "failed": 0,
+    "platform": "Windows"
+  },
+  "helperSha256": "a4d2f545e6dd5246480593ee7ea5a6a6747538eec2c81a79f1eef676c598c2cc",
+  "smallHelperSha256": "1cad9575bfe86647b7db0ccb55266823450878b6eabb009ad6af9b20f7b634bf",
+  "hashRepresentation": "frozen Git blob bytes (LF), not Windows checkout conversion"
+}
