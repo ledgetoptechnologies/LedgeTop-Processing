@@ -1,9 +1,12 @@
 import copy
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -13,6 +16,9 @@ from ops.retained_small_engine_swap import (
     BASE, TARGET, FLAG, Held, Runtime, apply, candidate_config, canonical, command_with_retention, main,
     digest, no_cluster_claims, snapshot_tree, terminal_inventory, verify_owned_receipt, verify_retained,
 )
+from processing.maintenance import Conflict
+from processing.prototype import Queue, VIEWER_PROFILE
+from processing.viewer_tasks import TaskStore
 
 
 class FakeRuntime:
@@ -212,6 +218,144 @@ class RetainedSwapTests(unittest.TestCase):
         self.assertFalse(report['writes'])
         self.assertNotIn('private-not-for-output', output.getvalue())
         self.assertEqual(runtime.method_calls, [('snapshot', (), {})])
+
+
+class RealQueueRetentionFenceTests(unittest.TestCase):
+    """Real SQLite queue/claim transactions, not a copy of the swap checks."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.now = datetime(2026, 11, 11, 12, tzinfo=timezone.utc)
+        self.queue = Queue(Path(self.temp.name) / 'queue', node_ids=('cluster', 'main'),
+                           viewer_enabled=True, clock=lambda: self.now)
+
+    def tearDown(self):
+        self.queue.close()
+        self.temp.cleanup()
+
+    def submit(self, name):
+        return self.queue.submit({'requestId': name, 'profile': VIEWER_PROFILE,
+                                  'environment': 'production'})[0]
+
+    def claim(self, worker, node='cluster', **bounds):
+        return self.queue.claim({'workerId': worker, 'nodeId': node,
+                                 'profiles': [VIEWER_PROFILE]}, **bounds)
+
+    def schedule_owned(self):
+        node = self.queue.get_node('cluster')
+        stamp = self.now.isoformat().replace('+00:00', 'Z')
+        request = dict(schemaVersion=1, requestId=str(uuid.uuid4()), authorityId=self.queue.authority_id,
+                       expectedRevision=node['revision'], drainAt=stamp, notBefore=stamp,
+                       afterJobId=None, targetImage=TARGET)
+        receipt = self.queue.schedule_node_owned('cluster', request)
+        verify_owned_receipt(receipt, request)
+        return receipt
+
+    def begin(self):
+        node = self.queue.get_node('cluster')
+        return self.queue.begin_node_update('cluster', {'expectedRevision': node['revision'],
+                                                        'planId': node['planId']})
+
+    def test_stale_eligible_snapshot_cannot_claim_draining_or_updating_small_node(self):
+        first, second = self.submit('first-photo'), self.submit('second-photo')
+        snapshot = self.queue.dispatch_snapshot()
+        bounds = dict(eligible_job_ids=[first['id'], second['id']],
+                      eligible_node_ids=['cluster', 'main'], expected_queue_sequence=snapshot['sequence'])
+        receipt = self.schedule_owned()
+        self.assertEqual(receipt['state'], 'draining')
+        # Supply the pre-maintenance eligibility snapshot deliberately. The
+        # queue's own transaction must still reject every new cluster claim.
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            claims = list(workers.map(lambda i: self.claim('draining-worker-' + str(i), **bounds), range(4)))
+        self.assertEqual(claims, [None] * 4)
+        self.assertEqual([job['status'] for job in self.queue.list()], ['queued', 'queued'])
+        self.assertEqual(self.begin()['node']['state'], 'updating')
+        self.assertIsNone(self.claim('updating-worker', **bounds))
+        self.assertIsNone(self.queue.get(first['id'])['nodeId'])
+        self.assertIsNone(self.queue.get(second['id'])['nodeId'])
+        # The independent main node is neither fenced nor restarted.
+        main = self.claim('main-worker', 'main', **bounds)
+        self.assertEqual(main['nodeId'], 'main')
+        self.assertEqual(main['id'], first['id'])
+        self.assertEqual(self.queue.get(second['id'])['status'], 'queued')
+
+    def test_linked_running_job_blocks_begin_before_viewer_assignment_then_unrelated_main_does_not(self):
+        store = TaskStore(self.queue, Path(self.temp.name) / 'viewer-inputs')
+        identifier = str(uuid.uuid4())
+        store.initialize(identifier, 'Synthetic retained-fence source', [], None, 'production')
+        body = b'synthetic source bytes only'
+        store.upload(identifier, 'photo.jpg', io.BytesIO(body), len(body))
+        store.commit(identifier)
+        claimed = self.claim('viewer-broker')
+        linked = store.task(identifier)
+        self.assertEqual(linked['job']['id'], claimed['id'])
+        self.assertEqual(linked['job']['status'], 'running')
+        self.assertIsNone(linked['node_id'])
+        self.assertIsNone(linked['engine_uuid'])
+        # This is the real Queue.claim -> ViewerTask assignment gap. The job
+        # row already owns cluster, so maintenance cannot begin in that gap.
+        self.submit('main-photo')
+        main = self.claim('main-worker', 'main')
+        queued = self.submit('waiting-photo')
+        self.schedule_owned()
+        with self.assertRaises(Conflict):
+            self.begin()
+        self.assertEqual(self.queue.get(claimed['id'])['status'], 'running')
+        self.queue.complete(claimed['id'], {'claimToken': claimed['claimToken'],
+                                            'status': 'succeeded', 'result': {}})
+        self.assertEqual(self.begin()['node']['state'], 'updating')
+        self.assertEqual(self.queue.get(main['id'])['status'], 'running')
+        self.assertEqual(self.queue.get(queued['id'])['status'], 'queued')
+        self.assertIsNone(self.claim('small-after-begin'))
+
+    def test_claim_transaction_winning_before_owned_drain_is_visible_to_begin(self):
+        self.submit('racing-photo')
+        checked, release, schedule_started = threading.Event(), threading.Event(), threading.Event()
+        original_node = self.queue._node
+        claims, receipts, errors = [], [], []
+
+        def observed_node(db, identifier):
+            row = original_node(db, identifier)
+            if threading.current_thread().name == 'retained-claim' and not checked.is_set():
+                self.assertEqual(row['state'], 'active')
+                checked.set()
+                self.assertTrue(release.wait(3), 'test failed to release real claim transaction')
+            return row
+
+        def claim_first():
+            try:
+                claims.append(self.claim('racing-worker'))
+            except Exception as error:
+                errors.append(error)
+
+        def drain_second():
+            schedule_started.set()
+            try:
+                receipts.append(self.schedule_owned())
+            except Exception as error:
+                errors.append(error)
+
+        claimant = threading.Thread(target=claim_first, name='retained-claim')
+        scheduler = threading.Thread(target=drain_second, name='retained-drain')
+        with patch.object(self.queue, '_node', side_effect=observed_node):
+            claimant.start()
+            try:
+                self.assertTrue(checked.wait(3))
+                scheduler.start()
+                self.assertTrue(schedule_started.wait(3))
+            finally:
+                release.set()
+                claimant.join(timeout=5)
+                if scheduler.ident is not None:
+                    scheduler.join(timeout=5)
+        self.assertFalse(claimant.is_alive())
+        self.assertFalse(scheduler.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(claims), 1)
+        self.assertEqual(claims[0]['nodeId'], 'cluster')
+        self.assertEqual(receipts[0]['state'], 'draining')
+        self.assertEqual(self.queue.get(claims[0]['id'])['status'], 'running')
+        with self.assertRaises(Conflict):
+            self.begin()
 
 
 if __name__ == '__main__':
