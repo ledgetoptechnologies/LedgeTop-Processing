@@ -2,10 +2,16 @@
 
 NodeODM accepts a starting line but no ending line. Closing the response after
 a verified prefix avoids buffering or downloading the entire remaining log.
-Only returned records are consumed by the caller's ordinary line cursor.
+Each returned record represents exactly one upstream line. An individually
+oversized but fully validated string gets an explicit placeholder; its original
+is never altered on the engine. Unverifiable records never advance the cursor.
 """
+import codecs
 import json
 import time
+
+
+OVERSIZED_OUTPUT_RECORD = '[LedgeTop: oversized log record omitted; original remains on engine.]'
 
 
 def read_output_prefix(response, *, max_lines=256, max_bytes=512 * 1024,
@@ -59,32 +65,59 @@ def read_output_prefix(response, *, max_lines=256, max_bytes=512 * 1024,
     while True:
         if value != ord('"'):
             raise ValueError('output record must be a string')
-        token, escaped = bytearray(b'"'), False
+        token, utf8 = bytearray(b'"'), bytearray(b'"')
+        decoder = codecs.getincrementaldecoder('utf-8')('strict')
+        escaped, unicode_remaining, token_size, oversized = False, 0, 1, False
         while True:
             value = take()
             if value is None:
                 raise ValueError('unfinished output record')
-            token.append(value)
-            if len(token) > max_bytes - 2:
-                if records:
-                    return records
-                raise ValueError('individual output record exceeds bound')
-            if escaped:
+            token_size += 1
+            utf8.append(value)
+            if len(utf8) >= 4096:
+                decoder.decode(utf8)
+                utf8.clear()
+            if not oversized:
+                if token_size > max_bytes - 2:
+                    if records:
+                        return records
+                    # Stop retaining the string, but validate all remaining
+                    # UTF-8/JSON lexical bytes before representing its line.
+                    oversized = True
+                    token.clear()
+                else:
+                    token.append(value)
+            if unicode_remaining:
+                if value not in b'0123456789abcdefABCDEF':
+                    raise ValueError('invalid output Unicode escape')
+                unicode_remaining -= 1
+            elif escaped:
+                if value == ord('u'):
+                    unicode_remaining = 4
+                elif value not in b'"\\/bfnrt':
+                    raise ValueError('invalid output escape')
                 escaped = False
+            elif value < 32:
+                raise ValueError('invalid output control byte')
             elif value == ord('\\'):
                 escaped = True
             elif value == ord('"'):
+                decoder.decode(utf8, final=True)
                 break
-        record = json.loads(token.decode('utf-8'))
+        record = OVERSIZED_OUTPUT_RECORD if oversized else json.loads(token.decode('utf-8'))
         separator = significant()
         if separator not in (ord(','), ord(']')):
             raise ValueError('invalid output array separator')
         # Bound the facade's canonical JSON too, including escaped Unicode.
         size = len(json.dumps(record, ensure_ascii=True).encode('ascii')) + bool(records)
         if page_bytes + size > max_bytes:
-            if not records:
-                raise ValueError('individual output record exceeds bound')
-            return records
+            if records:
+                return records
+            # Raw UTF-8 may fit while canonical escaped JSON does not.
+            record = OVERSIZED_OUTPUT_RECORD
+            size = len(json.dumps(record).encode('ascii'))
+            if page_bytes + size > max_bytes:
+                raise ValueError('output page cannot represent oversized record')
         records.append(record)
         page_bytes += size
         if separator == ord(']'):

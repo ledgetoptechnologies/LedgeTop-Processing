@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
-from processing.engine_output import read_output_prefix
+from processing.engine_output import OVERSIZED_OUTPUT_RECORD, read_output_prefix
 from processing.viewer_service import EngineUnavailable, NativeEngine
 
 
@@ -54,14 +54,43 @@ class OutputPrefixTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     read_output_prefix(Response(raw, 1))
 
-    def test_oversized_record_is_not_truncated_or_skipped(self):
+    def test_oversized_record_is_explicitly_represented_without_skipping(self):
         raw = json.dumps(['good', 'x' * 200, 'never skip to this']).encode()
         self.assertEqual(read_output_prefix(Response(raw), max_bytes=100), ['good'])
-        with self.assertRaises(ValueError):
-            read_output_prefix(Response(json.dumps(['x' * 200, 'tail']).encode()), max_bytes=100)
+        self.assertEqual(read_output_prefix(
+            Response(json.dumps(['x' * 200, 'tail']).encode()), max_bytes=100),
+            [OVERSIZED_OUTPUT_RECORD, 'tail'])
         # Encoded Unicode can exceed the facade budget while raw UTF-8 fits.
+        self.assertEqual(read_output_prefix(Response(
+            json.dumps(['🌳' * 10], ensure_ascii=False).encode()), max_bytes=100),
+            [OVERSIZED_OUTPUT_RECORD])
+
+    def test_oversized_discard_still_validates_utf8_escapes_and_separator(self):
+        prefix = b'["' + b'x' * 200
+        for suffix in (b'\\q"]', b'\\u00xz"]', b'\xff"]', b'\xe2\x82"]',
+                       b'\n"]', b'"null]', b'\\', b''):
+            with self.subTest(suffix=suffix), self.assertRaises(ValueError):
+                read_output_prefix(Response(prefix + suffix, 1), max_bytes=100)
+        raw = prefix + b'\\uD83C\\uDF33,\\\\\\"valid"]'
+        self.assertEqual(read_output_prefix(Response(raw, 1), max_bytes=100),
+                         [OVERSIZED_OUTPUT_RECORD])
+
+    def test_large_first_record_then_normal_line_preserves_exact_cursor(self):
+        records = ['prefix 🌳 ' + 'x' * (600 * 1024) + ' \\"ending', '', 'normal,next']
+        response = Response(json.dumps(records, ensure_ascii=False).encode(), 8191)
+        page = read_output_prefix(response, max_lines=1)
+        self.assertEqual(page, [OVERSIZED_OUTPUT_RECORD])
+        self.assertLessEqual(response.largest_read, 8192)
+        self.assertEqual(read_output_prefix(Response(json.dumps(records[len(page):]).encode())), records[1:])
+
+    def test_oversized_discard_cannot_escape_wire_or_time_bounds(self):
+        response = Response(b'["' + b'x' * 20000 + b'"]')
         with self.assertRaises(ValueError):
-            read_output_prefix(Response(json.dumps(['🌳' * 10], ensure_ascii=False).encode()), max_bytes=100)
+            read_output_prefix(response, max_bytes=100)
+        self.assertLessEqual(response.consumed, 7 * 100 + 16384 + 1)
+        with self.assertRaises(ValueError):
+            read_output_prefix(Response(b'["' + b'x' * 200 + b'"]'),
+                               max_bytes=100, deadline=time.monotonic() - 1)
 
     def test_verified_page_does_not_claim_to_validate_unread_suffix(self):
         self.assertEqual(read_output_prefix(Response(b'["good",malformed'), max_lines=1), ['good'])
