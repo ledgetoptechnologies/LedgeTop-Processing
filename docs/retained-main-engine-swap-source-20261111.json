@@ -62,5 +62,55 @@
       "running": false
     },
     "ownedContainerGone": true
+  },
+  "latestSource": {
+    "head": "662a32e2e6b8e75a27874bf1c9df76f0c59d2c48",
+    "helperSha256": "a8208f269269e4354b56ef8e6ccbcaced587ffd4d7bf9b9281db2a988b479ae6",
+    "change": "fixed-main NVIDIA Options null admission; no HostConfig equivalence relaxation",
+    "priorHelperSha256": "a4d2f545e6dd5246480593ee7ea5a6a6747538eec2c81a79f1eef676c598c2cc",
+    "nativeQualified": false
+  },
+  "latestLinuxUnitTests": {
+    "head": "662a32e2e6b8e75a27874bf1c9df76f0c59d2c48",
+    "image": "sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1",
+    "filesVerifiedAgainstGitBlob": 80,
+    "sourceTarSha256": "15ba7980caebc18943cc4409b408df4e60a9015d616df638e40d477f5b2502f8",
+    "scope": "Linux root unit tests only; no Docker socket, SSH, host data, native swap or network",
+    "capabilities": [
+      "CHOWN",
+      "DAC_OVERRIDE",
+      "FOWNER"
+    ],
+    "reason": "actual UID1000 root-owned metadata tests in isolated tmpfs",
+    "total": 46,
+    "passed": 46,
+    "skipped": 0,
+    "failed": 0,
+    "runnerExit": 0,
+    "state": {
+      "exitCode": 0,
+      "oom": false,
+      "running": false
+    },
+    "ownedContainerGone": true
+  },
+  "latestReadOnlyAdmission": {
+    "observedAt": "2026-11-11T15:29:33.038845+00:00",
+    "head": "662a32e2e6b8e75a27874bf1c9df76f0c59d2c48",
+    "scope": "one default read-only CLI inspection, negative admission only",
+    "exit": 2,
+    "busyRefusal": true,
+    "redactedCliDiagnostic": "Main-node swap held: main owns unfinished claim. No automatic rollback or replay.",
+    "sourceArchiveSha256": "d9751b253894ec4378c1d08ba4f4390da8afd44f174101aac8ba9b6af4cb56f0",
+    "readbackUnchanged": true,
+    "mainContainerId": "a22ca003c7b5e9a0dafb40e4f5019df22e70dd5b5ce92a40a8224e8cae8d67fc",
+    "mainNodeRevision": 43,
+    "originalJobNativeAndEngineIdentitiesUnchanged": true,
+    "generationWasProtocolDerivedNotDirectDatabaseField": true,
+    "noMutationReceiptsCreated": true,
+    "ownedProcessGroupExited": true,
+    "privateCredentialCopyRemoved": true,
+    "originalCredentialsUnchanged": true,
+    "nativeQualified": false
   }
 }

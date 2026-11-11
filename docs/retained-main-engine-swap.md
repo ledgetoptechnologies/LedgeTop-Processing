@@ -145,3 +145,29 @@ TMP/GPU profile, ingress, export duration/capacity and live host integration rem
 unqualified. No live apply or native fixture was run.
 Synthetic passes do not establish real job delivery, crash/power-loss safety,
 large-data backup duration, autonomous reboot recovery, or a completed goal.
+
+## Fixed-profile correction and actual busy refusal — 15:29 UTC
+
+An initial default inspection safely held on a source mistake: the fixed main
+GPU profile expected Options `{}` while Docker actually reports `null`. No
+mutation or busy-admission proof was claimed for that attempt. Source 662a32e2
+corrects only that fixed expectation, with a negative `{}` case; shared
+HostConfig equivalence and every other GPU/resource field remain unchanged.
+
+The corrected source passed all 46 main/small Linux-root unit cases, zero skips
+or failures, under the same isolated limits and ownership cleanup. One new
+default inspection on the real main host then exited 2 with `main owns unfinished
+claim` before any data walk or target-image inspection. No `--prepare` or
+`--apply` action was used, and no maintenance schedule, receipt, backup, container
+or configuration mutation occurred. Main's exact container/image/PID, active
+revision43/plan, broker/native and original running engine identities were
+unchanged in before/after read-only API and Docker projections. Generation1 was
+derived from the installed request-identity protocol, not directly read from
+a database field.
+
+The existing UID1000 maintenance credential file stayed unchanged. One separately
+authorized root-private, O_EXCL0600 task-owned copy was verified in memory and
+removed after the helper and its process group exited. No credential contents
+or credential digest were printed or retained. Only source and safe evidence
+remain in the private inspection root. This is actual **negative admission**
+proof while main is busy, not native replacement or positive idle admission.
