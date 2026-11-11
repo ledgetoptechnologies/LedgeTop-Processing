@@ -1,0 +1,79 @@
+{
+  "sourceCommit": "984f8bc4bae76b2a1c854f94d4dfa73bb989f250",
+  "sourceMockCases": {
+    "passed": 4,
+    "failed": 0,
+    "bothMaterializationsHashVerified": true
+  },
+  "small": {
+    "image": "sha256:9c9f7ed05e0a8d2e4a370a75dd7b8d8524a0603205e79dfc9046239818237940",
+    "baseImage": "sha256:5ce31be03711d280e7f97ee3820dd982b68227181165b3f430b037447c3d13b6",
+    "patchCommit": "984f8bc4bae76b2a1c854f94d4dfa73bb989f250",
+    "sourceHashes": {
+      "config.js": "cc422dceebea33876082c17084e165e40bd2f389df63f0e3afe3ba37e3edf2a5",
+      "TaskManager.js": "326639d70c12cf62acf979633937861ff929da7eda9d3805b9bf4f43af2ea2c5"
+    },
+    "cases": [
+      {
+        "phase": "startup",
+        "infoAvailable": true,
+        "maxImages": 1000,
+        "optionCount": 82,
+        "terminalTasks": 3,
+        "sentinelHashesRetained": 5,
+        "cleanStop": true
+      },
+      {
+        "phase": "restart",
+        "infoAvailable": true,
+        "maxImages": 1000,
+        "optionCount": 82,
+        "terminalTasks": 3,
+        "sentinelHashesRetained": 5,
+        "cleanStop": true
+      }
+    ],
+    "limits": "real API startup and clean restart with synthetic expired state only; no GPU/photo work, outage or power-loss proof",
+    "productionChanged": false,
+    "ownedContainerRemoved": true
+  },
+  "main": {
+    "image": "sha256:d1b3a6af8806b867a96c75ba2b22e35c45fd937217ccb9860c3fcbe6e75499bd",
+    "base": "sha256:a53446d53dee7de001f6cdc0dd877fcca7844f8b31e3773f463b915f8c9ac654",
+    "patchCommit": "984f8bc4bae76b2a1c854f94d4dfa73bb989f250",
+    "sourceHashes": {
+      "config.js": "602666721a385552e89b4c9fd0868c9e370ef534962443e959868abf047090f1",
+      "libs/TaskManager.js": "d7c78e953bf485309647c11ab81278ed12fb8f69013b576bf09c69057955d9a3"
+    },
+    "cases": [
+      {
+        "phase": "startup",
+        "cleanExit": 0,
+        "oom": false,
+        "terminalTasks": 3,
+        "sentinels": 8,
+        "optionCount": 80,
+        "startedAt": "2026-11-11T12:53:09.830865965Z",
+        "maxImages": 1000,
+        "flagProbe": true
+      },
+      {
+        "phase": "restart",
+        "cleanExit": 0,
+        "oom": false,
+        "terminalTasks": 3,
+        "sentinels": 8,
+        "optionCount": 80,
+        "startedAt": "2026-11-11T12:53:21.939657756Z",
+        "maxImages": 1000,
+        "flagProbe": true
+      }
+    ],
+    "limits": "No photo processing, production install, delivery, crash/OOM or power-loss proof.",
+    "productionChanged": false,
+    "ownedContainersAndVolumesRemoved": true,
+    "fixtureScriptSha256": "cbda042cd17f7fec0985d398b3e7edb81a9c244213ff669ec7b8e89f19caa0bd",
+    "executionHost": "local Docker Desktop Linux staging"
+  },
+  "scope": "Synthetic expired-state startup and clean restart only; no live installation or crash/power-loss proof."
+}
