@@ -109,3 +109,10 @@ label. The separately corrected helper now validates that label against the
 exact prior container name before comparison. This harness pins those reviewed
 bytes without discarding other labels or mount differences. Full native success
 is still a separate required observation.
+
+The subsequent full native attempt completed backup and creation, then refused
+application configuration whose Env list had a different order but identical
+unique names/values. The corrected helper compares those exact environment
+maps while retaining strict checks elsewhere. It saves the created candidate's
+full inspect privately before rejecting any comparison. This harness pins the
+new source; prior failed attempts remain qualification evidence, not a success.
