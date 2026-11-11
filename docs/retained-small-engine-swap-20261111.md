@@ -53,7 +53,9 @@ Before Compose can remove the old container, the helper retains its complete
 filesystem export, including unmounted tmp/log state; separately backs up and
 compares the named data volume; captures tmp with numeric ownership; and stores
 private source/result hashes and task-index identities. Required disk headroom
-is backup size plus8GiB. This is backup admission, not a photo-job byte cap.
+is a fixed8GiB pinned-base export budget, plus inspected writable-layer size,
+named-volume size and an additional8GiB free-space reserve. This is backup
+admission, not a photo-job byte cap.
 It never deletes terminal jobs to satisfy maintenance.
 
 Only then may it create the pinned child without starting it, verify settings,
@@ -125,3 +127,13 @@ retain exact canonical JSON comparison; mount equality is unchanged. This
 exception applies only to the recreated candidate comparison, never to the
 original container's immutable preparation/admission checks. No arbitrary
 Docker defaults are normalized, and no live OOM policy is changed by this patch.
+
+The export budget deliberately does not use Docker image Size alone. A parent
+rehearsal exported6,365,878,272bytes (about5.93GiB) while that daemon reported
+image Size3,952,627,133bytes. The verified archive SHA256 was
+`bde0009823a6f8db67dcfe079cb171eb47cbf57601820bf31240d169a7b185a0`;
+parent removed only that owned synthetic bulk backup after retaining evidence.
+The conservative8GiB base budget applies only to the exact fixed5ce image,
+whose identity is rechecked before backup. It is not a generic storage quota
+or a change to photo-count routing. Accounting and exact-boundary tests require
+strictly more free space than export budget plus writable/data copies/reserve.

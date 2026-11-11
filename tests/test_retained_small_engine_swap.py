@@ -18,6 +18,7 @@ from ops.retained_small_engine_swap import (
     BASE, TARGET, FLAG, Held, Runtime, apply, candidate_config, canonical, command_with_retention, main,
     digest, no_cluster_claims, snapshot_tree, terminal_inventory, verify_owned_receipt, verify_retained,
     host_config_equivalent,
+    BASE_EXPORT_BUDGET, RESERVE, require_backup_headroom,
 )
 from processing.maintenance import Conflict
 from processing.prototype import Queue, VIEWER_PROFILE
@@ -94,6 +95,22 @@ class FakeRuntime:
 
 
 class RetainedSwapTests(unittest.TestCase):
+    def test_pinned_base_export_budget_does_not_use_underreported_image_size(self):
+        measured_export, daemon_image_size = 6365878272, 3952627133
+        self.assertGreater(measured_export, daemon_image_size)
+        self.assertEqual(BASE_EXPORT_BUDGET, 8 * 1024 ** 3)
+        self.assertGreater(BASE_EXPORT_BUDGET, measured_export)
+        writable, data = 1024 ** 2, 2 * 1024 ** 2
+        minimum = BASE_EXPORT_BUDGET + writable + data + RESERVE
+        self.assertEqual(require_backup_headroom(minimum + 1, writable, data), minimum)
+        for free in (minimum, minimum - 1):
+            with self.subTest(free=free), self.assertRaises(Held):
+                require_backup_headroom(free, writable, data)
+        for free, rw, files in ((True, 0, 0), (minimum + 1, -1, 0),
+                                (minimum + 1, 0, -1), (minimum + 1, 0.0, 0)):
+            with self.subTest(accounting=(free, rw, files)), self.assertRaises(Held):
+                require_backup_headroom(free, rw, files)
+
     def test_only_observed_oom_default_representation_is_equivalent(self):
         base = {'OomKillDisable': None, 'Memory': 805306368, 'NanoCpus': 500000000,
                 'ReadonlyRootfs': False, 'Binds': ['owned-volume:/var/www/data']}

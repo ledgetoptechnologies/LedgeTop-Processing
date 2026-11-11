@@ -41,6 +41,10 @@ SOURCE_HASHES = {
     'libs/TaskManager.js': '326639d70c12cf62acf979633937861ff929da7eda9d3805b9bf4f43af2ea2c5',
 }
 RESERVE = 8 * 1024 ** 3
+# This exact base exported 6,365,878,272 bytes on the qualified daemon, whose
+# image Size reported only 3,952,627,133. Do not treat image accounting as tar
+# capacity. This fixed-image backup budget is unrelated to job eligibility.
+BASE_EXPORT_BUDGET = 8 * 1024 ** 3
 
 
 class Held(RuntimeError):
@@ -73,6 +77,14 @@ def command_with_retention(command):
             command[:3] == ['--max-images', '1000', '--token'] and
             isinstance(command[3], str) and bool(command[3]), 'unexpected engine command')
     return [*command, FLAG]
+
+
+def require_backup_headroom(free_bytes, writable_bytes, data_bytes):
+    require(all(type(value) is int and value >= 0 for value in
+                (free_bytes, writable_bytes, data_bytes)), 'invalid retained backup accounting')
+    minimum = BASE_EXPORT_BUDGET + writable_bytes + data_bytes + RESERVE
+    require(free_bytes > minimum, 'insufficient space for retained backup and reserve')
+    return minimum
 
 
 def host_config_equivalent(before, after):
@@ -348,12 +360,12 @@ class Runtime:
 
     def stop_and_backup(self, prepared, root):
         # Reserve enough for Docker's full filesystem export plus data copy.
-        base_size = json.loads(self.docker('image', 'inspect', BASE))[0]['Size']
+        base = json.loads(self.docker('image', 'inspect', BASE))[0]
+        require(base['Id'] == BASE, 'pinned base image identity changed')
         size = json.loads(self.docker('inspect', '--size', ENGINE))[0].get('SizeRw')
         require(type(size) is int and size >= 0, 'old writable-layer size unknown')
         data_size = int(self.run(['du', '-sb', str(DATA)]).split()[0])
-        require(shutil.disk_usage(root).free > base_size + size + data_size + RESERVE,
-                'insufficient space for retained backup and reserve')
+        require_backup_headroom(shutil.disk_usage(root).free, size, data_size)
         self.docker('stop', '--time', '120', ENGINE, timeout=150)
         stopped = self.inspect(ENGINE)
         require(not stopped['State']['Running'] and stopped['State']['ExitCode'] == 0 and
