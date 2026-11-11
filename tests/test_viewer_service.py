@@ -841,12 +841,16 @@ class ViewerServiceTests(unittest.TestCase):
 
         def hash_then_replace(path, expected_stat):
             value = original_hash(path, expected_stat)
-            with path.open('r+b') as result:
-                first = result.read(1)
-                result.seek(0)
-                result.write(bytes([first[0] ^ 1]))
-                result.flush()
-                os.fsync(result.fileno())
+            original = path.stat()
+            replacement = path.with_name('replacement.zip')
+            replacement.write_bytes(path.read_bytes())
+            os.utime(replacement, ns=(original.st_atime_ns, original.st_mtime_ns))
+            replacement_stat = replacement.stat()
+            self.assertEqual(replacement_stat.st_size, original.st_size)
+            self.assertEqual(replacement_stat.st_mtime_ns, original.st_mtime_ns)
+            self.assertNotEqual((replacement_stat.st_dev, replacement_stat.st_ino),
+                                (original.st_dev, original.st_ino))
+            os.replace(replacement, path)
             return value
 
         receipt = dict(eventId='processing-ready-replaced-attempt-1',
