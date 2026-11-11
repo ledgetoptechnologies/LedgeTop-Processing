@@ -108,9 +108,12 @@ def make_handler(config: Config):
                 from .observer_dashboard import parse_query, snapshot
                 try:
                     params = parse_query(parsed.query)
+                except ValueError:
+                    self._reply(400, {'error': 'invalid_query'}); return
+                try:
                     self._reply(200, snapshot(queue, config.viewer_enabled, *params))
                 except ValueError:
-                    self._reply(400, {'error': 'invalid_query'})
+                    self._reply(503, {'error': 'invalid_stored_state'})
                 return
             if facade and facade.handle(self):
                 return
