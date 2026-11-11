@@ -83,3 +83,10 @@ bindings with the old prepared container and reports differing field paths
 only. It never publishes raw bindings, changed values, environment or tokens.
 This characterizes Docker-generated differences; it does not relax the
 production helper's comparison or claim the swap completed.
+
+Parent's follow-up isolated no-backup diagnostic characterized the difference
+as only OomKillDisable JSONnull versus booleanfalse. The separately committed
+helper correction permits precisely that known default representation, with
+true/missing/numeric values and every other changed field rejected. This
+harness now pins that corrected helper's exact Git-LF source. Existing private
+binding diagnostics remain available; a fresh full native pass is still needed.
