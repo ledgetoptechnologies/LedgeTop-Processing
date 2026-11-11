@@ -1,0 +1,60 @@
+--- a/config.js
++++ b/config.js
+@@ -35,6 +35,7 @@
+ 	--log_level <logLevel>	Set log level verbosity (default: info)
+ 	-d, --daemon 	Set process to run as a deamon
+ 	-q, --parallel_queue_processing <number> Number of simultaneous processing tasks (default: 2)
++	--disable_scheduled_cleanup Disable scheduled terminal, orphan and stale-upload cleanup (default: false)
+ 	--cleanup_tasks_after <number> Number of minutes that elapse before deleting finished and canceled tasks (default: 2880) 
+ 	--cleanup_uploads_after <number> Number of minutes that elapse before deleting unfinished uploads. Set this value to the maximum time you expect a dataset to be uploaded. (default: 2880) 
+ 	--test Enable test mode. In test mode, no commands are sent to ODM. This can be useful during development or testing (default: false)
+@@ -65,7 +66,7 @@
+ 
+ const allOpts = ["slice","help","config","odm_path","odx_path","log_level","port","p",
+ "deamonize","daemon","d","parallel_queue_processing","q",
+-"cleanup_tasks_after","cleanup_uploads_after","test","test_skip_orthophotos",
++"disable_scheduled_cleanup","cleanup_tasks_after","cleanup_uploads_after","test","test_skip_orthophotos",
+ "test_skip_dems","test_drop_uploads","test_fail_tasks","test_seconds",
+ "powercycle","token","max_images","webhook","s3_endpoint","s3_bucket",
+ "s3_force_path_style","s3_access_key","s3_secret_key","s3_signature_version",
+@@ -121,6 +122,11 @@
+ config.port = (argv.port || argv.p || fromConfigFile("port", process.env.PORT || "auto"));
+ config.deamon = argv.deamonize || argv.daemon || argv.d || fromConfigFile("daemon", false);
+ config.parallelQueueProcessing = parseInt(argv.parallel_queue_processing || argv.q || fromConfigFile("parallelQueueProcessing", 1));
++// LedgeTop: 2026-11-11 scheduled-cleanup retention overlay (AGPL-3.0-or-later; see README).
++const scheduledCleanupFlag = argv.disable_scheduled_cleanup;
++const scheduledCleanupFile = fromConfigFile('disableScheduledCleanup', false);
++if ((scheduledCleanupFlag !== undefined && typeof scheduledCleanupFlag !== 'boolean') || typeof scheduledCleanupFile !== 'boolean') throw new Error('disableScheduledCleanup must be a boolean');
++config.disableScheduledCleanup = scheduledCleanupFlag === undefined ? scheduledCleanupFile : scheduledCleanupFlag;
+ config.cleanupTasksAfter = parseInt(argv.cleanup_tasks_after || fromConfigFile("cleanupTasksAfter", 2880));
+ config.cleanupUploadsAfter = parseInt(argv.cleanup_uploads_after || fromConfigFile("cleanupUploadsAfter", 2880));
+ config.test = argv.test || fromConfigFile("test", false);
+--- a/libs/TaskManager.js
++++ b/libs/TaskManager.js
+@@ -82,6 +82,8 @@
+     // Removes old tasks that have either failed, are completed, or
+     // have been canceled.
+     removeOldTasks(done){
++        // LedgeTop 2026-11-11 scheduled-cleanup retention overlay; see README.
++        if (config.disableScheduledCleanup) { if (done) done(); return; }
+         let list = [];
+         let now = new Date().getTime();
+         logger.debug("Checking for old tasks to be removed...");
+@@ -109,6 +111,8 @@
+     // Removes directories that don't have a corresponding
+     // task associated with it (maybe as a cause of an abrupt exit)
+     removeOrphanedDirectories(done){
++        // LedgeTop 2026-11-11 scheduled-cleanup retention overlay; see README.
++        if (config.disableScheduledCleanup) { if (done) done(); return; }
+         logger.info("Checking for orphaned directories to be removed...");
+ 
+         fs.readdir(Directories.data, (err, entries) => {
+@@ -128,6 +132,8 @@
+     }
+ 
+     removeStaleUploads(done){
++        // LedgeTop 2026-11-11 scheduled-cleanup retention overlay; see README.
++        if (config.disableScheduledCleanup) { if (done) done(); return; }
+         fs.readdir("tmp", (err, entries) => {
+             if (err) done(err);
+             else{
