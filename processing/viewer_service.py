@@ -92,7 +92,7 @@ class NativeEngine:
 
     def upload(self, identifier, item):
         path = Path(item['path'])
-        if path.is_symlink() or not path.is_file() or path.stat().st_size != item['bytes']:
+        if path.resolve() != path or path.is_symlink() or not path.is_file() or path.stat().st_size != item['bytes']:
             raise SmokeError('input file changed')
         boundary = 'processing-' + uuid.uuid4().hex
         prefix = (f'--{boundary}\r\nContent-Disposition: form-data; name="images"; '
@@ -428,12 +428,12 @@ class ViewerService:
         if cursor > len(task['files']):
             raise SmokeError('durable upload cursor exceeds input manifest')
         for index in range(cursor, len(task['files'])):
-            self.store.update(task['uuid'], phase='upload_pending', upload_cursor=index)
+            self.store.update(task['uuid'], return_task=False, phase='upload_pending', upload_cursor=index)
             engine.upload(task['engine_uuid'], task['files'][index])
             # Advance only after an acknowledged full-file upload. If the
             # process stops in upload_pending, do not guess whether the engine
             # received that file; keep the job held for inspection.
-            self.store.update(task['uuid'], phase='uploaded', upload_cursor=index + 1)
+            self.store.update(task['uuid'], return_task=False, phase='uploaded', upload_cursor=index + 1)
         self.store.update(task['uuid'], phase='commit_pending')
         engine.action('commit', task['engine_uuid'])
         # Commit acceptance does not mean ODM has begun processing yet.

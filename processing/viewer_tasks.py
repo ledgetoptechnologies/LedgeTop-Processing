@@ -403,7 +403,9 @@ class TaskStore:
             return [self._task(db, row) for row in db.execute(
                 'SELECT * FROM viewer_tasks WHERE removed=0 ORDER BY created_at,rowid').fetchall()]
 
-    def update(self, identifier, **fields):
+    def update(self, identifier, *, return_task=True, **fields):
+        if type(return_task) is not bool:
+            raise ValueError('return_task must be a boolean')
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
                    'progress', 'output_lines', 'archive_path', 'archive_sha256', 'upload_cursor'}
         if not fields or not set(fields) <= allowed:
@@ -444,6 +446,10 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
             row = self._row(db, identifier)
+            if not return_task:
+                # Preserve the owned-directory fence without rebuilding every
+                # file entry for an ignored upload-checkpoint return value.
+                self._directory(row)
             if row['engine_uuid'] and fields.get('engine_uuid', row['engine_uuid']) != row['engine_uuid']:
                 raise Conflict('engine task identity is immutable')
             if fields.get('engine_uuid') and db.execute(
@@ -463,7 +469,7 @@ class TaskStore:
             assignments = ','.join(field + '=?' for field in fields)
             db.execute('UPDATE viewer_tasks SET ' + assignments + ',updated_at=CURRENT_TIMESTAMP WHERE uuid=?',
                        (*fields.values(), identifier))
-        return self.task(identifier)
+        return self.task(identifier) if return_task else None
 
     def accept_viewer_delivery(self, identifier, environment, receipt):
         checked_uuid(identifier)
