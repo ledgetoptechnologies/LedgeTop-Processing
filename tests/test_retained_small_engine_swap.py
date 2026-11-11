@@ -240,7 +240,8 @@ class RetainedSwapTests(unittest.TestCase):
             old_umask = os.umask(0o077)
             try:
                 with patch.object(swap, 'NGINX', nginx), patch.object(swap, 'Client', return_value=client):
-                    runtime.change_ingress({'nginxHex': source.hex(), 'requestId': str(uuid.uuid4())}, closed=True)
+                    runtime.change_ingress({'nginxHex': source.hex(), 'requestId': str(uuid.uuid4()),
+                        'command': ['--max-images', '1000', '--token', 'synthetic']}, closed=True)
             finally:
                 os.umask(old_umask)
             after = nginx.stat()
