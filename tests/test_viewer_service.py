@@ -978,6 +978,12 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(engine.download_calls, 1)
 
     def test_waiting_download_rechecks_completion_after_same_uuid_reset(self):
+        self.assert_waiting_download_rejects_reset(False)
+
+    def test_waiting_download_rejects_already_completed_replacement_generation(self):
+        self.assert_waiting_download_rejects_reset(True)
+
+    def assert_waiting_download_rejects_reset(self, complete_replacement):
         identifier = self.submit()
         self.service.tick()
         self.finish(identifier)
@@ -1008,6 +1014,11 @@ class ViewerServiceTests(unittest.TestCase):
                 self.service.initialize(identifier, 'Synthetic survey', REQUEST_OPTIONS, None)
                 self.upload(identifier)
                 self.service.commit(identifier)
+                if complete_replacement:
+                    self.service.tick()
+                    self.finish(identifier)
+                    self.service.tick()
+                    self.assertEqual(self.task(identifier)['job']['status'], 'succeeded')
             finally:
                 capture_lock.release()
                 thread.join(5)
@@ -1019,6 +1030,41 @@ class ViewerServiceTests(unittest.TestCase):
         self.assertEqual(current['generation'], original['generation'] + 1)
         self.assertIsNone(current['archive_path'])
         self.assertTrue(Path(original['files'][0]['path']).is_file())
+
+    def test_legacy_digest_update_cannot_write_replacement_after_precheck(self):
+        identifier = self.submit()
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        original = self.task(identifier)
+        archive = Path(original['directory']) / 'all.zip'
+        archive.write_bytes(self.engines['cluster'].archive)
+        # Synthetic legacy state: a retained path predates stored archive digest.
+        self.service.store.update(identifier, archive_path=str(archive))
+        original_update = self.service.store.update
+        replaced = []
+        def reset_before_write(task_id, **fields):
+            if fields.get('archive_sha256') and not replaced:
+                replaced.append(True)
+                self.service.remove(identifier)
+                self.service.initialize(identifier, 'Synthetic survey', REQUEST_OPTIONS, None)
+                self.upload(identifier)
+                self.service.commit(identifier)
+                self.service.tick()
+                self.finish(identifier)
+                self.service.tick()
+            return original_update(task_id, **fields)
+        with patch.object(self.service.store, 'update', side_effect=reset_before_write), \
+             self.assertRaisesRegex(Conflict, 'identity changed'):
+            self.service.download(identifier)
+        current = self.task(identifier)
+        self.assertEqual(current['generation'], original['generation'] + 1)
+        self.assertEqual(current['job']['status'], 'succeeded')
+        self.assertIsNone(current['archive_sha256'])
+        self.assertIsNone(current['archive_path'])
+        self.assertEqual(archive.read_bytes(), self.engines['cluster'].archive)
+        self.assertTrue(Path(original['files'][0]['path']).is_file())
+        self.assertEqual(self.engines['cluster'].download_calls, 0)
 
     def test_download_twice_matches_hash_and_retains_archive_and_inputs(self):
         identifier = self.submit()
