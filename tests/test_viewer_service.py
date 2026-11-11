@@ -620,9 +620,14 @@ class ViewerServiceTests(unittest.TestCase):
              patch.object(self.service.store, 'update', side_effect=checkpoint_update), \
              patch.object(engine, 'upload', side_effect=upload), \
              patch.object(self.service, '_poll'):
-            self.service._upload_and_commit(task)
-            # Only two post-upload transitions and the final poll input read.
-            self.assertEqual(materialize.call_count, 3)
+            for turn in range(count + 1):
+                self.service._upload_and_commit(task)
+                task = self.service.store.task_state(identifier)
+                if task['phase'] == 'awaiting_engine_start':break
+            else:self.fail('bounded upload failed to finish')
+            # The supplied full manifest is retained only for this transfer;
+            # no checkpoint or continuation reconstructs all input paths.
+            self.assertEqual(materialize.call_count, 0)
         self.assertEqual(checkpoints, [entry for index in range(count) for entry in
             [('upload_pending', index, engine_id), ('uploaded', index + 1, engine_id)]])
         self.assertEqual(row(), ('awaiting_engine_start', count, engine_id))
@@ -895,6 +900,236 @@ class ViewerServiceTests(unittest.TestCase):
         self.service.tick()
         self.assertEqual(self.service.info(identifier)['status']['code'], 40)
         self.assertEqual(sum(c[0] == 'commit' for c in self.engines['cluster'].calls), 1)
+
+    def test_slow_upload_turn_yields_to_free_node_priority_and_polling(self):
+        self.set_cluster_max_photos(2)
+        self.service._upload_files_per_turn = 2
+        self.service._upload_seconds_per_turn = 1000
+        large = self.submit(count=9)
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        engine = self.engines['main']
+        original_upload = engine.upload
+        def slow_upload(engine_id, item):
+            entered.set()
+            if not release.wait(5):raise AssertionError('fixture upload deadline')
+            return original_upload(engine_id, item)
+        def run():
+            try:self.service.tick()
+            except BaseException as error:errors.append(error)
+        thread = threading.Thread(target=run)
+        with patch.object(engine, 'upload', side_effect=slow_upload):
+            try:
+                thread.start()
+                self.assertTrue(entered.wait(2))
+                small = self.submit()
+            finally:
+                release.set()
+                thread.join(5)
+                self.assertFalse(thread.is_alive(), 'owned fixture thread leaked')
+        self.assertFalse(errors)
+        self.assertEqual(self.task(large)['upload_cursor'], 2)
+        self.assertEqual(self.task(large)['node_id'], 'main')
+        self.assertIsNone(self.task(small)['node_id'])
+        self.service.tick()
+        self.assertEqual(self.task(large)['upload_cursor'], 4)
+        self.assertEqual(self.task(small)['node_id'], 'cluster')
+        small_task = self.task(small)
+        self.engines['cluster'].tasks[small_task['engine_uuid']]['progress'] = 67
+        staging = self.submit(environment='staging')
+        production = self.submit()
+        self.service.tick()
+        self.assertEqual(self.task(large)['upload_cursor'], 6)
+        self.assertEqual(self.task(small)['progress'], 67)
+        self.assertIsNone(self.task(staging)['node_id'])
+        self.assertIsNone(self.task(production)['node_id'])
+        self.finish(small)
+        self.service.tick()
+        self.assertEqual(self.task(large)['upload_cursor'], 8)
+        self.assertEqual(self.task(production)['node_id'], 'cluster')
+        self.assertIsNone(self.task(staging)['node_id'])
+        running = [job for job in self.queue.list() if job['status'] in ('running', 'held')]
+        self.assertEqual(sorted(job['nodeId'] for job in running), ['cluster', 'main'])
+        self.assertFalse(any(call[0] == 'commit' for call in engine.calls))
+
+    def test_upload_continuations_materialize_manifest_only_once(self):
+        identifier = self.submit(count=11)
+        self.service._upload_seconds_per_turn = 1000
+        with patch.object(self.service.store, '_task', wraps=self.service.store._task) as full:
+            cursors = []
+            for turn in range(10):
+                self.service.tick()
+                state = self.service.store.task_state(identifier)
+                cursors.append(state['upload_cursor'])
+                if state['phase'] == 'processing':break
+            else:self.fail('bounded upload did not finish')
+            self.assertEqual(full.call_count, 1)
+        self.assertEqual(cursors, [4, 8, 11])
+        self.assertNotIn(identifier, self.service._upload_manifests)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_turn_time_budget_yields_only_after_acknowledged_file(self):
+        identifier = self.submit(count=3)
+        clock = [0.0]
+        engine = self.engines['cluster']
+        original_upload = engine.upload
+        def slow_upload(engine_id, item):
+            original_upload(engine_id, item)
+            clock[0] += 1.1
+        with patch('processing.viewer_service.time.monotonic', side_effect=lambda:clock[0]), \
+             patch.object(engine, 'upload', side_effect=slow_upload):
+            self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'uploaded')
+        self.assertEqual(self.task(identifier)['upload_cursor'], 1)
+        self.assertFalse(self.fleet.commits)
+
+    def test_slow_last_file_yields_before_commit_without_reupload(self):
+        identifier = self.submit()
+        clock = [0.0]
+        engine = self.engines['cluster']
+        original_upload = engine.upload
+        def slow_upload(engine_id, item):
+            original_upload(engine_id, item)
+            clock[0] += 1.1
+        with patch('processing.viewer_service.time.monotonic', side_effect=lambda:clock[0]), \
+             patch.object(engine, 'upload', side_effect=slow_upload):
+            self.service.tick()
+            self.assertEqual(self.task(identifier)['phase'], 'uploaded')
+            self.assertEqual(self.task(identifier)['upload_cursor'], 1)
+            self.assertFalse(self.fleet.commits)
+            self.service.tick()
+        self.assertEqual(sum(call[0] == 'upload' for call in engine.calls), 1)
+        self.assertEqual(len(self.fleet.commits), 1)
+        self.assertEqual(self.task(identifier)['phase'], 'processing')
+
+    def test_stop_during_upload_ack_persists_cursor_and_resumes_exact_engine(self):
+        identifier = self.submit(count=6)
+        engine = self.engines['cluster']
+        original_upload = engine.upload
+        entered, release = threading.Event(), threading.Event()
+        errors = []
+        def upload(engine_id, item):
+            original_upload(engine_id, item)
+            entered.set()
+            if not release.wait(5):raise AssertionError('fixture ACK deadline')
+        def run():
+            try:self.service.tick()
+            except BaseException as error:errors.append(error)
+        thread = threading.Thread(target=run)
+        with patch.object(engine, 'upload', side_effect=upload):
+            try:
+                thread.start()
+                self.assertTrue(entered.wait(2))
+                self.service._stop.set()
+            finally:
+                release.set()
+                thread.join(5)
+                self.assertFalse(thread.is_alive(), 'owned fixture thread leaked')
+        self.assertFalse(errors)
+        task = self.task(identifier)
+        self.assertEqual((task['phase'], task['upload_cursor']), ('uploaded', 1))
+        self.assertFalse(self.fleet.commits)
+        original_engine = task['engine_uuid']
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        for turn in range(5):
+            self.service.tick()
+            if self.task(identifier)['phase'] == 'processing':break
+        else:self.fail('confirmed cursor did not resume')
+        self.assertEqual(self.task(identifier)['engine_uuid'], original_engine)
+        self.assertEqual(sum(call[0] == 'initialize' for call in engine.calls), 1)
+        uploads = [call[2] for call in engine.calls if call[0] == 'upload']
+        self.assertEqual(len(uploads), 6)
+        self.assertEqual(len(set(uploads)), 6)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def assert_stop_checkpoint_resumes_once(self, stop_phase):
+        identifier = self.submit()
+        original_update = self.service.store.update
+        stopped = []
+        def update(task_id, **fields):
+            result = original_update(task_id, **fields)
+            if fields.get('phase') == stop_phase and not stopped:
+                stopped.append(True)
+                self.service._stop.set()
+            return result
+        with patch.object(self.service.store, 'update', side_effect=update):
+            self.service.tick()
+        task = self.task(identifier)
+        self.assertEqual(task['phase'], 'uploaded')
+        expected_cursor = 0 if stop_phase == 'upload_pending' else 1
+        self.assertEqual(task['upload_cursor'], expected_cursor)
+        self.assertFalse(self.fleet.commits)
+        engine = self.engines['cluster']
+        self.assertEqual(sum(call[0] == 'upload' for call in engine.calls), expected_cursor)
+        original_engine = task['engine_uuid']
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'processing')
+        self.assertEqual(self.task(identifier)['engine_uuid'], original_engine)
+        self.assertEqual(sum(call[0] == 'upload' for call in engine.calls), 1)
+        self.assertEqual(sum(call[0] == 'initialize' for call in engine.calls), 1)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_stop_after_pending_before_http_is_known_unattempted(self):
+        self.assert_stop_checkpoint_resumes_once('upload_pending')
+
+    def test_stop_after_last_upload_ack_defers_commit(self):
+        self.assert_stop_checkpoint_resumes_once('uploaded')
+
+    def test_stop_after_commit_intent_before_http_is_known_unattempted(self):
+        self.assert_stop_checkpoint_resumes_once('commit_pending')
+
+    def test_stop_after_commit_ack_preserves_accepted_commit_without_replay(self):
+        identifier = self.submit()
+        engine = self.engines['cluster']
+        original_action = engine.action
+        def action(action_name, engine_id):
+            result = original_action(action_name, engine_id)
+            if action_name == 'commit':self.service._stop.set()
+            return result
+        with patch.object(engine, 'action', side_effect=action):self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'awaiting_engine_start')
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'processing')
+        self.assertEqual(sum(call[0] == 'commit' for call in engine.calls), 1)
+        self.assertEqual(sum(call[0] == 'initialize' for call in engine.calls), 1)
+
+    def test_commit_ack_loss_on_later_turn_reconciles_without_replay(self):
+        identifier = self.submit(count=6)
+        self.service._upload_seconds_per_turn = 1000
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['upload_cursor'], 4)
+        engine = self.engines['cluster']
+        engine.fail = 'commit'
+        self.service.tick()
+        uncertain = self.task(identifier)
+        self.assertEqual(uncertain['phase'], 'commit_pending')
+        self.assertEqual(uncertain['error'], 'commit_ack_uncertain')
+        self.assertEqual(uncertain['job']['status'], 'running')
+        self.assertEqual(len(self.fleet.commits), 1)
+        engine.fail = None
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'processing')
+        self.assertEqual(self.task(identifier)['engine_uuid'], uncertain['engine_uuid'])
+        self.assertEqual(len(self.fleet.commits), 1)
+        self.assertNotIn(identifier, self.service._upload_manifests)
+
+    def test_dispatch_loop_waits_only_when_no_upload_progress(self):
+        waits = []
+        def wait(delay):
+            waits.append(delay)
+            if len(waits) == 2:self.service._stop.set()
+        with patch.object(self.service, 'tick', side_effect=[True, False]), \
+             patch.object(self.service._stop, 'wait', side_effect=wait):
+            self.service._run()
+        self.assertEqual(waits, [0, 2])
 
     def test_completed_download_proceeds_while_another_upload_holds_scheduler(self):
         completed = self.submit()
