@@ -30,7 +30,7 @@ def snapshot(queue, viewer_enabled, after, limit, status, environment):
     if environment:
         conditions.append('j.environment = ?'); values.append(environment)
     join = 'LEFT JOIN viewer_tasks v ON v.job_id=j.id AND v.removed=0' if viewer_enabled else ''
-    projection = 'v.uuid provider_uuid, v.engine_uuid, v.phase, v.upload_cursor, v.progress, v.error' if viewer_enabled else 'NULL provider_uuid, NULL engine_uuid, NULL phase, NULL upload_cursor, NULL progress, NULL error'
+    projection = 'v.uuid provider_uuid, v.engine_uuid, v.phase, v.upload_cursor, v.progress, v.error, v.updated_at viewer_updated_at' if viewer_enabled else 'NULL provider_uuid, NULL engine_uuid, NULL phase, NULL upload_cursor, NULL progress, NULL error, NULL viewer_updated_at'
     with queue._db() as db:
         db.execute('BEGIN')
         rows = db.execute(f'''SELECT j.seq, j.id, j.environment, j.profile, j.status, j.node_id,
@@ -43,9 +43,15 @@ def snapshot(queue, viewer_enabled, after, limit, status, environment):
     jobs = [{'jobId': r['id'], 'providerTaskId': r['provider_uuid'], 'engineTaskId': r['engine_uuid'],
              'environment': r['environment'], 'profile': r['profile'], 'status': r['status'],
              'nodeId': r['node_id'], 'phase': r['phase'], 'uploadedFiles': r['upload_cursor'],
+             'totalFiles': None,
              'progress': r['progress'], 'errorCode': r['error'], 'heldReason': r['held_reason'],
-             'createdAt': r['created_at'], 'updatedAt': r['updated_at']} for r in rows]
-    return {'observedAt': observed, 'consistency': 'single_database_snapshot', 'jobs': jobs,
+             'createdAt': r['created_at'], 'queueUpdatedAt': r['updated_at'],
+             'viewerUpdatedAt': r['viewer_updated_at']} for r in rows]
+    ordered_nodes = {r['id']: r for r in nodes}
+    nodes = [ordered_nodes[n] for n in queue.node_ids if n in ordered_nodes]
+    return {'observedAt': observed, 'consistency': 'per_page_database_snapshot',
+            'pagination': 'creation_sequence_not_change_feed',
+            'refresh': 'restart_at_zero_and_read_all_pages', 'jobs': jobs,
             'nodes': [{'nodeId': r['id'], 'maintenanceState': r['state'], 'revision': r['revision'],
                        'drainAt': r['drain_at'], 'notBefore': r['not_before']} for r in nodes],
             'nextAfter': rows[-1]['seq'] if more and rows else None}
