@@ -109,6 +109,26 @@ class DeadlineSocketUnitTests(unittest.TestCase):
         self.assertAlmostEqual(sock.timeouts[1], 0.5)
         self.assertEqual(conn.gettimeout(), 10)
 
+    def test_sendall_fails_closed_when_send_moves_nothing(self):
+        clock = FakeClock()
+        request = b'GET / HTTP/1.0\r\n\r\n'
+        zero = ScriptedSocket([request], clock)
+        zero_calls = []
+        zero.send = lambda data, flags=0: zero_calls.append(len(data)) or 0
+        conn = DeadlineSocket(zero, header_deadline=5, progress_window=30, progress_bytes=8, clock=clock)
+        conn.recv_into(bytearray(64))
+        with self.assertRaises(ViewerTLSDeadlineExceeded):
+            conn.sendall(b'x' * 40000)
+        self.assertEqual(len(zero_calls), 1)  # fails at once; no spin until the window
+        partial = ScriptedSocket([request], clock)
+        sizes = []
+        partial.send = lambda data, flags=0: sizes.append(len(data)) or min(len(data), 1000)
+        conn = DeadlineSocket(partial, header_deadline=5, progress_window=30, progress_bytes=8, clock=clock)
+        conn.recv_into(bytearray(64))
+        conn.sendall(b'x' * 40000)  # short but non-zero sends still complete
+        self.assertEqual(len(sizes), 40)
+        self.assertLessEqual(max(sizes), 16 * 1024)
+
     def test_invalid_limits_are_rejected(self):
         for values in ((0, 1, 1), (1, 0, 1), (1, 1, 0)):
             with self.subTest(values=values), self.assertRaises(ValueError):

@@ -123,7 +123,12 @@ class DeadlineSocket:
         with memoryview(data) as view, view.cast('B') as octets:
             offset = 0
             while offset < len(octets):
-                offset += self.send(octets[offset:offset + SEND_SLICE], flags)
+                sent = self.send(octets[offset:offset + SEND_SLICE], flags)
+                if sent <= 0:
+                    # A blocking send that moves nothing will not recover; close
+                    # now instead of spinning until the progress window runs out.
+                    raise ViewerTLSDeadlineExceeded('viewer_tls_no_progress')
+                offset += sent
 
     def settimeout(self, value):
         self._op_timeout = value
