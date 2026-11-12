@@ -1,4 +1,5 @@
 import unittest
+import urllib.error
 from unittest.mock import patch
 import publish_images
 from publish_images import context, private_package, source_repository, REPOSITORY
@@ -33,6 +34,8 @@ class PublicationBoundaryTests(unittest.TestCase):
             private_package(None, required=True)
         with self.assertRaises(ValueError):
             private_package({'visibility': 'private'}, required=True)
+        with self.assertRaises(ValueError):
+            private_package({'visibility': 'private'})
         private_package({'visibility': 'private', 'repository': {'full_name': REPOSITORY}}, required=True)
 
     def test_publication_targets_only_new_coordinator_and_existing_treedar(self):
@@ -40,12 +43,11 @@ class PublicationBoundaryTests(unittest.TestCase):
                          ('ledgetop-processing-coordinator', 'ledgetop-processing-treedar'))
         self.assertNotIn('ledgetop-processing-orchestrator', publish_images.PACKAGES)
 
-    def test_missing_or_unverified_package_stops_before_any_build_or_push(self):
+    def test_public_or_unlinked_package_stops_before_any_build_or_push(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'public'}
         linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
-        for metadata in ([None], [linked, None],
-                         [{'visibility': 'public', 'repository': {'full_name': REPOSITORY}}],
-                         [linked, {'visibility': 'private'}]):
+        for metadata in ([{'visibility': 'public', 'repository': {'full_name': REPOSITORY}}],
+                         [{'visibility': 'private'}], [linked, {'visibility': 'private'}]):
             with self.subTest(metadata=metadata), \
                  patch.dict(publish_images.os.environ, self.env, clear=True), \
                  patch.object(publish_images, 'github', side_effect=[repository, *metadata]), \
@@ -54,6 +56,26 @@ class PublicationBoundaryTests(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     publish_images.main()
                 command.assert_not_called()
+
+    def test_metadata_forbidden_fails_closed_instead_of_treating_it_as_absent(self):
+        failure = urllib.error.HTTPError('https://api.github.com/example', 403, 'forbidden', {}, None)
+        with patch.dict(publish_images.os.environ, {'GITHUB_TOKEN': 'synthetic'}, clear=True), \
+             patch.object(publish_images.urllib.request, 'urlopen', side_effect=failure):
+            with self.assertRaisesRegex(ValueError, 'metadata permission'):
+                publish_images.github('/example')
+
+    def test_absent_packages_can_reach_build_but_must_verify_after_push(self):
+        repository = {'full_name': REPOSITORY, 'visibility': 'public'}
+        with patch.dict(publish_images.os.environ, self.env, clear=True), \
+             patch.object(publish_images, 'github', side_effect=[repository, None, None]), \
+             patch.object(publish_images, 'receipt'), \
+             patch.object(publish_images, 'command', side_effect=RuntimeError('test boundary')) as command:
+            with self.assertRaises(SystemExit):
+                publish_images.main()
+            self.assertEqual(command.call_count, 1)
+            self.assertEqual(command.call_args.args[0][:2], ['docker', 'build'])
+        with self.assertRaises(ValueError):
+            private_package(None, required=True)
 
     def test_preflight_checks_both_exact_package_names_before_build(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'public'}

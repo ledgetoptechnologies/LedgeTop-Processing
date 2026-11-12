@@ -57,7 +57,7 @@ def private_package(value, *, required=False):
     if not isinstance(value, dict) or value.get('visibility') != 'private':
         raise ValueError('private package visibility is required')
     linked = (value.get('repository') or {}).get('full_name')
-    if (required or linked is not None) and linked != REPOSITORY:
+    if linked != REPOSITORY:
         raise ValueError('package must be linked to LedgeTop-Processing')
 
 
@@ -89,9 +89,10 @@ def main():
         repository = github('/repos/' + REPOSITORY)
         state['sourceRepositoryVisibility'] = source_repository(repository)
         for package in PACKAGES:
-            # Never create an unverified package by pushing: the source repo
-            # can be public and package visibility is not established by a tag.
-            private_package(github('/orgs/ledgetoptechnologies/packages/container/' + package), required=True)
+            # A 404 may mean absent or inaccessible. GHCR creates a first
+            # publication private; the workflow token cannot push an existing
+            # unlinked package. Require positive verification after every push.
+            private_package(github('/orgs/ledgetoptechnologies/packages/container/' + package))
         for package, build_root in zip(PACKAGES, ('.', 'engines/treedar')):
             reference = 'ghcr.io/ledgetoptechnologies/' + package + ':' + tag
             state.update(stage='build', currentPackage=package)
