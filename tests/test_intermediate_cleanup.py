@@ -39,7 +39,8 @@ class NamespaceTopologyTests(unittest.TestCase):
         self.assertFalse(constrained_peer_host({'CapAdd':None}))
 
     def test_cleanup_observer_uses_same_full_seal_before_ro_proc_overlap(self):
-        runtime=alias_observer(Path('/synthetic-data'),Path('/proc'))
+        # Inspected metadata only: preserve the unchanged fixed original binding.
+        runtime=alias_observer(Path('/dockerfiles/nodeodm/data'),Path('/proc'))
         runtime.gate=Path('/synthetic-gate')
         other=runtime.inspect('b'*64)
         other['Config']={}
