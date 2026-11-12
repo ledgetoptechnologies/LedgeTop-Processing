@@ -71,32 +71,32 @@ QUAL_SHA=REVIEWED_CANONICAL_QUALIFICATION_SHA256
 INPUTS_SHA=REVIEWED_CANONICAL_INPUTS_SHA256
 
 # Default is static: no Runtime construction, source scan, API or Docker reads.
-python3 "$SOURCE/ops/combined_main_retention.py"
+(cd "$SOURCE" && python3 -B -m ops.combined_main_retention)
 
 # ONE preparation only; creates fresh private receipts, schedules no maintenance.
-python3 "$SOURCE/ops/combined_main_retention.py" --prepare \
+(cd "$SOURCE" && python3 -B -m ops.combined_main_retention --prepare \
   --credentials "$CREDS" --receipt "$OP" \
   --qualification "$QUAL" --qualification-sha256 "$QUAL_SHA" \
-  --inputs "$INPUTS" --inputs-sha256 "$INPUTS_SHA"
+  --inputs "$INPUTS" --inputs-sha256 "$INPUTS_SHA")
 
 # Root reviews the new preparation and uses the returned canonical digest.
 PREP_SHA=REVIEWED_RETURNED_PREPARATION_SHA256
-python3 "$SOURCE/ops/combined_main_retention.py" --stage begin \
-  --credentials "$CREDS" --receipt "$OP" --prepared-sha256 "$PREP_SHA"
+(cd "$SOURCE" && python3 -B -m ops.combined_main_retention --stage begin \
+  --credentials "$CREDS" --receipt "$OP" --prepared-sha256 "$PREP_SHA")
 
 # After clean stop and sealed original TMP proof: writes plans, not cache deletion.
-python3 "$SOURCE/ops/combined_main_retention.py" --stage plan-cleanup \
-  --credentials "$CREDS" --receipt "$OP" --prepared-sha256 "$PREP_SHA"
+(cd "$SOURCE" && python3 -B -m ops.combined_main_retention --stage plan-cleanup \
+  --credentials "$CREDS" --receipt "$OP" --prepared-sha256 "$PREP_SHA")
 
 # Separate review checks exact files, readers, archive proof and planned capacity.
 CLEANUP_SHA=REVIEWED_RETURNED_CLEANUP_SET_SHA256
-python3 "$SOURCE/ops/combined_main_retention.py" --stage apply-cleanup \
+(cd "$SOURCE" && python3 -B -m ops.combined_main_retention --stage apply-cleanup \
   --credentials "$CREDS" --receipt "$OP" --prepared-sha256 "$PREP_SHA" \
-  --cleanup-set-sha256 "$CLEANUP_SHA"
+  --cleanup-set-sha256 "$CLEANUP_SHA")
 
 # Full capacity/backup/export/retained recreation/pin/owned admission checks remain.
-python3 "$SOURCE/ops/combined_main_retention.py" --stage finish \
-  --credentials "$CREDS" --receipt "$OP" --prepared-sha256 "$PREP_SHA"
+(cd "$SOURCE" && python3 -B -m ops.combined_main_retention --stage finish \
+  --credentials "$CREDS" --receipt "$OP" --prepared-sha256 "$PREP_SHA")
 ```
 
 CLI JSON digests are SHA256 of canonical `sort_keys=True,separators=(',',':')`
