@@ -18,7 +18,7 @@ import zipfile
 
 from processing.intermediate_cleanup import CacheCleanup, CleanupHeld, ALLOWLIST, digest
 from processing.intermediate_dependencies import DependencyHeld, resource_references
-from processing.intermediate_mounts import MountTopologyHeld, parse_mountinfo, mount_overlaps, sealed_metrics_observer, mounts_fingerprint
+from processing.intermediate_mounts import MountTopologyHeld, parse_mountinfo, mount_overlaps, sealed_metrics_observer, mounts_fingerprint, constrained_peer_host
 from ops.early_intermediate_cleanup import assert_no_external_readers, verify_execution_fence, HostObserver, IMAGE, CONTAINER
 
 BINDING = ('authorityId','nodeId','engineId','containerId','imageId','viewerTaskId',
@@ -26,6 +26,17 @@ BINDING = ('authorityId','nodeId','engineId','containerId','imageId','viewerTask
 
 
 class NamespaceTopologyTests(unittest.TestCase):
+    def test_capability_aliases_and_malformed_authority_fail_closed(self):
+        bad=[['SYS_ADMIN'],['sys_admin'],['CAP_SYS_ADMIN'],['cap_sys_admin'],['ALL'],['all'],
+             ['CAP_ALL'],['cap_all'],'SYS_ADMIN',{},[None],[1],[''],['CAP_'],['NOT_A_CAP'],['CHOWN,ALL']]
+        for caps in bad:
+            with self.subTest(caps=caps):
+                self.assertFalse(constrained_peer_host({'Privileged':False,'CapAdd':caps}))
+        for caps in (None,[],['CHOWN'],['cap_net_bind_service']):
+            self.assertTrue(constrained_peer_host({'Privileged':False,'CapAdd':caps}))
+        for privileged in (True,1,'false',[]):
+            self.assertFalse(constrained_peer_host({'Privileged':privileged,'CapAdd':None}))
+
     def test_cleanup_observer_uses_same_full_seal_before_ro_proc_overlap(self):
         runtime=alias_observer(Path('/synthetic-data'),Path('/proc'))
         runtime.gate=Path('/synthetic-gate')
@@ -50,6 +61,13 @@ class NamespaceTopologyTests(unittest.TestCase):
             other['Mounts'][0]['RW']=True
             runtime.auth['readOnlyObservers']={other['Id']:dict(seal,mountsSha256=mounts_fingerprint(other['Mounts']))}
             with self.assertRaises(MountTopologyHeld):runtime(runtime.auth)
+            other['Mounts'][0]['RW']=False
+            for caps in (['cap_sys_admin'],['all'],['CAP_ALL'],['NOT_A_CAP'],[None],'CHOWN'):
+                other['HostConfig']['CapAdd']=caps
+                runtime.auth['readOnlyObservers']={other['Id']:dict(seal,
+                    hostConfigSha256=digest(other['HostConfig']),mountsSha256=mounts_fingerprint(other['Mounts']))}
+                with self.subTest(caps=caps):
+                    with self.assertRaisesRegex(CleanupHeld,'unconstrained_container_authority'):runtime(runtime.auth)
 
     def test_unrelated_opaque_namespace_roots_preserved(self):
         rows=parse_mountinfo('1 0 8:1 / / rw - ext4 /dev/a rw\n'

@@ -23,7 +23,7 @@ import time
 import uuid
 
 from ops import retained_main_engine_swap as swap
-from processing.intermediate_mounts import mounts_fingerprint as mount_fingerprint, sealed_metrics_observer
+from processing.intermediate_mounts import mounts_fingerprint as mount_fingerprint, sealed_metrics_observer, constrained_peer_host
 
 Held, require, canonical, digest = swap.Held, swap.require, swap.canonical, swap.digest
 OLD_UPLOAD = '5805ba8c-21bc-4aa4-8ccc-82bdf6fb1dc0'
@@ -561,7 +561,7 @@ class CombinedRuntime(swap.Runtime):
                 require(other['Image'] in (swap.BASE, swap.TARGET), 'owned_engine_image_changed')
                 continue
             host = other['HostConfig']
-            require(not host.get('Privileged') and 'SYS_ADMIN' not in (host.get('CapAdd') or []),
+            require(constrained_peer_host(host),
                     'unconstrained_peer_including_paused_peer')
             approved = self.observers.get(other['Id'])
             sealed = sealed_metrics_observer(other, approved)

@@ -45,6 +45,15 @@ class CombinedSourceTests(unittest.TestCase):
             other['Mounts'][0]['RW']=True
             runtime.observers={'observer':dict(seal,mountsSha256=combined.mounts_fingerprint(other['Mounts']))}
             with self.assertRaises(MountTopologyHeld):runtime.exclusive_volume(swap.ENGINE)
+            other['Mounts'][0]['RW']=False
+            for caps in (['cap_sys_admin'],['all'],['CAP_ALL'],['NOT_A_CAP'],[None],'CHOWN'):
+                other['HostConfig']['CapAdd']=caps
+                runtime.observers={'observer':dict(seal,
+                    hostConfigSha256=combined.digest(combined.canonical(other['HostConfig'])),
+                    mountsSha256=combined.mounts_fingerprint(other['Mounts']))}
+                with self.subTest(caps=caps):
+                    with self.assertRaisesRegex(swap.Held,'unconstrained_peer_including_paused_peer'):
+                        runtime.exclusive_volume(swap.ENGINE)
 
     def test_mount_fingerprint_normalizes_only_array_order(self):
         mounts = [dict(Type='bind', Source='/proc', Destination='/host/proc', RW=False),

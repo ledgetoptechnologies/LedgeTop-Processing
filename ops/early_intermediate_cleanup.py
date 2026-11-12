@@ -18,7 +18,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from processing.intermediate_cleanup import CacheCleanup, CleanupHeld, require, canonical, digest
 from processing.odx_smoke_worker import Client
-from processing.intermediate_mounts import parse_mountinfo, mount_overlaps, sealed_metrics_observer
+from processing.intermediate_mounts import parse_mountinfo, mount_overlaps, sealed_metrics_observer, constrained_peer_host
 from ops.node_ingress import Ingress, configuration
 
 DATA = Path('/dockerfiles/nodeodm/data')
@@ -191,7 +191,7 @@ class HostObserver:
             if not other['State']['Running']:
                 continue
             host = other['HostConfig']
-            require(not host.get('Privileged') and 'SYS_ADMIN' not in (host.get('CapAdd') or []),
+            require(constrained_peer_host(host),
                     'unconstrained_container_authority')
             approved = auth.get('readOnlyObservers', {}).get(other['Id'])
             sealed = sealed_metrics_observer(other, approved)

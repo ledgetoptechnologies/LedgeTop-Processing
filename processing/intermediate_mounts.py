@@ -32,13 +32,37 @@ def mounts_fingerprint(mounts):
     return hashlib.sha256(canonical(sorted(mounts,key=canonical))).hexdigest()
 
 
+def constrained_peer_host(host):
+    """Fail closed on malformed authority and equivalent mount-capability names."""
+    if type(host) is not dict or (host.get('Privileged') is not None and host.get('Privileged') is not False):
+        return False
+    caps=host.get('CapAdd')
+    if caps is None:
+        return True
+    if type(caps) is not list:
+        return False
+    for cap in caps:
+        if type(cap) is not str or re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*',cap) is None:
+            return False
+        normalized=cap.upper().removeprefix('CAP_')
+        known={'AUDIT_CONTROL','AUDIT_READ','AUDIT_WRITE','BLOCK_SUSPEND','BPF','CHECKPOINT_RESTORE',
+               'CHOWN','DAC_OVERRIDE','DAC_READ_SEARCH','FOWNER','FSETID','IPC_LOCK','IPC_OWNER','KILL',
+               'LEASE','LINUX_IMMUTABLE','MAC_ADMIN','MAC_OVERRIDE','MKNOD','NET_ADMIN','NET_BIND_SERVICE',
+               'NET_BROADCAST','NET_RAW','PERFMON','SETFCAP','SETGID','SETPCAP','SETUID','SYS_BOOT',
+               'SYS_CHROOT','SYS_MODULE','SYS_NICE','SYS_PACCT','SYS_PTRACE','SYS_RAWIO','SYS_RESOURCE',
+               'SYS_TIME','SYS_TTY_CONFIG','SYSLOG','WAKE_ALARM'}
+        if normalized not in known:
+            return False
+    return True
+
+
 def sealed_metrics_observer(container, approved):
     """Exact reviewed role only; caller still exempts RO mounts individually."""
     canonical=lambda value:json.dumps(value,sort_keys=True,separators=(',',':')).encode()
     digest=lambda value:hashlib.sha256(canonical(value)).hexdigest()
     host=container['HostConfig']
     return (isinstance(approved,dict) and approved.get('metricsOnlyReviewed') is True
-            and not host.get('Privileged') and 'SYS_ADMIN' not in (host.get('CapAdd') or [])
+            and constrained_peer_host(host)
             and approved.get('imageId')==container['Image']
             and approved.get('applicationConfigSha256')==digest(container['Config'])
             and approved.get('hostConfigSha256')==digest(host)

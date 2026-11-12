@@ -43,6 +43,10 @@ The inputs JSON has exactly two top-level keys:
   overlap resolution. Unsealed RO proc/sys/nsfs and all RW unsupported sources
   still hold. Valid opaque namespace roots remain opaque mountinfo identities;
   they never become ordinary filesystem paths.
+  Shared privilege validation uppercases capability names and removes one `CAP_`
+  prefix; SYS_ADMIN/ALL aliases, unknown capability names, malformed lists and
+  nonstring entries fail closed, as does Privileged authority. Future capability
+  names require source review rather than an automatic exemption.
   Do not print raw objects or
   infer an exemption from a container name. An empty map approves no observers.
 * `cleanupTemplates`: nonempty list with one template per authorized engine task,
