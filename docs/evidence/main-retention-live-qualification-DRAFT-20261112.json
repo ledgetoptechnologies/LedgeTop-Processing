@@ -109,18 +109,24 @@
     {
       "gate": "actual-format-cleanup-parsers",
       "evidence": "format741-result.txt",
-      "scope": "Parser741 six actual M4E/Tim format probes passed unchanged using pinned CRLF source; Git LF mapping is only a reviewed source provenance bridge. Prior integration133 suite used CRLF archive; canonical LF byte qualification pending. Reference counts192/732; parser58cases57pass1expectedskip"
+      "scope": "Parser741 six actual M4E/Tim probes passed unchanged using pinned CRLF source; explicit GitLF newline provenance bridge. New9c1 canonicalLF archive52hashes verified and integrated133suite128pass5expectedskip independently passed; no actual-format LF repeat. Reference counts192/732; parser58cases57pass1expectedskip"
     }
   ],
   "approvalState": "Awaiting root and independent review; passed=false and completedGates remain empty",
   "integrationEvidence": {
     "runtimeCommit": "9ef04bafd096aa89007dc053cc4f5181537ad82c",
+    "sourceArchiveSha256": "9c1b16be4f4ef88528295e2c828572f64a5962a49a970a7db162d268b3782f66",
+    "executionBytes": "Canonical Git LF, all52 Python file members exactly matched intended sourceHashes; no missing/extra/diffs",
     "cases": 133,
     "passed": 128,
     "expectedSkips": 5,
-    "outputSha256": "f3edfb0982555448dfa303c9a8a920e9054f0dcd6479ecad2dcc3d035d4fddb0",
-    "independentSourceReview": "PASS; unchanged fourteen origin blobs and thin CLI",
-    "executionByteScope": "Actual archivee30 contained many CRLF files; does not qualify intended Git LF sourceHashes"
+    "seconds": 1.768,
+    "exitCode": 0,
+    "outputSha256": "ea1cb35fbca4f3f761af9922cb336be8ba16311cd4ad3fa731e002d66e0adb3e",
+    "containerId": "d70df0a76a38287347eaaf1ab72c33c4a0335be3cbb0392cd7871968fdf844b4",
+    "ownedContainerRemoved": true,
+    "nonceAbsent": true,
+    "observer": "Root actual main-PC qualification report; author independently verified local archive SHA only"
   },
   "targetGpuObservation": {
     "observer": "Root report; no local receipt hash supplied",
@@ -144,7 +150,7 @@
     "sourceCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4",
     "probe": "probe741.py",
     "observedExecutionBytes": "CRLF source pinned by actual six-format probe",
-    "integrationBytes": "Intended Git LF source map; prior integrated9ef e30 archive executed many CRLF files, not verified LF",
+    "integrationBytes": "Canonical Git LF source exactly verified across52 members and executed in fresh9c1 archive133-case suite",
     "mapping": [
       {
         "path": "processing/__init__.py",
@@ -164,16 +170,25 @@
     ],
     "reviewBasis": "Independent reviewer recomputed Git741 LF to CRLF transformation and obtained exact probe741 pins for all three files",
     "equivalenceScope": "Pure Python source differs only in line terminators and has universal-newline equivalence; no parser logic difference",
-    "limitation": "Actual-format probes used pinned CRLF. Prior 133-case e30 archive suite also used many CRLF files. No LF execution is currently claimed; fresh canonical LF archive, all52 hash verification and suite are pending root."
+    "limitation": "Actual-format probe used pinned CRLF, not exact LF bytes. New canonical LF integrated unit suite is separate; only reviewed universal-newline provenance bridges actual-format CRLF to LF parser source. No actual-format LF repeat claimed."
   },
   "byteBindingHold": {
-    "status": "HOLD",
+    "status": "RESOLVED by new canonicalLF archive verification and separate freshsuite; prior E30 claim remains historical",
     "intendedSourceFiles": 52,
     "priorArchive": "e30c0ff4ad90831a80e12f9d38f0d8656723057586721fe7597d2547eea29282",
     "issue": "Many actual archive files CRLF differ from intended Git LF sourceHashes",
     "runtimeConstructed": false,
     "credentialsCreated": false,
     "maintenanceMutations": 0,
-    "next": "Root canonical LF archive, verify all52 hashes, rerun bounded133suite"
+    "next": "Root issues independently reviewed private live qualification and freshstage pins; no old stage replay"
+  },
+  "historicalCrlfIntegrationEvidence": {
+    "runtimeCommit": "9ef04bafd096aa89007dc053cc4f5181537ad82c",
+    "cases": 133,
+    "passed": 128,
+    "expectedSkips": 5,
+    "outputSha256": "f3edfb0982555448dfa303c9a8a920e9054f0dcd6479ecad2dcc3d035d4fddb0",
+    "independentSourceReview": "PASS; unchanged fourteen origin blobs and thin CLI",
+    "executionByteScope": "Actual archivee30 contained many CRLF files; does not qualify intended Git LF sourceHashes"
   }
 }

@@ -161,8 +161,13 @@ parser edits in this integration. Current-main Viewer/OpenSplat code is preserve
 
 The later integration133-case run used archivee30, which contained many CRLF
 files. Its pass does not qualify the intended Git LF manifest byte hashes.
-Canonical LF archive/hash verification and a fresh bounded suite are pending
-root; no Runtime/credential/maintenance step was entered on the rejected binding.
+Root then verified canonical LF archive9c1b16be:all52 Python members matched the
+intended source map, no missing/extra/diffs. A separate fresh suite passed133
+cases/128pass/5expectedskips in1.768s; output SHA256
+ea1cb35fbca4f3f761af9922cb336be8ba16311cd4ad3fa731e002d66e0adb3e.
+The owned runner was removed and nonce absence verified. No Runtime/credential/
+maintenance step was entered on the earlier rejected binding. Neither suite
+establishes live installation or removes fresh authority/reader/capacity gates.
 
 This record is a local candidate/handoff, not proof of a completed goal, installed
 automation or a newly created Engineering Hub project task. Root retains task

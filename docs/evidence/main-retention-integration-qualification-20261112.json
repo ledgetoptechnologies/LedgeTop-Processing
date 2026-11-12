@@ -1,20 +1,22 @@
 {
   "schemaVersion": 1,
   "qualifiedRuntimeCommit": "9ef04bafd096aa89007dc053cc4f5181537ad82c",
-  "qualifiedSourceArchiveSha256": "e30c0ff4ad90831a80e12f9d38f0d8656723057586721fe7597d2547eea29282",
+  "qualifiedSourceArchiveSha256": "9c1b16be4f4ef88528295e2c828572f64a5962a49a970a7db162d268b3782f66",
   "observer": "Parent agent; integration author did not execute tests",
   "mainPcSuite": {
+    "runtimeCommit": "9ef04bafd096aa89007dc053cc4f5181537ad82c",
+    "sourceArchiveSha256": "9c1b16be4f4ef88528295e2c828572f64a5962a49a970a7db162d268b3782f66",
+    "executionBytes": "Canonical Git LF, all52 Python file members exactly matched intended sourceHashes; no missing/extra/diffs",
     "cases": 133,
     "passed": 128,
     "expectedSkips": 5,
-    "seconds": 1.749,
+    "seconds": 1.768,
     "exitCode": 0,
-    "oom": false,
-    "resourceWarnings": 0,
-    "outputSha256": "f3edfb0982555448dfa303c9a8a920e9054f0dcd6479ecad2dcc3d035d4fddb0",
-    "containerId": "9c37ee77780a45f755967915694d54ed8d7035ee706601829ad632234b90454c",
+    "outputSha256": "ea1cb35fbca4f3f761af9922cb336be8ba16311cd4ad3fa731e002d66e0adb3e",
+    "containerId": "d70df0a76a38287347eaaf1ab72c33c4a0335be3cbb0392cd7871968fdf844b4",
     "ownedContainerRemoved": true,
-    "nonceAbsent": true
+    "nonceAbsent": true,
+    "observer": "Root actual main-PC qualification report; author independently verified local archive SHA only"
   },
   "independentReview": {
     "result": "PASS",
@@ -28,5 +30,18 @@
     "Restricted TMP profile only: each entry UID0/GID0 and no xattrs",
     "Todd intermediates remain excluded from cache cleanup"
   ],
-  "executionByteScope": "Suite executed archivee30 with many CRLF files. It proves those bytes only, not intended Git LF manifest. Root LF archive/hash verification and rerun pending."
+  "executionByteScope": "New9c1 canonicalLF archive all52 Python files exactly matched intended GitLF sourceHashes; fresh133suite passed. PriorE30 CRLF run retained as historical only.",
+  "historicalCrlfSuite": {
+    "cases": 133,
+    "passed": 128,
+    "expectedSkips": 5,
+    "seconds": 1.749,
+    "exitCode": 0,
+    "oom": false,
+    "resourceWarnings": 0,
+    "outputSha256": "f3edfb0982555448dfa303c9a8a920e9054f0dcd6479ecad2dcc3d035d4fddb0",
+    "containerId": "9c37ee77780a45f755967915694d54ed8d7035ee706601829ad632234b90454c",
+    "ownedContainerRemoved": true,
+    "nonceAbsent": true
+  }
 }
