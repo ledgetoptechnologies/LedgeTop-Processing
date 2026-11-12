@@ -51,19 +51,28 @@ def github(path):
         raise ValueError('GitHub metadata permission/read check failed') from None
 
 
+class PackageVerificationError(ValueError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
 def private_package(value, *, required=False):
-    if value is None and not required:
-        return
-    if not isinstance(value, dict) or value.get('visibility') != 'private':
-        raise ValueError('private package visibility is required')
-    linked = (value.get('repository') or {}).get('full_name')
-    if linked != REPOSITORY:
-        raise ValueError('package must be linked to LedgeTop-Processing')
+    if value is None:
+        if not required:
+            return
+        raise PackageVerificationError('missing_or_inaccessible', 'package metadata unavailable')
+    if not isinstance(value, dict):
+        raise PackageVerificationError('metadata_invalid', 'package metadata invalid')
+    if value.get('visibility') != 'private':
+        raise PackageVerificationError('not_private', 'private package visibility is required')
+    repository = value.get('repository')
+    if not isinstance(repository, dict) or repository.get('full_name') != REPOSITORY:
+        raise PackageVerificationError('unlinked_or_wrong_repository', 'package must be linked to LedgeTop-Processing')
 
 
 def source_repository(value):
-    # Source visibility and container-package visibility are independent. Beau
-    # temporarily made this repository public; the packages still stay private.
+    # Source and package visibility are distinct and independently verified.
     if not isinstance(value, dict) or value.get('full_name') != REPOSITORY:
         raise ValueError('exact source repository required')
     return value.get('visibility')
@@ -86,13 +95,14 @@ def main():
              'tag': tag, 'deploysRuntime': False, 'stage': 'preflight', 'images': []}
     receipt(state)
     try:
+        state.update(stage='preflight_repository_metadata')
+        receipt(state)
         repository = github('/repos/' + REPOSITORY)
         state['sourceRepositoryVisibility'] = source_repository(repository)
         for package in PACKAGES:
-            # A 404 may mean absent or inaccessible. GHCR creates a first
-            # publication private; the workflow token cannot push an existing
-            # unlinked package. Require positive verification after every push.
-            private_package(github('/orgs/ledgetoptechnologies/packages/container/' + package))
+            state.update(stage='preflight_package_metadata', currentPackage=package)
+            receipt(state)
+            private_package(github('/orgs/ledgetoptechnologies/packages/container/' + package), required=True)
         for package, build_root in zip(PACKAGES, ('.', 'engines/treedar')):
             reference = 'ghcr.io/ledgetoptechnologies/' + package + ':' + tag
             state.update(stage='build', currentPackage=package)
@@ -135,6 +145,9 @@ s.shutdown();s.server_close()
             receipt(state)
             command(['docker', 'push', image['reference']])
             image['status'] = 'push_returned'
+            state['stage'] = 'push_returned'
+            receipt(state)
+            state['stage'] = 'postpush_digest'
             receipt(state)
             manifest = json.loads(command(['docker', 'buildx', 'imagetools', 'inspect',
                 image['reference'], '--format', '{{json .Manifest}}'], capture=True))
@@ -142,12 +155,28 @@ s.shutdown();s.server_close()
             if not isinstance(digest, str) or not re.fullmatch('sha256:[0-9a-f]{64}', digest):
                 raise ValueError('remote manifest digest unverified')
             image['digest'] = digest
+            state['stage'] = 'postpush_package_metadata'
+            receipt(state)
             private_package(github('/orgs/ledgetoptechnologies/packages/container/' + image['package']), required=True)
             image.update(status='verified', visibility='private', linkedRepository=REPOSITORY)
             receipt(state)
         state.update(stage='completed', status='succeeded')
         receipt(state)
-    except Exception:
+    except Exception as error:
+        stage = state['stage']
+        if isinstance(error, PackageVerificationError):
+            state['failureCode'] = ('postpush_package_' if stage == 'postpush_package_metadata' else 'preflight_package_') + error.code
+        else:
+            state['failureCode'] = {
+                'preflight_repository_metadata': 'preflight_repository_metadata_unavailable',
+                'preflight_package_metadata': 'preflight_package_metadata_unavailable',
+                'push_intent': 'push_response_unconfirmed',
+                'push_returned': 'push_returned_receipt_unavailable',
+                'postpush_digest': 'postpush_digest_unverified',
+                'postpush_package_metadata': 'postpush_package_metadata_unavailable',
+                'build': 'build_or_image_check_failed',
+                'smoke_checks': 'smoke_check_failed',
+            }.get(stage, 'publication_failed')
         state['status'] = 'failed_or_uncertain'
         receipt(state)
         print('Publication stopped. Inspect the retained receipt and original registry references before any new attempt.')

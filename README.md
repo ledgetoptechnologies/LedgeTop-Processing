@@ -7,13 +7,17 @@ execution path is available. See [repository CI policy](AGENTS.md).
 The [package workflow](.github/workflows/processing.yml) checks the existing
 Dockerfiles and targets two private repository-linked images on main:
 `ledgetop-processing-coordinator` and `ledgetop-processing-treedar` under
-`ghcr.io/ledgetoptechnologies`. Before building or pushing, the publisher rejects any package metadata showing
-public visibility or an absent/different repository link. GitHub documents that
-a first Container Registry publication defaults to private and that publishing
-with the workflow token links the workflow repository. A metadata 404 can also
-mean inaccessible; the post-push check still requires positive confirmation
-of private visibility and the repository link. The legacy public
+`ghcr.io/ledgetoptechnologies`. Before building or pushing, the publisher
+requires positive metadata showing both packages already exist, are private,
+and are linked to this repository. A 404 can mean absent or inaccessible and
+therefore stops publication. The legacy public
 `ledgetop-processing-orchestrator` package is not modified.
+
+Despite GitHub's documented first-publication default, main run 43148199486
+created the new coordinator package publicly; its post-push check stopped before
+TreeDar was pushed. A safe first-private-package bootstrap remains unproven and
+must be resolved before allowing publication to an absent package. This guard
+does not change the already public package or claim to make it private.
 
 A successful publish records each verified immutable `sha256` manifest digest in
 its receipt. On a test node signed in with its read-only package credential, use
