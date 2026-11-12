@@ -179,6 +179,25 @@ binding, leaving runtime guards unchanged. Root's read-only actual host snapshot
 passed mainACTIVE47/3terminaltasks with operation absent and no container changes.
 Fresh maintenance, original TMP capture and capacity gates still have to run.
 
+The reviewed9022 successor replaces Docker's timed stop with ONE TERM and
+bounded observation, without daemon SIGKILL escalation or signal replay. Exact
+LF archivebe68ab06/helper8eba2588 passed145 cases:140pass/5expectedskips in1.755s,
+output SHA256 af0d0343c23122c93570628969fb977d7a7683de23c810209c507e41d80ec215.
+An existing deliberate process-loss test emitted one unclosed-file destructor
+ResourceWarning while still passing. The first fixture run used tmpfs without
+xattr support and had one setup error; the unchanged source passed with a fresh
+owned EXT4 TMPDIR. Both records remain retained; no skip or suppression was added.
+
+A separate real-daemon probe invoked the actual9022 method and durable checkpoint
+against one isolated empty cachedBASE server: one TERM, exit0/PID0, restart=no,
+no escalation, synthetic sentinel retained through exit, full source unchanged.
+Only its fixed ENGINE constant was scoped to the labeled fixture in a dedicated
+interpreter and restored in finally; own_updating used an explicit synthetic gate.
+The exact stopped helper and owned scratch were removed after verified export.
+This establishes empty-server signal mechanics, not live admission or client swap.
+Reused native mechanics files were exact qualified RAW CRLF c34e/55ce; their LF
+hashes are provenance only, not claims of executed LF mechanics bytes.
+
 This record is a local candidate/handoff, not proof of a completed goal, installed
 automation or a newly created Engineering Hub project task. Root retains task
 continuity/ownership and central Merger controls integration/release.

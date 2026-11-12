@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "draft": true,
   "passed": false,
-  "runtimeCommit": "6688c17ea97229113541b1f73e3f4c65ff879314",
+  "runtimeCommit": "9022b3f9a467590c8f9a6639c8aa9eaed7941178",
   "sourceHashes": {
-    "ops/combined_main_retention.py": "bc4c365d71e8a9410c5a000d2236e3728a53a1ec37c78e922c95d298d5518bbd",
+    "ops/combined_main_retention.py": "8eba25883552355f1bc7f6a837534ccb11fa7bc6bbab13702c547c869a3a156f",
     "ops/early_intermediate_cleanup.py": "2bacf32ddaf44ca9e2816e1f8d9a862f0cc98b3345d272143067239b339da89e",
     "ops/node_ingress.py": "4c51c04e09e7f8e211b4099c5d28ee4208298c05652a6a5f392444a41a37e853",
     "ops/node_maintenance.py": "f8e2449918dcb6b460d94991ad5729891fa9e4a0b338a125663aecba62d02ab8",
@@ -112,53 +112,38 @@
       "scope": "Parser741 six actual M4E/Tim probes passed unchanged using pinned CRLF source; explicit GitLF newline provenance bridge. New9c1 canonicalLF archive52hashes verified and integrated133suite128pass5expectedskip independently passed; no actual-format LF repeat. Reference counts192/732; parser58cases57pass1expectedskip"
     }
   ],
-  "approvalState": "Awaiting root and independent review; passed=false and completedGates remain empty",
+  "approvalState": "Public unapproved draft only; root separately owns private qualification and fresh-operation approvals",
   "integrationEvidence": {
-    "schemaVersion": 1,
-    "runtimeCommit": "6688c17ea97229113541b1f73e3f4c65ff879314",
-    "productionRuntimeCommit": "43d40b745f6c0eb6c5736dfb57ea975ca73c7eb9",
-    "sourceArchiveSha256": "119443557b754ff6fb20dd17ed8aed9134891031cf9ac9f903bd7628876ed0f1",
+    "sourceCommit": "9022b3f9a467590c8f9a6639c8aa9eaed7941178",
+    "archiveSha256": "be68ab0686cd2792b98a17f807a5c9d83cbf9383380894f34159ecaed7453eec",
+    "helperSha256": "8eba25883552355f1bc7f6a837534ccb11fa7bc6bbab13702c547c869a3a156f",
     "sourcePythonFiles": 52,
-    "changedSourceHashesVs07": {
-      "ops/combined_main_retention.py": "bc4c365d71e8a9410c5a000d2236e3728a53a1ec37c78e922c95d298d5518bbd",
-      "ops/early_intermediate_cleanup.py": "2bacf32ddaf44ca9e2816e1f8d9a862f0cc98b3345d272143067239b339da89e",
-      "processing/intermediate_mounts.py": "7628e7e83b4187e1d354195bbdac2af65eb4e4777fa973161beeab7ebb647f3a"
-    },
-    "other49FilesExact07Lf": true,
-    "mainPcSuite": {
-      "cases": 141,
-      "passed": 136,
-      "expectedSkips": 5,
-      "seconds": 1.746,
-      "exitCode": 0,
-      "outputSha256": "f94198e75f99cf9c37a9e1e21596a8d3acbadf2dc927de600e2b22511dcefaec",
-      "containerId": "83a07a2e793d4d290c9cf7dd592bbccd610178ff04cad5505074aef15581753c",
-      "removed": true,
-      "nonceAbsent": true
-    },
-    "priorFixtureFailure": {
-      "runtimeCommit": "43d40b745f6c0eb6c5736dfb57ea975ca73c7eb9",
-      "cases": 141,
+    "sourceReview": "Root reports independent SOURCE PASS9022; TERM no-forcekill gap closed; previous origin claims are historical only",
+    "cases": 145,
+    "passed": 140,
+    "expectedSkips": 5,
+    "seconds": 1.755,
+    "exitCode": 0,
+    "oom": false,
+    "outputSha256": "af0d0343c23122c93570628969fb977d7a7683de23c810209c507e41d80ec215",
+    "receiptSha256": "a48dd259baa9b8b746afafdb0ca86c96d86067cce268c5ffd24b7ae8d682c912",
+    "container": "c3821a89205e71ec331e8a25f3fa6cff6322cbd6cdb9337841e88cbd53854168",
+    "removed": true,
+    "scratchRemoved": true,
+    "filesystem": "ext4",
+    "tempXattrVerified": true,
+    "resourceWarnings": 1,
+    "warningScope": "Existing test_intermediate_cleanup deliberate process-loss subprocess json.load(open(...)) unclosed-file destructor warning; test and suite pass; no warning suppression or source edit",
+    "earlierFixtureFailure": {
+      "outputSha256": "2251fe39eb2a7926ddb18e1549d48b02c39804d15dfdd9ef71de23bdd67271de",
+      "cases": 145,
+      "passed": 139,
+      "skipped": 5,
       "errors": 1,
-      "expectedSkips": 5,
-      "cause": "New test own-engine metadata used synthetic source that did not match unchanged mandatory native bind",
-      "correction": "668 changes only synthetic inspected Source to exact required path; production guard unchanged",
-      "outputSha256": "8a6594675ac5a0dc81edf34bbe3cffe205670f618bd1670ab7f261aba2a4dd06"
-    },
-    "readOnlyHostSnapshot": {
-      "result": "PASS",
-      "scope": "CombinedRuntime.snapshot against captured119LF; root observation",
-      "nodeState": "active",
-      "revision": 47,
-      "terminalTasks": 3,
-      "operationAbsent": true,
-      "containerChanges": 0,
-      "maintenanceMutations": 0,
-      "liveInstall": false
-    },
-    "observer": "Parent actual main-PC qualification report; author did not execute suite or host snapshot",
-    "installed": false,
-    "qualificationApproved": false
+      "cause": "Synthetic tmpfs did not support test xattr; source unchanged; corrected owned EXT4 TMPDIR rerun passed",
+      "containerRemoved": true,
+      "scratchRemoved": true
+    }
   },
   "targetGpuObservation": {
     "observer": "Root report; no local receipt hash supplied",
@@ -255,5 +240,82 @@
     "nonceAbsent": true,
     "observer": "Root actual main-PC qualification report; author did not execute suite",
     "independentSourceReview": "PASS mount-order-only fingerprint fix"
-  }
+  },
+  "historical668IntegrationEvidence": {
+    "schemaVersion": 1,
+    "runtimeCommit": "6688c17ea97229113541b1f73e3f4c65ff879314",
+    "productionRuntimeCommit": "43d40b745f6c0eb6c5736dfb57ea975ca73c7eb9",
+    "sourceArchiveSha256": "119443557b754ff6fb20dd17ed8aed9134891031cf9ac9f903bd7628876ed0f1",
+    "sourcePythonFiles": 52,
+    "changedSourceHashesVs07": {
+      "ops/combined_main_retention.py": "bc4c365d71e8a9410c5a000d2236e3728a53a1ec37c78e922c95d298d5518bbd",
+      "ops/early_intermediate_cleanup.py": "2bacf32ddaf44ca9e2816e1f8d9a862f0cc98b3345d272143067239b339da89e",
+      "processing/intermediate_mounts.py": "7628e7e83b4187e1d354195bbdac2af65eb4e4777fa973161beeab7ebb647f3a"
+    },
+    "other49FilesExact07Lf": true,
+    "mainPcSuite": {
+      "cases": 141,
+      "passed": 136,
+      "expectedSkips": 5,
+      "seconds": 1.746,
+      "exitCode": 0,
+      "outputSha256": "f94198e75f99cf9c37a9e1e21596a8d3acbadf2dc927de600e2b22511dcefaec",
+      "containerId": "83a07a2e793d4d290c9cf7dd592bbccd610178ff04cad5505074aef15581753c",
+      "removed": true,
+      "nonceAbsent": true
+    },
+    "priorFixtureFailure": {
+      "runtimeCommit": "43d40b745f6c0eb6c5736dfb57ea975ca73c7eb9",
+      "cases": 141,
+      "errors": 1,
+      "expectedSkips": 5,
+      "cause": "New test own-engine metadata used synthetic source that did not match unchanged mandatory native bind",
+      "correction": "668 changes only synthetic inspected Source to exact required path; production guard unchanged",
+      "outputSha256": "8a6594675ac5a0dc81edf34bbe3cffe205670f618bd1670ab7f261aba2a4dd06"
+    },
+    "readOnlyHostSnapshot": {
+      "result": "PASS",
+      "scope": "CombinedRuntime.snapshot against captured119LF; root observation",
+      "nodeState": "active",
+      "revision": 47,
+      "terminalTasks": 3,
+      "operationAbsent": true,
+      "containerChanges": 0,
+      "maintenanceMutations": 0,
+      "liveInstall": false
+    },
+    "observer": "Parent actual main-PC qualification report; author did not execute suite or host snapshot",
+    "installed": false,
+    "qualificationApproved": false
+  },
+  "realDaemonTermEvidence": {
+    "scope": "Actual9022 TERM method and durable checkpoint, isolated empty cachedBASE server only",
+    "probeSourceSha256": "d58e71593d6edc4dad675244369e6ab8c1fa648ba93b1d7ebaa25a71864a3fd5",
+    "receiptSha256": "a1ed22cd4369d9d25554383d0c4353a8c2a8cbb55a04465d62f898e5f9bf6a11",
+    "journalSha256": "f3a903a062d28ba194f8145319f6a6fa39ad7a80e31a8342310652a314dc461b",
+    "checkpointSha256": "38c74597844d6b5c2ba4a15f4f6c76a46744dd8dc80bc44254480517cdfe35a0",
+    "signalCount": 1,
+    "signal": "TERM",
+    "finalExitCode": 0,
+    "finalPid": 0,
+    "automaticEscalation": false,
+    "restart": "no",
+    "sentinelPreservedThroughExit": true,
+    "sourceUnchanged": true,
+    "syntheticGateOnly": true,
+    "productionMounts": 0,
+    "gpu": false,
+    "hostPorts": false,
+    "ownedResourcesRemoved": true,
+    "exportHashesVerified": true,
+    "scopeLimits": "No actual coordinator admission, live install, retained-client swap or GPU processing proof"
+  },
+  "nativeSourceByteProvenance": {
+    "nativeMechanicsRaw": "c34e877b15bef54e469f3678f6122c3094090cbc6386072173683f15ba7a922f",
+    "nativeMechanicsNormalizedLf": "d9da6f7900e3a8c57e824b1090690684444453a12d6329f4e5aa3cc6ab97c328",
+    "archiveFragmentRaw": "55ce592b76de1e4259ea7047ed75fe42a65bc5e5700e124aaac422f82f0afcb3",
+    "archiveFragmentNormalizedLf": "2df6b6d84f8ba9c346a3c8472d329e7815866b87467c24cfafd11a1e74154056",
+    "scope": "Reused exact qualified RAW CRLF mechanics files; LF hashes are explicit provenance mapping, not executed LF mechanics claims"
+  },
+  "currentSourceDerivation": "Current52map includes derived741 observer/topology privilege guards and9022TERM-only helper; unchanged14origin-blob claim applies only to initial9ef historical selection"
 }

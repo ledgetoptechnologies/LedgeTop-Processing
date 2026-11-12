@@ -21,6 +21,12 @@ cases passed136 with5expected skips; the actual read-only host snapshot passed
 with mainACTIVE47, three terminal tasks, no operation or container changes.
 The observer/topology files are derived741 safety successors, not unchanged741
 copies. No host snapshot establishes stopped-window install or deletion safety.
+Current frozen operator source9022b3f9/archivebe68ab06 additionally replaces timed
+stop with TERM-only bounded observation. It passed145 cases/140pass/5expectedskips
+with one explicitly retained existing process-loss ResourceWarning. A separate
+empty-server real-daemon TERM probe passed using the actual method/checkpoint;
+its synthetic gate and fixture ENGINE override do not prove live admission.
+The public manifest remains false/empty-gates; private inputs/approval are separate.
 Documentation successors do not change its Python inventory. The draft manifest
 `docs/evidence/main-retention-live-qualification-DRAFT-20261112.json` proposes
 six gate-to-receipt bindings and retains `passed=false`, `completedGates=[]`.

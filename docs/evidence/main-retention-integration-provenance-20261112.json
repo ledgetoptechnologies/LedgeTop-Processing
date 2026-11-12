@@ -115,7 +115,7 @@
   ],
   "newBehavior": "Thin explicit phase CLI plus two CLI source tests; no changes to selected cleanup parser or retained helper",
   "executingPythonSourceHashes": {
-    "ops/combined_main_retention.py": "bc4c365d71e8a9410c5a000d2236e3728a53a1ec37c78e922c95d298d5518bbd",
+    "ops/combined_main_retention.py": "8eba25883552355f1bc7f6a837534ccb11fa7bc6bbab13702c547c869a3a156f",
     "ops/early_intermediate_cleanup.py": "2bacf32ddaf44ca9e2816e1f8d9a862f0cc98b3345d272143067239b339da89e",
     "ops/node_ingress.py": "4c51c04e09e7f8e211b4099c5d28ee4208298c05652a6a5f392444a41a37e853",
     "ops/node_maintenance.py": "f8e2449918dcb6b460d94991ad5729891fa9e4a0b338a125663aecba62d02ab8",
@@ -177,11 +177,12 @@
   "installed": false,
   "testsExecutedByIntegrationAuthor": false,
   "historicalSourceCommit": "3f620af044c117e324795648bda466397a3d563a",
-  "currentSourceCommit": "6688c17ea97229113541b1f73e3f4c65ff879314",
+  "currentSourceCommit": "9022b3f9a467590c8f9a6639c8aa9eaed7941178",
   "currentDerivedFiles": [
     "ops/combined_main_retention.py",
     "ops/early_intermediate_cleanup.py",
     "processing/intermediate_mounts.py"
   ],
-  "historicalOriginListCaveat": "selectedUnchangedFiles is the initial selection record; entries marked false are now explicitly derived, not current unchanged-origin claims"
+  "historicalOriginListCaveat": "selectedUnchangedFiles is the initial selection record; entries marked false are now explicitly derived, not current unchanged-origin claims",
+  "frozenOperatorArchiveSha256": "be68ab0686cd2792b98a17f807a5c9d83cbf9383380894f34159ecaed7453eec"
 }
