@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "qualifiedRuntimeCommit": "9ef04bafd096aa89007dc053cc4f5181537ad82c",
+  "qualifiedSourceArchiveSha256": "e30c0ff4ad90831a80e12f9d38f0d8656723057586721fe7597d2547eea29282",
+  "observer": "Parent agent; integration author did not execute tests",
+  "mainPcSuite": {
+    "cases": 133,
+    "passed": 128,
+    "expectedSkips": 5,
+    "seconds": 1.749,
+    "exitCode": 0,
+    "oom": false,
+    "resourceWarnings": 0,
+    "outputSha256": "f3edfb0982555448dfa303c9a8a920e9054f0dcd6479ecad2dcc3d035d4fddb0",
+    "containerId": "9c37ee77780a45f755967915694d54ed8d7035ee706601829ad632234b90454c",
+    "ownedContainerRemoved": true,
+    "nonceAbsent": true
+  },
+  "independentReview": {
+    "result": "PASS",
+    "scope": "14 exact origin blobs and thin explicit phase CLI"
+  },
+  "installed": false,
+  "liveAcceptance": false,
+  "limitations": [
+    "Five expected root-only/private-bind skips remain explicit",
+    "Suite and source review do not install or authorize consumed operation replay",
+    "Restricted TMP profile only: each entry UID0/GID0 and no xattrs",
+    "Todd intermediates remain excluded from cache cleanup"
+  ]
+}
