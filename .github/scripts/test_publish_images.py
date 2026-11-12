@@ -1,3 +1,5 @@
+import copy
+import json
 import unittest
 import urllib.error
 from unittest.mock import patch
@@ -64,18 +66,64 @@ class PublicationBoundaryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'metadata permission'):
                 publish_images.github('/example')
 
-    def test_absent_packages_can_reach_build_but_must_verify_after_push(self):
+    def test_missing_or_inaccessible_packages_stop_before_build(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'public'}
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
+        for metadata in ([None], [linked, None]):
+            records = []
+            with self.subTest(metadata=metadata), \
+                 patch.dict(publish_images.os.environ, self.env, clear=True), \
+                 patch.object(publish_images, 'github', side_effect=[repository, *metadata]), \
+                 patch.object(publish_images, 'receipt', side_effect=lambda x: records.append(copy.deepcopy(x))), \
+                 patch.object(publish_images, 'command') as command:
+                with self.assertRaises(SystemExit):
+                    publish_images.main()
+                command.assert_not_called()
+                self.assertEqual(records[-1]['stage'], 'preflight_package_metadata')
+                self.assertEqual(records[-1]['failureCode'], 'preflight_package_missing_or_inaccessible')
+
+    def test_preflight_metadata_failure_stops_before_build(self):
+        repository = {'full_name': REPOSITORY, 'visibility': 'public'}
+        records = []
         with patch.dict(publish_images.os.environ, self.env, clear=True), \
-             patch.object(publish_images, 'github', side_effect=[repository, None, None]), \
-             patch.object(publish_images, 'receipt'), \
-             patch.object(publish_images, 'command', side_effect=RuntimeError('test boundary')) as command:
+             patch.object(publish_images, 'github', side_effect=[repository, ValueError('metadata permission/read check failed')]), \
+             patch.object(publish_images, 'receipt', side_effect=lambda x: records.append(copy.deepcopy(x))), \
+             patch.object(publish_images, 'command') as command:
             with self.assertRaises(SystemExit):
                 publish_images.main()
-            self.assertEqual(command.call_count, 1)
-            self.assertEqual(command.call_args.args[0][:2], ['docker', 'build'])
-        with self.assertRaises(ValueError):
-            private_package(None, required=True)
+            command.assert_not_called()
+        self.assertEqual(records[-1]['stage'], 'preflight_package_metadata')
+        self.assertEqual(records[-1]['failureCode'], 'preflight_package_metadata_unavailable')
+
+    def test_partial_push_public_metadata_records_digest_and_never_pushes_treedar(self):
+        repository = {'full_name': REPOSITORY, 'visibility': 'public'}
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
+        public = {'visibility': 'public', 'repository': {'full_name': REPOSITORY}}
+        digest = 'sha256:' + 'b' * 64
+        records, commands = [], []
+        def fake_command(args, **kwargs):
+            commands.append(args)
+            if args[:3] == ['docker', 'image', 'inspect']:
+                return json.dumps([{'Config': {'User': '10001:10001'}, 'Os': 'linux',
+                                    'Architecture': 'amd64', 'Id': 'sha256:' + 'a' * 64}])
+            if args[:4] == ['docker', 'buildx', 'imagetools', 'inspect']:
+                return json.dumps({'digest': digest})
+            return ''
+        with patch.dict(publish_images.os.environ, self.env, clear=True), \
+             patch.object(publish_images, 'github', side_effect=[repository, linked, linked, public]), \
+             patch.object(publish_images, 'receipt', side_effect=lambda x: records.append(copy.deepcopy(x))), \
+             patch.object(publish_images, 'command', side_effect=fake_command):
+            with self.assertRaises(SystemExit):
+                publish_images.main()
+        final = records[-1]
+        self.assertEqual(final['stage'], 'postpush_package_metadata')
+        self.assertEqual(final['failureCode'], 'postpush_package_not_private')
+        self.assertEqual(final['images'][0]['status'], 'push_returned')
+        self.assertEqual(final['images'][0]['digest'], digest)
+        pushes = [args for args in commands if args[:2] == ['docker', 'push']]
+        self.assertEqual(len(pushes), 1)
+        self.assertIn('ledgetop-processing-coordinator:', pushes[0][2])
+        self.assertEqual(final['images'][1]['status'], 'built')
 
     def test_preflight_checks_both_exact_package_names_before_build(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'public'}
