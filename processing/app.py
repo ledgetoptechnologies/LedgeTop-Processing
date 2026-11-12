@@ -96,15 +96,17 @@ def make_handler(config: Config):
                 return
             if self.path.startswith("/v1/prototype/"):
                 prefix='/v1/prototype/nodes/'
-                if self.path.startswith(prefix) and '/schedule-owned' in self.path[len(prefix):]:
+                if self.path.startswith(prefix) and any('/'+action in self.path[len(prefix):]
+                        for action in ('schedule-owned', 'recover-update')):
                     if not self._authorized(operator=True):return
                     if queue is None:
                         self._reply(404,{'error':'prototype_disabled'});return
                     parts=self.path[len(prefix):].split('/')
-                    if len(parts)!=3 or parts[1]!='schedule-owned':
+                    if len(parts)!=3 or parts[1] not in ('schedule-owned', 'recover-update'):
                         self._reply(404,{'error':'not_found'});return
                     try:
-                        receipt=queue.owned_schedule_receipt(parts[0],parts[2])
+                        method = queue.owned_schedule_receipt if parts[1]=='schedule-owned' else queue.owned_recovery_receipt
+                        receipt=method(parts[0],parts[2])
                         self._reply(200 if receipt is not None else 404,
                             {'receipt':receipt} if receipt is not None else {'error':'owned_schedule_not_found'})
                     except Conflict:
@@ -181,7 +183,7 @@ def make_handler(config: Config):
                 return
             try:
                 raw=self.rfile.read(length)
-                if self.path.startswith('/v1/prototype/nodes/') and self.path.endswith('/schedule-owned'):
+                if self.path.startswith('/v1/prototype/nodes/') and self.path.endswith(('/schedule-owned', '/recover-update')):
                     def unique(pairs):
                         value={}
                         for key,item in pairs:
@@ -201,12 +203,14 @@ def make_handler(config: Config):
                         identifier, _, action = self.path[len("/v1/prototype/nodes/"):].rpartition("/")
                         methods = {"schedule": queue.schedule_node, "schedule-owned":queue.schedule_node_owned,"cancel": queue.cancel_node,
                                    "begin": queue.begin_node_update, "finish": queue.finish_node_update,
-                                   "hold": queue.hold_node, "resume": queue.resume_node}
+                                   "hold": queue.hold_node, "resume": queue.resume_node,
+                                   "recover-update": queue.recover_node_update}
                         if action not in methods:
                             self._reply(404, {"error": "not_found"})
                         else:
                             result = methods[action](identifier, request)
-                            self._reply(200,result if action=='begin' else {'receipt':result} if action=='schedule-owned' else {'node':result})
+                            self._reply(200,result if action=='begin' else {'receipt':result}
+                                        if action in ('schedule-owned', 'recover-update') else {'node':result})
                     elif operator and self.path.startswith("/v1/prototype/jobs/"):
                         identifier, _, action = self.path[len("/v1/prototype/jobs/"):].rpartition("/")
                         self._reply(200, {"job": queue.operator(identifier, action, request)})
