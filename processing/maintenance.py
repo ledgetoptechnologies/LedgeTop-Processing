@@ -57,6 +57,12 @@ class Maintenance:
         db.execute('''CREATE TABLE IF NOT EXISTS owned_maintenance_schedules (
             request_id TEXT PRIMARY KEY,node_id TEXT NOT NULL,authority_id TEXT NOT NULL,
             request_sha256 TEXT NOT NULL,request_json TEXT NOT NULL,receipt_json TEXT NOT NULL)''')
+        # Secret receipt: exposed only by the operator-only recovery endpoints.
+        # Public node serialization never includes this table or its token.
+        db.execute('''CREATE TABLE IF NOT EXISTS owned_maintenance_recoveries (
+            request_id TEXT PRIMARY KEY,node_id TEXT NOT NULL,authority_id TEXT NOT NULL,
+            request_sha256 TEXT NOT NULL,request_json TEXT NOT NULL,receipt_json TEXT NOT NULL,
+            update_token TEXT NOT NULL)''')
 
     @staticmethod
     def _node_public(row):
@@ -191,6 +197,99 @@ class Maintenance:
                 raise Conflict("maintenance can no longer be canceled")
             db.execute("UPDATE nodes SET state='active',revision=revision+1 WHERE id=?", (identifier,))
             return self._node_public(self._node(db, identifier))
+
+    def _recovery_receipt(self, db, stored):
+        receipt = json.loads(stored['receipt_json'])
+        row = self._node(db, stored['node_id'])
+        valid = (row['state'] == 'updating' and row['plan_id'] == receipt['planId']
+                 and row['revision'] == receipt['revision'] and row['target_image'] == receipt['targetImage']
+                 and row['update_hash'] is not None and hmac.compare_digest(
+                     row['update_hash'], hashlib.sha256(stored['update_token'].encode()).hexdigest()))
+        result = dict(receipt, tokenValid=valid)
+        if valid:
+            result['updateToken'] = stored['update_token']
+        return result
+
+    def owned_recovery_receipt(self, identifier, request_id):
+        """Operator-only reconciliation, never reissues an invalidated token."""
+        self._known_node(identifier); canonical_uuid(request_id)
+        with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            stored = db.execute('SELECT * FROM owned_maintenance_recoveries WHERE request_id=? AND node_id=?',
+                                (request_id, identifier)).fetchone()
+            if stored is None:
+                return None
+            if stored['authority_id'] != self.authority_id:
+                raise Conflict('coordinator authority changed')
+            return self._recovery_receipt(db, stored)
+
+    def recover_node_update(self, identifier, payload):
+        """Issue a fresh reservation after explicit operator inspection; never activates a node."""
+        self._known_node(identifier)
+        self.fields(payload, ('schemaVersion', 'requestId', 'originalOperationId', 'authorityId',
+                              'expectedRevision', 'planId', 'targetImage', 'workerStopped', 'ingressClosed', 'note'))
+        if type(payload['schemaVersion']) is not int or payload['schemaVersion'] != 1:
+            raise ValueError('recovery schemaVersion must be 1')
+        for key in ('requestId', 'originalOperationId', 'authorityId', 'planId'):
+            canonical_uuid(payload[key])
+        if payload['requestId'] == payload['originalOperationId']:
+            raise ValueError('fresh recovery requestId required')
+        if payload['authorityId'] != self.authority_id:
+            raise Conflict('coordinator authority changed')
+        if (type(payload['expectedRevision']) is not int or not 0 <= payload['expectedRevision'] <= 2**53-1
+                or not isinstance(payload['targetImage'], str) or not IMAGE.fullmatch(payload['targetImage'])
+                or payload['workerStopped'] is not True or payload['ingressClosed'] is not True
+                or not isinstance(payload['note'], str) or not payload['note'].strip() or len(payload['note']) > 256):
+            raise ValueError('inspected stopped worker and closed ingress acknowledgments required')
+        request_json = canonical(payload)
+        request_sha = hashlib.sha256(canonical(dict(nodeId=identifier, request=payload)).encode()).hexdigest()
+        with self._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            stored = db.execute('SELECT * FROM owned_maintenance_recoveries WHERE request_id=?',
+                                (payload['requestId'],)).fetchone()
+            if stored:
+                if (stored['node_id'] != identifier or stored['authority_id'] != self.authority_id
+                        or stored['request_sha256'] != request_sha or stored['request_json'] != request_json):
+                    raise Conflict('recovery requestId is already bound')
+                return self._recovery_receipt(db, stored)
+            if db.execute('SELECT 1 FROM owned_maintenance_schedules WHERE request_id=?',
+                          (payload['requestId'],)).fetchone():
+                raise Conflict('fresh recovery requestId required')
+            original = db.execute('SELECT * FROM owned_maintenance_schedules WHERE request_id=?',
+                                  (payload['originalOperationId'],)).fetchone()
+            if original is None:
+                raise Conflict('original owned schedule required')
+            receipt = json.loads(original['receipt_json'])
+            if (original['node_id'] != identifier or original['authority_id'] != self.authority_id
+                    or any(receipt.get(key) != value for key, value in (
+                        ('authorityId', self.authority_id), ('nodeId', identifier),
+                        ('requestId', payload['originalOperationId']), ('planId', payload['planId']),
+                        ('targetImage', payload['targetImage'])))):
+                raise Conflict('original maintenance operation changed')
+            row = self._node(db, identifier)
+            self._cas(row, payload, plan=True)
+            if row['state'] != 'held' or row['target_image'] != payload['targetImage']:
+                raise Conflict('only the same held update can be recovered')
+            if db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('queued','running','held')",
+                          (identifier,)).fetchone():
+                raise Conflict('node still owns unsettled work')
+            token = secrets.token_urlsafe(32)
+            result = canonical(dict(operatorAction='recover-update', requestId=payload['requestId'],
+                                    originalOperationId=payload['originalOperationId'], note=payload['note'],
+                                    workerStopped=True, ingressClosed=True))
+            db.execute("""UPDATE nodes SET state='updating',revision=revision+1,update_hash=?,
+                result=?,finish_status=NULL WHERE id=?""",
+                (hashlib.sha256(token.encode()).hexdigest(), result, identifier))
+            recovered = self._node_public(self._node(db, identifier))
+            receipt = dict(schemaVersion=1, requestId=payload['requestId'], originalOperationId=payload['originalOperationId'],
+                           originalReceiptSha256=receipt['receiptSha256'], authorityId=self.authority_id,
+                           nodeId=identifier, requestSha256=request_sha, expectedRevision=payload['expectedRevision'],
+                           revision=recovered['revision'], planId=recovered['planId'], targetImage=recovered['targetImage'],
+                           state='updating')
+            receipt['receiptSha256'] = hashlib.sha256(canonical(receipt).encode()).hexdigest()
+            db.execute('INSERT INTO owned_maintenance_recoveries VALUES(?,?,?,?,?,?,?)',
+                       (payload['requestId'], identifier, self.authority_id, request_sha, request_json, canonical(receipt), token))
+            return dict(receipt, tokenValid=True, updateToken=token)
 
     def begin_node_update(self, identifier, payload):
         self.fields(payload, ("expectedRevision", "planId"))
