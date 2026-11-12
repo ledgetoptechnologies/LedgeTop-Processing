@@ -117,6 +117,27 @@ def _snapshot(info):
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_nlink)
 
 
+def _ground_noncollinear(basis, positions):
+    """Accumulate an exact non-collinearity proof in LAS integer coordinates.
+
+    LAS scales are positive per axis, so this affine mapping preserves
+    collinearity. Python integers avoid overflow and floating-point thresholds
+    that would make admission depend on point order or coordinate scale.
+    """
+    for raw_x, raw_y in positions:
+        x, y = int(raw_x), int(raw_y)
+        if not basis:
+            basis.append((x, y))
+        elif len(basis) == 1:
+            if (x, y) != basis[0]:
+                basis.append((x, y))
+        else:
+            (x0, y0), (x1, y1) = basis
+            if (x1 - x0) * (y - y0) != (y1 - y0) * (x - x0):
+                return True
+    return False
+
+
 def _grid(bounds, cell, maximum):
     minx, miny, maxx, maxy = bounds
     columns = math.floor((maxx - math.floor(minx / cell) * cell) / cell) + 1
@@ -235,18 +256,8 @@ def validate_lidar(path, *, job_id, generation, environment, object_id, expected
                     ground_count += int(ground.sum())
                     ground_xy = xyz[ground, :2]
                     if not ground_noncollinear:
-                        for position in ground_xy:
-                            if not ground_basis:
-                                ground_basis.append(position.copy())
-                            elif len(ground_basis) == 1:
-                                if not np.array_equal(position, ground_basis[0]):
-                                    ground_basis.append(position.copy())
-                            else:
-                                direction = ground_basis[1] - ground_basis[0]
-                                offset = position - ground_basis[0]
-                                if abs(direction[0]*offset[1] - direction[1]*offset[0]) > 1e-6:
-                                    ground_noncollinear = True
-                                    break
+                        ground_noncollinear = _ground_noncollinear(
+                            ground_basis, zip(np.asarray(chunk.X)[ground], np.asarray(chunk.Y)[ground]))
                     cells = np.floor((ground_xy - minima[:2]) / policy.ground_cell_m).astype(np.int64)
                     ground_cells.update(map(tuple, cells.tolist()))
                     if len(ground_cells) > policy.max_grid_cells:
