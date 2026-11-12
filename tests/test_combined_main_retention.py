@@ -19,6 +19,26 @@ from ops import retained_main_engine_swap as swap
 
 
 class CombinedSourceTests(unittest.TestCase):
+    def test_mount_fingerprint_normalizes_only_array_order(self):
+        mounts = [dict(Type='bind', Source='/proc', Destination='/host/proc', RW=False),
+                  dict(Type='bind', Source='/sys', Destination='/host/sys', RW=False)]
+        expected = combined.mounts_fingerprint(mounts)
+        self.assertEqual(combined.mounts_fingerprint(list(reversed(mounts))), expected)
+        self.assertEqual(mounts[0]['Source'], '/proc')  # Input is not mutated.
+        changes = [dict(mounts[0], RW=True), dict(mounts[0], Source='/elsewhere'),
+                   dict(mounts[0], FutureInspectField='must-not-be-ignored')]
+        for changed in changes:
+            with self.subTest(changed=changed):
+                self.assertNotEqual(combined.mounts_fingerprint([changed, mounts[1]]), expected)
+        self.assertNotEqual(combined.mounts_fingerprint(mounts + [mounts[0]]), expected)
+        self.assertNotEqual(combined.mounts_fingerprint(mounts[:1]), expected)
+
+    def test_mount_fingerprint_refuses_non_array_or_non_object_rows(self):
+        for mounts in ({}, (), [None], ['mount']):
+            with self.subTest(mounts=mounts):
+                with self.assertRaises(swap.Held):
+                    combined.mounts_fingerprint(mounts)
+
     def test_cli_default_is_static_plan_without_runtime_or_source_reads(self):
         output = io.StringIO()
         with patch.object(combined, 'CombinedRuntime') as runtime, patch.object(

@@ -28,7 +28,12 @@ The inputs JSON has exactly two top-level keys:
 * `readOnlyObservers`: map from each independently approved full container ID to
   `{metricsOnlyReviewed: true, imageId, applicationConfigSha256,
   hostConfigSha256, mountsSha256}`. Hashes bind complete canonical inspected
-  objects, not selected command/environment fields. Do not print raw objects or
+  objects, not selected command/environment fields. `mountsSha256` uses
+  `mounts_fingerprint`: sort the complete mount dictionaries by their full
+  canonical JSON bytes, then SHA256 the canonical JSON array. Only array order
+  is normalized; all fields (including unknown fields) and repeated entries are
+  preserved. Do not hash Docker's nondeterministic raw mount-array order.
+  Do not print raw objects or
   infer an exemption from a container name. An empty map approves no observers.
 * `cleanupTemplates`: nonempty list with one template per authorized engine task,
   without duplicates. Only M4E `c4e4121a-7848-4290-a3c9-c0537699bbb1` and Tim

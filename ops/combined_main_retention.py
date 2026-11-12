@@ -36,6 +36,13 @@ CLEANUP_FILES = ('ops/early_intermediate_cleanup.py', 'processing/intermediate_c
                  'processing/intermediate_pdf.py')
 
 
+def mounts_fingerprint(mounts):
+    """Normalize inspect array order only; retain every field and multiplicity."""
+    require(type(mounts) is list and all(type(row) is dict for row in mounts),
+            'invalid_mount_fingerprint_input')
+    return digest(canonical(sorted(mounts, key=canonical)))
+
+
 def private_json(path):
     info = swap.regular(path, private=True)
     require(info.st_uid == 0 and stat.S_IMODE(info.st_mode) == 0o600, 'root_private_input_required')
@@ -568,7 +575,7 @@ class CombinedRuntime(swap.Runtime):
                             and approved['imageId'] == other['Image']
                             and approved['applicationConfigSha256'] == digest(canonical(other['Config']))
                             and approved['hostConfigSha256'] == digest(canonical(other['HostConfig']))
-                            and approved['mountsSha256'] == digest(canonical(other['Mounts'])),
+                            and approved['mountsSha256'] == mounts_fingerprint(other['Mounts']),
                             'unreviewed_readonly_native_observer')
 
     def backup_tmp(self, prepared, root):
