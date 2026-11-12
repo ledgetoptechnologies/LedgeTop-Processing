@@ -34,8 +34,9 @@ class NamespaceTopologyTests(unittest.TestCase):
                 self.assertFalse(constrained_peer_host({'Privileged':False,'CapAdd':caps}))
         for caps in (None,[],['CHOWN'],['cap_net_bind_service']):
             self.assertTrue(constrained_peer_host({'Privileged':False,'CapAdd':caps}))
-        for privileged in (True,1,'false',[]):
+        for privileged in (True,None,0,1,'false',[]):
             self.assertFalse(constrained_peer_host({'Privileged':privileged,'CapAdd':None}))
+        self.assertFalse(constrained_peer_host({'CapAdd':None}))
 
     def test_cleanup_observer_uses_same_full_seal_before_ro_proc_overlap(self):
         runtime=alias_observer(Path('/synthetic-data'),Path('/proc'))

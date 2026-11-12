@@ -34,7 +34,7 @@ def mounts_fingerprint(mounts):
 
 def constrained_peer_host(host):
     """Fail closed on malformed authority and equivalent mount-capability names."""
-    if type(host) is not dict or (host.get('Privileged') is not None and host.get('Privileged') is not False):
+    if type(host) is not dict or host.get('Privileged') is not False:
         return False
     caps=host.get('CapAdd')
     if caps is None:
