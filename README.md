@@ -1,16 +1,27 @@
 # LedgeTop Processing
 
-GitHub checks run on `main` pushes and pull requests targeting `main`; feature
-branch pushes do not consume Actions minutes. The guarded manual workflow is
-main-only. Ordinary branch iteration belongs in Engineering Hub when its actual
+GitHub checks run only on `main` pushes and guarded manual runs on `main`.
+Pull requests and feature branch pushes do not run this repository workflow. Ordinary branch iteration belongs in Engineering Hub when its actual
 execution path is available. See [repository CI policy](AGENTS.md).
 
 The [package workflow](.github/workflows/processing.yml) checks the existing
-Dockerfiles and publishes two private repository-linked images on main:
-`ledgetop-processing-orchestrator` and `ledgetop-processing-treedar` under
-`ghcr.io/ledgetoptechnologies`. Each run uses a unique build tag and retains a
-metadata receipt with verified registry digests. It never deploys a container,
-updates a live tag, or gives publishing permissions to processing-node tokens.
+Dockerfiles and targets two private repository-linked images on main:
+`ledgetop-processing-coordinator` and `ledgetop-processing-treedar` under
+`ghcr.io/ledgetoptechnologies`. Before building or pushing, the publisher rejects any package metadata showing
+public visibility or an absent/different repository link. GitHub documents that
+a first Container Registry publication defaults to private and that publishing
+with the workflow token links the workflow repository. A metadata 404 can also
+mean inaccessible; the post-push check still requires positive confirmation
+of private visibility and the repository link. The legacy public
+`ledgetop-processing-orchestrator` package is not modified.
+
+A successful publish records each verified immutable `sha256` manifest digest in
+its receipt. On a test node signed in with its read-only package credential, use
+`docker pull ghcr.io/ledgetoptechnologies/ledgetop-processing-coordinator@sha256:<digest>`
+and the corresponding `ledgetop-processing-treedar@sha256:<digest>` from that
+receipt. Neither the first private publish nor an immutable private pull has yet
+been verified. The workflow does not deploy containers, update live tags, or
+change node credentials; runtime image migration remains separate.
 
 Private, self-hosted coordination service for LedgeTop's processing computers.
 The cluster PC is the single endpoint reached by the TrueNAS Viewer. TrueNAS is
