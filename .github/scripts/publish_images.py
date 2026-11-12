@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 
 REPOSITORY = 'ledgetoptechnologies/LedgeTop-Processing'
-PACKAGES = ('ledgetop-processing-orchestrator', 'ledgetop-processing-treedar')
+PACKAGES = ('ledgetop-processing-coordinator', 'ledgetop-processing-treedar')
 
 
 def context(env):
@@ -89,7 +89,9 @@ def main():
         repository = github('/repos/' + REPOSITORY)
         state['sourceRepositoryVisibility'] = source_repository(repository)
         for package in PACKAGES:
-            private_package(github('/orgs/ledgetoptechnologies/packages/container/' + package))
+            # Never create an unverified package by pushing: the source repo
+            # can be public and package visibility is not established by a tag.
+            private_package(github('/orgs/ledgetoptechnologies/packages/container/' + package), required=True)
         for package, build_root in zip(PACKAGES, ('.', 'engines/treedar')):
             reference = 'ghcr.io/ledgetoptechnologies/' + package + ':' + tag
             state.update(stage='build', currentPackage=package)
