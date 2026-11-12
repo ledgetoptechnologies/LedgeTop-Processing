@@ -55,7 +55,21 @@ def parse_query(query):
         raise ValueError('invalid query')
     return after, limit, status, environment
 
-def snapshot(queue, viewer_enabled, after, limit, status, environment):
+def snapshot(queue, viewer_enabled, after, limit, status, environment, *, configured_nodes=None):
+    # Empty configuration is an explicit unknown: the scheduler has a legacy
+    # fallback and the dashboard must not invent its limits from defaults.
+    policy = None
+    if configured_nodes:
+        ids = [getattr(node, 'node_id', None) for node in configured_nodes]
+        if ids != list(queue.node_ids) or len(ids) != len(set(ids)):
+            raise ValueError('configured node order differs from queue')
+        policy = {}
+        for node in configured_nodes:
+            limit_value = getattr(node, 'max_photos', 'missing')
+            if limit_value is not None and (type(limit_value) is not int or not 1 <= limit_value <= 1_000_000):
+                raise ValueError('invalid configured node limit')
+            policy[node.node_id] = limit_value
+
     conditions, values = ['j.seq > ?'], [after]
     if status:
         conditions.append('j.status = ?'); values.append(status)
@@ -88,7 +102,13 @@ def snapshot(queue, viewer_enabled, after, limit, status, environment):
             'logs': unavailable(), 'consistency': 'per_page_database_snapshot',
             'pagination': 'creation_sequence_not_change_feed',
             'refresh': 'restart_at_zero_and_read_all_pages', 'jobs': jobs,
-            'nodes': [{'nodeId': r['id'], 'maintenanceState': r['state'], 'revision': r['revision'],
+            'nodes': [{'nodeId': r['id'], 'preferenceIndex': index,
+                       'maintenanceState': r['state'], 'revision': r['revision'],
                        'drainAt': utc_wire(r['drain_at']), 'notBefore': utc_wire(r['not_before']),
-                       'engine': unavailable(), 'container': unavailable(), 'resources': unavailable()} for r in nodes],
+                       'configuredPhotoLimit': ({'state': 'unavailable', 'source': None, 'maxPhotos': None}
+                           if policy is None else {'state': 'no_configured_cap' if policy[r['id']] is None else 'configured',
+                                                   'source': 'configuration', 'maxPhotos': policy[r['id']]}),
+                       'effectivePhotoLimit': unavailable(),
+                       'engine': unavailable(), 'container': unavailable(), 'resources': unavailable()}
+                      for index, r in enumerate(nodes)],
             'nextAfter': rows[-1]['seq'] if more and rows else None}

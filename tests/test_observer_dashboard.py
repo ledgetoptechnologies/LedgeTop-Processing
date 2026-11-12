@@ -120,6 +120,35 @@ class DashboardAvailabilityTests(unittest.TestCase):
             finally:
                 q.close()
 
+    def test_configured_order_limits_and_live_limit_unknown(self):
+        import tempfile
+        from processing.config import ProcessingNode
+        from processing.prototype import Queue
+        from processing.observer_dashboard import snapshot
+        with tempfile.TemporaryDirectory() as root:
+            q = Queue(root, node_ids=('cluster', 'main', 'third'))
+            try:
+                nodes = (ProcessingNode('cluster', 'http://cluster.invalid', max_photos=1000),
+                         ProcessingNode('main', 'http://main.invalid', max_photos=None),
+                         ProcessingNode('third', 'http://third.invalid', max_photos=700))
+                out = snapshot(q, False, 0, 50, None, None, configured_nodes=nodes)
+                self.assertEqual([n['preferenceIndex'] for n in out['nodes']], [0, 1, 2])
+                self.assertEqual([n['configuredPhotoLimit'] for n in out['nodes']], [
+                    {'state': 'configured', 'source': 'configuration', 'maxPhotos': 1000},
+                    {'state': 'no_configured_cap', 'source': 'configuration', 'maxPhotos': None},
+                    {'state': 'configured', 'source': 'configuration', 'maxPhotos': 700}])
+                self.assertTrue(all(n['effectivePhotoLimit']['state'] == 'unavailable' for n in out['nodes']))
+                fallback = snapshot(q, False, 0, 50, None, None)
+                self.assertTrue(all(n['configuredPhotoLimit']['state'] == 'unavailable' for n in fallback['nodes']))
+                for bad in ((nodes[1], nodes[0], nodes[2]), (nodes[0], nodes[1]),
+                            (nodes[0], nodes[1], nodes[1]),
+                            (nodes[0], nodes[1], ProcessingNode('unknown', 'http://x.invalid')),
+                            (nodes[0], nodes[1], ProcessingNode('third', 'http://x.invalid', max_photos=-1))):
+                    with self.subTest(bad=bad), self.assertRaises(ValueError):
+                        snapshot(q, False, 0, 50, None, None, configured_nodes=bad)
+            finally:
+                q.close()
+
     def test_missing_configured_node_fails_closed(self):
         import tempfile
         from processing.prototype import Queue

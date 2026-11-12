@@ -19,3 +19,12 @@ at runtime. Unknown phase and held-reason strings map to `other`, and error
 text maps to `other`; this endpoint never relays native task logs. A future
 reporter must define authenticated identity, freshness and redaction before
 these fields can report live values.
+
+Node `preferenceIndex` is zero-based configuration/scheduler preference order.
+`configuredPhotoLimit` reports `source: configuration` and either a numeric
+`maxPhotos` or `state: no_configured_cap` for a null configured limit. A null
+configured limit is not evidence of unlimited engine capability. The separate
+`effectivePhotoLimit` is unavailable until a trusted live report exists. If no
+explicit Processing-node configuration is supplied, configured limits are
+unavailable rather than inferred from legacy fallback defaults. Conflicting
+node order, duplicate IDs, missing nodes, and invalid limits fail closed.

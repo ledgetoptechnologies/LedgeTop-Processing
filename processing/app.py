@@ -114,7 +114,7 @@ def make_handler(config: Config):
                 except ValueError:
                     self._reply(400, {'error': 'invalid_query'}); return
                 try:
-                    self._reply(200, snapshot(queue, config.viewer_enabled, *params))
+                    self._reply(200, snapshot(queue, config.viewer_enabled, *params, configured_nodes=config.processing_nodes))
                 except ValueError:
                     self._reply(503, {'error': 'invalid_stored_state'})
                 return
