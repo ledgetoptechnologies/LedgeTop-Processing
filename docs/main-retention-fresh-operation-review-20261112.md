@@ -1,7 +1,10 @@
 # Fresh main-retention operation review packet
 
 This is a command/input review packet, not an execution record. Runtime source
-is exactly qualified commit `9ef04bafd096aa89007dc053cc4f5181537ad82c`.
+comes from commit `9ef04bafd096aa89007dc053cc4f5181537ad82c`. The prior e30 archive
+executed many CRLF files, which differ from the intended Git LF manifest hashes.
+That suite is not LF byte qualification. Root is preparing a canonical LF bundle,
+complete 52-file hash comparison and fresh suite; preparation is held until then.
 Documentation successors do not change its Python inventory. The draft manifest
 `docs/evidence/main-retention-live-qualification-DRAFT-20261112.json` proposes
 six gate-to-receipt bindings and retains `passed=false`, `completedGates=[]`.

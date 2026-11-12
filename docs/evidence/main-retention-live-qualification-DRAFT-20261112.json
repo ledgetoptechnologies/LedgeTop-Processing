@@ -109,7 +109,7 @@
     {
       "gate": "actual-format-cleanup-parsers",
       "evidence": "format741-result.txt",
-      "scope": "Parser741 six read-only actual M4E/Tim PDF/GLB/tileset probes passed unchanged using explicitly pinned CRLF source; LF integration uses separately reviewed newline provenance bridge and unit suite, not an exact LF actual-format execution claim; reference counts192/732; test741 58 cases57pass1expectedskip"
+      "scope": "Parser741 six actual M4E/Tim format probes passed unchanged using pinned CRLF source; Git LF mapping is only a reviewed source provenance bridge. Prior integration133 suite used CRLF archive; canonical LF byte qualification pending. Reference counts192/732; parser58cases57pass1expectedskip"
     }
   ],
   "approvalState": "Awaiting root and independent review; passed=false and completedGates remain empty",
@@ -119,7 +119,8 @@
     "passed": 128,
     "expectedSkips": 5,
     "outputSha256": "f3edfb0982555448dfa303c9a8a920e9054f0dcd6479ecad2dcc3d035d4fddb0",
-    "independentSourceReview": "PASS; unchanged fourteen origin blobs and thin CLI"
+    "independentSourceReview": "PASS; unchanged fourteen origin blobs and thin CLI",
+    "executionByteScope": "Actual archivee30 contained many CRLF files; does not qualify intended Git LF sourceHashes"
   },
   "targetGpuObservation": {
     "observer": "Root report; no local receipt hash supplied",
@@ -143,7 +144,7 @@
     "sourceCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4",
     "probe": "probe741.py",
     "observedExecutionBytes": "CRLF source pinned by actual six-format probe",
-    "integrationBytes": "Git LF source pinned by integrated9ef main-PC unit suite",
+    "integrationBytes": "Intended Git LF source map; prior integrated9ef e30 archive executed many CRLF files, not verified LF",
     "mapping": [
       {
         "path": "processing/__init__.py",
@@ -163,6 +164,16 @@
     ],
     "reviewBasis": "Independent reviewer recomputed Git741 LF to CRLF transformation and obtained exact probe741 pins for all three files",
     "equivalenceScope": "Pure Python source differs only in line terminators and has universal-newline equivalence; no parser logic difference",
-    "limitation": "The actual-format probe did not execute the exact LF byte hashes in sourceHashes. LF unit execution is separate evidence; no actual-format repeat claimed."
+    "limitation": "Actual-format probes used pinned CRLF. Prior 133-case e30 archive suite also used many CRLF files. No LF execution is currently claimed; fresh canonical LF archive, all52 hash verification and suite are pending root."
+  },
+  "byteBindingHold": {
+    "status": "HOLD",
+    "intendedSourceFiles": 52,
+    "priorArchive": "e30c0ff4ad90831a80e12f9d38f0d8656723057586721fe7597d2547eea29282",
+    "issue": "Many actual archive files CRLF differ from intended Git LF sourceHashes",
+    "runtimeConstructed": false,
+    "credentialsCreated": false,
+    "maintenanceMutations": 0,
+    "next": "Root canonical LF archive, verify all52 hashes, rerun bounded133suite"
   }
 }

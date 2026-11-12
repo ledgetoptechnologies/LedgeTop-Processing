@@ -27,5 +27,6 @@
     "Suite and source review do not install or authorize consumed operation replay",
     "Restricted TMP profile only: each entry UID0/GID0 and no xattrs",
     "Todd intermediates remain excluded from cache cleanup"
-  ]
+  ],
+  "executionByteScope": "Suite executed archivee30 with many CRLF files. It proves those bytes only, not intended Git LF manifest. Root LF archive/hash verification and rerun pending."
 }

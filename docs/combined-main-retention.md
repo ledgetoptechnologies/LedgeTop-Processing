@@ -159,6 +159,11 @@ This does not claim the new thin CLI integration or every root-only ownership
 case passed. The exact five cleanup runtime files come from741ee197, with no
 parser edits in this integration. Current-main Viewer/OpenSplat code is preserved.
 
+The later integration133-case run used archivee30, which contained many CRLF
+files. Its pass does not qualify the intended Git LF manifest byte hashes.
+Canonical LF archive/hash verification and a fresh bounded suite are pending
+root; no Runtime/credential/maintenance step was entered on the rejected binding.
+
 This record is a local candidate/handoff, not proof of a completed goal, installed
 automation or a newly created Engineering Hub project task. Root retains task
 continuity/ownership and central Merger controls integration/release.
