@@ -357,13 +357,16 @@ class TaskStore:
             self.ensure_capacity(length, copies=2)
             temporary = directory / ('.incoming-' + secrets.token_hex(16))
             final = directory / ('input-' + secrets.token_hex(16))
+            descriptor = None
             try:
                 with self.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE')
                     self._require_upload_pin(db, identifier, token, generation)
                     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 digest = hashlib.sha256()
-                with os.fdopen(descriptor, 'wb') as output:
+                output = os.fdopen(descriptor, 'wb')
+                descriptor = None  # output owns it from here
+                with output:
                     remaining = length
                     while remaining:
                         chunk = stream.read(min(1024 * 1024, remaining))
@@ -399,6 +402,8 @@ class TaskStore:
                     db.execute('UPDATE viewer_tasks SET updated_at=CURRENT_TIMESTAMP WHERE uuid=?', (identifier,))
                 return {'success': True, 'uuid': identifier}
             finally:
+                if descriptor is not None:
+                    os.close(descriptor)
                 # Only this invocation's randomly named, explicitly owned tmp file.
                 if temporary.exists():
                     temporary.unlink()
