@@ -1,3 +1,4 @@
+import http.client
 import unittest
 from dataclasses import replace
 from urllib.error import HTTPError
@@ -21,6 +22,17 @@ class DashboardHTTPTests(PrototypeHTTPTests):
         for token in (TOKEN, 'wrong', 'legacy-observer-token-1234567890123456'):
             with self.assertRaises(HTTPError) as e: self.request('/v1/observer/dashboard', token=token)
             self.assertEqual(e.exception.code, 401)
+        conn = http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=5)
+        try:
+            conn.putrequest('GET', '/v1/observer/dashboard')
+            conn.putheader('Authorization', 'Bearer ' + observer)
+            conn.putheader('Authorization', 'Bearer ' + observer)
+            conn.endheaders()
+            response = conn.getresponse()
+            self.assertEqual(response.status, 401)
+            response.read()
+        finally:
+            conn.close()
         for query in ('?limit=101', '?limit=0', '?after=-1', '?after=1&after=2', '?status=bad', '?secret=1'):
             with self.assertRaises(HTTPError) as e: self.request('/v1/observer/dashboard'+query, token=observer)
             self.assertEqual(e.exception.code, 400)
@@ -77,6 +89,49 @@ class DashboardJoinTests(unittest.TestCase):
                 self.assertIsNone(fresh['jobs'][0]['viewerUpdatedAt'])
                 self.assertEqual(fresh['refresh'],'restart_at_zero_and_read_all_pages')
             finally: q.close()
+
+class DashboardAvailabilityTests(unittest.TestCase):
+    def test_unreported_nodes_do_not_look_healthy_or_fresh_and_strings_are_redacted(self):
+        import tempfile
+        from processing.prototype import Queue
+        from processing.observer_dashboard import snapshot
+        with tempfile.TemporaryDirectory() as root:
+            q = Queue(root, node_ids=('cluster', 'main', 'third'))
+            try:
+                production, _ = q.submit({**submission('projection-prod'), 'environment': 'production'})
+                staging, _ = q.submit({**submission('projection-stage'), 'environment': 'staging'})
+                with q._db() as db:
+                    db.execute('CREATE TABLE viewer_tasks (uuid TEXT, engine_uuid TEXT, job_id TEXT, removed INTEGER, phase TEXT, upload_cursor INTEGER, progress REAL, error TEXT, updated_at TEXT)')
+                    db.execute('INSERT INTO viewer_tasks VALUES (?,?,?,?,?,?,?,?,?)',
+                               ('provider-uuid', 'engine-uuid', production['id'], 0,
+                                'SECRET_CLIENT_PHASE', 2, 0, 'SECRET_CLIENT_ERROR', '2026-11-10T23:20:00Z'))
+                    db.execute('UPDATE jobs SET held_reason=? WHERE id=?', ('SECRET_CLIENT_REASON', production['id']))
+                out = snapshot(q, True, 0, 50, None, None)
+                self.assertEqual(out['schemaVersion'], 1)
+                self.assertEqual([x['nodeId'] for x in out['nodes']], ['cluster', 'main', 'third'])
+                self.assertEqual({x['environment'] for x in out['jobs']}, {'production', 'staging'})
+                for node in out['nodes']:
+                    for key in ('engine', 'container', 'resources'):
+                        self.assertEqual(node[key], {'state': 'unavailable', 'reason': 'not_reported', 'observedAt': None})
+                self.assertEqual(out['logs']['state'], 'unavailable')
+                self.assertNotIn('SECRET_CLIENT_', str(out))
+                first = next(x for x in out['jobs'] if x['jobId'] == production['id'])
+                self.assertEqual((first['phase'], first['errorCode'], first['heldReason']), ('other', 'other', 'other'))
+            finally:
+                q.close()
+
+    def test_missing_configured_node_fails_closed(self):
+        import tempfile
+        from processing.prototype import Queue
+        from processing.observer_dashboard import snapshot
+        with tempfile.TemporaryDirectory() as root:
+            q = Queue(root, node_ids=('cluster', 'main'))
+            try:
+                with q._db() as db:
+                    db.execute("DELETE FROM nodes WHERE id='main'")
+                with self.assertRaises(ValueError): snapshot(q, False, 0, 50, None, None)
+            finally:
+                q.close()
 
 class DashboardTimestampTests(unittest.TestCase):
     def test_timestamp_contract(self):

@@ -7,3 +7,15 @@
 Nodes are listed in configured preference order with coordinator maintenance state, not live engine health or resource usage. `uploadedFiles` counts coordinator-to-NodeODM acknowledged files; `totalFiles` is null until a bounded authoritative count is supplied. This does not report Viewer-to-coordinator transfer progress. Job, provider-task and engine-task identifiers are distinct; no client paths, display names, claims, or result bodies are returned.
 
 Timestamps are explicit UTC ISO 8601. SQLite's exact `YYYY-MM-DD HH:MM:SS[.ffffff]` form is interpreted as UTC because SQLite CURRENT_TIMESTAMP produces UTC; offset-qualified ISO values are converted to UTC. Null remains null. Unknown or invalid stored timestamp formats fail the response closed with `invalid_stored_state`.
+
+
+Version 1 exposes a database observation time only: configured nodes do not
+currently have a trusted engine/container or resource reporting feed. Each node
+returns `engine`, `container`, and `resources` as `state: unavailable`,
+`reason: not_reported`, `observedAt: null`. Logs are also unavailable. These
+fields are not negative health results, and queue timestamps are not heartbeat
+timestamps. Nodes are configuration-driven rather than dynamically registered
+at runtime. Unknown phase and held-reason strings map to `other`, and error
+text maps to `other`; this endpoint never relays native task logs. A future
+reporter must define authenticated identity, freshness and redaction before
+these fields can report live values.

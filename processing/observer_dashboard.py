@@ -5,6 +5,19 @@ from urllib.parse import parse_qs
 
 _ALLOWED_STATUS = {'queued', 'running', 'held', 'succeeded', 'failed', 'cancelled'}
 _ALLOWED_ENV = {'production', 'staging'}
+_PHASES = frozenset(('uploading', 'queued', 'waiting_node', 'claimed', 'init_pending', 'initialized',
+                     'upload_pending', 'uploaded', 'commit_pending', 'awaiting_engine_start',
+                     'processing', 'complete', 'cancel_pending', 'cancelled', 'held'))
+_HELD_REASONS = frozenset(('operator', 'coordinator_restart'))
+
+def safe_known(value, allowed):
+    if value is None:
+        return None
+    return value if isinstance(value, str) and value in allowed else 'other'
+
+def unavailable():
+    return {'state': 'unavailable', 'reason': 'not_reported', 'observedAt': None}
+
 _SQLITE_UTC = re.compile(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,6})?$')
 _ISO_OFFSET = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$')
 
@@ -61,16 +74,21 @@ def snapshot(queue, viewer_enabled, after, limit, status, environment):
     rows = rows[:limit]
     jobs = [{'jobId': r['id'], 'providerTaskId': r['provider_uuid'], 'engineTaskId': r['engine_uuid'],
              'environment': r['environment'], 'profile': r['profile'], 'status': r['status'],
-             'nodeId': r['node_id'], 'phase': r['phase'], 'uploadedFiles': r['upload_cursor'],
+             'nodeId': r['node_id'], 'phase': safe_known(r['phase'], _PHASES), 'uploadedFiles': r['upload_cursor'],
              'totalFiles': None,
-             'progress': r['progress'], 'errorCode': r['error'], 'heldReason': r['held_reason'],
+             'progress': r['progress'], 'errorCode': None if r['error'] is None else 'other',
+             'heldReason': safe_known(r['held_reason'], _HELD_REASONS),
              'createdAt': utc_wire(r['created_at']), 'queueUpdatedAt': utc_wire(r['updated_at']),
              'viewerUpdatedAt': utc_wire(r['viewer_updated_at'])} for r in rows]
     ordered_nodes = {r['id']: r for r in nodes}
-    nodes = [ordered_nodes[n] for n in queue.node_ids if n in ordered_nodes]
-    return {'observedAt': observed, 'consistency': 'per_page_database_snapshot',
+    if any(n not in ordered_nodes for n in queue.node_ids):
+        raise ValueError('configured node missing from state')
+    nodes = [ordered_nodes[n] for n in queue.node_ids]
+    return {'schemaVersion': 1, 'observedAt': observed,
+            'logs': unavailable(), 'consistency': 'per_page_database_snapshot',
             'pagination': 'creation_sequence_not_change_feed',
             'refresh': 'restart_at_zero_and_read_all_pages', 'jobs': jobs,
             'nodes': [{'nodeId': r['id'], 'maintenanceState': r['state'], 'revision': r['revision'],
-                       'drainAt': utc_wire(r['drain_at']), 'notBefore': utc_wire(r['not_before'])} for r in nodes],
+                       'drainAt': utc_wire(r['drain_at']), 'notBefore': utc_wire(r['not_before']),
+                       'engine': unavailable(), 'container': unavailable(), 'resources': unavailable()} for r in nodes],
             'nextAfter': rows[-1]['seq'] if more and rows else None}

@@ -97,6 +97,8 @@ def make_handler(config: Config):
             if parsed.path == '/v1/observer/dashboard':
                 token = config.dashboard_token
                 supplied = self.headers.get('Authorization', '')
+                if len(self.headers.get_all('Authorization', [])) != 1:
+                    self._reply(401, {'error': 'unauthorized'}); return
                 if not token or token in (config.api_token, config.prototype_operator_token,
                                           config.prototype_observer_token, config.viewer_token,
                                           config.viewer_staging_token, config.local_node_token, config.main_node_token,
