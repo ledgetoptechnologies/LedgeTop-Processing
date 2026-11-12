@@ -7,10 +7,12 @@
   "selectedUnchangedFiles": [
     {
       "path": "ops/early_intermediate_cleanup.py",
-      "unchangedFromOrigin": true,
+      "unchangedFromOrigin": false,
       "gitBlob": "9656329b2581ffd588759628fcf78b546a1f205b",
       "sha256": "9cd039ea368a9c4043ec800310f698eec62a625f94c3d947b9ae6c80577969de",
-      "originCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4"
+      "originCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4",
+      "currentRelationship": "DERIVED from741: reviewed topology/full observer seal/shared privilege safety successor; original blob/hash retained as provenance only",
+      "currentSha256": "2bacf32ddaf44ca9e2816e1f8d9a862f0cc98b3345d272143067239b339da89e"
     },
     {
       "path": "processing/intermediate_cleanup.py",
@@ -28,10 +30,12 @@
     },
     {
       "path": "processing/intermediate_mounts.py",
-      "unchangedFromOrigin": true,
+      "unchangedFromOrigin": false,
       "gitBlob": "7b9bac2ec95292d6720b80d122306533cf600272",
       "sha256": "9ffcbc783f59dbf6ee64d993100ef674efe91638cda39fa4d33db8b6c620811b",
-      "originCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4"
+      "originCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4",
+      "currentRelationship": "DERIVED from741: reviewed topology/full observer seal/shared privilege safety successor; original blob/hash retained as provenance only",
+      "currentSha256": "7628e7e83b4187e1d354195bbdac2af65eb4e4777fa973161beeab7ebb647f3a"
     },
     {
       "path": "processing/intermediate_pdf.py",
@@ -111,8 +115,8 @@
   ],
   "newBehavior": "Thin explicit phase CLI plus two CLI source tests; no changes to selected cleanup parser or retained helper",
   "executingPythonSourceHashes": {
-    "ops/combined_main_retention.py": "63e64fa00e47b6dddd1a62cd4cd6398b6190abea4773ee00b2e2598b81b5b193",
-    "ops/early_intermediate_cleanup.py": "9cd039ea368a9c4043ec800310f698eec62a625f94c3d947b9ae6c80577969de",
+    "ops/combined_main_retention.py": "bc4c365d71e8a9410c5a000d2236e3728a53a1ec37c78e922c95d298d5518bbd",
+    "ops/early_intermediate_cleanup.py": "2bacf32ddaf44ca9e2816e1f8d9a862f0cc98b3345d272143067239b339da89e",
     "ops/node_ingress.py": "4c51c04e09e7f8e211b4099c5d28ee4208298c05652a6a5f392444a41a37e853",
     "ops/node_maintenance.py": "f8e2449918dcb6b460d94991ad5729891fa9e4a0b338a125663aecba62d02ab8",
     "ops/processingctl.py": "71189f1653a60dc8f06e4fc59ee52cb25b9a7939ab0349fac8d007c4699ba0cf",
@@ -126,7 +130,7 @@
     "processing/engine_output.py": "f721a72e726859d502eba5bce9ea9ac2380de02e2adc97a25ada80827501d703",
     "processing/intermediate_cleanup.py": "cc34ceb181170ec2292fd68ce5aae622ff4f1fb72ce8085321e44f961cda2ef1",
     "processing/intermediate_dependencies.py": "cc1ee27821ac69754ad4b73c37add466fb1b7f0223794159492ef516dfeaa925",
-    "processing/intermediate_mounts.py": "9ffcbc783f59dbf6ee64d993100ef674efe91638cda39fa4d33db8b6c620811b",
+    "processing/intermediate_mounts.py": "7628e7e83b4187e1d354195bbdac2af65eb4e4777fa973161beeab7ebb647f3a",
     "processing/intermediate_pdf.py": "7ef2d9f2110f2a2c2bc4487163613acd6327808faeaccb7ee97c880cd13b2be2",
     "processing/maintenance.py": "3db441879818e08a0009b052cee678d0bfad5e418be57682dc559a0c57e0e85c",
     "processing/node_gate.py": "b40ef1f4548ce1a2cf6363b863724717e72dd271f9e551d43e1c2c5a6b7bb179",
@@ -171,5 +175,13 @@
   ],
   "published": false,
   "installed": false,
-  "testsExecutedByIntegrationAuthor": false
+  "testsExecutedByIntegrationAuthor": false,
+  "historicalSourceCommit": "3f620af044c117e324795648bda466397a3d563a",
+  "currentSourceCommit": "6688c17ea97229113541b1f73e3f4c65ff879314",
+  "currentDerivedFiles": [
+    "ops/combined_main_retention.py",
+    "ops/early_intermediate_cleanup.py",
+    "processing/intermediate_mounts.py"
+  ],
+  "historicalOriginListCaveat": "selectedUnchangedFiles is the initial selection record; entries marked false are now explicitly derived, not current unchanged-origin claims"
 }

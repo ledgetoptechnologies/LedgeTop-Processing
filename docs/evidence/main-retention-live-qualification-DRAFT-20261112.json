@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "draft": true,
   "passed": false,
-  "runtimeCommit": "07c2e02991dd6eef7c278272743d1e827f390b13",
+  "runtimeCommit": "6688c17ea97229113541b1f73e3f4c65ff879314",
   "sourceHashes": {
-    "ops/combined_main_retention.py": "9302ff0b1a2786c12aa94c6269e915025fc0b8823e2f9875ec3f21f0c912d594",
-    "ops/early_intermediate_cleanup.py": "9cd039ea368a9c4043ec800310f698eec62a625f94c3d947b9ae6c80577969de",
+    "ops/combined_main_retention.py": "bc4c365d71e8a9410c5a000d2236e3728a53a1ec37c78e922c95d298d5518bbd",
+    "ops/early_intermediate_cleanup.py": "2bacf32ddaf44ca9e2816e1f8d9a862f0cc98b3345d272143067239b339da89e",
     "ops/node_ingress.py": "4c51c04e09e7f8e211b4099c5d28ee4208298c05652a6a5f392444a41a37e853",
     "ops/node_maintenance.py": "f8e2449918dcb6b460d94991ad5729891fa9e4a0b338a125663aecba62d02ab8",
     "ops/processingctl.py": "71189f1653a60dc8f06e4fc59ee52cb25b9a7939ab0349fac8d007c4699ba0cf",
@@ -19,7 +19,7 @@
     "processing/engine_output.py": "f721a72e726859d502eba5bce9ea9ac2380de02e2adc97a25ada80827501d703",
     "processing/intermediate_cleanup.py": "cc34ceb181170ec2292fd68ce5aae622ff4f1fb72ce8085321e44f961cda2ef1",
     "processing/intermediate_dependencies.py": "cc1ee27821ac69754ad4b73c37add466fb1b7f0223794159492ef516dfeaa925",
-    "processing/intermediate_mounts.py": "9ffcbc783f59dbf6ee64d993100ef674efe91638cda39fa4d33db8b6c620811b",
+    "processing/intermediate_mounts.py": "7628e7e83b4187e1d354195bbdac2af65eb4e4777fa973161beeab7ebb647f3a",
     "processing/intermediate_pdf.py": "7ef2d9f2110f2a2c2bc4487163613acd6327808faeaccb7ee97c880cd13b2be2",
     "processing/maintenance.py": "3db441879818e08a0009b052cee678d0bfad5e418be57682dc559a0c57e0e85c",
     "processing/node_gate.py": "b40ef1f4548ce1a2cf6363b863724717e72dd271f9e551d43e1c2c5a6b7bb179",
@@ -114,21 +114,51 @@
   ],
   "approvalState": "Awaiting root and independent review; passed=false and completedGates remain empty",
   "integrationEvidence": {
-    "runtimeCommit": "07c2e02991dd6eef7c278272743d1e827f390b13",
-    "sourceArchiveSha256": "8855a3d864c4fcb08f74ef4b86f64347982696d7d93277ca8b3dbb834cf29100",
-    "executionBytes": "Canonical Git LF52files:51exactprior9efLF map; only combined helper changed to9302ff0b",
-    "cases": 135,
-    "passed": 130,
-    "expectedSkips": 5,
-    "seconds": 1.736,
-    "exitCode": 0,
-    "oom": false,
-    "outputSha256": "9ce20ff2490b0abf1676500bee59a928173d320ba1913dfc64ebb56dd103158c",
-    "containerId": "805dae941dd486da8f95d7735fd62557047b74992b7c9549606f61fd905873bb",
-    "ownedContainerRemoved": true,
-    "nonceAbsent": true,
-    "observer": "Root actual main-PC qualification report; author did not execute suite",
-    "independentSourceReview": "PASS mount-order-only fingerprint fix"
+    "schemaVersion": 1,
+    "runtimeCommit": "6688c17ea97229113541b1f73e3f4c65ff879314",
+    "productionRuntimeCommit": "43d40b745f6c0eb6c5736dfb57ea975ca73c7eb9",
+    "sourceArchiveSha256": "119443557b754ff6fb20dd17ed8aed9134891031cf9ac9f903bd7628876ed0f1",
+    "sourcePythonFiles": 52,
+    "changedSourceHashesVs07": {
+      "ops/combined_main_retention.py": "bc4c365d71e8a9410c5a000d2236e3728a53a1ec37c78e922c95d298d5518bbd",
+      "ops/early_intermediate_cleanup.py": "2bacf32ddaf44ca9e2816e1f8d9a862f0cc98b3345d272143067239b339da89e",
+      "processing/intermediate_mounts.py": "7628e7e83b4187e1d354195bbdac2af65eb4e4777fa973161beeab7ebb647f3a"
+    },
+    "other49FilesExact07Lf": true,
+    "mainPcSuite": {
+      "cases": 141,
+      "passed": 136,
+      "expectedSkips": 5,
+      "seconds": 1.746,
+      "exitCode": 0,
+      "outputSha256": "f94198e75f99cf9c37a9e1e21596a8d3acbadf2dc927de600e2b22511dcefaec",
+      "containerId": "83a07a2e793d4d290c9cf7dd592bbccd610178ff04cad5505074aef15581753c",
+      "removed": true,
+      "nonceAbsent": true
+    },
+    "priorFixtureFailure": {
+      "runtimeCommit": "43d40b745f6c0eb6c5736dfb57ea975ca73c7eb9",
+      "cases": 141,
+      "errors": 1,
+      "expectedSkips": 5,
+      "cause": "New test own-engine metadata used synthetic source that did not match unchanged mandatory native bind",
+      "correction": "668 changes only synthetic inspected Source to exact required path; production guard unchanged",
+      "outputSha256": "8a6594675ac5a0dc81edf34bbe3cffe205670f618bd1670ab7f261aba2a4dd06"
+    },
+    "readOnlyHostSnapshot": {
+      "result": "PASS",
+      "scope": "CombinedRuntime.snapshot against captured119LF; root observation",
+      "nodeState": "active",
+      "revision": 47,
+      "terminalTasks": 3,
+      "operationAbsent": true,
+      "containerChanges": 0,
+      "maintenanceMutations": 0,
+      "liveInstall": false
+    },
+    "observer": "Parent actual main-PC qualification report; author did not execute suite or host snapshot",
+    "installed": false,
+    "qualificationApproved": false
   },
   "targetGpuObservation": {
     "observer": "Root report; no local receipt hash supplied",
@@ -208,5 +238,22 @@
     "nonceAbsent": true,
     "observer": "Root actual main-PC qualification report; author independently verified local archive SHA only"
   },
-  "observerMountSerialization": "canonical-full-records-sorted-v1: sort complete mount dictionaries by canonical JSON bytes, preserving all fields and multiplicity; SHA256 canonical JSON array"
+  "observerMountSerialization": "canonical-full-records-sorted-v1: sort complete mount dictionaries by canonical JSON bytes, preserving all fields and multiplicity; SHA256 canonical JSON array",
+  "previous07LfIntegrationEvidence": {
+    "runtimeCommit": "07c2e02991dd6eef7c278272743d1e827f390b13",
+    "sourceArchiveSha256": "8855a3d864c4fcb08f74ef4b86f64347982696d7d93277ca8b3dbb834cf29100",
+    "executionBytes": "Canonical Git LF52files:51exactprior9efLF map; only combined helper changed to9302ff0b",
+    "cases": 135,
+    "passed": 130,
+    "expectedSkips": 5,
+    "seconds": 1.736,
+    "exitCode": 0,
+    "oom": false,
+    "outputSha256": "9ce20ff2490b0abf1676500bee59a928173d320ba1913dfc64ebb56dd103158c",
+    "containerId": "805dae941dd486da8f95d7735fd62557047b74992b7c9549606f61fd905873bb",
+    "ownedContainerRemoved": true,
+    "nonceAbsent": true,
+    "observer": "Root actual main-PC qualification report; author did not execute suite",
+    "independentSourceReview": "PASS mount-order-only fingerprint fix"
+  }
 }

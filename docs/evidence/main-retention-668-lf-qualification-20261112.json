@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "runtimeCommit": "6688c17ea97229113541b1f73e3f4c65ff879314",
+  "productionRuntimeCommit": "43d40b745f6c0eb6c5736dfb57ea975ca73c7eb9",
+  "sourceArchiveSha256": "119443557b754ff6fb20dd17ed8aed9134891031cf9ac9f903bd7628876ed0f1",
+  "sourcePythonFiles": 52,
+  "changedSourceHashesVs07": {
+    "ops/combined_main_retention.py": "bc4c365d71e8a9410c5a000d2236e3728a53a1ec37c78e922c95d298d5518bbd",
+    "ops/early_intermediate_cleanup.py": "2bacf32ddaf44ca9e2816e1f8d9a862f0cc98b3345d272143067239b339da89e",
+    "processing/intermediate_mounts.py": "7628e7e83b4187e1d354195bbdac2af65eb4e4777fa973161beeab7ebb647f3a"
+  },
+  "other49FilesExact07Lf": true,
+  "mainPcSuite": {
+    "cases": 141,
+    "passed": 136,
+    "expectedSkips": 5,
+    "seconds": 1.746,
+    "exitCode": 0,
+    "outputSha256": "f94198e75f99cf9c37a9e1e21596a8d3acbadf2dc927de600e2b22511dcefaec",
+    "containerId": "83a07a2e793d4d290c9cf7dd592bbccd610178ff04cad5505074aef15581753c",
+    "removed": true,
+    "nonceAbsent": true
+  },
+  "priorFixtureFailure": {
+    "runtimeCommit": "43d40b745f6c0eb6c5736dfb57ea975ca73c7eb9",
+    "cases": 141,
+    "errors": 1,
+    "expectedSkips": 5,
+    "cause": "New test own-engine metadata used synthetic source that did not match unchanged mandatory native bind",
+    "correction": "668 changes only synthetic inspected Source to exact required path; production guard unchanged",
+    "outputSha256": "8a6594675ac5a0dc81edf34bbe3cffe205670f618bd1670ab7f261aba2a4dd06"
+  },
+  "readOnlyHostSnapshot": {
+    "result": "PASS",
+    "scope": "CombinedRuntime.snapshot against captured119LF; root observation",
+    "nodeState": "active",
+    "revision": 47,
+    "terminalTasks": 3,
+    "operationAbsent": true,
+    "containerChanges": 0,
+    "maintenanceMutations": 0,
+    "liveInstall": false
+  },
+  "observer": "Parent actual main-PC qualification report; author did not execute suite or host snapshot",
+  "installed": false,
+  "qualificationApproved": false
+}

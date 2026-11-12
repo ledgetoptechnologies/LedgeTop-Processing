@@ -156,8 +156,10 @@ The predecessor4f191b2a source suite was independently run on main:73 cases,
 69 passed and4 expected root-only skips, no ResourceWarnings; output SHA256
 5b3770e7df0f91702220543f5923c2b54cfb5c6bfcf3d24ecfa5f858ad4ac95f.
 This does not claim the new thin CLI integration or every root-only ownership
-case passed. The exact five cleanup runtime files come from741ee197, with no
-parser edits in this integration. Current-main Viewer/OpenSplat code is preserved.
+case passed. The initial five cleanup runtime files came from741ee197. Later
+reviewed observer/topology safety changes derive ops/early_intermediate_cleanup.py
+and processing/intermediate_mounts.py from that origin; the actual PDF/dependency
+parser logic remains unchanged. Current-main Viewer/OpenSplat code is preserved.
 
 The later integration133-case run used archivee30, which contained many CRLF
 files. Its pass does not qualify the intended Git LF manifest byte hashes.
@@ -168,6 +170,14 @@ ea1cb35fbca4f3f761af9922cb336be8ba16311cd4ad3fa731e002d66e0adb3e.
 The owned runner was removed and nonce absence verified. No Runtime/credential/
 maintenance step was entered on the earlier rejected binding. Neither suite
 establishes live installation or removes fresh authority/reader/capacity gates.
+
+Current6688c17e canonical11944355 archive was qualified separately:141 cases,
+136pass/5expectedskips in1.746s, output SHA256
+f94198e75f99cf9c37a9e1e21596a8d3acbadf2dc927de600e2b22511dcefaec.
+The prior43 test failed one synthetic own-bind fixture;668 fixes only that test
+binding, leaving runtime guards unchanged. Root's read-only actual host snapshot
+passed mainACTIVE47/3terminaltasks with operation absent and no container changes.
+Fresh maintenance, original TMP capture and capacity gates still have to run.
 
 This record is a local candidate/handoff, not proof of a completed goal, installed
 automation or a newly created Engineering Hub project task. Root retains task

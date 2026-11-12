@@ -14,6 +14,13 @@ archive8855a3d8:51 Python files remain exact9efLF, and the combined helper is
 SHA256 `9302ff0b1a2786c12aa94c6269e915025fc0b8823e2f9875ec3f21f0c912d594`.
 Root's separate135-case suite passed130 with5expected skips; independent review
 passed the order-only mount fingerprint change. All fresh-operation gates remain.
+Current candidate6688c17e retains production runtime43d40b74 plus one synthetic
+fixture correction. Its canonical11944355 LF archive has52 Python files; only
+combined helper, cleanup observer and mount topology differ from07. Root's141
+cases passed136 with5expected skips; the actual read-only host snapshot passed
+with mainACTIVE47, three terminal tasks, no operation or container changes.
+The observer/topology files are derived741 safety successors, not unchanged741
+copies. No host snapshot establishes stopped-window install or deletion safety.
 Documentation successors do not change its Python inventory. The draft manifest
 `docs/evidence/main-retention-live-qualification-DRAFT-20261112.json` proposes
 six gate-to-receipt bindings and retains `passed=false`, `completedGates=[]`.
