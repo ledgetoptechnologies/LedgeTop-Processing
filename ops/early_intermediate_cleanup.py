@@ -18,7 +18,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from processing.intermediate_cleanup import CacheCleanup, CleanupHeld, require, canonical, digest
 from processing.odx_smoke_worker import Client
-from processing.intermediate_mounts import parse_mountinfo, mount_overlaps
+from processing.intermediate_mounts import parse_mountinfo, mount_overlaps, sealed_metrics_observer
 from ops.node_ingress import Ingress, configuration
 
 DATA = Path('/dockerfiles/nodeodm/data')
@@ -193,21 +193,22 @@ class HostObserver:
             host = other['HostConfig']
             require(not host.get('Privileged') and 'SYS_ADMIN' not in (host.get('CapAdd') or []),
                     'unconstrained_container_authority')
+            approved = auth.get('readOnlyObservers', {}).get(other['Id'])
+            sealed = sealed_metrics_observer(other, approved)
+            require(approved is None or sealed, 'reviewed_observer_role_changed')
             for mount in other['Mounts']:
                 if mount['Type'] == 'tmpfs':
                     continue  # Private tmpfs cannot alias native data without forbidden mount authority.
                 require(mount['Type'] in ('bind','volume'), 'unsupported_container_mount_type')
+                if mount['RW'] is False and sealed:
+                    continue
                 overlap = mount_overlaps(DATA, mount['Source'], mounts)
                 if mount['RW']:
                     require(not overlap, 'another_container_can_write_native_data')
                 elif overlap:
                     # Only an independently sealed metrics-only observer may
                     # retain a broad RO host-root mount. Never auto-adopt one.
-                    approved = auth.get('readOnlyObservers', {}).get(other['Id'])
-                    require(approved is not None and approved.get('imageId') == other['Image']
-                            and approved.get('applicationConfigSha256') == digest(other['Config'])
-                            and approved.get('metricsOnlyReviewed') is True,
-                            'unfenced_readonly_container_reader')
+                    require(False, 'unfenced_readonly_container_reader')
         gate_path = self.gate / 'gate.json'
         info = gate_path.lstat()
         require(stat.S_ISREG(info.st_mode) and info.st_uid == 1000 and info.st_nlink == 1

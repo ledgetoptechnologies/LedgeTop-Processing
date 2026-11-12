@@ -19,6 +19,33 @@ from ops import retained_main_engine_swap as swap
 
 
 class CombinedSourceTests(unittest.TestCase):
+    def test_sealed_readonly_proc_sys_observer_precedes_generic_overlap(self):
+        from processing.intermediate_mounts import MountTopologyHeld
+        other=dict(Id='observer',Image='metrics',Config={},
+            HostConfig=dict(Privileged=False,CapAdd=[]),Mounts=[
+                dict(Type='bind',RW=False,Source='/proc'),dict(Type='bind',RW=False,Source='/sys')])
+        seal=dict(metricsOnlyReviewed=True,imageId=other['Image'],
+            applicationConfigSha256=combined.digest(combined.canonical(other['Config'])),
+            hostConfigSha256=combined.digest(combined.canonical(other['HostConfig'])),
+            mountsSha256=combined.mounts_fingerprint(other['Mounts']))
+        runtime=object.__new__(combined.CombinedRuntime)
+        runtime.inspect=lambda cid:dict(Id=swap.ENGINE,Image=swap.BASE) if cid==swap.ENGINE else other
+        runtime.docker=lambda *a:'observer'
+        overlap=Mock(side_effect=MountTopologyHeld('unsupported_mount_source_topology'))
+        runtime.mounts=SimpleNamespace(parse_mountinfo=lambda text:[],mount_overlaps=overlap)
+        runtime.observers={'observer':seal}
+        with patch.object(swap,'root_identity'),patch.object(Path,'read_text',return_value='synthetic'):
+            runtime.exclusive_volume(swap.ENGINE)
+            overlap.assert_not_called()
+            runtime.observers={}
+            with self.assertRaises(MountTopologyHeld):runtime.exclusive_volume(swap.ENGINE)
+            runtime.observers={'observer':dict(seal,mountsSha256='changed')}
+            with self.assertRaisesRegex(swap.Held,'reviewed_observer_role_changed'):
+                runtime.exclusive_volume(swap.ENGINE)
+            other['Mounts'][0]['RW']=True
+            runtime.observers={'observer':dict(seal,mountsSha256=combined.mounts_fingerprint(other['Mounts']))}
+            with self.assertRaises(MountTopologyHeld):runtime.exclusive_volume(swap.ENGINE)
+
     def test_mount_fingerprint_normalizes_only_array_order(self):
         mounts = [dict(Type='bind', Source='/proc', Destination='/host/proc', RW=False),
                   dict(Type='bind', Source='/sys', Destination='/host/sys', RW=False)]

@@ -18,11 +18,68 @@ import zipfile
 
 from processing.intermediate_cleanup import CacheCleanup, CleanupHeld, ALLOWLIST, digest
 from processing.intermediate_dependencies import DependencyHeld, resource_references
-from processing.intermediate_mounts import MountTopologyHeld, parse_mountinfo, mount_overlaps
+from processing.intermediate_mounts import MountTopologyHeld, parse_mountinfo, mount_overlaps, sealed_metrics_observer, mounts_fingerprint
 from ops.early_intermediate_cleanup import assert_no_external_readers, verify_execution_fence, HostObserver, IMAGE, CONTAINER
 
 BINDING = ('authorityId','nodeId','engineId','containerId','imageId','viewerTaskId',
            'generation','jobId','engineTaskId','maintenancePlanId')
+
+
+class NamespaceTopologyTests(unittest.TestCase):
+    def test_cleanup_observer_uses_same_full_seal_before_ro_proc_overlap(self):
+        runtime=alias_observer(Path('/synthetic-data'),Path('/proc'))
+        runtime.gate=Path('/synthetic-gate')
+        other=runtime.inspect('b'*64)
+        other['Config']={}
+        other['Mounts']=[{'Type':'bind','RW':False,'Source':'/proc'},
+                         {'Type':'bind','RW':False,'Source':'/sys'}]
+        seal={'metricsOnlyReviewed':True,'imageId':other['Image'],
+              'applicationConfigSha256':digest(other['Config']),
+              'hostConfigSha256':digest(other['HostConfig']),
+              'mountsSha256':mounts_fingerprint(other['Mounts'])}
+        runtime.auth['readOnlyObservers']={other['Id']:seal}
+        with patch.object(Path,'read_text',return_value='1 0 8:1 / / rw - ext4 /dev/a rw'),patch(
+                'ops.early_intermediate_cleanup.mount_overlaps',side_effect=MountTopologyHeld('unsupported_mount_source_topology')) as overlap,patch.object(
+                Path,'lstat',side_effect=RuntimeError('gate-boundary')):
+            with self.assertRaisesRegex(RuntimeError,'gate-boundary'):runtime(runtime.auth)
+            overlap.assert_not_called()
+            runtime.auth['readOnlyObservers']={}
+            with self.assertRaises(MountTopologyHeld):runtime(runtime.auth)
+            runtime.auth['readOnlyObservers']={other['Id']:dict(seal,hostConfigSha256='changed')}
+            with self.assertRaisesRegex(CleanupHeld,'reviewed_observer_role_changed'):runtime(runtime.auth)
+            other['Mounts'][0]['RW']=True
+            runtime.auth['readOnlyObservers']={other['Id']:dict(seal,mountsSha256=mounts_fingerprint(other['Mounts']))}
+            with self.assertRaises(MountTopologyHeld):runtime(runtime.auth)
+
+    def test_unrelated_opaque_namespace_roots_preserved(self):
+        rows=parse_mountinfo('1 0 8:1 / / rw - ext4 /dev/a rw\n'
+            '2 1 0:4 net:[4026532000] /run/netns/test rw - nsfs nsfs rw\n'
+            '3 1 0:4 mnt:[4026532001] /run/mntns/test rw - nsfs nsfs rw')
+        self.assertEqual(rows[1]['root'],'net:[4026532000]')
+        self.assertEqual(rows[2]['root'],'mnt:[4026532001]')
+        with self.assertRaisesRegex(MountTopologyHeld,'unsupported_mount_source_topology'):
+            mount_overlaps('/native','/run/netns/test',rows,
+                resolve=lambda p:Path(p),stat_path=lambda p:type('S',(),{'st_dev':os.makedev(8,1)})())
+
+    def test_non_namespace_relative_or_malformed_root_still_refused(self):
+        for kind,root in [('ext4','relative'),('nsfs','net:bad'),('nsfs','opaque')]:
+            with self.subTest(kind=kind,root=root):
+                with self.assertRaisesRegex(MountTopologyHeld,'relative_mount_identity'):
+                    parse_mountinfo(f'1 0 8:1 {root} /point rw - {kind} source rw')
+
+    def test_metrics_seal_binds_full_role_and_rejects_privilege(self):
+        other={'Image':'image','Config':{},'HostConfig':{'Privileged':False,'CapAdd':[]},
+               'Mounts':[{'Type':'bind','RW':False,'Source':'/proc'}]}
+        auth={'metricsOnlyReviewed':True,'imageId':'image','applicationConfigSha256':digest(other['Config']),
+              'hostConfigSha256':digest(other['HostConfig']),'mountsSha256':mounts_fingerprint(other['Mounts'])}
+        self.assertTrue(sealed_metrics_observer(other,auth))
+        for key in ('imageId','applicationConfigSha256','hostConfigSha256','mountsSha256'):
+            changed=dict(auth);changed[key]='changed'
+            self.assertFalse(sealed_metrics_observer(other,changed))
+        for field,value in [('Privileged',True),('CapAdd',['SYS_ADMIN'])]:
+            changed=copy.deepcopy(other);changed['HostConfig'][field]=value
+            rebound=dict(auth,hostConfigSha256=digest(changed['HostConfig']))
+            self.assertFalse(sealed_metrics_observer(changed,rebound))
 
 
 def sha(data):

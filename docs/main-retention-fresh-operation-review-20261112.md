@@ -38,6 +38,11 @@ The inputs JSON has exactly two top-level keys:
   canonical JSON bytes, then SHA256 the canonical JSON array. Only array order
   is normalized; all fields (including unknown fields) and repeated entries are
   preserved. Do not hash Docker's nondeterministic raw mount-array order.
+  Both preparation and cleanup verify the exact seal and absence of privileged/
+  SYS_ADMIN authority before exempting its RO bind/volume mounts from generic
+  overlap resolution. Unsealed RO proc/sys/nsfs and all RW unsupported sources
+  still hold. Valid opaque namespace roots remain opaque mountinfo identities;
+  they never become ordinary filesystem paths.
   Do not print raw objects or
   infer an exemption from a container name. An empty map approves no observers.
 * `cleanupTemplates`: nonempty list with one template per authorized engine task,

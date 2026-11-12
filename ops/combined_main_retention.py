@@ -23,6 +23,7 @@ import time
 import uuid
 
 from ops import retained_main_engine_swap as swap
+from processing.intermediate_mounts import mounts_fingerprint as mount_fingerprint, sealed_metrics_observer
 
 Held, require, canonical, digest = swap.Held, swap.require, swap.canonical, swap.digest
 OLD_UPLOAD = '5805ba8c-21bc-4aa4-8ccc-82bdf6fb1dc0'
@@ -40,7 +41,7 @@ def mounts_fingerprint(mounts):
     """Normalize inspect array order only; retain every field and multiplicity."""
     require(type(mounts) is list and all(type(row) is dict for row in mounts),
             'invalid_mount_fingerprint_input')
-    return digest(canonical(sorted(mounts, key=canonical)))
+    return mount_fingerprint(mounts)
 
 
 def private_json(path):
@@ -562,21 +563,20 @@ class CombinedRuntime(swap.Runtime):
             host = other['HostConfig']
             require(not host.get('Privileged') and 'SYS_ADMIN' not in (host.get('CapAdd') or []),
                     'unconstrained_peer_including_paused_peer')
+            approved = self.observers.get(other['Id'])
+            sealed = sealed_metrics_observer(other, approved)
+            require(approved is None or sealed, 'reviewed_observer_role_changed')
             for mount in other['Mounts']:
                 if mount['Type'] == 'tmpfs':
                     continue
                 require(mount['Type'] in ('bind', 'volume'), 'unknown_peer_mount')
+                if mount['RW'] is False and sealed:
+                    continue
                 overlap = self.mounts.mount_overlaps(swap.DATA, mount['Source'], topology)
                 if mount['RW']:
                     require(not overlap, 'writable_native_alias')
                 elif overlap:
-                    approved = self.observers.get(other['Id'])
-                    require(approved is not None and approved.get('metricsOnlyReviewed') is True
-                            and approved['imageId'] == other['Image']
-                            and approved['applicationConfigSha256'] == digest(canonical(other['Config']))
-                            and approved['hostConfigSha256'] == digest(canonical(other['HostConfig']))
-                            and approved['mountsSha256'] == mounts_fingerprint(other['Mounts']),
-                            'unreviewed_readonly_native_observer')
+                    require(False, 'unreviewed_readonly_native_observer')
 
     def backup_tmp(self, prepared, root):
         seal = private_json(root / 'inactive-tmp-sealed.private.json')
