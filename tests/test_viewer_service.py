@@ -10,6 +10,8 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
@@ -230,6 +232,166 @@ class ViewerServiceTests(unittest.TestCase):
         self.queue.close()
         self.make_queue_service()
         return engine_uuid
+
+    def test_durable_transfer_pins_block_cleanup_until_all_readers_close(self):
+        identifier = self.submit()
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        one, _ = self.service.download(identifier)
+        two, _ = self.service.download(identifier)
+        generation = self.task(identifier)['generation']
+        with self.assertRaises(Conflict):
+            self.service.store._begin_cleanup_fence(identifier, generation)
+        one.close()
+        with self.assertRaises(Conflict):
+            self.service.store._begin_cleanup_fence(identifier, generation)
+        two.close()
+        self.service.store._begin_cleanup_fence(identifier, generation)
+        with self.assertRaises(Conflict):
+            self.service.download(identifier)
+        with self.assertRaises(Conflict):
+            with self.service.transfer_scope(identifier, 'upload'):
+                pass
+
+    def test_failed_setup_releases_pin_and_restart_keeps_uncertain_pin(self):
+        identifier = self.initialize()
+        with self.assertRaises(Conflict):
+            self.service.download(identifier)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_transfer_pins').fetchone()[0], 0)
+        token = self.service.store.acquire_transfer(identifier, 'upload')
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        with self.assertRaises(Conflict):
+            self.service.store._begin_cleanup_fence(identifier, 1)
+        # A live holder can release only the opaque token it owns; there is no
+        # automatic timeout or restart clearing of another holder's pin.
+        with self.assertRaises(Conflict):
+            self.service.store.release_transfer('not-the-token')
+        self.service.store.release_transfer(token)
+        self.service.store._begin_cleanup_fence(identifier, 1)
+
+    def test_cross_process_cleanup_and_transfer_are_serialized(self):
+        identifier = self.initialize()
+        script = r"""
+import sqlite3, sys, threading
+from contextlib import contextmanager
+from processing.viewer_tasks import TaskStore
+from processing.maintenance import Conflict
+class Queue:
+    @contextmanager
+    def _db(self):
+        db = sqlite3.connect(sys.argv[1], timeout=5)
+        db.row_factory = sqlite3.Row
+        try:
+            yield db
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+s = TaskStore.__new__(TaskStore)
+s.queue = Queue()
+s._lock = threading.RLock()
+try:
+    s._begin_cleanup_fence(sys.argv[2], 1)
+    print('fenced')
+except Conflict:
+    print('held')
+"""
+        pin = self.service.store.acquire_transfer(identifier, 'upload')
+        def child():
+            return subprocess.run([sys.executable, '-c', script, str(self.queue.path), identifier],
+                                  capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+        self.assertEqual(child(), 'held')
+        self.service.store.release_transfer(pin)
+        self.assertEqual(child(), 'fenced')
+        with self.assertRaises(Conflict):
+            self.service.store.acquire_transfer(identifier, 'download')
+
+    def test_http_disconnect_closes_only_its_own_reader_pin(self):
+        from processing.viewer_http import ViewerFacade
+        from tests.test_viewer_http import MemoryHandler
+        identifier = self.submit()
+        self.service.tick()
+        self.finish(identifier)
+        self.service.tick()
+        other, _ = self.service.download(identifier)
+        facade = ViewerFacade(self.service, 'synthetic-viewer-token-000000000000000',
+                              'synthetic-stage-token-000000000000000', temp_dir=str(self.root))
+        handler = MemoryHandler('/task/' + identifier + '/download/all.zip', method='GET')
+        class Disconnect:
+            def write(self, _data):
+                raise BrokenPipeError('synthetic disconnect')
+        handler.wfile = Disconnect()
+        facade._get(handler, handler.path, {}, 'production')
+        self.assertTrue(handler.close_connection)
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_transfer_pins').fetchone()[0], 1)
+        with self.assertRaises(Conflict):
+            self.service.store._begin_cleanup_fence(identifier, 1)
+        other.close()
+        self.service.store._begin_cleanup_fence(identifier, 1)
+
+    def test_direct_upload_pin_cannot_write_replacement_fenced_generation(self):
+        identifier = self.initialize()
+        with self.service.transfer_scope(identifier, 'upload') as transfer:
+            self.service.remove(identifier)
+            self.service.initialize(identifier, 'Synthetic survey', REQUEST_OPTIONS, None)
+            self.service.store._begin_cleanup_fence(identifier, 2)
+            with self.assertRaises(Conflict):
+                self.service.upload(identifier, 'photo.jpg', io.BytesIO(b'photo'), 5, transfer=transfer)
+        self.assertEqual(self.task(identifier)['generation'], 2)
+        self.assertEqual(self.task(identifier)['files'], [])
+
+    def test_upload_reset_mid_body_never_registers_replacement(self):
+        identifier = self.initialize()
+        service = self.service
+        class ResettingStream(io.BytesIO):
+            def read(self, size=-1):
+                if not getattr(self, 'reset', False):
+                    self.reset = True
+                    service.remove(identifier)
+                    service.initialize(identifier, 'Synthetic survey', REQUEST_OPTIONS, None)
+                    service.store._begin_cleanup_fence(identifier, 2)
+                return super().read(size)
+        with self.assertRaises(Conflict):
+            service.upload(identifier, 'photo.jpg', ResettingStream(b'photo'), 5)
+        self.assertEqual(self.task(identifier)['generation'], 2)
+        self.assertEqual(self.task(identifier)['files'], [])
+
+    def test_multipart_request_cannot_cross_generation_between_files(self):
+        from processing.viewer_http import ViewerFacade
+        from tests.test_viewer_http import MemoryHandler
+        identifier = self.initialize()
+        facade = ViewerFacade(self.service, 'synthetic-viewer-token-000000000000000',
+                              'synthetic-stage-token-000000000000000', temp_dir=str(self.root))
+        handler = MemoryHandler('/task/new/upload/' + identifier, Content_Type='multipart/form-data')
+        def parts(*_args):
+            yield ('images', 'first.jpg', io.BytesIO(b'first'), 5)
+            self.service.remove(identifier)
+            self.service.initialize(identifier, 'Synthetic survey', REQUEST_OPTIONS, None)
+            self.service.store._begin_cleanup_fence(identifier, 2)
+            yield ('images', 'second.jpg', io.BytesIO(b'second'), 6)
+        with self.service.transfer_scope(identifier, 'upload') as transfer:
+            with patch('processing.viewer_http._multipart', side_effect=parts):
+                with self.assertRaises(Conflict):
+                    facade._receive_upload(handler, identifier, 100, transfer)
+        self.assertEqual(self.task(identifier)['generation'], 2)
+        self.assertEqual(self.task(identifier)['files'], [])
+
+    def test_cleanup_fence_rejects_wrong_generation(self):
+        identifier = self.initialize()
+        with self.assertRaises(Conflict):
+            self.service.store._begin_cleanup_fence(identifier, 2)
+        with self.assertRaises(Conflict):
+            self.service.store.acquire_transfer(identifier, 'upload', expected_generation=2)
+        with self.service.transfer_scope(identifier, 'upload', expected_generation=1):
+            with self.assertRaises(Conflict):
+                self.service.store._begin_cleanup_fence(identifier, 1)
 
     def test_exact_upload_bytes_use_small_node_and_main_is_untouched(self):
         identifier = self.initialize()

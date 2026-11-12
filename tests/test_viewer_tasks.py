@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import io
 import os
 from pathlib import Path
@@ -53,6 +54,40 @@ class ViewerTaskStoreTests(unittest.TestCase):
                          ('Synthetic survey', [{'name': 'pc-ept', 'value': True}], ['all.zip'], 'staging')):
             with self.subTest(settings=settings), self.assertRaises(Conflict):
                 store.initialize(self.identifier, *settings)
+
+    def test_upload_closes_descriptor_when_open_transaction_exit_fails(self):
+        self.initialize()
+        original_db = self.queue._db
+        original_open = os.open
+        opened = []
+        injected = []
+
+        def tracking_open(path, flags, *args, **kwargs):
+            fd = original_open(path, flags, *args, **kwargs)
+            if Path(path).name.startswith('.incoming-'):
+                opened.append(fd)
+            return fd
+
+        @contextmanager
+        def failing_db():
+            with original_db() as db:
+                yield db
+                if opened and not injected:
+                    injected.append(True)
+                    raise OSError('synthetic transaction exit failure')
+
+        with patch.object(self.queue, '_db', side_effect=failing_db), \
+             patch('processing.viewer_tasks.os.open', side_effect=tracking_open):
+            with self.assertRaisesRegex(OSError, 'synthetic transaction exit failure'):
+                self.photo(data=b'photo')
+        self.assertEqual(len(opened), 1)
+        with self.assertRaises(OSError):
+            os.fstat(opened[0])
+        self.assertEqual(self.store.task(self.identifier)['files'], [])
+        directory = Path(self.store.task(self.identifier)['directory'])
+        self.assertEqual(list(directory.glob('.incoming-*')), [])
+        with self.queue._db() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM viewer_transfer_pins').fetchone()[0], 0)
 
     def test_upload_hashes_exact_bytes_and_retries_do_not_duplicate(self):
         self.initialize()

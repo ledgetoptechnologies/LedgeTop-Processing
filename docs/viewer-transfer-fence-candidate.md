@@ -1,0 +1,7 @@
+# Viewer transfer fence candidate
+
+The Viewer-compatible HTTP path records durable generation-scoped pins before receiving upload bytes, reading coordinator files for NodeODM upload, or opening a result download. Each HTTP response holds its own pin until the stream closes. A private cleanup-admission primitive atomically refuses when any pin exists and blocks new pins after admission. No runtime calls that primitive, and this change does not authorize or perform deletion.
+
+Pins do not expire. A process crash, interrupted close, or database failure can leave a pin behind. Reopening the database retains it and blocks cleanup. Operators must first stop and fence every possible writer/reader, verify the old process and its descendants have exited, and independently reconcile task identity and transfers before any future recovery tool may clear an orphan. This branch provides no such clearing tool: inventing a PID- or time-only proof is unsafe. A held pin is an availability cost, not evidence that data can be deleted.
+
+This fence alone is insufficient for automatic cleanup. Missing gates include independently verified Viewer outputs and model identity, at least 24 hours after durable readiness, source-original custody, active transfers outside this coordinator, exact engine and archive identity and integrity, isolated native expiry controls, durable deletion/recovery, and safe orphan reconciliation. Existing NodeODM or other processes may bypass this local fence. Do not enable any cleanup on the basis of this candidate.

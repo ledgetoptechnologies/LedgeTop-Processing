@@ -5,6 +5,7 @@ credentials, interprets task names as environments, or loads image batches into
 memory. Each multipart part is streamed to an unlinked private temporary file.
 """
 
+from contextlib import nullcontext
 from email.parser import BytesHeaderParser
 from email.policy import default as email_policy
 import hmac
@@ -268,6 +269,27 @@ class ViewerFacade:
         if callable(authorize):
             authorize(identifier, environment)
 
+    def _receive_upload(self, handler, identifier, length, transfer=None):
+        ensure_capacity = getattr(self.service, 'ensure_upload_capacity', None)
+        if callable(ensure_capacity):
+            ensure_capacity(length)
+        count, seen = 0, set()
+        for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
+            if name != 'images':
+                raise RequestError(400, 'invalid_upload_form')
+            filename = safe_filename(filename)
+            if filename.casefold() in seen or not size:
+                raise RequestError(400, 'duplicate_or_empty_upload')
+            seen.add(filename.casefold())
+            if transfer is None:
+                self.service.upload(identifier, filename, stream, size)
+            else:
+                self.service.upload(identifier, filename, stream, size, transfer=transfer)
+            count += 1
+        if not count:
+            raise RequestError(400, 'empty_upload')
+        self._reply(handler, 200, {'success': True})
+
     def _get(self, handler, path, query, environment):
         lengths = handler.headers.get_all('Content-Length', [])
         if handler.headers.get('Transfer-Encoding') or lengths not in ([], ['0']):
@@ -381,22 +403,9 @@ class ViewerFacade:
             if not self._upload_lock.acquire(blocking=False):
                 raise StorageBackpressure()
             try:
-                ensure_capacity = getattr(self.service, 'ensure_upload_capacity', None)
-                if callable(ensure_capacity):
-                    ensure_capacity(length)
-                count, seen = 0, set()
-                for name, filename, stream, size in _multipart(handler.rfile, length, handler.headers.get('Content-Type', ''), self.temp_dir):
-                    if name != 'images':
-                        raise RequestError(400, 'invalid_upload_form')
-                    filename = safe_filename(filename)
-                    if filename.casefold() in seen or not size:
-                        raise RequestError(400, 'duplicate_or_empty_upload')
-                    seen.add(filename.casefold())
-                    self.service.upload(identifier, filename, stream, size)
-                    count += 1
-                if not count:
-                    raise RequestError(400, 'empty_upload')
-                self._reply(handler, 200, {'success': True})
+                scope = getattr(self.service, 'transfer_scope', None)
+                with scope(identifier, 'upload') if callable(scope) else nullcontext() as transfer:
+                    self._receive_upload(handler, identifier, length, transfer)
             finally:
                 self._upload_lock.release()
             return
