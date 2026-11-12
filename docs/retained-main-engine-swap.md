@@ -1,10 +1,11 @@
 # Retained-terminal main-node swap candidate
 
-Status: SOURCE CANDIDATE, not native-qualified or installed. Read-only binding
-checks were made on 2026-11-11 while client processing continued. No maintenance
-schedule, production data walk, backup, stop, image transfer or replacement was
-performed for this candidate. The qualified local child-server tests are a
-separate proof; they do not qualify this host swap.
+Status: SOURCE CANDIDATE, not fully native-swap-qualified or installed. Read-only
+binding checks were made on 2026-11-11 while client processing continued. The
+target was subsequently cached and a bounded native CREATE/INSPECT-only fixture
+passed on 2026-11-12, as recorded below. No live engine replacement, maintenance
+schedule, production data walk, backup or stop was performed. The qualified local
+child-server and native create-time tests do not qualify the full host swap.
 
 ## Exact scope and bindings
 
@@ -17,7 +18,7 @@ label `607b560b94fee3c8ceb3f2bff78aacf6`. This label is provenance metadata, not
 execution authority or a runtime resource limit. Source commit label is 984f8bc4.
 
 Main differs from the small node: NodeODX `odx` 2.4.0 / engine 3.8.6, no photo
-cap, null default command, root `0:0`, NVIDIA all GPUs, unlimited CPU/memory,
+cap, null default command, root `0:0`, existing `privileged: true`, NVIDIA all GPUs, unlimited CPU/memory,
 one RW bind `/dockerfiles/nodeodm/data` -> `/var/www/data`, writable root/TMP,
 private 13004 and dedicated public ingress 3004. Only the image and bare
 `--disable_scheduled_cleanup` are added. Main uses Docker 29.6.2 and Compose
@@ -89,6 +90,8 @@ export size/capacity and bounded duration for this exact base.
 ## Required native fixture before live use
 
 This is a plan, not a passing test or an executable deployment request.
+The later bounded fixture establishes only the native create-time profile and
+comparison checks in step 3; the remaining full-fixture steps are still required.
 
 1. Freeze helper/tests by commit and LF Git archive; verify every packaged blob.
    Pin the actual Compose 5.3.1 binary and Docker version. Preserve the existing
@@ -140,9 +143,10 @@ UID1000 metadata tests could execute inside its tmpfs. The container exited 0
 without OOM and was removed, with absence verified. Safe hashes and limits are
 in `retained-main-engine-swap-source-20261111.json`.
 
-This is Linux **unit** proof. Actual data-bind backup, Compose 5.3.1 recreation,
-TMP/GPU profile, ingress, export duration/capacity and live host integration remain
-unqualified. No live apply or native fixture was run.
+This is Linux **unit** proof. At this checkpoint no live apply or native fixture
+had run. The later CREATE/INSPECT-only evidence below qualifies the exact native
+create-time GPU/profile comparisons, not actual retained-data backup, writable
+TMP restoration, ingress, export duration/capacity or live host integration.
 Synthetic passes do not establish real job delivery, crash/power-loss safety,
 large-data backup duration, autonomous reboot recovery, or a completed goal.
 
@@ -171,3 +175,56 @@ removed after the helper and its process group exited. No credential contents
 or credential digest were printed or retained. Only source and safe evidence
 remain in the private inspection root. This is actual **negative admission**
 proof while main is busy, not native replacement or positive idle admission.
+
+## Native CREATE/INSPECT-only qualification - 2026-11-12
+
+Reviewed runner `930d5e4f639ed047459e6a11a7e5b6eb951f1cfb120de4683a5e2245ae1a28de`
+passed once on actual Docker 29.6.2/Compose 5.3.1, using unchanged helper
+`a8208f269269e4354b56ef8e6ccbcaced587ffd4d7bf9b9281db2a988b479ae6`.
+See the redacted [machine-readable evidence](evidence/main-retention-native-create-inspect-20261112.json).
+The private combined receipt has SHA256
+`72e28029fc40f0dfb80b7e7bdca869a12fbc77309d12bf29700e45041d00eb9d`.
+
+Caching the exact target transferred 5,667,816,960 stream bytes in 573.840 seconds.
+The guarded tag was absent before load and identified the exact target afterward;
+save/load children and pump thread exited. The live engine's full role remained
+unchanged before/after caching, after the fixture and at independent readback.
+Daemon-reported image size was not substituted for measured transfer or rootfs
+export size. The cache is not a runtime installation.
+
+The first owned attempt safely refused the existing `privileged: true` profile
+before creating a fixture directory or container. Its consumed intent and evidence
+remain held. A fresh reviewed nonce pinned canonical and live privilege to Boolean
+`true`; it did not strip, lower or change the live setting.
+
+Two sequential owned containers were created but **never started**: both had
+status `created`, PID 0 and zero `StartedAt`. No engine or GPU workload ran. They
+used only tiny synthetic data/TMP binds, network `none` and no published ports,
+explicit host device mappings, Docker socket or client mounts. Both retained root `0:0`,
+existing privilege, CPU/memory 0 and NVIDIA all-GPU metadata (Driver `nvidia`,
+Count -1, Capabilities `[["gpu"]]`, DeviceIDs/Options `null`). The null default
+command changed only to bare `--disable_scheduled_cleanup` in the child.
+
+Actual source comparison functions passed, including **exact canonical HostConfig
+equality**, application configuration, literal Mounts equality and the
+missing-to-explicit private environment-file label. Synthetic bind metadata was
+unchanged. Both create responses were acknowledged and exact CIDs recorded; the
+base fixture was replaced and the child removed. Independent readback found no
+owned container or matching fixture Compose process. Live engine role,
+Compose/ingress bytes and helper source stayed unchanged. No pull/build/start,
+maintenance invocation or production-data cleanup occurred.
+
+Sixteen pure guards passed on Windows and Linux, including lost-create-ACK
+faults. These do not inject an actual Docker timeout: that failure retains unknown
+Compose-plugin/daemon disposition and `cleanupUncertain`, even after empty
+discovery or removal of a late owned CID. It is never replayed or reported as a
+full process/future-create absence proof.
+
+Still open before live use: native retained-bind backup/comparison and ACL/xattr
+preservation; measured rootfs export size, duration and capacity; writable-layer
+and TMP restoration with numeric metadata; actual server startup/restart and
+retained terminal tasks; GPU execution; real ingress/drain/maintenance failure
+integration; positive idle admission and a new independently reviewed live
+preparation. This is not a full swap, rollback, live-installation or unattended
+update qualification. The normal CREATE/INSPECT result does not close actual
+daemon-timeout or full native failure-integration gates.
