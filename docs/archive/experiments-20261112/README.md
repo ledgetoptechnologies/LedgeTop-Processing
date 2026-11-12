@@ -1,6 +1,6 @@
 # Historical Processing experiment index
 
-The November 12 cleanup consolidates 219 historical pull requests into this index. They are archived **unmerged**, not implemented, qualified or deployed by this cleanup. Existing tests remain in Git history. Active source and data are preserved.
+The November 12 cleanup consolidates 238 historical pull requests into this index. They are archived **unmerged**, not implemented, qualified or deployed by this cleanup. Existing tests remain in Git history. Active source and data are preserved.
 
 Current work stays in the normal PR queue. #66 retains the older photo integration reference, #180 the reference/synthetic experiments, #105 the LiDAR correctness extraction, #384 the read-only dashboard, and #385 retained-main maintenance. Other recent thematic keepers remain open.
 
@@ -237,3 +237,29 @@ No runtime deployment, data cleanup, credentials, release visibility, CI trigger
 | [#356](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/356) | Cache repeated source-range grant validation | #358 | ancestry-consolidated-unmerged |
 | [#360](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/360) | Verify retained custody before clearing pending state | #361 | ancestry-consolidated-unmerged |
 | [#364](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/364) | Add ordered node routing and live ODM option validation | #368 | ancestry-consolidated-unmerged |
+
+## Additional unique deferred proposals
+
+These keepers retain follow-up ownership only, not ancestor history or implemented functionality. The machine index preserves the original unfinished requirements, including the Gaussian gates from #317 and receipt binding from #335.
+
+| PR | Historical proposal | Follow-up keeper | Disposition |
+| --- | --- | --- | --- |
+| [#363](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/363) | Prototype node-local scratch reservations | #324 | unique, unmerged, unfinished |
+| [#362](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/362) | Gate ordered per-node dispatch on coordinator authority | #365 | unique, unmerged, unfinished |
+| [#359](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/359) | Preserve unresolved result custody on removal | #361 | unique, unmerged, unfinished |
+| [#357](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/357) | Check backup space before stopping coordinator | #367 | unique, unmerged, unfinished |
+| [#340](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/340) | Reject Viewer source seals as spool custody | #368 | unique, unmerged, unfinished |
+| [#338](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/338) | Draft: safely cancel queued processing jobs | #368 | unique, unmerged, unfinished |
+| [#336](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/336) | Draft: add isolated range budget v2 candidate | #353 | unique, unmerged, unfinished |
+| [#335](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/335) | Draft: fixture-only acceptance and spool-v2 release binding | #368 | unique, unmerged, unfinished |
+| [#331](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/331) | Hold maintenance when active job ownership is uncertain | #367 | unique, unmerged, unfinished |
+| [#330](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/330) | Stage disabled streaming gateway isolation fixture | #368 | unique, unmerged, unfinished |
+| [#321](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/321) | Prototype reference init authority witness | #328 | unique, unmerged, unfinished |
+| [#320](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/320) | Exercise in-flight coordinator shutdown | #334 | unique, unmerged, unfinished |
+| [#319](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/319) | Prototype disabled node gateway authentication | #316 | unique, unmerged, unfinished |
+| [#317](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/317) | Test inactive TreeDar and Gaussian capability gates | #329 | unique, unmerged, unfinished |
+| [#313](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/313) | Define candidate cross-language receipt envelope | #353 | unique, unmerged, unfinished |
+| [#312](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/312) | Hold reference cleanup until downstream custody is qualified | #361 | unique, unmerged, unfinished |
+| [#310](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/310) | Experiment with conditional clone census under supervisor | #367 | unique, unmerged, unfinished |
+| [#307](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/307) | Prototype held broker evidence inspection | #328 | unique, unmerged, unfinished |
+| [#305](https://github.com/ledgetoptechnologies/LedgeTop-Processing/pull/305) | Rehearse coordinator interruption during node init | #328 | unique, unmerged, unfinished |
