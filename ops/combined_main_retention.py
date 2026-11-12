@@ -24,6 +24,7 @@ import uuid
 
 from ops import retained_main_engine_swap as swap
 from processing.intermediate_mounts import mounts_fingerprint as mount_fingerprint, sealed_metrics_observer, constrained_peer_host, MountTopologyHeld
+from processing.intermediate_cleanup import CleanupHeld
 
 Held, require, canonical, digest = swap.Held, swap.require, swap.canonical, swap.digest
 OLD_UPLOAD = '5805ba8c-21bc-4aa4-8ccc-82bdf6fb1dc0'
@@ -47,7 +48,8 @@ def mounts_fingerprint(mounts):
 def safe_failure(error):
     """Only known exception types and fixed underscore codes may leave receipts."""
     import re
-    kind = 'Held' if isinstance(error, Held) else 'MountTopologyHeld' if isinstance(error, MountTopologyHeld) else 'Exception'
+    kind = ('Held' if isinstance(error, Held) else 'MountTopologyHeld' if isinstance(error, MountTopologyHeld)
+            else 'CleanupHeld' if isinstance(error, CleanupHeld) else 'Exception')
     code = str(error) if kind != 'Exception' else ''
     if re.fullmatch(r'[a-z][a-z0-9_]{0,127}', code) is None:
         code = 'held_unclassified' if kind != 'Exception' else 'unexpected_failure'

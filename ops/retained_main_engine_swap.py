@@ -187,6 +187,23 @@ def closed_ingress_bytes(prepared):
     require(bytes.fromhex(prepared['nginxHex']) == opened, 'canonical_open_ingress_required')
     return ingress_configuration(3004, 13004, True).encode()
 
+
+def ingress_lock_profile(root):
+    """Seal the supported user CLI lock, including mode664 within private700."""
+    require(root.is_absolute() and root.resolve() == root, 'canonical_ingress_root_alias')
+    parent = root.lstat()
+    require(stat.S_ISDIR(parent.st_mode) and parent.st_uid == 1000
+            and stat.S_IMODE(parent.st_mode) == 0o700, 'canonical_ingress_root_not_private')
+    path = root / 'ingress.lock'
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == 1000
+            and info.st_gid == 1000 and stat.S_IMODE(info.st_mode) in (0o600, 0o664),
+            'canonical_ingress_lock_profile_changed')
+    def record(value):
+        return dict(device=value.st_dev, inode=value.st_ino, uid=value.st_uid,
+                    gid=value.st_gid, mode=stat.S_IMODE(value.st_mode))
+    return dict(schemaVersion=1, root=record(parent), lock=record(info))
+
 class Runtime:
     def __init__(self, credentials):
         s = regular(credentials, private=True)
@@ -294,12 +311,12 @@ class Runtime:
         closed_bytes = closed_ingress_bytes(prepared)
         request = prepared['requestId']
         require(str(uuid.UUID(request)) == request, 'canonical_ingress_request_required')
-        lock_info = regular(lock_path, private=True)
-        require(lock_info.st_uid == 1000 and stat.S_IMODE(lock_info.st_mode) == 0o600,
-                'canonical_ingress_lock_metadata_changed')
+        profile = ingress_lock_profile(root)
+        require(profile == prepared['ingressLockProfile'], 'prepared_ingress_lock_profile_changed')
         fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
         try:
-            require((os.fstat(fd).st_dev, os.fstat(fd).st_ino) == (lock_info.st_dev, lock_info.st_ino),
+            require((os.fstat(fd).st_dev, os.fstat(fd).st_ino)
+                    == (profile['lock']['device'], profile['lock']['inode']),
                     'canonical_ingress_lock_replaced')
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             gateway_path = root / 'gateway.json'
@@ -338,9 +355,7 @@ class Runtime:
                     and len(set(old_workers)) == len(old_workers), 'canonical_ingress_state_identity_changed')
 
             def verify_control_files():
-                named = regular(lock_path, private=True)
-                require((named.st_dev, named.st_ino, named.st_uid, named.st_gid, named.st_mode)
-                        == (lock_info.st_dev, lock_info.st_ino, lock_info.st_uid, lock_info.st_gid, lock_info.st_mode),
+                require(ingress_lock_profile(root) == profile,
                         'canonical_ingress_lock_replaced')
                 current = regular(gateway_path, private=True)
                 require((current.st_dev, current.st_ino, current.st_uid, current.st_gid, current.st_mode)
@@ -667,7 +682,8 @@ class Runtime:
                 'dockerEngineId': self.docker('info', '--format', '{{.ID}}').strip(), 'node': node,
                 'oldContainer': c, 'command': c['Config']['Cmd'], 'engine': engine,
                 'sourceFiles': source_files, 'dataRootIdentity': root_identity(DATA), 'nginxHex': nginx.hex(),
-                'candidate': candidate, 'target': TARGET, 'autoRollback': False}
+                'candidate': candidate, 'target': TARGET, 'autoRollback': False,
+                'ingressLockProfile': ingress_lock_profile(NGINX.parent.parent)}
 
 
 def apply(runtime, root, prepared, checkpoint):

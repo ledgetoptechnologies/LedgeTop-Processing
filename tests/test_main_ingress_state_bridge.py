@@ -15,6 +15,7 @@ from ops.node_ingress import Ingress, configuration
 from ops.combined_main_retention import safe_failure
 from ops import combined_main_retention as combined
 from processing.intermediate_mounts import MountTopologyHeld
+from processing.intermediate_cleanup import CleanupHeld
 
 
 @unittest.skipUnless(os.name == 'posix' and getattr(os, 'getuid', lambda: -1)() == 1000,
@@ -38,7 +39,8 @@ class CanonicalIngressBridgeTests(unittest.TestCase):
         self.runtime.nginx_workers = Mock(side_effect=[(100, {101}), (100, {101}), (100, {102})])
         self.runtime.docker = Mock(return_value='')
         self.prepared = dict(requestId=str(uuid.uuid4()), dockerEngineId='fixture-daemon',
-                             oldContainer=dict(Name='/fixture-node'), nginxHex=self.nginx.read_bytes().hex())
+                             oldContainer=dict(Name='/fixture-node'), nginxHex=self.nginx.read_bytes().hex(),
+                             ingressLockProfile=swap.ingress_lock_profile(self.root))
         self.patch = patch.object(swap, 'NGINX', self.nginx); self.patch.start()
 
     def tearDown(self):
@@ -62,6 +64,28 @@ class CanonicalIngressBridgeTests(unittest.TestCase):
         self.assertEqual(metadata, [self.metadata(p) for p in (self.nginx, self.state)])
         self.runtime.docker.assert_any_call('kill', '--signal', 'HUP', swap.INGRESS)
         self.assertEqual(sum(c.args[:3] == ('kill', '--signal', 'HUP') for c in self.runtime.docker.call_args_list), 1)
+
+    def test_supported_mode664_lock_is_sealed_and_preserved_inside_private700(self):
+        lock = self.root / 'ingress.lock'
+        lock.chmod(0o664)
+        self.prepared['ingressLockProfile'] = swap.ingress_lock_profile(self.root)
+        with patch.object(Ingress, 'http', return_value=(503, None)):
+            self.runtime.change_ingress(self.prepared, closed=True)
+        self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o664)
+        self.assertEqual(swap.ingress_lock_profile(self.root), self.prepared['ingressLockProfile'])
+
+    def test_lock_mode_drift_or_unsafe_parent_is_not_adopted(self):
+        lock = self.root / 'ingress.lock'
+        lock.chmod(0o664)
+        with self.assertRaisesRegex(swap.Held, 'prepared_ingress_lock_profile_changed'):
+            self.runtime.change_ingress(self.prepared, closed=True)
+        lock.chmod(0o666)
+        with self.assertRaisesRegex(swap.Held, 'canonical_ingress_lock_profile_changed'):
+            swap.ingress_lock_profile(self.root)
+        lock.chmod(0o664); self.root.chmod(0o750)
+        with self.assertRaisesRegex(swap.Held, 'canonical_ingress_root_not_private'):
+            swap.ingress_lock_profile(self.root)
+        self.runtime.docker.assert_not_called()
 
     def test_open_requires_owned_closed_then_attests_actual_supported_backend(self):
         with patch.object(Ingress, 'http', return_value=(503, None)):
@@ -114,20 +138,23 @@ class SafeFailureTests(unittest.TestCase):
         operation.root = Path('/unused-synthetic-operation')
         operation._executing = False
         operation.r = SimpleNamespace(hold_closed=Mock(return_value={'held': True}))
-        operation.begin_and_preserve = Mock(side_effect=swap.Held('canonical_ingress_source_mismatch'))
+        operation.prepared = dict(cleanupTemplates=[])
+        operation.plan_cleanup = Mock(side_effect=CleanupHeld('ingress_readers_not_drained'))
         with patch.object(swap, 'operation_lock', return_value=nullcontext()), patch.object(
-                combined, 'private_json', return_value={'stage': 'prepared'}), patch.object(swap, 'save') as save:
-            with self.assertRaises(swap.Held): operation.run_phase('begin')
+                combined, 'private_json', return_value={'stage': 'stopped_tmp_preserved'}), patch.object(swap, 'save') as save:
+            with self.assertRaises(CleanupHeld): operation.run_phase('plan-cleanup')
         saved = save.call_args.args[1]
         self.assertEqual(saved['stage'], 'held_for_independent_inspection')
-        self.assertEqual(saved['errorClass'], 'Held')
-        self.assertEqual(saved['errorCode'], 'canonical_ingress_source_mismatch')
+        self.assertEqual(saved['errorClass'], 'CleanupHeld')
+        self.assertEqual(saved['errorCode'], 'ingress_readers_not_drained')
         self.assertFalse(saved['automaticReplay'])
 
     def test_only_typed_static_underscore_codes_are_released(self):
         self.assertEqual(safe_failure(swap.Held('ingress_source_changed')),
                          dict(errorClass='Held', errorCode='ingress_source_changed'))
         self.assertEqual(safe_failure(MountTopologyHeld('relative_mount_identity'))['errorCode'], 'relative_mount_identity')
+        self.assertEqual(safe_failure(CleanupHeld('ingress_readers_not_drained')),
+                         dict(errorClass='CleanupHeld', errorCode='ingress_readers_not_drained'))
         for error in (swap.Held('/private/path token=do-not-echo'), RuntimeError('secret_token')):
             result = safe_failure(error)
             self.assertNotIn('secret_token', json.dumps(result))
