@@ -136,13 +136,21 @@ fresh bind, writable root/TMP, expired30/40/50 sentinels, actual GNUtar ACL/xatt
 restore, export size/duration, archive TMP preservation, Compose5.3.1 recreation,
 real target startup/clean restart and exact role checks. Cached images only, no
 production mounts or new GPU workload without root's exact command review.
-That runtime proof and source regressions must precede any installation.
+Root reports the restricted current-profile native fixture passed: real BASE
+startup/clean stop, 10.529GB writable-root export, GNUtar bind-data restore with
+nondefault ownership/ACL/xattrs, independently observed root0/gid0/noattrs TMP
+roundtrip, and actual target retention/start/clean restart. The fixture source
+SHA256 is c34e877b15bef54e469f3678f6122c3094090cbc6386072173683f15ba7a922f.
+This proves only that restricted TMP profile; the preserved negative fixture
+demonstrates Docker copy loses nondefault TMP metadata. Final fenced original
+inventory, actual capacity and all phase guards remain required before install.
 
 Source-only tests cover unchanged normal empty-TMP guard, failed-original identity,
 Todd prohibition, qualification refusal, phase lock ordering, sealed-copy reuse,
 mutation/xattr refusal and actual tar parsing without another extraction. Their
 Docker/coordinator boundaries are mocked and are not native acceptance evidence.
-No desktop tests were executed; root owns a later bounded main-PC test window.
+No desktop tests were executed; root owns the integration's bounded main-PC
+test window. No integration runtime or CLI tests have run yet.
 
 The predecessor4f191b2a source suite was independently run on main:73 cases,
 69 passed and4 expected root-only skips, no ResourceWarnings; output SHA256

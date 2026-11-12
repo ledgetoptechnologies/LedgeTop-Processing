@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "baseCommit": "a18d26f16c9a1526a9bed47a17a14020de9dc900",
+  "sourceCommit": "3f620af044c117e324795648bda466397a3d563a",
+  "reviewedCombinedCommit": "4f191b2ae57fb92d381d68bf91702509b87ec127",
+  "reviewedCleanupCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4",
+  "selectedUnchangedFiles": [
+    {
+      "path": "ops/early_intermediate_cleanup.py",
+      "unchangedFromOrigin": true,
+      "gitBlob": "9656329b2581ffd588759628fcf78b546a1f205b",
+      "sha256": "9cd039ea368a9c4043ec800310f698eec62a625f94c3d947b9ae6c80577969de",
+      "originCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4"
+    },
+    {
+      "path": "processing/intermediate_cleanup.py",
+      "unchangedFromOrigin": true,
+      "gitBlob": "f41d95df220164ac059b8a58f5842f20dbf0f4e8",
+      "sha256": "cc34ceb181170ec2292fd68ce5aae622ff4f1fb72ce8085321e44f961cda2ef1",
+      "originCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4"
+    },
+    {
+      "path": "processing/intermediate_dependencies.py",
+      "unchangedFromOrigin": true,
+      "gitBlob": "d7c31c5e63512e995fe8324a58560553b4c676e1",
+      "sha256": "cc1ee27821ac69754ad4b73c37add466fb1b7f0223794159492ef516dfeaa925",
+      "originCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4"
+    },
+    {
+      "path": "processing/intermediate_mounts.py",
+      "unchangedFromOrigin": true,
+      "gitBlob": "7b9bac2ec95292d6720b80d122306533cf600272",
+      "sha256": "9ffcbc783f59dbf6ee64d993100ef674efe91638cda39fa4d33db8b6c620811b",
+      "originCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4"
+    },
+    {
+      "path": "processing/intermediate_pdf.py",
+      "unchangedFromOrigin": true,
+      "gitBlob": "ce629d00c453bab3e769e6030b0bd82b2bf58afe",
+      "sha256": "7ef2d9f2110f2a2c2bc4487163613acd6327808faeaccb7ee97c880cd13b2be2",
+      "originCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4"
+    },
+    {
+      "path": "tests/test_intermediate_cleanup.py",
+      "unchangedFromOrigin": true,
+      "gitBlob": "87c42454dc61e9c8cd05336a9204be3e10edfc8b",
+      "sha256": "2a8b0fe53a5014913e54814e1fe1b6d174b86bc9b26a7a02636f43348ddce1ca",
+      "originCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4"
+    },
+    {
+      "path": "docs/early-intermediate-cleanup.md",
+      "unchangedFromOrigin": true,
+      "gitBlob": "77994fc087fc1673b23f96345045e0018f2fc0bd",
+      "sha256": "b0143769863e882a58e8eed6b3899db78288c9de627735bafff71b91e1672856",
+      "originCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4"
+    },
+    {
+      "path": "ops/retained_main_engine_swap.py",
+      "unchangedFromOrigin": true,
+      "gitBlob": "99facf9574658b5f20c44b1df76f074ca29ec5eb",
+      "sha256": "781eb3d5515d0fb0bb27352425d863f6b5e2792e5d9c84f5ca229d79c008de59",
+      "originCommit": "4f191b2ae57fb92d381d68bf91702509b87ec127"
+    },
+    {
+      "path": "tests/test_retained_main_engine_swap.py",
+      "unchangedFromOrigin": true,
+      "gitBlob": "3ad18b6824cc426b8fa89777dbe6348fdd9df582",
+      "sha256": "291d20752ba658a6ccd44e4df88a169656ac319e4acbdeb75794c576b69bc9d0",
+      "originCommit": "4f191b2ae57fb92d381d68bf91702509b87ec127"
+    },
+    {
+      "path": "tests/test_retained_main_engine_dual_pin_failure.py",
+      "unchangedFromOrigin": true,
+      "gitBlob": "ee8a028c2746382a803b01d36ffacf3c1c415ba7",
+      "sha256": "3c56031f28430aad1b9fedc07b2e078387fef60e635ab9abe11fa063e21860af",
+      "originCommit": "4f191b2ae57fb92d381d68bf91702509b87ec127"
+    },
+    {
+      "path": "docs/retained-main-engine-swap.md",
+      "unchangedFromOrigin": true,
+      "gitBlob": "5cebcbdd9a46ff12ab3922ba42d0f0f4bdbda2b5",
+      "sha256": "b6ebde229091c410de734bd15b10a315a3d35cf1ef7f96e5f8fea79aae7ab9b6",
+      "originCommit": "4f191b2ae57fb92d381d68bf91702509b87ec127"
+    },
+    {
+      "path": "docs/retained-main-engine-swap-source-20261111.json",
+      "unchangedFromOrigin": true,
+      "gitBlob": "8a2d94ff63f4d6a779db58ea3c51d1f54b95a580",
+      "sha256": "f00704d5558aae92c69cc6f49272761c2d884d308aa1a49886ef673a1d19992e",
+      "originCommit": "4f191b2ae57fb92d381d68bf91702509b87ec127"
+    },
+    {
+      "path": "docs/evidence/main-retention-native-create-inspect-20261112.json",
+      "unchangedFromOrigin": true,
+      "gitBlob": "8aec582fa9e94782d11603497ac48b2bc34b9d20",
+      "sha256": "ce97e3b95935a3309c66cbf82c679bb78bd2b41d0a5bb3537b076aed39a2ef6e",
+      "originCommit": "4f191b2ae57fb92d381d68bf91702509b87ec127"
+    },
+    {
+      "path": "docs/evidence/main-retention-dual-pin-failure-20261112.json",
+      "unchangedFromOrigin": true,
+      "gitBlob": "cb486a41666fd554dd9b05dd305e9d648fa16bb1",
+      "sha256": "46ba3e1af518adba120c696aca8eceba26ce6567d585ec71a55e5535b065817a",
+      "originCommit": "4f191b2ae57fb92d381d68bf91702509b87ec127"
+    }
+  ],
+  "intentionalDerivativeFiles": [
+    "ops/combined_main_retention.py",
+    "tests/test_combined_main_retention.py",
+    "docs/combined-main-retention.md"
+  ],
+  "newBehavior": "Thin explicit phase CLI plus two CLI source tests; no changes to selected cleanup parser or retained helper",
+  "executingPythonSourceHashes": {
+    "ops/combined_main_retention.py": "63e64fa00e47b6dddd1a62cd4cd6398b6190abea4773ee00b2e2598b81b5b193",
+    "ops/early_intermediate_cleanup.py": "9cd039ea368a9c4043ec800310f698eec62a625f94c3d947b9ae6c80577969de",
+    "ops/node_ingress.py": "4c51c04e09e7f8e211b4099c5d28ee4208298c05652a6a5f392444a41a37e853",
+    "ops/node_maintenance.py": "f8e2449918dcb6b460d94991ad5729891fa9e4a0b338a125663aecba62d02ab8",
+    "ops/processingctl.py": "71189f1653a60dc8f06e4fc59ee52cb25b9a7939ab0349fac8d007c4699ba0cf",
+    "ops/qualify_retained_small_engine_swap.py": "954ab922932a04b44fe0796753f137e5ff615cafe77f3a7fa63a4f12ab6398f2",
+    "ops/retained_main_engine_swap.py": "781eb3d5515d0fb0bb27352425d863f6b5e2792e5d9c84f5ca229d79c008de59",
+    "ops/retained_small_engine_swap.py": "1cad9575bfe86647b7db0ccb55266823450878b6eabb009ad6af9b20f7b634bf",
+    "processing/__init__.py": "f0c657d9911e3fff1b99b90e9a364e0d1b237ca8ceea939897ffc37c4931bb9a",
+    "processing/app.py": "405ec39c6c527f074bd7d8804a839b1703195a968096d88d52f2853621d694a4",
+    "processing/config.py": "f15111f8959d5bdc6fcd2a188e573020bb8796283b2e5c861a0bbaca34348cdb",
+    "processing/container_update.py": "e179e72ae607d8bf8e42404fa36069103a86f2785aa145ffdec6a4468efc0e29",
+    "processing/engine_output.py": "f721a72e726859d502eba5bce9ea9ac2380de02e2adc97a25ada80827501d703",
+    "processing/intermediate_cleanup.py": "cc34ceb181170ec2292fd68ce5aae622ff4f1fb72ce8085321e44f961cda2ef1",
+    "processing/intermediate_dependencies.py": "cc1ee27821ac69754ad4b73c37add466fb1b7f0223794159492ef516dfeaa925",
+    "processing/intermediate_mounts.py": "9ffcbc783f59dbf6ee64d993100ef674efe91638cda39fa4d33db8b6c620811b",
+    "processing/intermediate_pdf.py": "7ef2d9f2110f2a2c2bc4487163613acd6327808faeaccb7ee97c880cd13b2be2",
+    "processing/maintenance.py": "3db441879818e08a0009b052cee678d0bfad5e418be57682dc559a0c57e0e85c",
+    "processing/node_gate.py": "b40ef1f4548ce1a2cf6363b863724717e72dd271f9e551d43e1c2c5a6b7bb179",
+    "processing/odx_smoke_worker.py": "6db916ad710bbde2533c7649a5b7c65564a64a74f027ff994864f45848e193e1",
+    "processing/opensplat_trial.py": "1cfb8dcc0646f62e0110467ae39a0f14dc8fb16869e9acb947f52625ae3f5c55",
+    "processing/options.py": "1f52806917a9d99e2dfae044103e52e7c669f8c7e5cf79bf58f5bbe8792078bb",
+    "processing/policy.py": "75a4841e6ce4ccbb694bb40a241a0367971ac82c11a1639e1875a1228f7f5076",
+    "processing/prototype.py": "5cefbc7ba3e70be59666edf6a40de091265aff30c3c6cfba9d96bb2915f85a76",
+    "processing/provider.py": "6296d7142eef0f6811cfb62dcf2ec7c228c4dbc1fd2466db04b3002bb8c52d23",
+    "processing/reference_api.py": "51e2dc34a805b1d22b0c93b6cd8b220ea4aa5eed4ea00aa12e0fa86178c0f9fe",
+    "processing/reference_binary.py": "2237b8fa17c6b1612e6c680c1d9b02ad30517361baa75d62f8f2ed2edf79a40c",
+    "processing/reference_control.py": "6eececc5652c7c4ac17c916b5ba7413a82241bf87069a232194e1c8a654a7455",
+    "processing/reference_delivery.py": "5aeca43000ff3597b4c44f177fa1323e2b815cbe37b361b9dd77ea495cb74981",
+    "processing/reference_failure.py": "33a107e5557de33413743d22f01f53fb9522a7b62fa9368cdf9e3d5651b7c511",
+    "processing/reference_http.py": "b9866a36be62c57f5521a453dfd3516696054970b489dcd371f9b2d685e224a0",
+    "processing/reference_parent_guard.py": "fa745a94a19aed413a6ebd0dc509838d72edc1011ce8203b95460a277141a24c",
+    "processing/reference_pipeline.py": "cd1bebe197d6c0e0ce6d2a58cb50fba6c01251bcbdee12e45f94b668ca9941af",
+    "processing/reference_protocol.py": "facc66dac8ed5471c0da5debad98c19d4d2eb619f6be731b706dfeb486ef961d",
+    "processing/reference_recovery.py": "3a33d565e9d5b2ba1f1947e5bfd2f49fd252299594182aac48d74c9058913a33",
+    "processing/reference_result_proxy.py": "14eb1d4df05f91bb5461d46f1cf5a5185bfee236dc1f6386790e54c51eedd4a7",
+    "processing/reference_runtime.py": "2371a9ed13561812d7ee5aad0600fee4abe49f862f4fa79cbe36675e4cf25db6",
+    "processing/reference_sender.py": "299bae3a4c68c3af6d3142e5e0769e9e55dccfd821d760c7248c3d621f945b33",
+    "processing/reference_store.py": "f3f5a44f83f17d141a46c457f123a5c0f46df2d0153f639f760de9e8d260b27d",
+    "processing/reference_terminal.py": "72b61696ab76053dce1f847f0a21e9b04f5e3e3954bcd48305b3d2f4e0f08319",
+    "processing/reference_tls.py": "7e1f062afcf50b6b1f2647350976490d46f66e3cf5166b00688641f82449b612",
+    "processing/reference_transfer.py": "a066052c82d67bdfba53e96cfea70bbb6cedc6c3097d57aed7c82b7e11a4fc4b",
+    "processing/reference_worker_api.py": "8a105519a956a1b034a9d120e6142cac7c58f08ef05c0a83422a8b198b14d483",
+    "processing/reference_worker_recovery.py": "63df271ab3a0481f1e0304dbe2681c3355f82f195bb4574589aaa8a2d690012a",
+    "processing/scratch_policy.py": "6010bc7015f84b415560e20adcf32d766eecf231b7fe92f830cdbfffa5431221",
+    "processing/treedar_admission.py": "3341911ff66b94ea395dba58f26b944feb81f4f44ed514730fe5186c0bb9c6e6",
+    "processing/viewer_http.py": "2952d560adc899d92852d0409af57dfd4cbafbd4968b233d5f107d5eb747a7c1",
+    "processing/viewer_service.py": "4d8b293b774796de81a32a0029c0373d00892b76b4e7c87ebc860cdb3657489c",
+    "processing/viewer_tasks.py": "d1b686ab8b6ce9616683e8b83cd40e334e46f2aa0d35f0eb3c49c1cda50c4f98",
+    "processing/viewer_tls.py": "fce0e8661cc07a0a34379507d0a7566785f82c105e526648d402195872411c20",
+    "processing/viewer_tls_deadlines.py": "34359f44ec22562ccd3734f06ee8fe6c78fa89f951f8666d11f19935b191ec36",
+    "processing/worker_outbox.py": "7e1592b1d13c1efa3e71c02bb2b53202a8b2385142476faec43246a4fb4298cb"
+  },
+  "preservedBaseFiles": [
+    "processing/viewer_service.py",
+    "processing/viewer_tasks.py",
+    "processing/opensplat_trial.py"
+  ],
+  "published": false,
+  "installed": false,
+  "testsExecutedByIntegrationAuthor": false
+}
