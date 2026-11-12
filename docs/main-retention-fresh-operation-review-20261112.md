@@ -9,6 +9,11 @@ map, with zero missing/extra/diffs, and ran a fresh suite:133 cases,128 passed,
 5 expected skips. Output SHA256:
 `ea1cb35fbca4f3f761af9922cb336be8ba16311cd4ad3fa731e002d66e0adb3e`.
 This resolves source-byte qualification, not the separate live-operation gates.
+The subsequent mount-order fix is runtime07c2e029, qualified from canonical LF
+archive8855a3d8:51 Python files remain exact9efLF, and the combined helper is
+SHA256 `9302ff0b1a2786c12aa94c6269e915025fc0b8823e2f9875ec3f21f0c912d594`.
+Root's separate135-case suite passed130 with5expected skips; independent review
+passed the order-only mount fingerprint change. All fresh-operation gates remain.
 Documentation successors do not change its Python inventory. The draft manifest
 `docs/evidence/main-retention-live-qualification-DRAFT-20261112.json` proposes
 six gate-to-receipt bindings and retains `passed=false`, `completedGates=[]`.

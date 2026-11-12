@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "draft": true,
   "passed": false,
-  "runtimeCommit": "9ef04bafd096aa89007dc053cc4f5181537ad82c",
+  "runtimeCommit": "07c2e02991dd6eef7c278272743d1e827f390b13",
   "sourceHashes": {
-    "ops/combined_main_retention.py": "63e64fa00e47b6dddd1a62cd4cd6398b6190abea4773ee00b2e2598b81b5b193",
+    "ops/combined_main_retention.py": "9302ff0b1a2786c12aa94c6269e915025fc0b8823e2f9875ec3f21f0c912d594",
     "ops/early_intermediate_cleanup.py": "9cd039ea368a9c4043ec800310f698eec62a625f94c3d947b9ae6c80577969de",
     "ops/node_ingress.py": "4c51c04e09e7f8e211b4099c5d28ee4208298c05652a6a5f392444a41a37e853",
     "ops/node_maintenance.py": "f8e2449918dcb6b460d94991ad5729891fa9e4a0b338a125663aecba62d02ab8",
@@ -114,19 +114,21 @@
   ],
   "approvalState": "Awaiting root and independent review; passed=false and completedGates remain empty",
   "integrationEvidence": {
-    "runtimeCommit": "9ef04bafd096aa89007dc053cc4f5181537ad82c",
-    "sourceArchiveSha256": "9c1b16be4f4ef88528295e2c828572f64a5962a49a970a7db162d268b3782f66",
-    "executionBytes": "Canonical Git LF, all52 Python file members exactly matched intended sourceHashes; no missing/extra/diffs",
-    "cases": 133,
-    "passed": 128,
+    "runtimeCommit": "07c2e02991dd6eef7c278272743d1e827f390b13",
+    "sourceArchiveSha256": "8855a3d864c4fcb08f74ef4b86f64347982696d7d93277ca8b3dbb834cf29100",
+    "executionBytes": "Canonical Git LF52files:51exactprior9efLF map; only combined helper changed to9302ff0b",
+    "cases": 135,
+    "passed": 130,
     "expectedSkips": 5,
-    "seconds": 1.768,
+    "seconds": 1.736,
     "exitCode": 0,
-    "outputSha256": "ea1cb35fbca4f3f761af9922cb336be8ba16311cd4ad3fa731e002d66e0adb3e",
-    "containerId": "d70df0a76a38287347eaaf1ab72c33c4a0335be3cbb0392cd7871968fdf844b4",
+    "oom": false,
+    "outputSha256": "9ce20ff2490b0abf1676500bee59a928173d320ba1913dfc64ebb56dd103158c",
+    "containerId": "805dae941dd486da8f95d7735fd62557047b74992b7c9549606f61fd905873bb",
     "ownedContainerRemoved": true,
     "nonceAbsent": true,
-    "observer": "Root actual main-PC qualification report; author independently verified local archive SHA only"
+    "observer": "Root actual main-PC qualification report; author did not execute suite",
+    "independentSourceReview": "PASS mount-order-only fingerprint fix"
   },
   "targetGpuObservation": {
     "observer": "Root report; no local receipt hash supplied",
@@ -190,5 +192,21 @@
     "outputSha256": "f3edfb0982555448dfa303c9a8a920e9054f0dcd6479ecad2dcc3d035d4fddb0",
     "independentSourceReview": "PASS; unchanged fourteen origin blobs and thin CLI",
     "executionByteScope": "Actual archivee30 contained many CRLF files; does not qualify intended Git LF sourceHashes"
-  }
+  },
+  "previousLfIntegrationEvidence": {
+    "runtimeCommit": "9ef04bafd096aa89007dc053cc4f5181537ad82c",
+    "sourceArchiveSha256": "9c1b16be4f4ef88528295e2c828572f64a5962a49a970a7db162d268b3782f66",
+    "executionBytes": "Canonical Git LF, all52 Python file members exactly matched intended sourceHashes; no missing/extra/diffs",
+    "cases": 133,
+    "passed": 128,
+    "expectedSkips": 5,
+    "seconds": 1.768,
+    "exitCode": 0,
+    "outputSha256": "ea1cb35fbca4f3f761af9922cb336be8ba16311cd4ad3fa731e002d66e0adb3e",
+    "containerId": "d70df0a76a38287347eaaf1ab72c33c4a0335be3cbb0392cd7871968fdf844b4",
+    "ownedContainerRemoved": true,
+    "nonceAbsent": true,
+    "observer": "Root actual main-PC qualification report; author independently verified local archive SHA only"
+  },
+  "observerMountSerialization": "canonical-full-records-sorted-v1: sort complete mount dictionaries by canonical JSON bytes, preserving all fields and multiplicity; SHA256 canonical JSON array"
 }
