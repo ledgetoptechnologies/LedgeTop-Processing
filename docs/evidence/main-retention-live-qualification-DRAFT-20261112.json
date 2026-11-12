@@ -109,7 +109,7 @@
     {
       "gate": "actual-format-cleanup-parsers",
       "evidence": "format741-result.txt",
-      "scope": "Exact parser741 six read-only actual M4E/Tim PDF/GLB/tileset probes passed unchanged; reference counts192/732 for tilesets; test741 58 cases57pass1expectedskip"
+      "scope": "Parser741 six read-only actual M4E/Tim PDF/GLB/tileset probes passed unchanged using explicitly pinned CRLF source; LF integration uses separately reviewed newline provenance bridge and unit suite, not an exact LF actual-format execution claim; reference counts192/732; test741 58 cases57pass1expectedskip"
     }
   ],
   "approvalState": "Awaiting root and independent review; passed=false and completedGates remain empty",
@@ -138,5 +138,31 @@
     "removed": true,
     "nonceAbsent": true,
     "scope": "Device query only, no GPU processing workload or live installation proof"
+  },
+  "parserSourceProvenanceBridge": {
+    "sourceCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4",
+    "probe": "probe741.py",
+    "observedExecutionBytes": "CRLF source pinned by actual six-format probe",
+    "integrationBytes": "Git LF source pinned by integrated9ef main-PC unit suite",
+    "mapping": [
+      {
+        "path": "processing/__init__.py",
+        "git741LfSha256": "f0c657d9911e3fff1b99b90e9a364e0d1b237ca8ceea939897ffc37c4931bb9a",
+        "actualProbe741CrlfSha256": "d7ef6a480c640c35f2de72724b4bc3504143e042b419dee1b560662a41d4ed31"
+      },
+      {
+        "path": "processing/intermediate_dependencies.py",
+        "git741LfSha256": "cc1ee27821ac69754ad4b73c37add466fb1b7f0223794159492ef516dfeaa925",
+        "actualProbe741CrlfSha256": "c4e09150e3cb4938025c7bf388b53e69805ae2b70af67774b77782038e67ec86"
+      },
+      {
+        "path": "processing/intermediate_pdf.py",
+        "git741LfSha256": "7ef2d9f2110f2a2c2bc4487163613acd6327808faeaccb7ee97c880cd13b2be2",
+        "actualProbe741CrlfSha256": "1aa37f79aefcd576006b90fdc061a3b1267046d8e14634448adc339f8b2e5726"
+      }
+    ],
+    "reviewBasis": "Independent reviewer recomputed Git741 LF to CRLF transformation and obtained exact probe741 pins for all three files",
+    "equivalenceScope": "Pure Python source differs only in line terminators and has universal-newline equivalence; no parser logic difference",
+    "limitation": "The actual-format probe did not execute the exact LF byte hashes in sourceHashes. LF unit execution is separate evidence; no actual-format repeat claimed."
   }
 }
