@@ -23,7 +23,7 @@ import time
 import uuid
 
 from ops import retained_main_engine_swap as swap
-from processing.intermediate_mounts import mounts_fingerprint as mount_fingerprint, sealed_metrics_observer, constrained_peer_host
+from processing.intermediate_mounts import mounts_fingerprint as mount_fingerprint, sealed_metrics_observer, constrained_peer_host, MountTopologyHeld
 
 Held, require, canonical, digest = swap.Held, swap.require, swap.canonical, swap.digest
 OLD_UPLOAD = '5805ba8c-21bc-4aa4-8ccc-82bdf6fb1dc0'
@@ -42,6 +42,16 @@ def mounts_fingerprint(mounts):
     require(type(mounts) is list and all(type(row) is dict for row in mounts),
             'invalid_mount_fingerprint_input')
     return mount_fingerprint(mounts)
+
+
+def safe_failure(error):
+    """Only known exception types and fixed underscore codes may leave receipts."""
+    import re
+    kind = 'Held' if isinstance(error, Held) else 'MountTopologyHeld' if isinstance(error, MountTopologyHeld) else 'Exception'
+    code = str(error) if kind != 'Exception' else ''
+    if re.fullmatch(r'[a-z][a-z0-9_]{0,127}', code) is None:
+        code = 'held_unclassified' if kind != 'Exception' else 'unexpected_failure'
+    return dict(errorClass=kind, errorCode=code)
 
 
 def private_json(path):
@@ -635,11 +645,12 @@ class Operation:
                 if phase == 'apply-cleanup':
                     return self.apply_cleanup(reviewed_cleanup_set_sha256)
                 return self.finish_swap()
-            except Exception:
+            except Exception as error:
                 state = private_json(self.root / 'combined.private.json')
                 prior = state['stage']
                 state.update(stage='held_for_independent_inspection', failedPhase=phase,
-                             priorStage=prior, automaticReplay=False, automaticRollback=False)
+                             priorStage=prior, automaticReplay=False, automaticRollback=False,
+                             **safe_failure(error))
                 self.r.state = state
                 swap.save(self.root / 'combined.private.json', state)
                 # Never close/rewrite ingress after a possibly successful finish.
@@ -915,10 +926,10 @@ def main(argv=None):
         print(json.dumps({'mode': 'stage', 'stage': state['stage'], 'writes': True, 'result': result,
                           'automaticReplay': False, 'automaticRollback': False}))
         return 0
-    except Exception:
+    except Exception as error:
         # Never echo private paths, credentials, filenames or raw Docker/API errors.
         print(json.dumps({'status': 'held', 'independentInspectionRequired': True,
-                          'automaticReplay': False, 'automaticRollback': False}))
+                          'automaticReplay': False, 'automaticRollback': False, **safe_failure(error)}))
         return 2
 
 

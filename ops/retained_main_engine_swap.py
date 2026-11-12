@@ -21,6 +21,7 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from processing.container_update import save
 from processing.odx_smoke_worker import Client
+from ops.node_ingress import Ingress, GateError, configuration as ingress_configuration
 from ops.retained_small_engine_swap import (
     Held, require, canonical, digest, regular, host_config_equivalent,
     application_config_equivalent, recreation_labels_equivalent as small_labels_equivalent,
@@ -161,12 +162,12 @@ def recreation_labels_equivalent(before, after, old_name, empty_env):
     return small_labels_equivalent(before, checked, old_name)
 
 
-def atomic_preserved_json(path, value):
-    s = regular(path, private=True)
+def atomic_preserved_bytes(path, raw, *, private):
+    s = regular(path, private=private)
     temporary = path.with_name(path.name + '.retention-' + uuid.uuid4().hex)
     fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, stat.S_IMODE(s.st_mode))
     with os.fdopen(fd, 'wb') as stream:
-        stream.write(canonical(value)); stream.flush()
+        stream.write(raw); stream.flush()
         os.fchown(stream.fileno(), s.st_uid, s.st_gid)
         os.fchmod(stream.fileno(), stat.S_IMODE(s.st_mode)); os.fsync(stream.fileno())
     os.replace(temporary, path)
@@ -175,6 +176,16 @@ def atomic_preserved_json(path, value):
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def atomic_preserved_json(path, value):
+    atomic_preserved_bytes(path, canonical(value), private=True)
+
+
+def closed_ingress_bytes(prepared):
+    opened = ingress_configuration(3004, 13004, False).encode()
+    require(bytes.fromhex(prepared['nginxHex']) == opened, 'canonical_open_ingress_required')
+    return ingress_configuration(3004, 13004, True).encode()
 
 class Runtime:
     def __init__(self, credentials):
@@ -277,50 +288,101 @@ class Runtime:
         return c['State']['Pid'], found - {c['State']['Pid']}
 
     def change_ingress(self, prepared, *, closed, recover_closed_intent=False):
-        old = bytes.fromhex(prepared['nginxHex'])
-        shutting = old.replace(PASS, b'return 503;')
-        expected, replacement = (old, shutting) if closed else (shutting, old)
-        regular(NGINX)
-        actual = NGINX.read_bytes()
-        require(actual == expected or (closed and recover_closed_intent and actual == shutting),
-                'ingress source changed; do not adopt')
-        master, workers = self.nginx_workers()
-        metadata = NGINX.stat()
-        temporary = NGINX.with_name('nginx.conf.retention-' + prepared['requestId'])
-        fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, stat.S_IMODE(metadata.st_mode))
-        with os.fdopen(fd, 'wb') as stream:
-            stream.write(replacement); stream.flush()
-            os.fchown(stream.fileno(), metadata.st_uid, metadata.st_gid)
-            os.fchmod(stream.fileno(), stat.S_IMODE(metadata.st_mode))
-            os.fsync(stream.fileno())
-        os.replace(temporary, NGINX)
-        fd = os.open(NGINX.parent, os.O_RDONLY | os.O_DIRECTORY)
+        import fcntl
+        root = NGINX.parent.parent
+        state_path, lock_path = root / 'state.json', root / 'ingress.lock'
+        closed_bytes = closed_ingress_bytes(prepared)
+        request = prepared['requestId']
+        require(str(uuid.UUID(request)) == request, 'canonical_ingress_request_required')
+        lock_info = regular(lock_path, private=True)
+        require(lock_info.st_uid == 1000 and stat.S_IMODE(lock_info.st_mode) == 0o600,
+                'canonical_ingress_lock_metadata_changed')
+        fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
         try:
-            os.fsync(fd)
+            require((os.fstat(fd).st_dev, os.fstat(fd).st_ino) == (lock_info.st_dev, lock_info.st_ino),
+                    'canonical_ingress_lock_replaced')
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            gateway_path = root / 'gateway.json'
+            gateway_info = regular(gateway_path, private=True)
+            gateway_raw = gateway_path.read_bytes()
+            require(gateway_info.st_uid == 1000 and stat.S_IMODE(gateway_info.st_mode) == 0o600,
+                    'canonical_gateway_metadata_changed')
+            gate = Ingress(root)
+            item = self.ingress_inspect()
+            master, _ = self.nginx_workers()
+            require(gate.config['engineId'] == prepared['dockerEngineId']
+                    and gate.config['proxyName'] == item['Name'].removeprefix('/')
+                    and gate.config['proxyImage'] == INGRESS_IMAGE
+                    and gate.config['backendName'] == prepared['oldContainer']['Name'].removeprefix('/')
+                    and gate.config['listenPort'] == 3004 and gate.config['backendPort'] == 13004,
+                    'canonical_gateway_role_changed')
+            gate.inspect = self.ingress_inspect
+            gate.docker = lambda argv: self.docker(*argv)
+
+            def workers(current):
+                observed_master, observed_workers = self.nginx_workers()
+                require(observed_master == current['State']['Pid'] == master, 'ingress_master_changed')
+                return observed_workers
+
+            gate.workers = workers
+            baseline = {}
+            for path in (state_path, NGINX):
+                info = regular(path, private=path == state_path)
+                require(info.st_uid == 1000 and (path != state_path or stat.S_IMODE(info.st_mode) == 0o600),
+                        'canonical_ingress_file_metadata_changed')
+                baseline[path] = (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode, path.read_bytes())
+            state = json.loads(baseline[state_path][-1])
+            old_workers = state.get('oldWorkers')
+            require(state.get('containerId') == INGRESS and type(old_workers) is list
+                    and all(type(pid) is int and pid > 0 for pid in old_workers)
+                    and len(set(old_workers)) == len(old_workers), 'canonical_ingress_state_identity_changed')
+
+            def verify_control_files():
+                named = regular(lock_path, private=True)
+                require((named.st_dev, named.st_ino, named.st_uid, named.st_gid, named.st_mode)
+                        == (lock_info.st_dev, lock_info.st_ino, lock_info.st_uid, lock_info.st_gid, lock_info.st_mode),
+                        'canonical_ingress_lock_replaced')
+                current = regular(gateway_path, private=True)
+                require((current.st_dev, current.st_ino, current.st_uid, current.st_gid, current.st_mode)
+                        == (gateway_info.st_dev, gateway_info.st_ino, gateway_info.st_uid, gateway_info.st_gid, gateway_info.st_mode)
+                        and gateway_path.read_bytes() == gateway_raw, 'canonical_gateway_source_changed')
+
+            def writer(path, value, mode=0o600):
+                verify_control_files()
+                require(path in baseline, 'unexpected_ingress_write_path')
+                info = regular(path, private=path == state_path)
+                require((info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode, path.read_bytes())
+                        == baseline[path], 'canonical_ingress_file_changed')
+                if path == state_path:
+                    value = dict(value, retentionOperationId=request, retentionGatewayMasterPid=master)
+                raw = value.encode() if isinstance(value, str) else canonical(value)
+                atomic_preserved_bytes(path, raw, private=path == state_path)
+                info = regular(path, private=path == state_path)
+                baseline[path] = (info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode, raw)
+
+            owned = state.get('retentionOperationId') == request and state.get('retentionGatewayMasterPid') == master
+            if closed and recover_closed_intent and state.get('state') in ('closing', 'closed'):
+                # Re-attest existing owned evidence only; never replay an ambiguous HUP.
+                require(owned and NGINX.read_bytes() == closed_bytes
+                        and not set(old_workers) & workers(item) and gate.http(3004)[0] == 503,
+                        'owned_closed_ingress_unproven_no_replay')
+                writer(state_path, dict(state, state='closed'))
+                return
+            require(state.get('state') == ('open' if closed else 'closed')
+                    and (closed or owned), 'canonical_ingress_transition_not_owned')
+            require(NGINX.read_bytes() == (bytes.fromhex(prepared['nginxHex']) if closed else closed_bytes),
+                    'canonical_ingress_source_mismatch')
+            gate.change(closed, BASE if closed else TARGET, seconds=90, writer=writer)
+            verify_control_files()
+            final = json.loads(state_path.read_bytes())
+            require(final['state'] == ('closed' if closed else 'open')
+                    and final['containerId'] == INGRESS and final['retentionOperationId'] == request
+                    and final['retentionGatewayMasterPid'] == master,
+                    'canonical_ingress_transition_unproven')
+        except GateError:
+            raise Held('canonical_ingress_transition_unproven') from None
         finally:
             os.close(fd)
-        self.docker('exec', INGRESS, 'nginx', '-t', '-c', '/config/nginx.conf')
-        self.docker('kill', '--signal', 'HUP', INGRESS)
-        deadline = time.monotonic() + 90
-        client = self.engine_client(prepared['command'])
-        while time.monotonic() < deadline:
-            current_master, current = self.nginx_workers()
-            require(current_master == master, 'ingress changed while draining')
-            try:
-                raw = Client('http://127.0.0.1:3004', '', node=True).request('GET', '/info', timeout=3)
-                public = json.loads(raw)
-                observed = not closed and public.get('engine') == 'odx' and 'maxImages' in public and public['maxImages'] is None
-            except Exception:
-                # Client redacts status; curl below independently verifies 503.
-                observed = False
-            if closed:
-                status = self.run(['curl', '--silent', '--show-error', '--max-time', '3', '--output',
-                                   '/dev/null', '--write-out', '%{http_code}', 'http://127.0.0.1:3004/info'])
-                observed = status.strip() == '503'
-            if observed and not workers.intersection(current):
-                return
-            time.sleep(.25)
-        raise Held('ingress drain or reopen unverified')
 
     def exclusive_volume(self, own):
         # Bind paths have no Docker volume identity. Seal the real root and reject
@@ -437,7 +499,7 @@ class Runtime:
         require((root / 'backup-verified.json').is_file(), 'verified backup required before recreation')
         self.exclusive_volume(ENGINE)
         require(not self.inspect(ENGINE)['State']['Running'], 'old engine restarted unexpectedly')
-        require(NGINX.read_bytes() == bytes.fromhex(prepared['nginxHex']).replace(PASS, b'return 503;'),
+        require(NGINX.read_bytes() == closed_ingress_bytes(prepared),
                 'closed ingress source changed')
         config = root / 'candidate.json'
         save(config, prepared['candidate'])
