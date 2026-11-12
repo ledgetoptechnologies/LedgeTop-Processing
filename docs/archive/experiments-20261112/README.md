@@ -6,7 +6,7 @@ Current work stays in the normal PR queue. #66 retains the older photo integrati
 
 ## Recovery and limits
 
-The local complete recovery bundle is `C:/Users/fstor/.codex/tmp/processing-repo-cleanup-20261112/all-refs-before.bundle`, SHA256 `70e8c9b2ceb6889dc54e7cfc2caa9b22723d06718067606cbbe2fab38d03bfc0`. Every listed exact head is explicitly present in this verified bundle. Local fresh comments, reviews and inline discussions are preserved alongside it; original GitHub discussions remain accessible on closed PRs. The machine index records exact original branches, heads, reasons and successors.
+The local complete recovery bundle is `C:/Projects/LedgeTop-Processing/_artifacts/processing-cleanup-recovery-20261112/current-219-archive/all-refs-70e8-before.bundle`, SHA256 `70e8c9b2ceb6889dc54e7cfc2caa9b22723d06718067606cbbe2fab38d03bfc0`. Every listed exact head is explicitly present in this verified bundle. Local fresh comments, reviews and inline discussions are preserved alongside it; original GitHub discussions remain accessible on closed PRs. The machine index records exact original branches, heads, reasons and successors.
 
 A successor link means follow-up ownership or source-history containment only. It does not assert that every requirement was implemented. Unique historical code needs fresh, narrow extraction and validation against current main before reuse; do not merge a stale umbrella stack.
 
