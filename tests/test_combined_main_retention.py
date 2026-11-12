@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from contextlib import redirect_stdout
 import hashlib
+import copy
 import io
 import json
 import os
@@ -19,6 +20,61 @@ from ops import retained_main_engine_swap as swap
 
 
 class CombinedSourceTests(unittest.TestCase):
+    def term_fixture(self, *, exit_code=0):
+        current=dict(Id=swap.ENGINE,Image=swap.BASE,RestartCount=0,
+            HostConfig=dict(RestartPolicy=dict(Name='no')),
+            State=dict(Running=True,Pid=123,StartedAt='fixed-start',Paused=False,Restarting=False,OOMKilled=False))
+        stopped=copy.deepcopy(current)
+        stopped['State'].update(Running=False,Pid=0,ExitCode=exit_code)
+        operation=object.__new__(combined.Operation)
+        operation.own_updating=Mock()
+        operation.checkpoint=Mock()
+        operation.r=SimpleNamespace(inspect=Mock(side_effect=[current,stopped]),docker=Mock())
+        return operation,current,stopped
+
+    def test_term_only_stop_accepts_clean_exit_with_one_signal(self):
+        operation,_,_=self.term_fixture()
+        state={}
+        operation.term_only_stop(state)
+        operation.r.docker.assert_called_once_with('kill','--signal','TERM',swap.ENGINE,timeout=30)
+        self.assertTrue(state['cleanStop']['exitVerified'])
+        self.assertFalse(state['cleanStop']['automaticEscalation'])
+
+    def test_term_only_timeout_holds_same_running_process_without_escalation(self):
+        operation,current,_=self.term_fixture()
+        operation.r.inspect.side_effect=[current,copy.deepcopy(current)]
+        with patch.object(combined.time,'monotonic',side_effect=[0,1]),patch.object(combined.time,'sleep') as sleep:
+            with self.assertRaisesRegex(swap.Held,'term_observation_timeout_no_escalation'):
+                operation.term_only_stop({},wait_seconds=0)
+        self.assertEqual(operation.r.docker.call_count,1)
+        sleep.assert_not_called()
+
+    def test_term_only_rejects_nonzero_forced_exit_and_identity_changes(self):
+        for exit_code in (137,143,1):
+            operation,_,_=self.term_fixture(exit_code=exit_code)
+            with self.subTest(exit_code=exit_code):
+                with self.assertRaisesRegex(swap.Held,'term_clean_exit_unproven'):
+                    operation.term_only_stop({})
+                self.assertEqual(operation.r.docker.call_count,1)
+        operation,current,stopped=self.term_fixture()
+        stopped['Id']='other-container'
+        with self.assertRaisesRegex(swap.Held,'term_observed_identity_changed'):
+            operation.term_only_stop({})
+        operation,current,_=self.term_fixture()
+        current['Id']='other-container'
+        with self.assertRaisesRegex(swap.Held,'term_original_identity_unproven'):
+            operation.term_only_stop({})
+        operation.r.docker.assert_not_called()
+
+    def test_term_only_unknown_signal_response_is_not_replayed(self):
+        operation,_,_=self.term_fixture()
+        operation.r.docker.side_effect=TimeoutError('lost CLI response')
+        state={}
+        with self.assertRaises(TimeoutError):operation.term_only_stop(state)
+        self.assertFalse(state['cleanStop']['accepted'])
+        self.assertEqual(operation.r.docker.call_count,1)
+        self.assertEqual(operation.r.inspect.call_count,1)
+
     def test_sealed_readonly_proc_sys_observer_precedes_generic_overlap(self):
         from processing.intermediate_mounts import MountTopologyHeld
         other=dict(Id='observer',Image='metrics',Config={},

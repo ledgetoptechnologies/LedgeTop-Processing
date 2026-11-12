@@ -695,6 +695,47 @@ class Operation:
         self.r.exclusive_volume(swap.ENGINE)
         return current
 
+    def term_only_stop(self, state, *, wait_seconds=120):
+        """One TERM to the exact running original; observation never escalates."""
+        self.own_updating(state)
+        original = self.r.inspect(swap.ENGINE)
+        s = original['State']
+        require(original['Id'] == swap.ENGINE and original['Image'] == swap.BASE
+                and s['Running'] is True and s['Pid'] > 0 and not s.get('Paused')
+                and not s.get('Restarting') and not s.get('OOMKilled')
+                and original['HostConfig']['RestartPolicy']['Name'] == 'no'
+                and type(s.get('StartedAt')) is str and s['StartedAt'], 'term_original_identity_unproven')
+        identity = dict(containerId=original['Id'], imageId=original['Image'], pid=s['Pid'],
+                        startedAt=s['StartedAt'], restartCount=original['RestartCount'])
+        state['cleanStop'] = dict(identity=identity, signal='TERM', accepted=False,
+                                  automaticEscalation=False, automaticReplay=False)
+        self.checkpoint(state, 'clean_stop_term_intent')
+        # Docker kill with an explicit TERM sends only that signal. Unlike stop
+        # with a timeout, the daemon installs no later SIGKILL deadline.
+        self.r.docker('kill', '--signal', 'TERM', swap.ENGINE, timeout=30)
+        state['cleanStop']['accepted'] = True
+        self.checkpoint(state, 'clean_stop_term_accepted')
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            current = self.r.inspect(swap.ENGINE)
+            observed = current['State']
+            require(current['Id'] == identity['containerId'] and current['Image'] == identity['imageId']
+                    and observed['StartedAt'] == identity['startedAt']
+                    and current['RestartCount'] == identity['restartCount']
+                    and current['HostConfig']['RestartPolicy']['Name'] == 'no'
+                    and not observed.get('Paused') and not observed.get('Restarting'),
+                    'term_observed_identity_changed')
+            if observed['Running'] is False:
+                require(observed['Pid'] == 0 and observed['ExitCode'] == 0
+                        and not observed.get('OOMKilled'), 'term_clean_exit_unproven')
+                state['cleanStop']['exitVerified'] = True
+                self.checkpoint(state, 'clean_stop_term_exit_verified')
+                return
+            require(observed['Running'] is True and observed['Pid'] == identity['pid'],
+                    'term_running_identity_changed')
+            require(time.monotonic() < deadline, 'term_observation_timeout_no_escalation')
+            time.sleep(1)
+
     def begin_and_preserve(self):
         state = self.state('prepared')
         self.r.revalidate(self.prepared)
@@ -732,8 +773,7 @@ class Operation:
             inventorySha256=digest(canonical(original_tmp))))
         self.r.engine_idle(swap.ENGINE, self.prepared['command'])
         self.own_updating(state)
-        self.checkpoint(state, 'clean_stop_intent')
-        self.r.docker('stop', '--time', '120', swap.ENGINE, timeout=150)
+        self.term_only_stop(state)
         self.stopped(state)
         self.checkpoint(state, 'inactive_tmp_copy_intent')
         self.r.docker('cp', '--archive', swap.ENGINE + ':/var/www/tmp', str(self.root / 'tmp.before'), timeout=1800)

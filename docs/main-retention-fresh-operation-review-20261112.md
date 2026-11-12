@@ -142,6 +142,11 @@ accepted retained outputs, no active uploads/readers, known launchers fenced,
 approved observers, native expiry timing and exact command ownership. `begin`
 revalidates idle claims, schedules and begins its own reservation, fences restart,
 closes ingress only with owned UPDATING authority, captures original TMP and
-stops cleanly. Unknown tracked readers, nonroot/attributed TMP, claim races,
+stops using ONE explicit TERM signal to the freshly verified original container.
+The daemon has no timed SIGKILL escalation. Bounded observation requires the
+same container/image/start/restart identity and clean exit0/PID0; timeout or
+unknown signal response holds the consumed intent without another signal,
+restart, KILL or replay. An already stopped or replaced original is not signaled.
+Unknown tracked readers, nonroot/attributed TMP, claim races,
 capacity deficits or phase errors hold for independent inspection. No automatic
 KILL, replay, old-image start or database restore is an authorized fallback.
