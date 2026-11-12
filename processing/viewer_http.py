@@ -269,7 +269,7 @@ class ViewerFacade:
         if callable(authorize):
             authorize(identifier, environment)
 
-    def _receive_upload(self, handler, identifier, length):
+    def _receive_upload(self, handler, identifier, length, transfer=None):
         ensure_capacity = getattr(self.service, 'ensure_upload_capacity', None)
         if callable(ensure_capacity):
             ensure_capacity(length)
@@ -281,7 +281,10 @@ class ViewerFacade:
             if filename.casefold() in seen or not size:
                 raise RequestError(400, 'duplicate_or_empty_upload')
             seen.add(filename.casefold())
-            self.service.upload(identifier, filename, stream, size)
+            if transfer is None:
+                self.service.upload(identifier, filename, stream, size)
+            else:
+                self.service.upload(identifier, filename, stream, size, transfer=transfer)
             count += 1
         if not count:
             raise RequestError(400, 'empty_upload')
@@ -401,8 +404,8 @@ class ViewerFacade:
                 raise StorageBackpressure()
             try:
                 scope = getattr(self.service, 'transfer_scope', None)
-                with scope(identifier, 'upload') if callable(scope) else nullcontext():
-                    self._receive_upload(handler, identifier, length)
+                with scope(identifier, 'upload') if callable(scope) else nullcontext() as transfer:
+                    self._receive_upload(handler, identifier, length, transfer)
             finally:
                 self._upload_lock.release()
             return

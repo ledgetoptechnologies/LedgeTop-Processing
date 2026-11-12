@@ -336,6 +336,53 @@ except Conflict:
         other.close()
         self.service.store._begin_cleanup_fence(identifier, 1)
 
+    def test_direct_upload_pin_cannot_write_replacement_fenced_generation(self):
+        identifier = self.initialize()
+        with self.service.transfer_scope(identifier, 'upload') as transfer:
+            self.service.remove(identifier)
+            self.service.initialize(identifier, 'Synthetic survey', REQUEST_OPTIONS, None)
+            self.service.store._begin_cleanup_fence(identifier, 2)
+            with self.assertRaises(Conflict):
+                self.service.upload(identifier, 'photo.jpg', io.BytesIO(b'photo'), 5, transfer=transfer)
+        self.assertEqual(self.task(identifier)['generation'], 2)
+        self.assertEqual(self.task(identifier)['files'], [])
+
+    def test_upload_reset_mid_body_never_registers_replacement(self):
+        identifier = self.initialize()
+        service = self.service
+        class ResettingStream(io.BytesIO):
+            def read(self, size=-1):
+                if not getattr(self, 'reset', False):
+                    self.reset = True
+                    service.remove(identifier)
+                    service.initialize(identifier, 'Synthetic survey', REQUEST_OPTIONS, None)
+                    service.store._begin_cleanup_fence(identifier, 2)
+                return super().read(size)
+        with self.assertRaises(Conflict):
+            service.upload(identifier, 'photo.jpg', ResettingStream(b'photo'), 5)
+        self.assertEqual(self.task(identifier)['generation'], 2)
+        self.assertEqual(self.task(identifier)['files'], [])
+
+    def test_multipart_request_cannot_cross_generation_between_files(self):
+        from processing.viewer_http import ViewerFacade
+        from tests.test_viewer_http import MemoryHandler
+        identifier = self.initialize()
+        facade = ViewerFacade(self.service, 'synthetic-viewer-token-000000000000000',
+                              'synthetic-stage-token-000000000000000', temp_dir=str(self.root))
+        handler = MemoryHandler('/task/new/upload/' + identifier, Content_Type='multipart/form-data')
+        def parts(*_args):
+            yield ('images', 'first.jpg', io.BytesIO(b'first'), 5)
+            self.service.remove(identifier)
+            self.service.initialize(identifier, 'Synthetic survey', REQUEST_OPTIONS, None)
+            self.service.store._begin_cleanup_fence(identifier, 2)
+            yield ('images', 'second.jpg', io.BytesIO(b'second'), 6)
+        with self.service.transfer_scope(identifier, 'upload') as transfer:
+            with patch('processing.viewer_http._multipart', side_effect=parts):
+                with self.assertRaises(Conflict):
+                    facade._receive_upload(handler, identifier, 100, transfer)
+        self.assertEqual(self.task(identifier)['generation'], 2)
+        self.assertEqual(self.task(identifier)['files'], [])
+
     def test_cleanup_fence_rejects_wrong_generation(self):
         identifier = self.initialize()
         with self.assertRaises(Conflict):

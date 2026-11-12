@@ -225,9 +225,11 @@ class ViewerService:
         self._check_options(options or [])
         return self.store.initialize(identifier, name, options, outputs, environment)
 
-    def upload(self, identifier, filename, stream, length):
-        with self.transfer_scope(identifier, 'upload'):
-            return self.store.upload(identifier, filename, stream, length)
+    def upload(self, identifier, filename, stream, length, *, transfer=None):
+        if transfer is not None:
+            return self.store.upload(identifier, filename, stream, length, transfer=transfer)
+        with self.transfer_scope(identifier, 'upload') as pin:
+            return self.store.upload(identifier, filename, stream, length, transfer=pin)
 
     def ensure_upload_capacity(self, request_bytes):
         # Reserve both the request-body temp file and durable per-file temp copy
@@ -265,7 +267,7 @@ class ViewerService:
     def transfer_scope(self, identifier, kind, *, expected_generation=None):
         token = self.store.acquire_transfer(identifier, kind, expected_generation=expected_generation)
         try:
-            yield
+            yield (token, self.store.transfer_generation(token))
         finally:
             self.store.release_transfer(token)
 

@@ -157,6 +157,23 @@ class TaskStore:
                        (token, identifier, generation, kind))
         return token
 
+    def transfer_generation(self, token):
+        with self.queue._db() as db:
+            row = db.execute('SELECT generation FROM viewer_transfer_pins WHERE token=?', (token,)).fetchone()
+            if row is None:
+                raise Conflict('transfer pin missing')
+            return row['generation']
+
+    def _require_upload_pin(self, db, identifier, token, generation):
+        row = self._row(db, identifier)
+        pin = db.execute('SELECT uuid,generation,kind FROM viewer_transfer_pins WHERE token=?', (token,)).fetchone()
+        if (row['generation'] != generation or pin is None or
+                (pin['uuid'], pin['generation'], pin['kind']) != (identifier, generation, 'upload') or
+                db.execute('SELECT 1 FROM viewer_cleanup_fences WHERE uuid=? AND generation=?',
+                           (identifier, generation)).fetchone()):
+            raise Conflict('upload transfer identity changed')
+        return row
+
     def release_transfer(self, token):
         with self._lock, self.queue._db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -290,13 +307,22 @@ class TaskStore:
             raise ValueError('safe supported input basename required')
         return name.casefold()
 
-    def upload(self, identifier, filename, stream, length):
+    def upload(self, identifier, filename, stream, length, *, transfer=None):
+        if transfer is None:
+            token = self.acquire_transfer(identifier, 'upload')
+            try:
+                return self.upload(identifier, filename, stream, length,
+                                   transfer=(token, self.transfer_generation(token)))
+            finally:
+                self.release_transfer(token)
+        token, generation = transfer
         key = self._filename(filename)
         if type(length) is not int or length <= 0:
             raise ValueError('invalid input length')
         with self._lock:
             with self.queue._db() as db:
-                row = self._row(db, identifier)
+                db.execute('BEGIN IMMEDIATE')
+                row = self._require_upload_pin(db, identifier, token, generation)
                 if row['stage'] != 'uploading' or row['job_id']:
                     raise Conflict('task is no longer accepting uploads')
                 directory = self._directory(row)
@@ -322,6 +348,9 @@ class TaskStore:
                         or existing_path.is_symlink() or not existing_path.is_file()
                         or existing_path.stat().st_size != length):
                     raise Conflict('input basename already contains different or missing bytes')
+                with self.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    self._require_upload_pin(db, identifier, token, generation)
                 return {'success': True, 'uuid': identifier}
             # The caller may still hold its multipart temporary copy while this
             # durable temporary file is written. Preserve headroom for both.
@@ -329,7 +358,10 @@ class TaskStore:
             temporary = directory / ('.incoming-' + secrets.token_hex(16))
             final = directory / ('input-' + secrets.token_hex(16))
             try:
-                descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with self.queue._db() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    self._require_upload_pin(db, identifier, token, generation)
+                    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 digest = hashlib.sha256()
                 with os.fdopen(descriptor, 'wb') as output:
                     remaining = length
@@ -347,7 +379,7 @@ class TaskStore:
                 value = digest.hexdigest()
                 with self.queue._db() as db:
                     db.execute('BEGIN IMMEDIATE')
-                    row = self._row(db, identifier)
+                    row = self._require_upload_pin(db, identifier, token, generation)
                     if row['stage'] != 'uploading' or row['job_id']:
                         raise Conflict('task is no longer accepting uploads')
                     existing = db.execute('SELECT * FROM viewer_files WHERE uuid=? AND name_key=?',
