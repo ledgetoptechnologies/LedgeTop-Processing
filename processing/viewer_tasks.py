@@ -132,8 +132,51 @@ class TaskStore:
                 uuid TEXT NOT NULL, generation INTEGER NOT NULL, event_id TEXT NOT NULL UNIQUE,
                 attempt_id TEXT NOT NULL UNIQUE, receipt_sha256 TEXT NOT NULL, receipt_json TEXT NOT NULL,
                 accepted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(uuid,generation))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS viewer_transfer_pins (
+                token TEXT PRIMARY KEY, uuid TEXT NOT NULL, generation INTEGER NOT NULL, kind TEXT NOT NULL)''')
+            db.execute('''CREATE TABLE IF NOT EXISTS viewer_cleanup_fences (
+                uuid TEXT NOT NULL, generation INTEGER NOT NULL, PRIMARY KEY(uuid,generation))''')
             db.execute('''CREATE UNIQUE INDEX IF NOT EXISTS viewer_engine_uuid
                 ON viewer_tasks(engine_uuid) WHERE engine_uuid IS NOT NULL''')
+
+    def acquire_transfer(self, identifier, kind, *, expected_generation=None):
+        """Persist an active transfer; orphaned pins stay held across restart."""
+        if kind not in ('download', 'upload', 'engine_upload'):
+            raise ValueError('invalid transfer kind')
+        token = secrets.token_hex(32)
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, identifier)
+            generation = row['generation']
+            if expected_generation is not None and generation != expected_generation:
+                raise Conflict('task generation changed')
+            if db.execute('SELECT 1 FROM viewer_cleanup_fences WHERE uuid=? AND generation=?',
+                          (identifier, generation)).fetchone():
+                raise Conflict('task is fenced for cleanup')
+            db.execute('INSERT INTO viewer_transfer_pins VALUES(?,?,?,?)',
+                       (token, identifier, generation, kind))
+        return token
+
+    def release_transfer(self, token):
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('DELETE FROM viewer_transfer_pins WHERE token=?', (token,)).rowcount != 1:
+                raise Conflict('transfer pin missing')
+
+    def _begin_cleanup_fence(self, identifier, generation):
+        """Fence admission only; does not verify retention or authorize deletion."""
+        with self._lock, self.queue._db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db, identifier)
+            if row['generation'] != generation:
+                raise Conflict('task generation changed')
+            if db.execute('SELECT 1 FROM viewer_transfer_pins WHERE uuid=? AND generation=?',
+                          (identifier, generation)).fetchone():
+                raise Conflict('active or uncertain transfers')
+            if db.execute('SELECT 1 FROM viewer_cleanup_fences WHERE uuid=? AND generation=?',
+                          (identifier, generation)).fetchone():
+                raise Conflict('cleanup fence already exists')
+            db.execute('INSERT INTO viewer_cleanup_fences VALUES(?,?)', (identifier, generation))
 
     def ensure_capacity(self, additional_bytes, *, copies=1):
         if (type(additional_bytes) is not int or additional_bytes < 0

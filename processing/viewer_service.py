@@ -5,6 +5,7 @@ before HTTP; uncertain mutations hold that physical node's slot instead of
 replaying a job. Completed engine tasks and downloaded archives remain until
 operator cleanup.
 """
+from contextlib import contextmanager
 
 import http.client
 import hashlib
@@ -124,6 +125,28 @@ class NativeEngine:
             self.origin + self.route('/task/' + identifier + '/download/all.zip'), timeout=60)
 
 
+class _PinnedStream:
+    def __init__(self, stream, store, token):
+        self._stream, self._store, self._token = stream, store, token
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.close()
+
+    def read(self, size=-1):
+        return self._stream.read(size)
+
+    def close(self):
+        if self._token is None:
+            return
+        # If close fails, preserve the durable pin for explicit reconciliation.
+        self._stream.close()
+        self._store.release_transfer(self._token)
+        self._token = None
+
+
 class ViewerService:
     def __init__(self, queue, config, *, store=None, engines=None, probe=probe_node):
         self.queue, self.config = queue, config
@@ -203,7 +226,8 @@ class ViewerService:
         return self.store.initialize(identifier, name, options, outputs, environment)
 
     def upload(self, identifier, filename, stream, length):
-        return self.store.upload(identifier, filename, stream, length)
+        with self.transfer_scope(identifier, 'upload'):
+            return self.store.upload(identifier, filename, stream, length)
 
     def ensure_upload_capacity(self, request_bytes):
         # Reserve both the request-body temp file and durable per-file temp copy
@@ -237,8 +261,34 @@ class ViewerService:
                 return self.store.output(identifier, line)
         return self.store.output(identifier, line)
 
+    @contextmanager
+    def transfer_scope(self, identifier, kind, *, expected_generation=None):
+        token = self.store.acquire_transfer(identifier, kind, expected_generation=expected_generation)
+        try:
+            yield
+        finally:
+            self.store.release_transfer(token)
+
     def download(self, identifier):
+        generation = self.store.task(identifier)['generation']
+        try:
+            token = self.store.acquire_transfer(identifier, 'download', expected_generation=generation)
+        except KeyError:
+            raise Conflict('task generation changed') from None
+        try:
+            stream, length = self._download_pinned(identifier, generation)
+        except KeyError:
+            self.store.release_transfer(token)
+            raise Conflict('task generation changed') from None
+        except BaseException:
+            self.store.release_transfer(token)
+            raise
+        return _PinnedStream(stream, self.store, token), length
+
+    def _download_pinned(self, identifier, generation):
         task = self.store.task(identifier)
+        if task['generation'] != generation:
+            raise Conflict('task generation changed')
         if not task['job'] or task['job']['status'] != 'succeeded':
             raise Conflict('task is not complete')
         identity = {field: task[field] for field in
@@ -456,6 +506,10 @@ class ViewerService:
                 ('generation', 'job_id', 'engine_uuid', 'node_id', 'directory')}
 
     def _upload_and_commit(self, task):
+        with self.transfer_scope(task['uuid'], 'engine_upload', expected_generation=task['generation']):
+            return self._upload_and_commit_pinned(task)
+
+    def _upload_and_commit_pinned(self, task):
         """One bounded upload turn; only the dispatcher mutates engine state."""
         if self._stop.is_set():
             return False
