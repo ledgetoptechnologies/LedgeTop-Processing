@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-11-12T03:25:09.631831+00:00",
+  "scope": "Native CREATE/INSPECT only; not full retained-terminal swap or live installation",
+  "passed": true,
+  "sourceBase": "b85e25f7b098e2ffba410f3e8007c12df8e35779",
+  "runtimeHelperSha256": "a8208f269269e4354b56ef8e6ccbcaced587ffd4d7bf9b9281db2a988b479ae6",
+  "runtimeHelperChanged": false,
+  "runnerSha256": "930d5e4f639ed047459e6a11a7e5b6eb951f1cfb120de4683a5e2245ae1a28de",
+  "sourceBundleManifestSha256": "36fdd799a25c59b43d5a4aaa293f170199af254e62f267f6eb3e55be77692670",
+  "privateCombinedReceiptSha256": "72e28029fc40f0dfb80b7e7bdca869a12fbc77309d12bf29700e45041d00eb9d",
+  "nativeResultSha256": "41cac867bb58b900cbe4cb3d233a7963df96bf8f828e9139f39eb0e9c54b4cd6",
+  "dockerVersion": "29.6.2",
+  "composeVersion": "5.3.1",
+  "baseImage": "sha256:a53446d53dee7de001f6cdc0dd877fcca7844f8b31e3773f463b915f8c9ac654",
+  "targetImage": "sha256:d1b3a6af8806b867a96c75ba2b22e35c45fd937217ccb9860c3fcbe6e75499bd",
+  "cacheTransfer": {
+    "streamBytes": 5667816960,
+    "elapsedSeconds": 573.84,
+    "tagAbsentBeforeLoad": true,
+    "tagExactAfterLoad": true,
+    "exactTargetVerified": true,
+    "ownedSaveLoadChildrenExited": true,
+    "pumpThreadExited": true,
+    "liveEngineRoleUnchanged": true,
+    "notRootfsExportMeasurement": true
+  },
+  "historicalRefusal": {
+    "runnerSha256": "f7c0f930b9930c6cd5961a95426aeed9ae18a5993566e3f6daf3956c2f4336a2",
+    "reason": "Existing canonical and live privileged:true profile initially rejected",
+    "fixtureDirectoryCreated": false,
+    "containersCreated": 0,
+    "consumedIntentRetainedAndNotReplayed": true,
+    "successfulVariantUsedFreshNonce": true
+  },
+  "nativeCreatedProfile": {
+    "containers": 2,
+    "status": "created",
+    "pid": 0,
+    "startedAt": "0001-01-01T00:00:00Z",
+    "starts": 0,
+    "builds": 0,
+    "pulls": 0,
+    "user": "0:0",
+    "existingPrivileged": true,
+    "privilegePreservedInBothFixtures": true,
+    "nanoCpus": 0,
+    "memoryBytes": 0,
+    "GPU": [
+      {
+        "Capabilities": [
+          [
+            "gpu"
+          ]
+        ],
+        "Count": -1,
+        "DeviceIDs": null,
+        "Driver": "nvidia",
+        "Options": null
+      }
+    ],
+    "gpuExecution": false,
+    "baseCommand": null,
+    "targetCommand": [
+      "--disable_scheduled_cleanup"
+    ],
+    "networkMode": "none",
+    "publishedPorts": [],
+    "syntheticBindCount": 2,
+    "clientDataMounts": 0
+  },
+  "comparisons": {
+    "exactCanonicalHostConfigEquality": true,
+    "sourceApplicationConfigAndLiteralMountArrayEquality": true,
+    "missingToExplicitPrivateEnvironmentFileLabel": true,
+    "syntheticBindMetadataUnchanged": true,
+    "liveEngineRoleUnchanged": true,
+    "liveComposeAndIngressBytesUnchanged": true
+  },
+  "cleanup": {
+    "bothCreateResponsesAcknowledged": true,
+    "baseOwnedFixtureReplaced": true,
+    "targetOwnedFixtureRemoved": true,
+    "bothOwnedContainersObservedAbsent": true,
+    "matchingFixtureComposeProcessesObservedAbsent": true,
+    "ownedRunnerObservedExited": true,
+    "cleanupUncertain": false,
+    "noGlobalPruneOrProductionCleanup": true
+  },
+  "pureGuards": {
+    "testSourceSha256": "222f43e0739953575e39f84fb7cbafcd4fff3a1fa45da0cc3bb782e4b9e67b56",
+    "WindowsPassed": 16,
+    "LinuxPassed": 16,
+    "actualDockerTimeoutInjected": false,
+    "lostAckDisposition": "Held with unknown plugin/daemon disposition; no replay or fabricated future-absence proof"
+  },
+  "remainingGates": [
+    "Native retained-bind backup/comparison and ACL/xattr preservation",
+    "Measured native rootfs export size, duration and capacity",
+    "Writable-layer and TMP restoration with numeric metadata",
+    "Actual server startup/restart and retained terminal-task preservation",
+    "Actual GPU execution",
+    "Real ingress, drain, maintenance and daemon-timeout failure integration",
+    "Positive idle admission and new independently reviewed live preparation"
+  ],
+  "fullNativeSwapQualified": false,
+  "liveInstallationPerformed": false,
+  "redactions": "Credentials, client data, live process/container identities, private paths and full inspect environment omitted; exact private receipts retained by operator"
+}

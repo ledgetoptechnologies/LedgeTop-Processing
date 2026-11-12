@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "qualifiedRuntimeCommit": "1161ba91bbc437f697a66a1409ff9f7451e2c48f",
+  "sourceArchiveSha256": "b12672c39a9702d563c3c78436774e98f9bc35ffbfb257ad52b7757c1511c6a9",
+  "archiveComparison": {
+    "regularMembers": 248,
+    "exactGitBlobs": 248,
+    "crlfOnly": 0,
+    "otherDifferences": 0,
+    "reportSha256": "08aa80e430378b8e7a69adb570d9b4b1fcec9d9d7c8738f207ad0d8a69568d3b",
+    "scope": "Canonical Git byte comparison; not the separate API CRLF packet"
+  },
+  "suite": {
+    "cases": 153,
+    "passed": 148,
+    "expectedSkips": 5,
+    "suiteSeconds": 2.031,
+    "wrapperSeconds": 2.7346081220312044,
+    "exitCode": 0,
+    "oom": false,
+    "outputSha256": "81addabccf1d607cafbf48150abc1958db8b803d2e3bec8abbb0236189d19b8d",
+    "resultSha256": "ca54563d08ddf3ce5c96446b3c1b89eba07befe9101ddd2f45c5b0b37663754e",
+    "containerId": "9a94b26e81ea5c438094ab2593f5c17a26d90233f30944af712872ef249f0323",
+    "image": "sha256:e32be0e55814a08977501ca863271d9bd02443710db8f2afaf8372e2c4508530",
+    "productionMounts": false
+  },
+  "sourceReview": "Parent reports independent SOURCE PASS1161",
+  "cleanup": {
+    "observer": "Parent root verification; source author did not access host",
+    "containerAbsent": true,
+    "sourceAndScratchRemoved": true,
+    "receipt": "lt-bridge-qualification-3f560b5bf98140db83ee70203e6f7fda/source-cleanup.json"
+  },
+  "scope": "Canonical ingress writer/lock profile/failure-code source and synthetic regressions only",
+  "notQualified": [
+    "Recovery continuation fd31 source",
+    "Live e8 adoption or phase replay",
+    "Native install or client retained-data acceptance"
+  ],
+  "installedByAuthor": false,
+  "privateQualificationIncluded": false
+}

@@ -1,0 +1,23 @@
+{
+  "sourceBase": "7d797fa6b7c3e5bf2906b5da7e46d9b930a6446f",
+  "runtimeSourceCommit": "662a32e2e6b8e75a27874bf1c9df76f0c59d2c48",
+  "runtimeSourceGitLfSha256": "a8208f269269e4354b56ef8e6ccbcaced587ffd4d7bf9b9281db2a988b479ae6",
+  "command": "python -m unittest tests.test_retained_main_engine_dual_pin_failure -v",
+  "tests": 1,
+  "subcases": 2,
+  "passed": true,
+  "scope": "Actual Runtime.persist_pin in mocked apply lifecycle; temporary JSON forward sources. Simulated second atomic write fails before and after replacement; real atomic filesystem writer is not qualified by this test.",
+  "assertions": [
+    "historical rollback bytes unchanged",
+    "first forward pin retains target image and bare retention flag",
+    "second source remains old or becomes target according to failure boundary",
+    "held_for_inspection and admission closed",
+    "no ingress reopen or maintenance finish",
+    "one recreation and forward-pin invocation only",
+    "no old-image start or automatic rollback"
+  ],
+  "platform": "Windows",
+  "noDockerSshOrClientData": true,
+  "nativeSwapQualified": false,
+  "remainingNativeGates": ["Docker/Compose5.3.1 and NVIDIA exact creation profile", "real bind ACL/xattr and writable TMP metadata preservation", "rootfs export capacity and backup comparison", "real failure-path ingress and maintenance integration"]
+}
