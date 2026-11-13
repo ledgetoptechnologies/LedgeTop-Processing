@@ -242,6 +242,9 @@ class ViewerService:
     def info(self, identifier):
         return self.store.info(identifier)
 
+    def producer_binding(self, identifier, environment):
+        return self.store.producer_binding(identifier, environment)
+
     def authorize(self, identifier, environment):
         if self.store.task(identifier)['environment'] != environment:
             raise KeyError('unknown task')

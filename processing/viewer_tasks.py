@@ -2,7 +2,10 @@
 
 ``task`` and ``list_tasks`` are PRIVATE broker interfaces: they include filesystem
 paths, claim credentials and engine identity. Never return them from an HTTP route.
-Native public responses come from ``info``/``output``. Inputs and results survive
+Native public responses come from ``info``/``output``. ``producer_binding``
+selects only terminal identity/digest fields for a TLS-only, credential-scoped
+mapping endpoint; it never exposes full task records or claim credentials.
+Inputs and results survive
 ``remove``; a reinitialized UUID gets a fresh directory and execution request ID.
 """
 
@@ -504,6 +507,55 @@ class TaskStore:
         with self._lock, self.queue._db() as db:
             return [self._task_state(db, row) for row in db.execute(
                 'SELECT * FROM viewer_tasks WHERE removed=0 ORDER BY created_at,rowid').fetchall()]
+
+    def producer_binding(self, identifier, environment):
+        """Public, read-only mapping from the durable producer records.
+
+        This is not Viewer readiness, a cleanup permit, or a fresh archive-byte
+        check. The archive digest is the producer's immutable retained record;
+        consumers must compare it to their own verified downloaded archive.
+        """
+        checked_uuid(identifier)
+        with self._lock, self.queue._db() as db:
+            # One statement binds both records in the same SQLite snapshot.
+            row = db.execute('''SELECT t.uuid,t.generation,t.environment,t.stage,t.phase,
+                t.job_id,t.node_id,t.engine_uuid,t.archive_sha256,t.removed,
+                j.status AS job_status,j.environment AS job_environment,
+                j.profile AS job_profile,j.node_id AS job_node_id,j.result AS job_result,
+                j.request_id AS job_request_id
+                FROM viewer_tasks t LEFT JOIN jobs j ON j.id=t.job_id
+                WHERE t.uuid=?''', (identifier,)).fetchone()
+        if row is None or row['removed'] or row['environment'] != environment:
+            raise KeyError('unknown task')
+        if (row['stage'] != 'succeeded' or row['phase'] != 'complete'
+                or row['job_status'] != 'succeeded'
+                or row['job_environment'] != environment or row['job_profile'] != VIEWER_PROFILE
+                or row['node_id'] != row['job_node_id']
+                or type(row['generation']) is not int or not 1 <= row['generation'] <= 2 ** 53 - 1
+                or not isinstance(row['node_id'], str) or not PHASE.fullmatch(row['node_id'])
+                or not isinstance(row['archive_sha256'], str)
+                or not re.fullmatch(r'[0-9a-f]{64}', row['archive_sha256'])):
+            raise Conflict('successful producer binding unavailable')
+        try:
+            checked_uuid(row['job_id'])
+            checked_uuid(row['engine_uuid'])
+            if row['job_request_id'] != self._request_id(row):
+                raise ValueError('inconsistent producer incarnation')
+            result = json.loads(row['job_result'])
+            if (type(result) is not dict or result.get('engineTaskId') != row['engine_uuid']
+                    or result.get('nodeId') != row['node_id']
+                    or result.get('environment') != environment or result.get('cancelled') is not False):
+                raise ValueError('inconsistent producer completion')
+        except (ValueError, TypeError):
+            raise Conflict('successful producer binding unavailable') from None
+        value = {'schemaVersion': 1, 'providerTaskId': identifier,
+                 'producerGeneration': row['generation'], 'environment': environment,
+                 'jobId': row['job_id'], 'nativeTaskId': row['engine_uuid'],
+                 'nodeId': row['node_id'], 'archiveSha256': row['archive_sha256'],
+                 'archiveEvidence': 'producer-record-not-fresh-byte-verification'}
+        value['bindingSha256'] = hashlib.sha256(
+            b'ltds-producer-binding-v1\0' + canonical(value).encode('utf-8')).hexdigest()
+        return value
 
     def update(self, identifier, *, return_task=True, expected_result=None, **fields):
         if type(return_task) is not bool:

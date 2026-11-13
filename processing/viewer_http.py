@@ -303,16 +303,33 @@ class ViewerFacade:
                     'transport': 'https',
                     'pathTemplate': '/task/{taskId}/viewer-acceptance',
                 }
+            if (getattr(handler.server, 'viewer_tls', False)
+                    and callable(getattr(self.service, 'producer_binding', None))):
+                value['producerBinding'] = {
+                    'version': 1, 'transport': 'https',
+                    'pathTemplate': '/task/{taskId}/producer-binding',
+                }
         elif path == '/options':
             value = self.service.options()
         else:
-            route = re.fullmatch(r'/task/([^/]+)/(info|output|download/all\.zip)', path)
+            route = re.fullmatch(r'/task/([^/]+)/(info|output|producer-binding|download/all\.zip)', path)
             if not route:
                 raise RequestError(404, 'not_found')
             identifier, action = task_uuid(unquote(route[1])), route[2]
-            self._authorize(identifier, environment)
+            if action != 'producer-binding':
+                self._authorize(identifier, environment)
             if action == 'info':
                 value = self.service.info(identifier)
+            elif action == 'producer-binding':
+                # This method performs its own environment check in the same
+                # metadata snapshot as the mapping. Generic authorization
+                # resolves all input files and is inappropriate for this read.
+                if not getattr(handler.server, 'viewer_tls', False):
+                    raise RequestError(403, 'tls_required')
+                binding = getattr(self.service, 'producer_binding', None)
+                if not callable(binding):
+                    raise RequestError(404, 'not_found')
+                value = binding(identifier, environment)
             elif action == 'output':
                 line = query.get('line', ['0'])[0]
                 if not re.fullmatch(r'0|[1-9][0-9]{0,14}', line) or int(line) > 2 ** 53 - 1:
