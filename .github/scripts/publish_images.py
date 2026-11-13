@@ -15,7 +15,8 @@ import urllib.error
 import urllib.request
 
 REPOSITORY = 'ledgetoptechnologies/LedgeTop-Processing'
-PACKAGES = ('ledgetop-processing-coordinator', 'ledgetop-processing-treedar')
+# Fresh fixed namespaces: legacy public packages are never publication targets.
+PACKAGES = ('ledgetop-processing-private-coordinator', 'ledgetop-processing-private-treedar')
 
 
 def context(env):
@@ -102,7 +103,9 @@ def main():
         for package in PACKAGES:
             state.update(stage='preflight_package_metadata', currentPackage=package)
             receipt(state)
-            private_package(github('/orgs/ledgetoptechnologies/packages/container/' + package), required=True)
+            # An authenticated metadata 404 permits first publication only for these
+            # fixed fresh namespaces. Other read/auth failures remain fatal.
+            private_package(github('/orgs/ledgetoptechnologies/packages/container/' + package))
         for package, build_root in zip(PACKAGES, ('.', 'engines/treedar')):
             reference = 'ghcr.io/ledgetoptechnologies/' + package + ':' + tag
             state.update(stage='build', currentPackage=package)
@@ -140,6 +143,11 @@ s.shutdown();s.server_close()
             image['smokeCheckPassed'] = True
         receipt(state)
         for image in state['images']:
+            # Recheck immediately before the effect; another publisher/operator
+            # may have created or changed this package while both builds ran.
+            state.update(stage='prepush_package_metadata', currentPackage=image['package'])
+            receipt(state)
+            private_package(github('/orgs/ledgetoptechnologies/packages/container/' + image['package']))
             state.update(stage='push_intent', currentPackage=image['package'])
             image['status'] = 'push_response_unconfirmed'
             receipt(state)
@@ -165,11 +173,13 @@ s.shutdown();s.server_close()
     except Exception as error:
         stage = state['stage']
         if isinstance(error, PackageVerificationError):
-            state['failureCode'] = ('postpush_package_' if stage == 'postpush_package_metadata' else 'preflight_package_') + error.code
+            state['failureCode'] = ({'postpush_package_metadata': 'postpush_package_',
+                                     'prepush_package_metadata': 'prepush_package_'}.get(stage, 'preflight_package_')) + error.code
         else:
             state['failureCode'] = {
                 'preflight_repository_metadata': 'preflight_repository_metadata_unavailable',
                 'preflight_package_metadata': 'preflight_package_metadata_unavailable',
+                'prepush_package_metadata': 'prepush_package_metadata_unavailable',
                 'push_intent': 'push_response_unconfirmed',
                 'push_returned': 'push_returned_receipt_unavailable',
                 'postpush_digest': 'postpush_digest_unverified',
