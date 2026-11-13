@@ -29,6 +29,7 @@ class Config:
     photo_smoke_enabled: bool = False
     prototype_node_ids: tuple[str, ...] = ("cluster",)
     prototype_observer_token: str = ""
+    dashboard_token: str = field(default="", repr=False)
     local_node_token: str = field(default="", repr=False)
     main_node_token: str = field(default="", repr=False)
     treedar_node_ids: tuple[str, ...] | None = None
@@ -75,12 +76,16 @@ def from_environment() -> Config:
         raise ValueError("PROCESSING_API_TOKEN must contain at least 32 printable characters")
     operator = os.environ.get("PROCESSING_PROTOTYPE_OPERATOR_TOKEN", "")
     observer = os.environ.get("PROCESSING_PROTOTYPE_OBSERVER_TOKEN", "")
+    dashboard = os.environ.get("PROCESSING_DASHBOARD_TOKEN", "")
     node_tokens = tuple(os.environ.get(name, '') for name in ('LOCAL_NODE_TOKEN', 'MAIN_NODE_TOKEN'))
     if any(len(value) > 4096 or any(ord(c) < 33 or ord(c) > 126 for c in value) for value in node_tokens):
         raise ValueError('node tokens must contain at most 4096 non-space printable ASCII characters')
     if observer and (len(observer) < 32 or observer in (token, operator)
                      or any(ord(char) < 33 or ord(char) > 126 for char in observer)):
         raise ValueError("prototype observer token must be a separate printable credential of at least 32 characters")
+    if dashboard and (len(dashboard) < 32 or dashboard in (token, operator, observer, *node_tokens)
+                      or any(ord(c) < 33 or ord(c) > 126 for c in dashboard)):
+        raise ValueError('dashboard token must be a separate printable credential of at least 32 characters')
     # This list is also the Viewer scheduler's preference order. Existing
     # deployments keep using PROCESSING_PROTOTYPE_NODE_IDS; the clearer alias
     # lets a future fleet add/remove nodes without changing dispatch code.
@@ -116,7 +121,7 @@ def from_environment() -> Config:
     if viewer == '1':
         if not os.environ.get('PROCESSING_PROTOTYPE_STATE_DIR') or not os.environ.get('LOCAL_NODE_URL'):
             raise ValueError('Viewer requires persistent state and the ordered cluster node')
-        credentials = (token, operator, observer)
+        credentials = (token, operator, observer, dashboard)
         for value in (viewer_token, viewer_staging):
             if value and (len(value) < 32 or value in credentials
                           or any(ord(c) < 33 or ord(c) > 126 for c in value)):
@@ -149,6 +154,8 @@ def from_environment() -> Config:
                 max_photos = _optional_positive_int(os.environ.get(prefix + '_MAX_PHOTOS', ''),
                                                     prefix + '_MAX_PHOTOS', 1_000_000)
                 # Legacy *_MAX_INPUT_BYTES settings are intentionally ignored.
+            if dashboard and dashboard == node_token:
+                raise ValueError('dashboard token must differ from processing node credentials')
             if not origin:
                 raise ValueError('every ordered processing node requires a configured origin')
             processing_nodes_list.append(ProcessingNode(node_id, origin, node_token, max_photos))
@@ -174,7 +181,7 @@ def from_environment() -> Config:
         viewer_tls_certificate=viewer_certificate, viewer_tls_private_key=viewer_private_key,
         viewer_min_free_bytes=_positive_int(os.environ.get('PROCESSING_VIEWER_MIN_FREE_BYTES', str(20 * 1024 ** 3)),
                                             'PROCESSING_VIEWER_MIN_FREE_BYTES', 10 ** 15),
-        prototype_observer_token=observer,
+        prototype_observer_token=observer, dashboard_token=dashboard,
         local_node_token=node_tokens[0],
         main_node_token=node_tokens[1],
         reference_config_path=os.environ.get('PROCESSING_REFERENCE_CONFIG', ''),

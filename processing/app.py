@@ -4,6 +4,7 @@ import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+from urllib.parse import urlsplit
 import signal
 import sys
 import threading
@@ -92,6 +93,31 @@ def make_handler(config: Config):
                     probe_node("main", config.main_node_url, config.main_node_token))
 
         def do_GET(self):
+            parsed = urlsplit(self.path)
+            if parsed.path == '/v1/observer/dashboard':
+                token = config.dashboard_token
+                supplied = self.headers.get('Authorization', '')
+                if len(self.headers.get_all('Authorization', [])) != 1:
+                    self._reply(401, {'error': 'unauthorized'}); return
+                if not token or token in (config.api_token, config.prototype_operator_token,
+                                          config.prototype_observer_token, config.viewer_token,
+                                          config.viewer_staging_token, config.local_node_token, config.main_node_token,
+                                          *(node.token for node in config.processing_nodes)):
+                    self._reply(403, {'error': 'observer_disabled'}); return
+                if not hmac.compare_digest(supplied.encode(), f'Bearer {token}'.encode()):
+                    self._reply(401, {'error': 'unauthorized'}); return
+                if queue is None:
+                    self._reply(404, {'error': 'prototype_disabled'}); return
+                from .observer_dashboard import parse_query, snapshot
+                try:
+                    params = parse_query(parsed.query)
+                except ValueError:
+                    self._reply(400, {'error': 'invalid_query'}); return
+                try:
+                    self._reply(200, snapshot(queue, config.viewer_enabled, *params, configured_nodes=config.processing_nodes))
+                except ValueError:
+                    self._reply(503, {'error': 'invalid_stored_state'})
+                return
             if facade and facade.handle(self):
                 return
             if self.path.startswith("/v1/prototype/"):
