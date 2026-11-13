@@ -88,7 +88,9 @@ class PublicationBoundaryTests(unittest.TestCase):
         def fake_command(args, **kwargs):
             commands.append(args)
             if args[:3] == ['docker', 'image', 'inspect']:
-                return json.dumps([{'Config': {'User': '10001:10001'}, 'Os': 'linux',
+                return json.dumps([{'Config': {'User': '10001:10001', 'Labels': {
+                    'org.opencontainers.image.source': 'https://github.com/' + REPOSITORY,
+                    'org.opencontainers.image.revision': self.env['GITHUB_SHA']}}, 'Os': 'linux',
                                     'Architecture': 'amd64', 'Id': 'sha256:' + 'a' * 64}])
             if args[:4] == ['docker', 'buildx', 'imagetools', 'inspect']:
                 return json.dumps({'digest': digest})
@@ -133,13 +135,18 @@ class PublicationBoundaryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             private_package({'visibility': 'public', 'repository': {'full_name': REPOSITORY}}, required=True)
 
-    def run_publication(self, metadata, *, fail_push=False, fail_smoke=False, bad_digest=False):
+    def run_publication(self, metadata, *, fail_push=False, fail_smoke=False, bad_digest=False, remote_change=None):
         records, commands = [], []
         def fake_command(args, **kwargs):
             commands.append(args)
             if args[:3] == ['docker', 'image', 'inspect']:
-                return json.dumps([{'Config': {'User': '10001:10001'}, 'Os': 'linux',
-                                    'Architecture': 'amd64', 'Id': 'sha256:' + 'a' * 64}])
+                item = {'Config': {'User': '10001:10001', 'Labels': {
+                    'org.opencontainers.image.source': 'https://github.com/' + REPOSITORY,
+                    'org.opencontainers.image.revision': self.env['GITHUB_SHA']}}, 'Os': 'linux',
+                        'Architecture': 'amd64', 'Id': 'sha256:' + 'a' * 64}
+                if '@sha256:' in args[3] and remote_change:
+                    remote_change(item)
+                return json.dumps([item])
             if args[:2] == ['docker', 'run'] and fail_smoke:
                 raise RuntimeError('synthetic smoke failure')
             if args[:2] == ['docker', 'push'] and fail_push:
@@ -181,6 +188,11 @@ class PublicationBoundaryTests(unittest.TestCase):
             self.assertEqual((image['visibility'], image['linkedRepository'], image['status']),
                              ('private', REPOSITORY, 'verified'))
             self.assertRegex(image['digest'], r'^sha256:[a-f0-9]{64}$')
+            self.assertEqual(image['immutableReference'], image['reference'].rsplit(':', 1)[0] + '@' + image['digest'])
+            self.assertEqual(image['remoteImageId'], image['localImageId'])
+            self.assertTrue(image['imageIdentityVerified'])
+            self.assertIn(['docker', 'pull', '--platform', 'linux/amd64', image['immutableReference']], commands)
+            self.assertIn(['docker', 'image', 'inspect', image['immutableReference']], commands)
         effects = json.dumps([args for args in commands if args[:2] in (['docker', 'build'], ['docker', 'push'])])
         for old in ('ledgetop-processing-coordinator:', 'ledgetop-processing-treedar:',
                     'ledgetop-processing-orchestrator:', ':latest', '@sha256:'):
@@ -206,6 +218,30 @@ class PublicationBoundaryTests(unittest.TestCase):
                 self.assertEqual(len([args for args in commands if args[:2] == ['docker', 'push']]), 1)
                 self.assertIn('digest', records[-1]['images'][0])
                 self.assertEqual(records[-1]['images'][1]['status'], 'built')
+
+    def test_remote_identity_mismatch_stops_before_second_push(self):
+        repository = {'full_name': REPOSITORY, 'visibility': 'private'}
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
+        mutations = {
+            'image_id': lambda item: item.update(Id='sha256:' + 'c' * 64),
+            'platform': lambda item: item.update(Architecture='arm64'),
+            'os': lambda item: item.update(Os='windows'),
+            'user': lambda item: item['Config'].update(User='root'),
+            'revision': lambda item: item['Config']['Labels'].update({'org.opencontainers.image.revision': 'c' * 40}),
+            'source': lambda item: item['Config']['Labels'].update({'org.opencontainers.image.source': 'https://github.com/other/repo'}),
+            'missing_labels': lambda item: item['Config'].update(Labels=None),
+        }
+        for name, mutation in mutations.items():
+            with self.subTest(name=name):
+                records, commands = self.run_publication([repository, None, None, None, linked], remote_change=mutation)
+                final = records[-1]
+                self.assertEqual(final['failureCode'], 'postpush_image_identity_unverified')
+                self.assertEqual(final['status'], 'failed_or_uncertain')
+                self.assertNotIn('imageIdentityVerified', final['images'][0])
+                self.assertNotIn('remoteImageId', final['images'][0])
+                self.assertIn('@sha256:', final['images'][0]['immutableReference'])
+                self.assertEqual(len([args for args in commands if args[:2] == ['docker', 'push']]), 1)
+                self.assertEqual(final['images'][1]['status'], 'built')
 
     def test_second_package_changed_before_push_preserves_first_verified_receipt(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'private'}

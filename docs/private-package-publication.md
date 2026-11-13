@@ -30,7 +30,16 @@ uses `build-<source-prefix>-<run-id>-<run-attempt>`; there is no `latest` tag.
 Run/attempt uniqueness avoids deliberate tag reuse, but it is not a registry
 immutability policy. Consumers must use the verified digest, not a mutable tag.
 The publisher checks each pushed manifest digest plus private visibility and
-exact repository linkage before marking that image verified or pushing the next.
+exact repository linkage. It then pulls the immutable `repository@sha256:...`
+reference for Linux/amd64 using the existing job registry login, and inspects
+that exact reference. Its image ID must equal the locally built and smoke-tested
+image ID; Linux/amd64, non-root user `10001:10001`, exact source-repository label
+and current source-revision label must also match. Only then does the receipt
+record `remoteImageId` and `imageIdentityVerified: true`, mark that image verified,
+and permit the next push. A pull/inspection/identity failure stops at
+`postpush_image_identity` with `postpush_image_identity_unverified`; the remote
+digest remains recorded for reconciliation. This pull is verification, not runtime
+deployment.
 The pair is not transactional: a verified first image can exist if the second
 push fails. The retained receipt records that partial outcome.
 

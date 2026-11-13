@@ -163,10 +163,22 @@ s.shutdown();s.server_close()
             if not isinstance(digest, str) or not re.fullmatch('sha256:[0-9a-f]{64}', digest):
                 raise ValueError('remote manifest digest unverified')
             image['digest'] = digest
+            image['immutableReference'] = image['reference'].rsplit(':', 1)[0] + '@' + digest
             state['stage'] = 'postpush_package_metadata'
             receipt(state)
             private_package(github('/orgs/ledgetoptechnologies/packages/container/' + image['package']), required=True)
-            image.update(status='verified', visibility='private', linkedRepository=REPOSITORY)
+            state['stage'] = 'postpush_image_identity'
+            receipt(state)
+            command(['docker', 'pull', '--platform', 'linux/amd64', image['immutableReference']])
+            remote = json.loads(command(['docker', 'image', 'inspect', image['immutableReference']], capture=True))[0]
+            labels = remote['Config'].get('Labels') or {}
+            if (remote['Id'] != image['localImageId'] or remote['Os'] != 'linux'
+                    or remote['Architecture'] != 'amd64' or remote['Config']['User'] != '10001:10001'
+                    or labels.get('org.opencontainers.image.source') != 'https://github.com/' + REPOSITORY
+                    or labels.get('org.opencontainers.image.revision') != state['sourceCommit']):
+                raise ValueError('remote image identity unverified')
+            image.update(remoteImageId=remote['Id'], imageIdentityVerified=True,
+                         status='verified', visibility='private', linkedRepository=REPOSITORY)
             receipt(state)
         state.update(stage='completed', status='succeeded')
         receipt(state)
@@ -183,6 +195,7 @@ s.shutdown();s.server_close()
                 'push_intent': 'push_response_unconfirmed',
                 'push_returned': 'push_returned_receipt_unavailable',
                 'postpush_digest': 'postpush_digest_unverified',
+                'postpush_image_identity': 'postpush_image_identity_unverified',
                 'postpush_package_metadata': 'postpush_package_metadata_unavailable',
                 'build': 'build_or_image_check_failed',
                 'smoke_checks': 'smoke_check_failed',
