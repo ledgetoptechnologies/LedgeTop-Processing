@@ -15,7 +15,8 @@ import urllib.error
 import urllib.request
 
 REPOSITORY = 'ledgetoptechnologies/LedgeTop-Processing'
-PACKAGES = ('ledgetop-processing-coordinator', 'ledgetop-processing-treedar')
+# Fresh fixed namespaces: legacy public packages are never publication targets.
+PACKAGES = ('ledgetop-processing-private-coordinator', 'ledgetop-processing-private-treedar')
 
 
 def context(env):
@@ -102,7 +103,9 @@ def main():
         for package in PACKAGES:
             state.update(stage='preflight_package_metadata', currentPackage=package)
             receipt(state)
-            private_package(github('/orgs/ledgetoptechnologies/packages/container/' + package), required=True)
+            # An authenticated metadata 404 permits first publication only for these
+            # fixed fresh namespaces. Other read/auth failures remain fatal.
+            private_package(github('/orgs/ledgetoptechnologies/packages/container/' + package))
         for package, build_root in zip(PACKAGES, ('.', 'engines/treedar')):
             reference = 'ghcr.io/ledgetoptechnologies/' + package + ':' + tag
             state.update(stage='build', currentPackage=package)
@@ -140,6 +143,11 @@ s.shutdown();s.server_close()
             image['smokeCheckPassed'] = True
         receipt(state)
         for image in state['images']:
+            # Recheck immediately before the effect; another publisher/operator
+            # may have created or changed this package while both builds ran.
+            state.update(stage='prepush_package_metadata', currentPackage=image['package'])
+            receipt(state)
+            private_package(github('/orgs/ledgetoptechnologies/packages/container/' + image['package']))
             state.update(stage='push_intent', currentPackage=image['package'])
             image['status'] = 'push_response_unconfirmed'
             receipt(state)
@@ -155,24 +163,39 @@ s.shutdown();s.server_close()
             if not isinstance(digest, str) or not re.fullmatch('sha256:[0-9a-f]{64}', digest):
                 raise ValueError('remote manifest digest unverified')
             image['digest'] = digest
+            image['immutableReference'] = image['reference'].rsplit(':', 1)[0] + '@' + digest
             state['stage'] = 'postpush_package_metadata'
             receipt(state)
             private_package(github('/orgs/ledgetoptechnologies/packages/container/' + image['package']), required=True)
-            image.update(status='verified', visibility='private', linkedRepository=REPOSITORY)
+            state['stage'] = 'postpush_image_identity'
+            receipt(state)
+            command(['docker', 'pull', '--platform', 'linux/amd64', image['immutableReference']])
+            remote = json.loads(command(['docker', 'image', 'inspect', image['immutableReference']], capture=True))[0]
+            labels = remote['Config'].get('Labels') or {}
+            if (remote['Id'] != image['localImageId'] or remote['Os'] != 'linux'
+                    or remote['Architecture'] != 'amd64' or remote['Config']['User'] != '10001:10001'
+                    or labels.get('org.opencontainers.image.source') != 'https://github.com/' + REPOSITORY
+                    or labels.get('org.opencontainers.image.revision') != state['sourceCommit']):
+                raise ValueError('remote image identity unverified')
+            image.update(remoteImageId=remote['Id'], imageIdentityVerified=True,
+                         status='verified', visibility='private', linkedRepository=REPOSITORY)
             receipt(state)
         state.update(stage='completed', status='succeeded')
         receipt(state)
     except Exception as error:
         stage = state['stage']
         if isinstance(error, PackageVerificationError):
-            state['failureCode'] = ('postpush_package_' if stage == 'postpush_package_metadata' else 'preflight_package_') + error.code
+            state['failureCode'] = ({'postpush_package_metadata': 'postpush_package_',
+                                     'prepush_package_metadata': 'prepush_package_'}.get(stage, 'preflight_package_')) + error.code
         else:
             state['failureCode'] = {
                 'preflight_repository_metadata': 'preflight_repository_metadata_unavailable',
                 'preflight_package_metadata': 'preflight_package_metadata_unavailable',
+                'prepush_package_metadata': 'prepush_package_metadata_unavailable',
                 'push_intent': 'push_response_unconfirmed',
                 'push_returned': 'push_returned_receipt_unavailable',
                 'postpush_digest': 'postpush_digest_unverified',
+                'postpush_image_identity': 'postpush_image_identity_unverified',
                 'postpush_package_metadata': 'postpush_package_metadata_unavailable',
                 'build': 'build_or_image_check_failed',
                 'smoke_checks': 'smoke_check_failed',
