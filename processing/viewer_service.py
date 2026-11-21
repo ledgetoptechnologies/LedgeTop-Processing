@@ -27,7 +27,7 @@ from .odx_smoke_worker import Client, SmokeError
 from .options import discover_node, _NoRedirect, _compatibility_signature
 from .prototype import VIEWER_PROFILE
 from .provider import probe_node
-from .viewer_tasks import TaskStore, sync_directory
+from .viewer_tasks import TaskStore, sync_directory, valid_processing_time
 
 
 class EngineUnavailable(OSError):
@@ -421,6 +421,8 @@ class ViewerService:
             return
         self._backoff.pop(identifier, None)
         code = info['status']['code']
+        processing_time = info.get('processingTime')
+        identity = {key: task[key] for key in ('generation', 'job_id', 'engine_uuid', 'node_id', 'directory')}
         if code != 10:self._upload_manifests.pop(identifier, None)
         if code in (10, 20):
             # Queued10 may mean a delayed accepted commit or an uncommitted
@@ -430,15 +432,25 @@ class ViewerService:
                 self._backoff[identifier] = (now + 2, 1)
                 return
             fields = {'progress': progress}
-            if code == 20 and task['phase'] in ('commit_pending', 'awaiting_engine_start'):
-                fields.update(phase='processing', error=None)
-            self.store.update(identifier, return_task=False, **fields)
+            if code == 20:
+                if task['phase'] in ('commit_pending', 'awaiting_engine_start'):
+                    fields.update(phase='processing', error=None)
+                fields['engine_requeued'] = False
+                if valid_processing_time(processing_time):
+                    fields['processing_time_ms'] = processing_time
+            elif task['phase'] in ('processing', 'cancel_pending'):
+                # Keep the accepted execution phase for output and cancellation.
+                fields.update(processing_time_ms=None, engine_requeued=True)
+            self.store.update(identifier, return_task=False, expected_result=identity, **fields)
             return
         status = 'succeeded' if code == 40 else 'failed'
         result = {'engineTaskId': task['engine_uuid'], 'nodeId': task['node_id'],
                   'environment': task['environment'], 'cancelled': code == 50}
+        if valid_processing_time(processing_time):
+            result['processingTime'] = processing_time
         self.queue.complete(task['job_id'], {'claimToken': task['claim_token'], 'status': status, 'result': result})
-        self.store.update(identifier, return_task=False, stage='cancelled' if code == 50 else status,
+        self.store.update(identifier, return_task=False, expected_result=identity,
+                          stage='cancelled' if code == 50 else status,
                           phase='complete', progress=100 if code == 40 else task['progress'])
 
     def _node_snapshots(self, current):
