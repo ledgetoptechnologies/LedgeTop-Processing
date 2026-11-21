@@ -30,34 +30,32 @@ class PublicationBoundaryTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 private_package(value)
 
-    def test_new_package_is_allowed_but_published_link_must_be_verified(self):
-        private_package(None)
-        with self.assertRaises(ValueError):
-            private_package(None, required=True)
-        with self.assertRaises(ValueError):
-            private_package({'visibility': 'private'}, required=True)
+    def test_private_package_requires_existing_linked_metadata(self):
+        with self.assertRaisesRegex(ValueError, 'package metadata unavailable'):
+            private_package(None)
         with self.assertRaises(ValueError):
             private_package({'visibility': 'private'})
-        private_package({'visibility': 'private', 'repository': {'full_name': REPOSITORY}}, required=True)
+        private_package({'visibility': 'private', 'repository': {'full_name': REPOSITORY}})
 
     def test_publication_targets_only_fixed_private_names(self):
         self.assertEqual(publish_images.PACKAGES,
                          ('ledgetop-processing-private-coordinator', 'ledgetop-processing-private-treedar'))
         self.assertNotIn('ledgetop-processing-orchestrator', publish_images.PACKAGES)
 
-    def test_public_or_unlinked_package_stops_before_any_build_or_push(self):
+    def test_unqualified_package_at_either_preflight_position_stops_before_build(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'public'}
         linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
-        for metadata in ([{'visibility': 'public', 'repository': {'full_name': REPOSITORY}}],
-                         [{'visibility': 'private'}], [linked, {'visibility': 'private'}]):
-            with self.subTest(metadata=metadata), \
-                 patch.dict(publish_images.os.environ, self.env, clear=True), \
-                 patch.object(publish_images, 'github', side_effect=[repository, *metadata]), \
-                 patch.object(publish_images, 'receipt'), \
-                 patch.object(publish_images, 'command') as command:
-                with self.assertRaises(SystemExit):
-                    publish_images.main()
-                command.assert_not_called()
+        for bad, code in self.bad_package_metadata():
+            for index, package in enumerate(publish_images.PACKAGES):
+                with self.subTest(package=package, bad=code):
+                    metadata = [linked, linked]
+                    metadata[index] = bad
+                    records, commands = self.run_publication([repository, *metadata])
+                    self.assertEqual(commands, [])
+                    self.assertEqual(records[-1]['images'], [])
+                    self.assertEqual(records[-1]['currentPackage'], package)
+                    self.assertEqual(records[-1]['stage'], 'preflight_package_metadata')
+                    self.assertEqual(records[-1]['failureCode'], 'preflight_package_' + code)
 
     def test_metadata_forbidden_fails_closed_instead_of_treating_it_as_absent(self):
         failure = urllib.error.HTTPError('https://api.github.com/example', 403, 'forbidden', {}, None)
@@ -96,7 +94,7 @@ class PublicationBoundaryTests(unittest.TestCase):
                 return json.dumps({'digest': digest})
             return ''
         with patch.dict(publish_images.os.environ, self.env, clear=True), \
-             patch.object(publish_images, 'github', side_effect=[repository, linked, linked, linked, public]), \
+             patch.object(publish_images, 'github', side_effect=[repository, *([linked] * 5), public]), \
              patch.object(publish_images, 'receipt', side_effect=lambda x: records.append(copy.deepcopy(x))), \
              patch.object(publish_images, 'command', side_effect=fake_command):
             with self.assertRaises(SystemExit):
@@ -133,7 +131,18 @@ class PublicationBoundaryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             source_repository({'full_name': 'someone/other', 'visibility': 'public'})
         with self.assertRaises(ValueError):
-            private_package({'visibility': 'public', 'repository': {'full_name': REPOSITORY}}, required=True)
+            private_package({'visibility': 'public', 'repository': {'full_name': REPOSITORY}})
+
+    @staticmethod
+    def bad_package_metadata():
+        return (
+            (None, 'missing_or_inaccessible'),
+            ({'visibility': 'public', 'repository': {'full_name': REPOSITORY}}, 'not_private'),
+            ({'visibility': 'internal', 'repository': {'full_name': REPOSITORY}}, 'not_private'),
+            ({'visibility': 'private'}, 'unlinked_or_wrong_repository'),
+            ({'visibility': 'private', 'repository': {'full_name': 'other/repo'}}, 'unlinked_or_wrong_repository'),
+            (ValueError('synthetic metadata permission failure'), 'metadata_unavailable'),
+        )
 
     def run_publication(self, metadata, *, fail_push=False, fail_smoke=False, bad_digest=False, remote_change=None):
         records, commands = [], []
@@ -164,7 +173,7 @@ class PublicationBoundaryTests(unittest.TestCase):
                 self.assertEqual(error.code, 1)
         return records, commands
 
-    def test_authenticated_metadata_404_is_bootstrap_not_other_http_failures(self):
+    def test_authenticated_metadata_404_means_required_package_is_unavailable(self):
         for code in (404, 401, 403, 429, 500):
             failure = urllib.error.HTTPError('https://api.github.com/example', code, 'synthetic', {}, None)
             with self.subTest(code=code), \
@@ -172,18 +181,22 @@ class PublicationBoundaryTests(unittest.TestCase):
                  patch.object(publish_images.urllib.request, 'urlopen', side_effect=failure):
                 if code == 404:
                     self.assertIsNone(publish_images.github('/example'))
+                    with self.assertRaisesRegex(ValueError, 'package metadata unavailable'):
+                        private_package(publish_images.github('/example'))
                 else:
                     with self.assertRaises(ValueError): publish_images.github('/example')
 
-    def test_fresh_private_pair_builds_and_smokes_before_first_push(self):
+    def test_existing_private_pair_builds_and_smokes_before_first_push(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'private'}
         linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
-        records, commands = self.run_publication([repository, None, None, None, linked, None, linked])
+        records, commands = self.run_publication([repository, *([linked] * 8)])
         self.assertEqual(records[-1]['status'], 'succeeded')
         pushes = [i for i, args in enumerate(commands) if args[:2] == ['docker', 'push']]
         self.assertEqual(len(pushes), 2)
         self.assertEqual(sum(args[:2] == ['docker', 'build'] for args in commands[:pushes[0]]), 2)
         self.assertEqual(sum(args[:2] == ['docker', 'run'] for args in commands[:pushes[0]]), 2)
+        self.assertEqual([row['currentPackage'] for row in records if row['stage'] == 'prepush_pair_metadata'],
+                         list(publish_images.PACKAGES))
         for image in records[-1]['images']:
             self.assertEqual((image['visibility'], image['linkedRepository'], image['status']),
                              ('private', REPOSITORY, 'verified'))
@@ -198,21 +211,35 @@ class PublicationBoundaryTests(unittest.TestCase):
                     'ledgetop-processing-orchestrator:', ':latest', '@sha256:'):
             self.assertNotIn(old, effects)
 
-    def test_changed_package_privacy_or_repository_before_push_is_fatal(self):
+    def test_pair_recheck_stops_before_first_push_if_either_package_drifted(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'private'}
-        for bad in ({'visibility': 'public', 'repository': {'full_name': REPOSITORY}},
-                    {'visibility': 'internal', 'repository': {'full_name': REPOSITORY}},
-                    {'visibility': 'private', 'repository': {'full_name': 'other/repo'}}):
-            with self.subTest(bad=bad):
-                records, commands = self.run_publication([repository, None, None, bad])
-                self.assertEqual(records[-1]['stage'], 'prepush_package_metadata')
-                self.assertFalse(any(args[:2] == ['docker', 'push'] for args in commands))
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
+        for bad, code in self.bad_package_metadata():
+            for index, package in enumerate(publish_images.PACKAGES):
+                with self.subTest(package=package, bad=code):
+                    metadata = [linked, linked]
+                    metadata[index] = bad
+                    records, commands = self.run_publication([repository, linked, linked, *metadata])
+                    self.assertEqual(records[-1]['stage'], 'prepush_pair_metadata')
+                    self.assertEqual(records[-1]['currentPackage'], package)
+                    self.assertEqual(records[-1]['failureCode'], 'prepush_package_' + code)
+                    self.assertEqual([image['status'] for image in records[-1]['images']], ['built', 'built'])
+                    self.assertFalse(any(args[:2] == ['docker', 'push'] for args in commands))
+
+    def test_immediate_recheck_stops_first_push_after_valid_pair_read(self):
+        repository = {'full_name': REPOSITORY, 'visibility': 'private'}
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
+        records, commands = self.run_publication([repository, *([linked] * 4), None])
+        self.assertEqual(records[-1]['stage'], 'prepush_package_metadata')
+        self.assertEqual(records[-1]['failureCode'], 'prepush_package_missing_or_inaccessible')
+        self.assertFalse(any(args[:2] == ['docker', 'push'] for args in commands))
 
     def test_postpush_missing_or_wrong_repository_stops_pair_after_first_push(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'private'}
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
         for bad in (None, {'visibility': 'private', 'repository': {'full_name': 'other/repo'}}):
             with self.subTest(bad=bad):
-                records, commands = self.run_publication([repository, None, None, None, bad])
+                records, commands = self.run_publication([repository, *([linked] * 5), bad])
                 self.assertEqual(records[-1]['stage'], 'postpush_package_metadata')
                 self.assertEqual(records[-1]['status'], 'failed_or_uncertain')
                 self.assertEqual(len([args for args in commands if args[:2] == ['docker', 'push']]), 1)
@@ -233,7 +260,7 @@ class PublicationBoundaryTests(unittest.TestCase):
         }
         for name, mutation in mutations.items():
             with self.subTest(name=name):
-                records, commands = self.run_publication([repository, None, None, None, linked], remote_change=mutation)
+                records, commands = self.run_publication([repository, *([linked] * 6)], remote_change=mutation)
                 final = records[-1]
                 self.assertEqual(final['failureCode'], 'postpush_image_identity_unverified')
                 self.assertEqual(final['status'], 'failed_or_uncertain')
@@ -247,7 +274,7 @@ class PublicationBoundaryTests(unittest.TestCase):
         repository = {'full_name': REPOSITORY, 'visibility': 'private'}
         linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
         public = {'visibility': 'public', 'repository': {'full_name': REPOSITORY}}
-        records, commands = self.run_publication([repository, None, None, None, linked, public])
+        records, commands = self.run_publication([repository, *([linked] * 6), public])
         self.assertEqual(records[-1]['failureCode'], 'prepush_package_not_private')
         self.assertEqual(records[-1]['images'][0]['status'], 'verified')
         self.assertEqual(records[-1]['images'][1]['status'], 'built')
@@ -255,7 +282,8 @@ class PublicationBoundaryTests(unittest.TestCase):
 
     def test_lost_push_response_never_retries_and_retains_exact_uncertain_reference(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'private'}
-        records, commands = self.run_publication([repository, None, None, None], fail_push=True)
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
+        records, commands = self.run_publication([repository, *([linked] * 5)], fail_push=True)
         final = records[-1]
         self.assertEqual(final['failureCode'], 'push_response_unconfirmed')
         self.assertEqual(final['images'][0]['status'], 'push_response_unconfirmed')
@@ -267,10 +295,11 @@ class PublicationBoundaryTests(unittest.TestCase):
 
     def test_bad_digest_or_smoke_failure_cannot_complete_pair(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'private'}
-        records, commands = self.run_publication([repository, None, None, None], bad_digest=True)
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
+        records, commands = self.run_publication([repository, *([linked] * 5)], bad_digest=True)
         self.assertEqual(records[-1]['failureCode'], 'postpush_digest_unverified')
         self.assertEqual(len([args for args in commands if args[:2] == ['docker', 'push']]), 1)
-        records, commands = self.run_publication([repository, None, None], fail_smoke=True)
+        records, commands = self.run_publication([repository, linked, linked], fail_smoke=True)
         self.assertEqual(records[-1]['failureCode'], 'smoke_check_failed')
         self.assertFalse(any(args[:2] == ['docker', 'push'] for args in commands))
 
