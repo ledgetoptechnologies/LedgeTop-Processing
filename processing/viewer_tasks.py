@@ -43,6 +43,10 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
+def valid_processing_time(value):
+    return type(value) is int and 0 <= value <= 2 ** 53 - 1
+
+
 def checked_uuid(value):
     if not isinstance(value, str):
         raise ValueError('canonical UUID required')
@@ -110,7 +114,7 @@ class TaskStore:
                 stage TEXT NOT NULL DEFAULT 'uploading', phase TEXT NOT NULL DEFAULT 'uploading',
                 job_id TEXT, node_id TEXT, engine_uuid TEXT, claim_token TEXT,
                 upload_cursor INTEGER NOT NULL DEFAULT 0,
-                error TEXT, progress REAL NOT NULL DEFAULT 0,
+                error TEXT, progress REAL NOT NULL DEFAULT 0, processing_time_ms INTEGER,
                 output_lines TEXT NOT NULL DEFAULT '[]', archive_path TEXT, archive_sha256 TEXT,
                 removed INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -129,6 +133,8 @@ class TaskStore:
             columns = {row['name'] for row in db.execute('PRAGMA table_info(viewer_tasks)')}
             if 'upload_cursor' not in columns:
                 db.execute('ALTER TABLE viewer_tasks ADD COLUMN upload_cursor INTEGER NOT NULL DEFAULT 0')
+            if 'processing_time_ms' not in columns:
+                db.execute('ALTER TABLE viewer_tasks ADD COLUMN processing_time_ms INTEGER')
             if 'archive_sha256' not in columns:
                 db.execute('ALTER TABLE viewer_tasks ADD COLUMN archive_sha256 TEXT')
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_delivery_acceptances (
@@ -567,7 +573,8 @@ class TaskStore:
                 or any(type(expected_result[field]) is not str for field in result_fields - {'generation'})):
             raise ValueError('invalid expected result identity')
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
-                   'progress', 'output_lines', 'archive_path', 'archive_sha256', 'upload_cursor'}
+                   'progress', 'output_lines', 'archive_path', 'archive_sha256', 'upload_cursor',
+                   'processing_time_ms'}
         if not fields or not set(fields) <= allowed:
             raise ValueError('unexpected broker update fields')
         if 'stage' in fields and fields['stage'] not in STAGES:
@@ -595,6 +602,10 @@ class TaskStore:
         if 'upload_cursor' in fields and (type(fields['upload_cursor']) is not int
                 or not 0 <= fields['upload_cursor'] <= 100000):
             raise ValueError('invalid upload cursor')
+        processing_time = fields.get('processing_time_ms')
+        if 'processing_time_ms' in fields and (expected_result is None
+                or (processing_time is not None and not valid_processing_time(processing_time))):
+            raise ValueError('invalid engine processing time or identity')
         if 'output_lines' in fields:
             lines = fields['output_lines']
             if (not isinstance(lines, list) or len(lines) > 10000
@@ -802,6 +813,15 @@ class TaskStore:
         result = {'uuid': identifier, 'name': task['name'], 'status': status,
                   'progress': 100 if code == 40 else task['progress'],
                   'imagesCount': task['images_count'], 'dateCreated': task['created_at']}
+        processing_time = task['processing_time_ms'] if code == 20 else None
+        if job and state in ('succeeded', 'failed') and isinstance(job['result'], dict):
+            completion = job['result']
+            if (completion.get('engineTaskId') == task['engine_uuid']
+                    and completion.get('nodeId') == task['node_id']
+                    and completion.get('environment') == task['environment']):
+                processing_time = completion.get('processingTime')
+        if valid_processing_time(processing_time):
+            result['processingTime'] = processing_time
         if job and state == 'queued':
             result['ledgetopQueueState'] = 'waiting_for_dispatch'
             if task['phase'] == 'waiting_node':

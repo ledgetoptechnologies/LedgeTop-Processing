@@ -129,7 +129,10 @@ class FakeEngine:
                 return None
             raise EngineUnavailable('synthetic_task_not_found')
         if kind == 'info':
-            return {'uuid': identifier, 'status': dict(task['status']), 'progress': task['progress']}
+            reply = {'uuid': identifier, 'status': dict(task['status']), 'progress': task['progress']}
+            if 'processingTime' in task:
+                reply['processingTime'] = task['processingTime']
+            return reply
         if kind == 'output':
             return ['synthetic engine output', '', 'comma,record'][query.get('line', 0):]
         raise AssertionError('unexpected engine read')
@@ -422,6 +425,109 @@ except Conflict:
         self.service.tick()
         self.assertEqual(self.task(identifier)['phase'], 'processing')
         self.assertEqual(self.service.info(identifier)['status']['code'], 20)
+
+    def test_runtime_uses_only_native_processing_elapsed_and_freezes_at_completion(self):
+        identifier = self.initialize()
+        self.upload(identifier)
+        self.assertNotIn('processingTime', self.service.info(identifier))
+        self.service.commit(identifier)
+        self.assertNotIn('processingTime', self.service.info(identifier))
+        engine = self.engines['cluster']
+        engine.commit_status = 10
+        self.service.tick()
+        engine_id = self.task(identifier)['engine_uuid']
+        native = engine.tasks[engine_id]
+        native['processingTime'] = 90000
+        self.service.tick()
+        self.assertNotIn('processingTime', self.service.info(identifier))
+
+        native['status']['code'] = 20
+        native['processingTime'] = 0
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['processingTime'], 0)
+        native['processingTime'] = 1200
+        self.service.tick()
+        for invalid in (-1, None, True, '2400', 2400.5, 2 ** 53):
+            with self.subTest(invalid=invalid):
+                native['processingTime'] = invalid
+                self.service.tick()
+                self.assertEqual(self.service.info(identifier)['processingTime'], 1200)
+        native['processingTime'] = 1100
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['processingTime'], 1100)
+
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.assertEqual(self.service.info(identifier)['processingTime'], 1100)
+        engine.finish(engine_id)
+        native['processingTime'] = 2750
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['status']['code'], 40)
+        native['processingTime'] = 90000
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['processingTime'], 2750)
+
+        original = self.task(identifier)
+        self.service.remove(identifier)
+        self.service.initialize(identifier, 'Replacement survey', REQUEST_OPTIONS, None, 'production')
+        self.assertEqual(self.task(identifier)['generation'], original['generation'] + 1)
+        self.assertNotIn('processingTime', self.service.info(identifier))
+        native['status']['code'] = 20
+        with self.assertRaisesRegex(Conflict, 'task result identity changed'):
+            self.service._poll(original)
+        self.assertNotIn('processingTime', self.service.info(identifier))
+
+    def test_runtime_migration_leaves_existing_tasks_unknown(self):
+        identifier = self.submit()
+        self.service.tick()
+        with self.queue._db() as db:
+            db.execute('ALTER TABLE viewer_tasks DROP COLUMN processing_time_ms')
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.assertNotIn('processingTime', self.service.info(identifier))
+        native = self.engines['cluster'].tasks[self.task(identifier)['engine_uuid']]
+        native['processingTime'] = 500
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['processingTime'], 500)
+
+    def test_requeued_native_uuid_starts_a_fresh_runtime(self):
+        identifier = self.submit()
+        self.service.tick()
+        engine = self.engines['cluster']
+        native = engine.tasks[self.task(identifier)['engine_uuid']]
+        native['processingTime'] = 10000
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['processingTime'], 10000)
+        native['status']['code'] = 10
+        self.service.tick()
+        queued = self.service.info(identifier)
+        self.assertEqual(queued['status']['code'], 10)
+        self.assertNotIn('processingTime', queued)
+        native['status']['code'] = 20
+        native['processingTime'] = 150
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['processingTime'], 150)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_terminal_runtime_can_be_first_sample_but_missing_runtime_stays_unknown(self):
+        engine = self.engines['cluster']
+        for outcome, duration in ((40, 725), (30, -1), (50, None)):
+            with self.subTest(outcome=outcome):
+                identifier = self.submit()
+                engine.commit_status = 10
+                self.service.tick()
+                engine_id = self.task(identifier)['engine_uuid']
+                engine.finish(engine_id, outcome)
+                engine.tasks[engine_id]['processingTime'] = duration
+                self.service.tick()
+                observed = self.service.info(identifier)
+                self.assertEqual(observed['status']['code'], outcome)
+                if outcome == 40:
+                    self.assertEqual(observed['processingTime'], duration)
+                else:
+                    self.assertNotIn('processingTime', observed)
 
     def test_over_cluster_photo_ceiling_uses_main_and_never_cluster(self):
         # A lowered synthetic threshold exercises scheduler dispatch without
