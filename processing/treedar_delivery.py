@@ -50,6 +50,8 @@ class TreeDarDelivery(ReferenceEngineWorker):
         self.outbox, self.failure_outbox = outbox,failure_outbox
         self.engine = controller
         self.path = Path(path).absolute()
+        from .reference_auxiliary_budget import reject_unbudgeted
+        reject_unbudgeted(self.path, self.auxiliary_budget)
         self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
         if any(item.is_symlink() for item in (self.path, *self.path.parents)):
             raise WorkerHeld('owned_private_delivery_journal_required')
