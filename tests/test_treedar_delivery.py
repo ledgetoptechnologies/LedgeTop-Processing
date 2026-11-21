@@ -333,6 +333,16 @@ class TreeDarDeliveryTests(unittest.TestCase):
         self.assertEqual(self.delivery.poll(self.job['jobId']),committed[0])
         self.assertEqual(sum(args[0]=='start' for args in self.docker.calls),1)
 
+    def test_delivery_refuses_latched_auxiliary_budget_before_creating_journal(self):
+        from processing.reference_auxiliary_budget import AuxiliaryHeld
+        private = self.root / "private"
+        (private / "auxiliary-budget.sqlite").touch()
+        journal = private / "other-delivery.sqlite"
+        with self.assertRaisesRegex(AuxiliaryHeld, "auxiliary_latched_budget_required"):
+            TreeDarDelivery(journal, controller=self.controller,
+                            outbox=self.outbox, failure_outbox=self.failures)
+        self.assertFalse(journal.exists())
+
     def test_changed_controller_version_cannot_rebind_delivery_projection(self):
         self.success();self.delivery.poll(self.job['jobId'])
         old=self.controller.config

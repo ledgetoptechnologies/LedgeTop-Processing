@@ -28,6 +28,8 @@ class WorkerHeld(ValueError):
 
 
 class ReferenceEngineWorker:
+    auxiliary_budget = None
+
     def __init__(self, path, *, ledger, outbox, engine, engine_id, node_id,
                  authority_id, coordinator_origin, gate_generation, worker_id,
                  engine_version, allowed_odm_options=(), auxiliary_budget=None):
