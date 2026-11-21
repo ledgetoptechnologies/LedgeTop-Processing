@@ -1,6 +1,6 @@
 # Private pull-test package publication
 
-The main-only Processing publisher targets exactly two fresh package namespaces:
+The main-only Processing publisher targets these two fixed package namespaces.
 
 - `ghcr.io/ledgetoptechnologies/ledgetop-processing-private-coordinator`
 - `ghcr.io/ledgetoptechnologies/ledgetop-processing-private-treedar`
@@ -10,19 +10,20 @@ digests are not publication targets. This change neither changes their visibilit
 nor migrates any runtime. The existing main-only workflow uses its job-scoped
 `GITHUB_TOKEN` with `packages: write`; no publisher PAT or additional scope is added.
 
-GitHub documents that a newly published container package defaults to private,
-and publication with the workflow's `GITHUB_TOKEN` automatically links it to the
-workflow repository. The build also supplies the exact repository source label.
-See [GitHub Container registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#pushing-container-images).
+Preflight checks the exact source repository and requires both packages to
+already exist, be private, and be linked to that repository. Missing or
+inaccessible metadata, including an authenticated HTTP 404, stops before any
+image build. Public, internal, unlinked and wrong-repository records also stop
+publication. The publisher rechecks both packages after smoke tests and before
+the first push, then rechecks the individual package immediately before its
+push.
 
-Preflight checks the exact source repository and both fixed package names. An
-authenticated package-metadata HTTP 404 permits first publication at these new
-names. A 404 can also hide inaccessible metadata; it is not proof of ownership
-or write permission. Other metadata/authentication errors fail closed. If a
-package exists, it must already be private and linked to this exact repository;
-public, internal, unlinked and wrong-repository metadata are rejected. The same
-check runs again immediately before each push to catch intervening changes.
-Nothing changes package visibility to make a push succeed.
+An existing public organization package cannot be made private again. Recovery
+requires separate approval for a replacement namespace and publisher
+configuration. If the registry owner independently approves seeding a fresh
+namespace, use an artifact approved for public exposure and verify private
+visibility, exact repository linkage and repository Actions permissions before
+publishing any application image. [GitHub package visibility and access](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility#configuring-visibility-of-packages-for-an-organization)
 
 Both unchanged Docker recipes must build, pass image platform/non-root checks,
 and pass bounded offline smoke tests before the first push. Each publication
