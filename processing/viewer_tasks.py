@@ -115,6 +115,7 @@ class TaskStore:
                 job_id TEXT, node_id TEXT, engine_uuid TEXT, claim_token TEXT,
                 upload_cursor INTEGER NOT NULL DEFAULT 0,
                 error TEXT, progress REAL NOT NULL DEFAULT 0, processing_time_ms INTEGER,
+                engine_requeued INTEGER NOT NULL DEFAULT 0 CHECK(engine_requeued IN (0,1)),
                 output_lines TEXT NOT NULL DEFAULT '[]', archive_path TEXT, archive_sha256 TEXT,
                 removed INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -135,6 +136,9 @@ class TaskStore:
                 db.execute('ALTER TABLE viewer_tasks ADD COLUMN upload_cursor INTEGER NOT NULL DEFAULT 0')
             if 'processing_time_ms' not in columns:
                 db.execute('ALTER TABLE viewer_tasks ADD COLUMN processing_time_ms INTEGER')
+            if 'engine_requeued' not in columns:
+                db.execute('ALTER TABLE viewer_tasks ADD COLUMN engine_requeued INTEGER NOT NULL DEFAULT 0 '
+                           'CHECK(engine_requeued IN (0,1))')
             if 'archive_sha256' not in columns:
                 db.execute('ALTER TABLE viewer_tasks ADD COLUMN archive_sha256 TEXT')
             db.execute('''CREATE TABLE IF NOT EXISTS viewer_delivery_acceptances (
@@ -574,7 +578,7 @@ class TaskStore:
             raise ValueError('invalid expected result identity')
         allowed = {'stage', 'phase', 'node_id', 'engine_uuid', 'claim_token', 'error',
                    'progress', 'output_lines', 'archive_path', 'archive_sha256', 'upload_cursor',
-                   'processing_time_ms'}
+                   'processing_time_ms', 'engine_requeued'}
         if not fields or not set(fields) <= allowed:
             raise ValueError('unexpected broker update fields')
         if 'stage' in fields and fields['stage'] not in STAGES:
@@ -606,6 +610,9 @@ class TaskStore:
         if 'processing_time_ms' in fields and (expected_result is None
                 or (processing_time is not None and not valid_processing_time(processing_time))):
             raise ValueError('invalid engine processing time or identity')
+        if 'engine_requeued' in fields and (expected_result is None
+                or type(fields['engine_requeued']) is not bool):
+            raise ValueError('invalid engine queue observation or identity')
         if 'output_lines' in fields:
             lines = fields['output_lines']
             if (not isinstance(lines, list) or len(lines) > 10000
@@ -789,20 +796,17 @@ class TaskStore:
                       and task['engine_uuid'] and task['node_id'] and task['claim_token'])
         cancelled_result = (job and state == 'failed' and isinstance(job['result'], dict)
                             and job['result'].get('cancelled') is True)
-        engine_started = (state == 'running'
-                          and task['phase'] in ('processing', 'cancel_pending'))
+        engine_queued = bool(task['engine_requeued']) or task['phase'] not in ('processing', 'cancel_pending')
         if task['stage'] == 'cancelled' or cancelled_result:
             code = 50
         elif recovering:
             # Retain the shared slot, but do not tell Viewer this recoverable
             # engine execution failed before its exact UUID is reconciled. A
             # restart does not itself prove NodeODM left its queued state.
-            code = 10 if task['phase'] in ('claimed', 'init_pending', 'initialized', 'uploaded',
-                                            'commit_pending', 'awaiting_engine_start') else 20
-        elif state == 'running' and not engine_started:
-            # A durable queue claim owns the task while the coordinator
-            # initializes NodeODM and transfers photos. Viewer must keep
-            # reporting queued until the engine itself confirms status 20.
+            code = 10 if engine_queued else 20
+        elif state == 'running' and engine_queued:
+            # Viewer stays queued during submission or a native requeue.
+            # The native observation never revokes prior commit ownership.
             code = 10
         else:
             code = {'uploading': 10, 'queued': 10, 'running': 20, 'held': 30,

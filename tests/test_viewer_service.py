@@ -417,6 +417,10 @@ except Conflict:
         task = self.task(identifier)
         self.assertEqual(task['phase'], 'awaiting_engine_start')
         self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        self.service.output(identifier)
+        self.assertNotIn(('read', task['engine_uuid'], 'output'), engine.calls)
+        with self.assertRaisesRegex(Conflict, 'submission in progress'):
+            self.service.cancel(identifier)
         self.service.tick()
         self.assertEqual(self.task(identifier)['phase'], 'awaiting_engine_start')
         self.assertEqual(self.service.info(identifier)['status']['code'], 10)
@@ -483,6 +487,7 @@ except Conflict:
         self.service.tick()
         with self.queue._db() as db:
             db.execute('ALTER TABLE viewer_tasks DROP COLUMN processing_time_ms')
+            db.execute('ALTER TABLE viewer_tasks DROP COLUMN engine_requeued')
         self.service.close()
         self.queue.close()
         self.make_queue_service()
@@ -491,12 +496,14 @@ except Conflict:
         native['processingTime'] = 500
         self.service.tick()
         self.assertEqual(self.service.info(identifier)['processingTime'], 500)
+        self.assertEqual(self.task(identifier)['engine_requeued'], 0)
 
     def test_requeued_native_uuid_starts_a_fresh_runtime(self):
         identifier = self.submit()
         self.service.tick()
         engine = self.engines['cluster']
-        native = engine.tasks[self.task(identifier)['engine_uuid']]
+        original = self.task(identifier)
+        native = engine.tasks[original['engine_uuid']]
         native['processingTime'] = 10000
         self.service.tick()
         self.assertEqual(self.service.info(identifier)['processingTime'], 10000)
@@ -505,10 +512,44 @@ except Conflict:
         queued = self.service.info(identifier)
         self.assertEqual(queued['status']['code'], 10)
         self.assertNotIn('processingTime', queued)
+        self.assertEqual(self.task(identifier)['phase'], 'processing')
+        self.assertEqual(self.service.output(identifier)[0], 'synthetic engine output')
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        reopened = self.task(identifier)
+        self.assertEqual((reopened['generation'], reopened['engine_uuid']),
+                         (original['generation'], original['engine_uuid']))
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        self.assertNotIn('processingTime', self.service.info(identifier))
+        self.assertEqual(self.service.output(identifier)[0], 'synthetic engine output')
         native['status']['code'] = 20
         native['processingTime'] = 150
         self.service.tick()
         self.assertEqual(self.service.info(identifier)['processingTime'], 150)
+        self.assertEqual(len(self.fleet.commits), 1)
+
+    def test_requeued_native_run_can_cancel_once_even_after_reopening(self):
+        identifier = self.submit()
+        self.service.tick()
+        engine = self.engines['cluster']
+        native_id = self.task(identifier)['engine_uuid']
+        engine.tasks[native_id]['status']['code'] = 10
+        self.service.tick()
+        self.service.close()
+        self.queue.close()
+        self.make_queue_service()
+        self.assertEqual(self.service.cancel(identifier), {'success': True})
+        self.assertEqual(self.service.cancel(identifier), {'success': True})
+        self.service.tick()
+        self.assertEqual(self.task(identifier)['phase'], 'cancel_pending')
+        self.assertEqual(self.task(identifier)['job']['heldReason'], 'coordinator_restart')
+        self.assertEqual(self.service.info(identifier)['status']['code'], 10)
+        self.assertNotIn('processingTime', self.service.info(identifier))
+        self.assertEqual(engine.calls.count(('cancel', native_id)), 1)
+        engine.finish(native_id, 50)
+        self.service.tick()
+        self.assertEqual(self.service.info(identifier)['status']['code'], 50)
         self.assertEqual(len(self.fleet.commits), 1)
 
     def test_terminal_runtime_can_be_first_sample_but_missing_runtime_stays_unknown(self):

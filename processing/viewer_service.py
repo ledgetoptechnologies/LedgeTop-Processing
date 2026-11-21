@@ -435,14 +435,12 @@ class ViewerService:
             if code == 20:
                 if task['phase'] in ('commit_pending', 'awaiting_engine_start'):
                     fields.update(phase='processing', error=None)
+                fields['engine_requeued'] = False
                 if valid_processing_time(processing_time):
                     fields['processing_time_ms'] = processing_time
             elif task['phase'] in ('processing', 'cancel_pending'):
-                # NodeODM can requeue the same UUID on engine restart and
-                # reset its clock when processing resumes.
-                fields['processing_time_ms'] = None
-                if task['phase'] == 'processing':
-                    fields['phase'] = 'awaiting_engine_start'
+                # Keep the accepted execution phase for output and cancellation.
+                fields.update(processing_time_ms=None, engine_requeued=True)
             self.store.update(identifier, return_task=False, expected_result=identity, **fields)
             return
         status = 'succeeded' if code == 40 else 'failed'
