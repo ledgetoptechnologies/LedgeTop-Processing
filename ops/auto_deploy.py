@@ -39,6 +39,11 @@ STATE_DIR = 'auto-deploy'
 # Written on a definite coordinator refusal or an unprovable plan. While it
 # exists no schedule request is sent; a person inspects and deletes it.
 REFUSAL_FILE = 'refused.json'
+# The owned schedule request in flight. Written before the request is sent and
+# removed only when its receipt is bound or it was definitely refused. Absence
+# is never proof (a timed-out request can still commit later), so an unresolved
+# intent stays until its receipt appears or a person deletes this file.
+INTENT_FILE = 'schedule-intent.json'
 DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
 COMMIT = re.compile(r'[0-9a-f]{40}\Z')
 RUN = re.compile(r'[1-9][0-9]{0,19}\Z')
@@ -200,7 +205,8 @@ def step(root, directory, settings, binding, api, *, schedule, lookup, run, wait
     if (directory / REFUSAL_FILE).exists():
         return {'status': 'held', 'reason': 'refusal_latched'}
 
-    intent = state.get('scheduling')
+    intent_path = directory / INTENT_FILE
+    intent = load(intent_path) or None
     if intent is not None:
         # An earlier pass sent this owned request without a definite answer.
         # Reconcile it only through the read-only receipt lookup; never POST.
@@ -213,16 +219,21 @@ def step(root, directory, settings, binding, api, *, schedule, lookup, run, wait
                              {'httpStatus': error.status, 'requestId': request_id})
             return {'status': 'held', 'reason': 'ownership_unproven', 'requestId': request_id}
         if receipt is None:
-            # Proven absent at the original authority (typed 404, same authority
-            # before and after). Start afresh on a later pass.
-            state['scheduling'] = None
-            save(state_path, state)
-            return {'status': 'not_created', 'requestId': request_id}
+            # Absent right now at the original authority, but the timed-out
+            # request may still commit. Keep the intent and only read again.
+            unresolved = {'status': 'held', 'reason': 'schedule_unresolved', 'requestId': request_id,
+                          'action': 'unresolved: check the node has no plan from this request, then delete '
+                                    + STATE_DIR + '/' + INTENT_FILE + ' to retry'}
+            if intent.get('unresolved') is None:
+                intent['unresolved'] = {'since': utc(datetime.now(timezone.utc)), 'action': unresolved['action']}
+                save(intent_path, intent)
+            return unresolved
         try:
             bind(state, settings, intent['candidate'], intent['request'], receipt)
         except DeployError as error:
             return latch(directory, state_path, state, 'receipt', {'detail': str(error), 'requestId': request_id})
         save(state_path, state)
+        intent_path.unlink()
 
     pending = state.get('inProgress')
     node = api.json('GET', route)['node']
@@ -248,19 +259,18 @@ def step(root, directory, settings, binding, api, *, schedule, lookup, run, wait
             return {'status': 'not_newer', 'runId': candidate['runId'], 'floor': floor}
         drain = utc(now + timedelta(seconds=delay))
         # Compare-and-swap on the node revision just read; the request is saved
-        # before it is sent so a lost response is resolved by replaying it.
+        # before it is sent so a lost response is reconciled by reading its receipt.
         request = {'schemaVersion': 1, 'requestId': str(uuid.uuid4()),
                    'authorityId': api.json('GET', '/v1/prototype/authority')['authorityId'],
                    'expectedRevision': node['revision'], 'targetImage': candidate['imageId'],
                    'drainAt': drain, 'notBefore': drain, 'afterJobId': None}
-        state['scheduling'] = {'candidate': candidate, 'request': request}
-        save(state_path, state)
+        save(intent_path, {'candidate': candidate, 'request': request})
         try:
             receipt = schedule(request)
         except (SmokeError, OSError, ValueError, KeyError) as error:
             if definite(error):
                 # Refused before any plan was stored: nothing was created.
-                state['scheduling'] = None
+                intent_path.unlink()
                 return latch(directory, state_path, state, 'schedule',
                              {'httpStatus': error.status, 'requestId': request['requestId']})
             return {'status': 'held', 'reason': 'schedule_response_uncertain', 'requestId': request['requestId']}
@@ -270,6 +280,7 @@ def step(root, directory, settings, binding, api, *, schedule, lookup, run, wait
             return latch(directory, state_path, state, 'receipt',
                          {'detail': str(error), 'requestId': request['requestId']})
         save(state_path, state)
+        intent_path.unlink()
         pending = state['inProgress']
         node = api.json('GET', route)['node']
 
@@ -320,7 +331,7 @@ def bind(state, settings, candidate, request, receipt):
             or not isinstance(receipt.get('planId'), str) or not PLAN.fullmatch(receipt['planId'])):
         raise DeployError('schedule receipt does not bind this request; inspect the node plan')
     state.update(inProgress={**candidate, 'planId': receipt['planId'], 'requestId': request['requestId']},
-                 highestRunId=candidate['runId'], scheduling=None)
+                 highestRunId=candidate['runId'])
 
 
 def pinned(root, settings):

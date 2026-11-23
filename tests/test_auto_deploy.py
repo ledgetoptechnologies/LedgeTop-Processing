@@ -108,6 +108,10 @@ class AutoDeployTests(unittest.TestCase):
                                      lookup=self.lookup, run=self.run,
                                      wait_seconds=60, drain_seconds=60, now=NOW)
 
+    def intent(self):
+        path = self.root / 'auto-deploy' / agent.INTENT_FILE
+        return json.loads(path.read_text()) if path.exists() else None
+
     def state(self):
         return json.loads((self.root / 'auto-deploy' / 'state.json').read_text())
 
@@ -129,7 +133,7 @@ class AutoDeployTests(unittest.TestCase):
         self.assertEqual((receipt.parent.name, wait, drain), ('receipts', 60, 60))
         self.assertEqual((plan, target), (self.node['planId'], NEW))
         self.assertEqual(self.state()['applied']['planId'], plan)
-        self.assertIsNone(self.state()['scheduling'])
+        self.assertIsNone(self.intent())
         self.assertEqual(self.state()['applied']['imageId'], NEW)
         self.assertIsNone(self.state()['inProgress'])
         self.assertEqual(self.state()['highestRunId'], 200)
@@ -271,8 +275,8 @@ class AutoDeployTests(unittest.TestCase):
             raise HTTPUncertain('HTTP response uncertain; mutation must not be retried')
         self.schedule.side_effect = lost
         self.assertEqual(self.deploy()['reason'], 'schedule_response_uncertain')
-        self.assertIsNone(self.state().get('inProgress'))
-        saved = self.state()['scheduling']['request']
+        self.assertFalse((self.root / 'auto-deploy' / 'state.json').exists())
+        saved = self.intent()['request']
         self.assertEqual(self.deploy()['status'], 'succeeded')
         self.schedule.assert_called_once()
         self.lookup.assert_called_once_with(saved)
@@ -284,7 +288,7 @@ class AutoDeployTests(unittest.TestCase):
         self.lookup.side_effect = HTTPUncertain('HTTP response uncertain; mutation must not be retried')
         for _ in range(2):
             self.assertEqual(self.deploy(), {'status': 'held', 'reason': 'ownership_unproven',
-                                             'requestId': self.state()['scheduling']['request']['requestId']})
+                                             'requestId': self.intent()['request']['requestId']})
         self.schedule.assert_called_once()
         self.run.assert_not_called()
 
@@ -292,17 +296,41 @@ class AutoDeployTests(unittest.TestCase):
         self.schedule.side_effect = HTTPRefused('HTTP request rejected or redirected; inspect private receipt', 500)
         self.assertEqual(self.deploy()['status'], 'held')
         self.assertFalse((self.root / 'auto-deploy' / agent.REFUSAL_FILE).exists())
-        self.assertIsNotNone(self.state()['scheduling'])
+        self.assertIsNotNone(self.intent())
 
-    def test_lookup_proving_no_plan_clears_intent_then_a_later_pass_starts_fresh(self):
+    def test_typed_absence_keeps_the_intent_across_passes_until_a_person_deletes_it(self):
         self.schedule.side_effect = HTTPUncertain('HTTP response uncertain; mutation must not be retried')
         self.deploy()
-        first = self.state()['scheduling']['request']['requestId']
-        self.assertEqual(self.deploy(), {'status': 'not_created', 'requestId': first})
+        first = self.intent()['request']
+        for _ in range(3):
+            result = self.deploy()
+            self.assertEqual((result['status'], result['reason'], result['requestId']),
+                             ('held', 'schedule_unresolved', first['requestId']))
+            self.assertIn('delete auto-deploy/schedule-intent.json to retry', result['action'])
+            self.assertEqual(self.intent()['request'], first)
+        self.assertEqual(self.last()['reason'], 'schedule_unresolved')
+        self.assertIn('unresolved', self.intent())
         self.assertEqual(self.schedule.call_count, 1)
+        self.assertEqual(self.lookup.call_count, 3)
+        self.run.assert_not_called()
+        # A person checked the node and deleted the intent: a fresh request follows.
+        (self.root / 'auto-deploy' / agent.INTENT_FILE).unlink()
         self.schedule.side_effect = self.scheduled
         self.assertEqual(self.deploy()['status'], 'succeeded')
-        self.assertNotEqual(self.schedule.call_args.args[0]['requestId'], first)
+        self.assertNotEqual(self.schedule.call_args.args[0]['requestId'], first['requestId'])
+
+    def test_late_commit_after_typed_absence_is_bound_not_other_plan(self):
+        self.schedule.side_effect = HTTPUncertain('HTTP response uncertain; mutation must not be retried')
+        self.deploy()
+        saved = self.intent()['request']
+        self.assertEqual(self.deploy()['reason'], 'schedule_unresolved')
+        # The timed-out request commits only now, after the first lookup.
+        receipt = self.scheduled(saved)
+        result = self.deploy()
+        self.assertEqual(result['status'], 'succeeded')
+        self.assertEqual(self.run.call_args.args[3:], (receipt['planId'], NEW))
+        self.assertIsNone(self.intent())
+        self.assertEqual(self.schedule.call_count, 1)
 
     def test_definite_refusal_latches_and_nothing_is_posted_until_cleared(self):
         for status in (403, 409):
@@ -312,7 +340,7 @@ class AutoDeployTests(unittest.TestCase):
                 self.schedule.side_effect = HTTPRefused('HTTP request rejected or redirected', status)
                 result = self.deploy()
                 self.assertEqual((result['status'], result['httpStatus']), ('refused', status))
-                self.assertIsNone(self.state()['scheduling'])
+                self.assertIsNone(self.intent())
                 latch = self.root / 'auto-deploy' / agent.REFUSAL_FILE
                 self.assertTrue(latch.exists())
                 for _ in range(2):
@@ -528,38 +556,62 @@ class RealClientTimerTests(unittest.TestCase):
         self.timer_pass()
         self.server.owned.clear()
         self.server.node.update(state='active', planId=None, targetImage=None)
-        return self.root / 'auto-deploy' / 'state.json'
+        return self.root / 'auto-deploy' / agent.INTENT_FILE
 
     def assert_held_with_intent(self, state_path, saved):
         result = self.timer_pass()
         self.assertEqual((result['status'], result['reason']), ('held', 'ownership_unproven'))
-        self.assertEqual(json.loads(state_path.read_text())['scheduling']['request'], saved)
+        self.assertEqual(json.loads(state_path.read_text())['request'], saved)
         self.assertFalse((self.root / 'auto-deploy' / agent.REFUSAL_FILE).exists())
         self.assertEqual(len(self.server.posts), 1)
         self.run.assert_not_called()
 
-    def test_typed_absence_at_the_same_authority_clears_the_intent(self):
-        state_path = self.lost_then_absent()
-        self.assertEqual(self.timer_pass()['status'], 'not_created')
-        self.assertIsNone(json.loads(state_path.read_text())['scheduling'])
+    def test_typed_absence_at_the_same_authority_keeps_the_intent(self):
+        intent_path = self.lost_then_absent()
+        saved = json.loads(intent_path.read_text())['request']
+        for _ in range(2):
+            result = self.timer_pass()
+            self.assertEqual((result['status'], result['reason']), ('held', 'schedule_unresolved'))
+            self.assertEqual(json.loads(intent_path.read_text())['request'], saved)
+        self.assertEqual(len(self.server.posts), 1)
+        self.assertEqual(self.server.lookups, [saved['requestId']] * 2)
+        self.run.assert_not_called()
+
+    def test_real_commit_landing_after_the_first_lookup_is_bound_on_the_next_pass(self):
+        intent_path = self.lost_then_absent()
+        saved = json.loads(intent_path.read_text())['request']
+        self.assertEqual(self.timer_pass()['reason'], 'schedule_unresolved')
+        # The original timed-out POST commits late on the coordinator.
+        plan = str(uuid.uuid4())
+        self.server.node.update(state='draining', planId=plan, targetImage=saved['targetImage'],
+                                revision=saved['expectedRevision'] + 1)
+        self.server.owned[saved['requestId']] = {
+            'schemaVersion': 1, 'requestId': saved['requestId'], 'authorityId': saved['authorityId'],
+            'nodeId': 'main', 'planId': plan, 'expectedRevision': saved['expectedRevision'],
+            'targetImage': saved['targetImage'], 'revision': saved['expectedRevision'] + 1, 'state': 'draining'}
+        result = self.timer_pass()
+        self.assertEqual(result['status'], 'waiting')
+        self.assertNotEqual(result.get('reason'), 'other_plan')
+        self.assertEqual(self.run.call_args.args[3:], (plan, NEW))
+        self.assertFalse(intent_path.exists())
         self.assertEqual(len(self.server.posts), 1)
 
     def test_generic_404_holds_and_keeps_the_intent(self):
         state_path = self.lost_then_absent()
-        saved = json.loads(state_path.read_text())['scheduling']['request']
+        saved = json.loads(state_path.read_text())['request']
         self.server.lookup_answer = 'generic'
         for _ in range(2):
             self.assert_held_with_intent(state_path, saved)
 
     def test_disabled_prototype_404_holds_and_keeps_the_intent(self):
         state_path = self.lost_then_absent()
-        saved = json.loads(state_path.read_text())['scheduling']['request']
+        saved = json.loads(state_path.read_text())['request']
         self.server.lookup_answer = 'disabled'
         self.assert_held_with_intent(state_path, saved)
 
     def test_changed_authority_with_no_row_holds_even_with_typed_absence(self):
         state_path = self.lost_then_absent()
-        saved = json.loads(state_path.read_text())['scheduling']['request']
+        saved = json.loads(state_path.read_text())['request']
         self.server.authority = str(uuid.UUID(int=9))
         for _ in range(2):
             self.assert_held_with_intent(state_path, saved)
@@ -568,7 +620,7 @@ class RealClientTimerTests(unittest.TestCase):
 
     def test_authority_changing_during_the_lookup_holds(self):
         state_path = self.lost_then_absent()
-        saved = json.loads(state_path.read_text())['scheduling']['request']
+        saved = json.loads(state_path.read_text())['request']
         self.server.on_lookup = lambda: setattr(self.server, 'authority', str(uuid.UUID(int=9)))
         self.assert_held_with_intent(state_path, saved)
         self.assertEqual(len(self.server.lookups), 1)
@@ -576,8 +628,8 @@ class RealClientTimerTests(unittest.TestCase):
     def test_changed_authority_with_a_row_holds(self):
         self.server.mode = 'drop'
         self.timer_pass()
-        state_path = self.root / 'auto-deploy' / 'state.json'
-        saved = json.loads(state_path.read_text())['scheduling']['request']
+        state_path = self.root / 'auto-deploy' / agent.INTENT_FILE
+        saved = json.loads(state_path.read_text())['request']
         # The row exists but now belongs to another authority: 409 on lookup.
         self.server.owned[saved['requestId']]['authorityId'] = str(uuid.UUID(int=9))
         self.assert_held_with_intent(state_path, saved)

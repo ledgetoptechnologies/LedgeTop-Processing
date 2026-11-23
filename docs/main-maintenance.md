@@ -127,23 +127,31 @@ Each pass, in order:
    (`not_newer`).
 5. It creates the window (`drainAt` = `notBefore` = now + `drainDelaySeconds`)
    with the coordinator's idempotent `schedule-owned` request, a compare-and-swap
-   on the node revision it just read. The request, with its `requestId`, is saved
-   in `state.json` before it is sent. The client tells a definite answer
-   (`HTTPRefused`, an HTTP status) from an uncertain one (`HTTPUncertain`: no
-   complete response). A 3xx/4xx answer means nothing was created: the agent
+   on the node revision it just read. The request, with its `requestId`, is
+   saved in `$ROOT/auto-deploy/schedule-intent.json` before it is sent, and that
+   file is removed only when the request's receipt is bound or the request was
+   definitely refused. The client tells a definite answer (`HTTPRefused`, an
+   HTTP status and sanitized error code) from an uncertain one (`HTTPUncertain`:
+   no complete response). A 3xx/4xx answer means nothing was created: the agent
    writes `$ROOT/auto-deploy/refused.json` and sends no schedule request on any
    later pass (`held`, `refusal_latched`) until a person inspects the node and
    deletes that file. A 5xx, a lost or unreadable response is uncertain: the
-   schedule request is never sent again. Later passes only read
-   `GET .../schedule-owned/<requestId>`: a receipt binds the plan. Absence is
-   proven only by a 404 with the exact `owned_schedule_not_found` code while
-   the coordinator authority equals the saved request's authority both before
-   and after the lookup; then the intent is cleared (`not_created`) and a later
-   pass starts a fresh request. A generic or `prototype_disabled` 404, a 409
-   authority conflict, a changed authority or an uncertain lookup holds
-   (`ownership_unproven`) and keeps the intent; only reads repeat. A receipt whose request ID,
-   node, authority, expected revision, target or plan ID does not match the
-   saved request also latches `refused.json`.
+   schedule request is never sent again, and later passes only read
+   `GET .../schedule-owned/<requestId>`.
+   - A receipt binds the plan, even one that committed late; it is never
+     treated as another operator's plan.
+   - A 404 with the exact `owned_schedule_not_found` code, with the coordinator
+     authority equal to the saved request's before and after the lookup, is
+     only a point-in-time absence: a timed-out request can still commit. The
+     agent keeps the intent, marks it `unresolved` and returns `held`,
+     `schedule_unresolved` with the action "check the node has no plan from
+     this request, then delete auto-deploy/schedule-intent.json to retry". It
+     keeps reading on later passes and never clears the intent or sends a new
+     request itself.
+   - A generic or `prototype_disabled` 404, a 409 authority conflict, a changed
+     authority or an uncertain lookup holds (`ownership_unproven`).
+   - A receipt whose request ID, node, authority, expected revision, target or
+     plan ID does not match the saved request latches `refused.json`.
 6. It records the returned plan ID and target and calls `run` with both under a
    private receipt in `$ROOT/auto-deploy/receipts/`. `run` then requires that
    exact plan and target on every poll and again after closing ingress and in
@@ -153,7 +161,7 @@ Each pass, in order:
    retried. A failed candidate is rolled back by `run` exactly as above and
    recorded in `state.json` as `failed`.
 
-`$ROOT/auto-deploy/state.json` keeps `scheduling`, `inProgress` (with its plan
+`$ROOT/auto-deploy/state.json` keeps `inProgress` (with its plan
 ID), `applied`, `failed`, `cancelled` and `highestRunId`; `last-run.json` records every pass. A flock on
 `agent.lock` keeps timer passes from overlapping. The exit status is 0 for
 normal outcomes, 1 for a failed (rolled back) update and 2 for `refused`,
