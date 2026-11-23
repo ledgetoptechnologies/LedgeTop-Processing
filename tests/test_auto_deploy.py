@@ -40,7 +40,7 @@ class AutoDeployTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.settings = {'nodeId': 'main', 'project': 'owned', 'service': 'node',
-                         'autoDeploy': {'package': 'coordinator'}}
+                         'kind': 'coordinator', 'autoDeploy': {'package': 'coordinator'}}
         save(self.root / 'compose.json', {'services': {'node': {'image': OLD}}})
         self.node = {'state': 'active', 'revision': 4, 'planId': None, 'targetImage': None}
         self.api = MagicMock()
@@ -536,7 +536,7 @@ class RealClientTimerTests(unittest.TestCase):
         origin = 'http://127.0.0.1:' + str(self.server.server_address[1])
         self.api, self.operator = Client(origin, 'worker-token'), Client(origin, 'operator-token')
         self.settings = {'nodeId': 'main', 'project': 'owned', 'service': 'node',
-                         'autoDeploy': {'package': 'coordinator'}}
+                         'kind': 'coordinator', 'autoDeploy': {'package': 'coordinator'}}
         self.images = {OLD: image(OLD, 100), REPO + ':verified': image(NEW, 200, digests=[REPO + '@' + DIGEST]),
                        REPO + '@' + DIGEST: image(NEW, 200, digests=[REPO + '@' + DIGEST])}
         self.run = MagicMock(return_value={'status': 'waiting', 'nodeState': 'draining'})
@@ -558,7 +558,8 @@ class RealClientTimerTests(unittest.TestCase):
                 patch.object(agent, 'inspect', side_effect=lambda ref: json.loads(json.dumps(self.images[ref]))), \
                 patch.object(agent, 'agent_lock', acquired), \
                 patch('ops.node_maintenance.Ingress', return_value=ingress), \
-                patch('ops.node_maintenance.ComposeNode'):
+                patch('ops.node_maintenance.ComposeNode'), \
+                patch('ops.node_maintenance.service_adapters.adapter'):
             return agent.auto_deploy(self.root, self.settings, self.api,
                 schedule=lambda request: node_maintenance.schedule_owned(self.root, self.settings, self.operator, request),
                 lookup=lambda request: node_maintenance.owned_receipt(self.settings, self.api, self.operator, request),
@@ -753,8 +754,13 @@ class AutoDeployRunnerTests(unittest.TestCase):
                   REPO + '@' + DIGEST: image(NEW, 200, digests=[REPO + '@' + DIGEST])}
         rolled_back = {'status': 'failed', 'nodeId': 'main', 'healthy': False,
                        'rollbackHealthy': True, 'restoredImage': OLD}
-        settings = {'nodeId': 'main', 'project': 'owned', 'service': 'node', 'autoDeploy': {'package': 'coordinator'}}
+        settings = {'nodeId': 'main', 'project': 'owned', 'service': 'node', 'kind': 'coordinator',
+                    'dockerEngineId': 'engine', 'autoDeploy': {'package': 'coordinator'}}
+        save(self.root / 'maintenance.json', settings)
+        adapter.inspect.return_value = {'Image': OLD}
+        adapter.health_seconds = 120
         stack, execute = self.patched_runner(ingress, adapter, gate, rolled_back)
+        factory = stack.enter_context(patch('ops.node_maintenance.service_adapters.adapter', return_value=adapter))
         with stack, patch.object(agent, 'docker', return_value=''), \
                 patch.object(agent, 'inspect', side_effect=lambda ref: json.loads(json.dumps(images[ref]))):
             result = agent.auto_deploy(self.root, settings, api,
@@ -763,7 +769,14 @@ class AutoDeployRunnerTests(unittest.TestCase):
                 run=lambda receipt, wait, drain, plan, target: run(
                     self.root, api, operator, receipt, wait, drain, expected_plan_id=plan, expected_target=target),
                 wait_seconds=0, drain_seconds=60)
-        self.assertEqual((result['status'], result['ingress']), ('failed', 'closed'))
+        self.assertEqual(result['status'], 'failed')
+        # The coordinator kind has no engine ingress or host engine gate.
+        self.assertNotIn('ingress', result)
+        ingress.change.assert_not_called()
+        gate.snapshot.assert_not_called()
+        self.assertEqual(factory.call_args.args[0], 'coordinator')
+        self.assertEqual(factory.call_args.kwargs['baseline'], OLD)
+        self.assertEqual(execute.call_args.kwargs['health_seconds'], 120)
         self.assertEqual(execute.call_args.kwargs['expected_target'], NEW)
         self.assertEqual(execute.call_args.kwargs['expected_plan_id'], node['planId'])
         self.assertEqual(json.loads((self.root / 'compose.json').read_text())['services']['node']['image'], OLD)

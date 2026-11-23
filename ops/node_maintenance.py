@@ -3,8 +3,14 @@
 `schedule`/`run`: an operator stages an immutable image, schedules a plan, then
 supervises `run` until its bounded wait ends. `auto-deploy`: the host timer's
 step (ops/auto_deploy.py) pulls the newest verified main image by digest and
-uses the same schedule/run path. Neither runs a moving tag, updates the OS,
-terminates processes or replays an uncertain operation.
+uses the same schedule/run path. `adopt`: the reviewed, one-time manual opt-in
+of a coordinator or TreeDar service whose current pin predates package labels.
+None of them runs a moving tag, updates the OS, terminates processes or replays
+an uncertain operation.
+
+`maintenance.json` may declare the service `kind` (processing/service_adapters.py):
+`odx` (the default: a NodeODX/NodeODM engine behind the host ingress, unchanged),
+`coordinator` or `treedar`. Unknown kinds are refused.
 """
 import argparse
 from contextlib import contextmanager
@@ -21,7 +27,9 @@ from processing.container_update import ComposeNode, execute, lock, UpdateError
 from processing.node_gate import NodeGate, GateBusy, GateError as NodeGateError
 from processing.odx_smoke_worker import Client, HTTPRefused, HTTPUncertain, SmokeError
 from ops.node_ingress import Ingress, GateError, locked, save
-from ops.auto_deploy import auto_deploy, DeployError
+from processing import service_adapters
+from processing.service_adapters import service_kind
+from ops.auto_deploy import auto_deploy, adopt, DeployError
 
 
 def private_directory(value):
@@ -65,6 +73,10 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60, *, expecte
     if (expected_plan_id is None) != (expected_target is None):
         raise GateError('expected plan and target are bound together')
     settings = json.loads((root / 'maintenance.json').read_text())
+    kind = service_kind(settings)
+    if kind != 'odx':
+        return run_service(root, settings, kind, api, operator, receipt, wait_seconds,
+                           expected_plan_id=expected_plan_id, expected_target=expected_target)
     ingress = Ingress(root / 'ingress')
     node_id = settings['nodeId']
     args = SimpleNamespace(project=settings['project'], service=settings['service'],
@@ -127,12 +139,85 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60, *, expecte
             return {**result, 'composePinUpdateRequired': False, 'ingress': 'open'}
 
 
+def await_window(api, node_id, deadline, expected_plan_id, expected_target):
+    """Poll until the bound plan is draining and due.
+
+    Returns (result, None) when the runner should stop and (None, node) once
+    the window is open.
+    """
+    while True:
+        node = api.json('GET', '/v1/prototype/nodes/' + node_id)['node']
+        if node['state'] not in ('scheduled', 'draining'):
+            return {'status': 'not_eligible', 'nodeState': node['state']}, None
+        if expected_plan_id is not None and (node.get('planId') != expected_plan_id
+                                             or node.get('targetImage') != expected_target):
+            raise GateError('maintenance plan is not the bound plan; no update change')
+        due = datetime.fromisoformat(node['notBefore'].replace('Z', '+00:00')) <= datetime.now(timezone.utc)
+        if node['state'] == 'draining' and due:
+            return None, node
+        if time.monotonic() >= deadline:
+            return {'status': 'waiting', 'nodeState': node['state']}, None
+        time.sleep(min(2, max(0, deadline - time.monotonic())))
+
+
+def run_service(root, settings, kind, api, operator, receipt, wait_seconds, *, expected_plan_id=None,
+                expected_target=None):
+    """The same frozen-plan update for a coordinator or TreeDar service.
+
+    There is no engine ingress or host engine gate: the kind's adapter proves
+    idleness (and `execute` still requires no running/held claim on this node),
+    swaps, health-checks and rolls back to the old pin on failure. Success
+    persists the Compose pin; failure keeps it and leaves the node failed.
+    """
+    node_id = settings['nodeId']
+    deadline = time.monotonic() + wait_seconds
+    with lock(receipt):
+        if (receipt / 'managed-update.json').exists() or (receipt / 'update.json').exists():
+            raise GateError('existing operation receipt; inspect rather than replay')
+        stop, node = await_window(api, node_id, deadline, expected_plan_id, expected_target)
+        if stop is not None:
+            return stop
+        pin = json.loads((root / 'compose.json').read_text())['services'][settings['service']]['image']
+        authority = api.json('GET', '/v1/prototype/authority')['authorityId']
+        adapter = service_adapters.adapter(kind, root, settings, receipt, api=api, authority=authority,
+                                           baseline=pin)
+        if adapter.inspect()['Image'] != pin:
+            raise GateError('running service is not the Compose pin; inspect before any update')
+        adapter.image(node['targetImage'])
+        result = execute(api, operator, adapter, node_id, receipt,
+            wait_seconds=max(0, deadline - time.monotonic()), health_seconds=adapter.health_seconds,
+            expected_plan_id=node['planId'], expected_target=node['targetImage'])
+        if result['status'] not in ('succeeded', 'failed'):
+            # Still waiting for the adapter's idle proof: nothing was reserved.
+            return result
+        state = {'stage': 'update_returned', 'kind': kind, 'planId': node['planId'],
+                 'targetImage': node['targetImage'], 'result': result}
+        save(receipt / 'managed-update.json', state)
+        if result['status'] != 'succeeded':
+            return result
+        source = json.loads((root / 'compose.json').read_text())
+        source['services'][settings['service']]['image'] = result['image']
+        save(root / 'compose.json', source)
+        state.update(stage='completed', persistentComposePin=result['image'])
+        save(receipt / 'managed-update.json', state)
+        return {**result, 'composePinUpdateRequired': False}
+
+
+def staged_image(root, settings, image):
+    """Refuse unless the immutable image is already cached on this host."""
+    kind = service_kind(settings)
+    if kind == 'odx':
+        receipt_args = SimpleNamespace(project=settings['project'], service=settings['service'],
+            compose_file=str(root / 'compose.json'), node_origin='http://127.0.0.1:13004',
+            docker_engine_id=Ingress(root / 'ingress').config['engineId'], node_port=3000)
+        ComposeNode(receipt_args, root).image(image)
+    else:
+        service_adapters.adapter(kind, root, settings, root).image(image)
+
+
 def schedule(root, settings, api, operator, target_image, drain_at, not_before, after_job_id=None):
     node = api.json('GET', '/v1/prototype/nodes/' + settings['nodeId'])['node']
-    receipt_args = SimpleNamespace(project=settings['project'], service=settings['service'],
-        compose_file=str(root / 'compose.json'), node_origin='http://127.0.0.1:13004',
-        docker_engine_id=Ingress(root / 'ingress').config['engineId'], node_port=3000)
-    ComposeNode(receipt_args, root).image(target_image)
+    staged_image(root, settings, target_image)
     return operator.json('POST', '/v1/prototype/nodes/' + settings['nodeId'] + '/schedule', {
         'expectedRevision': node['revision'], 'targetImage': target_image,
         'drainAt': drain_at, 'notBefore': not_before, 'afterJobId': after_job_id})
@@ -145,10 +230,7 @@ def schedule_owned(root, settings, operator, request):
     before the first attempt. Re-sending the identical request after a lost
     response returns the original receipt; any other state is a conflict.
     """
-    receipt_args = SimpleNamespace(project=settings['project'], service=settings['service'],
-        compose_file=str(root / 'compose.json'), node_origin='http://127.0.0.1:13004',
-        docker_engine_id=Ingress(root / 'ingress').config['engineId'], node_port=3000)
-    ComposeNode(receipt_args, root).image(request['targetImage'])
+    staged_image(root, settings, request['targetImage'])
     return operator.json('POST', '/v1/prototype/nodes/' + settings['nodeId'] + '/schedule-owned', request)['receipt']
 
 
@@ -199,6 +281,10 @@ def main():
     agent = actions.add_parser('auto-deploy', help='host timer step: verified main image through the drain window')
     agent.add_argument('--wait-seconds', type=int, choices=range(0, 86401), default=3600)
     agent.add_argument('--drain-seconds', type=int, choices=range(1, 86401), default=3600)
+    adoption = actions.add_parser('adopt', help='one-time reviewed opt-in of a coordinator/TreeDar service')
+    adoption.add_argument('--kind', required=True, choices=('coordinator', 'treedar'))
+    adoption.add_argument('--image', required=True, help='the current Compose pin, as reviewed')
+    adoption.add_argument('--drain-delay-seconds', type=int, choices=range(0, 86401), default=0)
     args = parser.parse_args()
     try:
         root = private_directory(args.root)
@@ -214,9 +300,15 @@ def main():
         if not secret or secret == env['PROCESSING_API_TOKEN']:
             raise GateError('distinct maintenance credential required')
         operator = Client(api.origin, secret)
-        if args.action == 'status':
+        if args.action == 'status' and service_kind(settings) != 'odx':
+            node = api.json('GET', '/v1/prototype/nodes/' + settings['nodeId'])['node']
+            result = {'node': node, 'kind': settings['kind']}
+        elif args.action == 'status':
             node = api.json('GET', '/v1/prototype/nodes/' + settings['nodeId'])['node']
             result = {'node': node, 'ingressState': json.loads((root / 'ingress/state.json').read_text())['state']}
+        elif args.action == 'adopt':
+            result = adopt(root, settings, api, kind=args.kind, image=args.image,
+                           drain_delay=args.drain_delay_seconds)
         elif args.action == 'schedule':
             result = schedule(root, settings, api, operator, args.target_image, args.drain_at,
                               args.not_before, args.after_job_id)
