@@ -32,9 +32,13 @@ import uuid
 
 from processing import release_packages
 from processing.container_update import save
+from processing.odx_smoke_worker import HTTPRefused, SmokeError
 
 HOLD_FILE = 'auto-deploy.hold'
 STATE_DIR = 'auto-deploy'
+# Written on a definite coordinator refusal or an unprovable plan. While it
+# exists no schedule request is sent; a person inspects and deletes it.
+REFUSAL_FILE = 'refused.json'
 DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
 COMMIT = re.compile(r'[0-9a-f]{40}\Z')
 RUN = re.compile(r'[1-9][0-9]{0,19}\Z')
@@ -131,8 +135,28 @@ def utc(moment):
     return moment.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
 
 
-def auto_deploy(root, settings, api, *, schedule, run, wait_seconds, drain_seconds, now=None):
-    """One idempotent agent pass. `schedule` and `run` are the existing runner's."""
+def definite(error):
+    """A 3xx/4xx answer: the coordinator handled and refused the request.
+
+    5xx, transport failures and unreadable 2xx bodies are uncertain: the plan
+    may exist, so only the read-only receipt lookup may follow.
+    """
+    return isinstance(error, HTTPRefused) and 300 <= error.status < 500
+
+
+def latch(directory, state_path, state, stage, detail):
+    save(directory / REFUSAL_FILE, {'stage': stage, **detail, 'at': utc(datetime.now(timezone.utc))})
+    save(state_path, state)
+    return {'status': 'refused', 'reason': stage + '_refused', **detail}
+
+
+def auto_deploy(root, settings, api, *, schedule, lookup, run, wait_seconds, drain_seconds, now=None):
+    """One idempotent agent pass.
+
+    `schedule(request)` sends the owned schedule request and `lookup(requestId)`
+    reads its receipt (None when the coordinator definitely has none); `run` is
+    the existing drain-window runner bound to one plan.
+    """
     directory = state_directory(root)
     if (root / HOLD_FILE).exists():
         return record(directory, {'status': 'paused'})
@@ -143,7 +167,7 @@ def auto_deploy(root, settings, api, *, schedule, run, wait_seconds, drain_secon
         if not acquired:
             return {'status': 'busy'}
         try:
-            result = step(root, directory, settings, binding, api, schedule=schedule, run=run,
+            result = step(root, directory, settings, binding, api, schedule=schedule, lookup=lookup, run=run,
                           wait_seconds=wait_seconds, drain_seconds=drain_seconds,
                           now=now or datetime.now(timezone.utc))
         except DeployError as error:
@@ -160,7 +184,7 @@ def record(directory, result):
     return result
 
 
-def step(root, directory, settings, binding, api, *, schedule, run, wait_seconds, drain_seconds, now):
+def step(root, directory, settings, binding, api, *, schedule, lookup, run, wait_seconds, drain_seconds, now):
     key = binding.get('package')
     try:
         release_packages.package(key)
@@ -172,13 +196,31 @@ def step(root, directory, settings, binding, api, *, schedule, run, wait_seconds
     state_path = directory / 'state.json'
     state = load(state_path)
     route = '/v1/prototype/nodes/' + settings['nodeId']
+    if (directory / REFUSAL_FILE).exists():
+        return {'status': 'held', 'reason': 'refusal_latched'}
 
     intent = state.get('scheduling')
     if intent is not None:
-        # An earlier pass persisted this owned request but never recorded its
-        # receipt. Only the identical request is re-sent: the coordinator either
-        # returns that request's original plan or refuses. A refusal stops here.
-        bind(state, settings, intent['candidate'], intent['request'], schedule(intent['request']))
+        # An earlier pass sent this owned request without a definite answer.
+        # Reconcile it only through the read-only receipt lookup; never POST.
+        request_id = intent['request']['requestId']
+        try:
+            receipt = lookup(request_id)
+        except (SmokeError, OSError, ValueError, KeyError) as error:
+            if definite(error):
+                return latch(directory, state_path, state, 'lookup',
+                             {'httpStatus': error.status, 'requestId': request_id})
+            return {'status': 'held', 'reason': 'ownership_unproven', 'requestId': request_id}
+        if receipt is None:
+            # The coordinator definitely holds no plan for this request. Start
+            # afresh on a later pass, with a new request and the current revision.
+            state['scheduling'] = None
+            save(state_path, state)
+            return {'status': 'not_created', 'requestId': request_id}
+        try:
+            bind(state, settings, intent['candidate'], intent['request'], receipt)
+        except DeployError as error:
+            return latch(directory, state_path, state, 'receipt', {'detail': str(error), 'requestId': request_id})
         save(state_path, state)
 
     pending = state.get('inProgress')
@@ -212,7 +254,20 @@ def step(root, directory, settings, binding, api, *, schedule, run, wait_seconds
                    'drainAt': drain, 'notBefore': drain, 'afterJobId': None}
         state['scheduling'] = {'candidate': candidate, 'request': request}
         save(state_path, state)
-        bind(state, settings, candidate, request, schedule(request))
+        try:
+            receipt = schedule(request)
+        except (SmokeError, OSError, ValueError, KeyError) as error:
+            if definite(error):
+                # Refused before any plan was stored: nothing was created.
+                state['scheduling'] = None
+                return latch(directory, state_path, state, 'schedule',
+                             {'httpStatus': error.status, 'requestId': request['requestId']})
+            return {'status': 'held', 'reason': 'schedule_response_uncertain', 'requestId': request['requestId']}
+        try:
+            bind(state, settings, candidate, request, receipt)
+        except DeployError as error:
+            return latch(directory, state_path, state, 'receipt',
+                         {'detail': str(error), 'requestId': request['requestId']})
         save(state_path, state)
         pending = state['inProgress']
         node = api.json('GET', route)['node']
@@ -260,6 +315,7 @@ def bind(state, settings, candidate, request, receipt):
     if (not isinstance(receipt, dict) or receipt.get('requestId') != request['requestId']
             or receipt.get('nodeId') != settings['nodeId'] or receipt.get('targetImage') != candidate['imageId']
             or receipt.get('expectedRevision') != request['expectedRevision']
+            or receipt.get('authorityId') != request['authorityId']
             or not isinstance(receipt.get('planId'), str) or not PLAN.fullmatch(receipt['planId'])):
         raise DeployError('schedule receipt does not bind this request; inspect the node plan')
     state.update(inProgress={**candidate, 'planId': receipt['planId'], 'requestId': request['requestId']},

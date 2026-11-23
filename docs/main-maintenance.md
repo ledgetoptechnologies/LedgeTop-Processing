@@ -128,10 +128,18 @@ Each pass, in order:
 5. It creates the window (`drainAt` = `notBefore` = now + `drainDelaySeconds`)
    with the coordinator's idempotent `schedule-owned` request, a compare-and-swap
    on the node revision it just read. The request, with its `requestId`, is saved
-   in `state.json` before it is sent. A lost response is resolved only by
-   re-sending that identical request, which returns the original plan or is
-   refused; a refusal keeps the intent and stops every pass (`stopped`) until a
-   person inspects the node and clears `scheduling`.
+   in `state.json` before it is sent. The client tells a definite answer
+   (`HTTPRefused`, an HTTP status) from an uncertain one (`HTTPUncertain`: no
+   complete response). A 3xx/4xx answer means nothing was created: the agent
+   writes `$ROOT/auto-deploy/refused.json` and sends no schedule request on any
+   later pass (`held`, `refusal_latched`) until a person inspects the node and
+   deletes that file. A 5xx, a lost or unreadable response is uncertain: the
+   schedule request is never sent again. Later passes only read
+   `GET .../schedule-owned/<requestId>`: a receipt binds the plan, a 404 proves
+   none was created (`not_created`; a later pass starts a fresh request), and an
+   uncertain lookup holds (`ownership_unproven`). A receipt whose request ID,
+   node, authority, expected revision, target or plan ID does not match the
+   saved request also latches `refused.json`.
 6. It records the returned plan ID and target and calls `run` with both under a
    private receipt in `$ROOT/auto-deploy/receipts/`. `run` then requires that
    exact plan and target on every poll and again after closing ingress and in
@@ -144,8 +152,8 @@ Each pass, in order:
 `$ROOT/auto-deploy/state.json` keeps `scheduling`, `inProgress` (with its plan
 ID), `applied`, `failed`, `cancelled` and `highestRunId`; `last-run.json` records every pass. A flock on
 `agent.lock` keeps timer passes from overlapping. The exit status is 0 for
-normal outcomes, 1 for a failed (rolled back) update and 2 for `refused` or
-a stop that needs inspection; existing receipts are never replayed.
+normal outcomes, 1 for a failed (rolled back) update and 2 for `refused`,
+`held` or a stop that needs inspection; existing receipts are never replayed.
 
 The runner's health and idle checks are the ODM-family engine checks above, so
 a package is only auto-deployed to a service whose current pin is already that

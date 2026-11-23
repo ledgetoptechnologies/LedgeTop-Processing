@@ -38,6 +38,22 @@ class SmokeError(Exception):
     """Sanitized operator message; never includes response bodies or URLs."""
 
 
+class HTTPRefused(SmokeError):
+    """The server answered with a non-2xx status: a definite answer.
+
+    `status` is the HTTP status. A refused mutation was not applied by the
+    handler that answered; callers may rely on that, unlike HTTPUncertain.
+    """
+
+    def __init__(self, message, status):
+        super().__init__(message)
+        self.status = status
+
+
+class HTTPUncertain(SmokeError):
+    """No complete answer: the request may or may not have been applied."""
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
 
@@ -104,7 +120,7 @@ class Client:
                     connection.send(suffix)
             response = connection.getresponse()
             if not 200 <= response.status < 300:
-                raise SmokeError('HTTP request rejected or redirected; inspect private receipt')
+                raise HTTPRefused('HTTP request rejected or redirected; inspect private receipt', response.status)
             declared = response.getheader('Content-Length')
             if declared is not None and (int(declared) < 0 or int(declared) > limit):
                 raise SmokeError('HTTP response exceeds limit')
@@ -115,7 +131,7 @@ class Client:
         except SmokeError:
             raise
         except Exception:
-            raise SmokeError('HTTP response uncertain; mutation must not be retried') from None
+            raise HTTPUncertain('HTTP response uncertain; mutation must not be retried') from None
         finally:
             if connection:
                 connection.close()

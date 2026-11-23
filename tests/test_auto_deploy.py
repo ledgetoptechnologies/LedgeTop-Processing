@@ -1,15 +1,19 @@
 from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import socket
 import tempfile
+import threading
 import unittest
 import uuid
 from unittest.mock import MagicMock, patch
 
 from ops import auto_deploy as agent
 from ops.auto_deploy import DeployError
+from processing.odx_smoke_worker import Client, HTTPRefused, HTTPUncertain
 from processing.container_update import save
 from processing import release_packages
 
@@ -47,6 +51,8 @@ class AutoDeployTests(unittest.TestCase):
         self.publish(image(NEW, 200, digests=[REPO + '@' + DIGEST]))
         self.pulls = []
         self.schedule = MagicMock(side_effect=self.scheduled)
+        self.lookup = MagicMock(side_effect=lambda request_id: (
+            dict(self.owned[request_id][1]) if request_id in self.owned else None))
         self.run = MagicMock(return_value={'status': 'succeeded', 'image': NEW})
 
     def tearDown(self):
@@ -65,11 +71,12 @@ class AutoDeployTests(unittest.TestCase):
                 raise RuntimeError('owned schedule requestId is already bound')
             return dict(receipt)
         if self.node['state'] != 'active' or self.node['revision'] != request['expectedRevision']:
-            raise RuntimeError('HTTP request rejected')
+            raise HTTPRefused('HTTP request rejected or redirected; inspect private receipt', 409)
         plan = str(uuid.uuid4())
         self.node.update(state='draining', planId=plan, targetImage=request['targetImage'],
                          revision=self.node['revision'] + 1)
         receipt = {'schemaVersion': 1, 'requestId': request['requestId'], 'nodeId': 'main', 'planId': plan,
+                   'authorityId': request['authorityId'],
                    'expectedRevision': request['expectedRevision'], 'targetImage': request['targetImage'],
                    'revision': self.node['revision'], 'state': 'draining'}
         self.owned[request['requestId']] = (dict(request), receipt)
@@ -97,7 +104,8 @@ class AutoDeployTests(unittest.TestCase):
 
     def deploy(self):
         with self.patched():
-            return agent.auto_deploy(self.root, self.settings, self.api, schedule=self.schedule, run=self.run,
+            return agent.auto_deploy(self.root, self.settings, self.api, schedule=self.schedule,
+                                     lookup=self.lookup, run=self.run,
                                      wait_seconds=60, drain_seconds=60, now=NOW)
 
     def state(self):
@@ -256,44 +264,87 @@ class AutoDeployTests(unittest.TestCase):
         self.run.assert_not_called()
         self.assertFalse((self.root / 'auto-deploy' / 'state.json').exists())
 
-    def test_lost_schedule_response_replays_identical_request_and_binds_its_plan(self):
+    def test_lost_schedule_response_is_reconciled_by_lookup_never_by_another_post(self):
         created = []
         def lost(request):
             created.append(self.scheduled(request))
-            raise RuntimeError('HTTP response uncertain')
+            raise HTTPUncertain('HTTP response uncertain; mutation must not be retried')
         self.schedule.side_effect = lost
-        with self.assertRaises(RuntimeError):
-            self.deploy()
-        self.assertEqual(self.last()['status'], 'stopped')
+        self.assertEqual(self.deploy()['reason'], 'schedule_response_uncertain')
         self.assertIsNone(self.state().get('inProgress'))
-        first = self.state()['scheduling']['request']
-        self.schedule.side_effect = self.scheduled
+        request_id = self.state()['scheduling']['request']['requestId']
         self.assertEqual(self.deploy()['status'], 'succeeded')
-        self.assertEqual(self.schedule.call_args.args[0], first)
+        self.schedule.assert_called_once()
+        self.lookup.assert_called_once_with(request_id)
         self.assertEqual(self.run.call_args.args[3], created[0]['planId'])
 
-    def test_schedule_conflict_keeps_intent_and_never_runs(self):
-        def conflict(request):
-            self.node.update(revision=self.node['revision'] + 1)
-            raise RuntimeError('HTTP request rejected')
-        self.schedule.side_effect = conflict
+    def test_uncertain_lookup_holds_without_posting(self):
+        self.schedule.side_effect = HTTPUncertain('HTTP response uncertain; mutation must not be retried')
+        self.deploy()
+        self.lookup.side_effect = HTTPUncertain('HTTP response uncertain; mutation must not be retried')
         for _ in range(2):
-            with self.assertRaises(RuntimeError):
-                self.deploy()
-        requests = [call.args[0] for call in self.schedule.call_args_list]
-        self.assertEqual(requests[0], requests[1])
-        self.assertIsNotNone(self.state()['scheduling'])
+            self.assertEqual(self.deploy(), {'status': 'held', 'reason': 'ownership_unproven',
+                                             'requestId': self.state()['scheduling']['request']['requestId']})
+        self.schedule.assert_called_once()
         self.run.assert_not_called()
+
+    def test_server_error_on_schedule_is_uncertain_not_a_refusal(self):
+        self.schedule.side_effect = HTTPRefused('HTTP request rejected or redirected; inspect private receipt', 500)
+        self.assertEqual(self.deploy()['status'], 'held')
+        self.assertFalse((self.root / 'auto-deploy' / agent.REFUSAL_FILE).exists())
+        self.assertIsNotNone(self.state()['scheduling'])
+
+    def test_lookup_proving_no_plan_clears_intent_then_a_later_pass_starts_fresh(self):
+        self.schedule.side_effect = HTTPUncertain('HTTP response uncertain; mutation must not be retried')
+        self.deploy()
+        first = self.state()['scheduling']['request']['requestId']
+        self.assertEqual(self.deploy(), {'status': 'not_created', 'requestId': first})
+        self.assertEqual(self.schedule.call_count, 1)
+        self.schedule.side_effect = self.scheduled
+        self.assertEqual(self.deploy()['status'], 'succeeded')
+        self.assertNotEqual(self.schedule.call_args.args[0]['requestId'], first)
+
+    def test_definite_refusal_latches_and_nothing_is_posted_until_cleared(self):
+        for status in (403, 409):
+            with self.subTest(status=status):
+                self.tearDown()
+                self.setUp()
+                self.schedule.side_effect = HTTPRefused('HTTP request rejected or redirected', status)
+                result = self.deploy()
+                self.assertEqual((result['status'], result['httpStatus']), ('refused', status))
+                self.assertIsNone(self.state()['scheduling'])
+                latch = self.root / 'auto-deploy' / agent.REFUSAL_FILE
+                self.assertTrue(latch.exists())
+                for _ in range(2):
+                    self.assertEqual(self.deploy(), {'status': 'held', 'reason': 'refusal_latched'})
+                self.schedule.assert_called_once()
+                self.lookup.assert_not_called()
+                self.run.assert_not_called()
+                latch.unlink()
+                self.schedule.side_effect = self.scheduled
+                self.assertEqual(self.deploy()['status'], 'succeeded')
+
+    def test_definite_lookup_refusal_latches(self):
+        self.schedule.side_effect = HTTPUncertain('HTTP response uncertain; mutation must not be retried')
+        self.deploy()
+        self.lookup.side_effect = HTTPRefused('HTTP request rejected or redirected', 403)
+        self.assertEqual(self.deploy()['status'], 'refused')
+        self.assertEqual(self.deploy(), {'status': 'held', 'reason': 'refusal_latched'})
+        self.lookup.assert_called_once()
+        self.schedule.assert_called_once()
 
     def test_receipt_for_another_target_or_request_is_refused(self):
         for change in ({'targetImage': 'sha256:' + 'f' * 64}, {'requestId': str(uuid.uuid4())},
-                       {'planId': 'not-a-plan'}, {'nodeId': 'cluster'}):
+                       {'planId': 'not-a-plan'}, {'nodeId': 'cluster'}, {'authorityId': str(uuid.UUID(int=8))}):
             with self.subTest(change=change):
                 self.tearDown()
                 self.setUp()
                 self.schedule.side_effect = lambda request, change=change: {**self.scheduled(request), **change}
                 self.assertEqual(self.deploy()['status'], 'refused')
                 self.assertIsNone(self.state().get('inProgress'))
+                self.assertTrue((self.root / 'auto-deploy' / agent.REFUSAL_FILE).exists())
+                self.assertEqual(self.deploy()['reason'], 'refusal_latched')
+                self.schedule.assert_called_once()
                 self.run.assert_not_called()
 
     def test_plan_replaced_while_waiting_is_never_run(self):
@@ -338,6 +389,136 @@ class AutoDeployTests(unittest.TestCase):
             self.deploy()
         self.assertEqual(self.last()['status'], 'stopped')
         self.assertEqual(self.state()['inProgress']['imageId'], NEW)
+
+
+class Coordinator(ThreadingHTTPServer):
+    """A loopback stand-in for the coordinator's node and owned-schedule routes."""
+    daemon_threads = True
+
+    def __init__(self):
+        super().__init__(('127.0.0.1', 0), CoordinatorHandler)
+        self.node = {'state': 'active', 'revision': 4, 'planId': None, 'targetImage': None,
+                     'notBefore': '2020-01-01T00:00:00Z'}
+        self.mode = 'conflict'
+        self.posts, self.lookups, self.owned = [], [], {}
+
+
+class CoordinatorHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def reply(self, status, value):
+        body = json.dumps(value).encode()
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        server = self.server
+        if self.path == '/v1/prototype/authority':
+            return self.reply(200, {'authorityId': AUTHORITY})
+        if self.path == '/v1/prototype/nodes/main':
+            return self.reply(200, {'node': server.node})
+        prefix = '/v1/prototype/nodes/main/schedule-owned/'
+        if self.path.startswith(prefix):
+            request_id = self.path[len(prefix):]
+            server.lookups.append(request_id)
+            if request_id in server.owned:
+                return self.reply(200, {'receipt': server.owned[request_id]})
+            return self.reply(404, {'error': 'owned_schedule_not_found'})
+        self.reply(404, {'error': 'not_found'})
+
+    def do_POST(self):
+        server = self.server
+        request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        server.posts.append(request)
+        if server.mode == 'conflict':
+            return self.reply(409, {'error': 'conflict', 'detail': 'node already has maintenance'})
+        plan = str(uuid.uuid4())
+        server.node.update(state='draining', planId=plan, targetImage=request['targetImage'],
+                           revision=server.node['revision'] + 1)
+        server.owned[request['requestId']] = {
+            'schemaVersion': 1, 'requestId': request['requestId'], 'authorityId': request['authorityId'],
+            'nodeId': 'main', 'planId': plan, 'expectedRevision': request['expectedRevision'],
+            'targetImage': request['targetImage'], 'revision': server.node['revision'], 'state': 'draining'}
+        if server.mode == 'drop':
+            # Created, but the answer is lost: the client sees no response.
+            self.close_connection = True
+            self.wfile.flush()
+            self.connection.shutdown(socket.SHUT_RDWR)
+            return
+        self.reply(200, {'receipt': server.owned[request['requestId']]})
+
+
+class RealClientTimerTests(unittest.TestCase):
+    """Two timer passes against the real HTTP client's error classification."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        save(self.root / 'compose.json', {'services': {'node': {'image': OLD}}})
+        self.server = Coordinator()
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        origin = 'http://127.0.0.1:' + str(self.server.server_address[1])
+        self.api, self.operator = Client(origin, 'worker-token'), Client(origin, 'operator-token')
+        self.settings = {'nodeId': 'main', 'project': 'owned', 'service': 'node',
+                         'autoDeploy': {'package': 'coordinator'}}
+        self.images = {OLD: image(OLD, 100), REPO + ':verified': image(NEW, 200, digests=[REPO + '@' + DIGEST]),
+                       REPO + '@' + DIGEST: image(NEW, 200, digests=[REPO + '@' + DIGEST])}
+        self.run = MagicMock(return_value={'status': 'waiting', 'nodeState': 'draining'})
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.temp.cleanup()
+
+    def timer_pass(self):
+        from ops import node_maintenance
+
+        @contextmanager
+        def acquired(directory):
+            yield True
+        ingress = MagicMock()
+        ingress.config = {'engineId': 'engine'}
+        with patch.object(agent, 'docker', return_value=''), \
+                patch.object(agent, 'inspect', side_effect=lambda ref: json.loads(json.dumps(self.images[ref]))), \
+                patch.object(agent, 'agent_lock', acquired), \
+                patch('ops.node_maintenance.Ingress', return_value=ingress), \
+                patch('ops.node_maintenance.ComposeNode'):
+            return agent.auto_deploy(self.root, self.settings, self.api,
+                schedule=lambda request: node_maintenance.schedule_owned(self.root, self.settings, self.operator, request),
+                lookup=lambda request_id: node_maintenance.owned_receipt(self.settings, self.operator, request_id),
+                run=self.run, wait_seconds=0, drain_seconds=60, now=NOW)
+
+    def test_real_409_latches_and_the_next_timer_pass_sends_nothing(self):
+        first = self.timer_pass()
+        self.assertEqual((first['status'], first['httpStatus']), ('refused', 409))
+        second = self.timer_pass()
+        self.assertEqual(second, {'status': 'held', 'reason': 'refusal_latched'})
+        self.assertEqual(len(self.server.posts), 1)
+        self.assertEqual(self.server.lookups, [])
+        self.run.assert_not_called()
+
+    def test_real_lost_response_is_bound_by_lookup_on_the_next_timer_pass(self):
+        self.server.mode = 'drop'
+        first = self.timer_pass()
+        self.assertEqual(first['reason'], 'schedule_response_uncertain')
+        second = self.timer_pass()
+        self.assertEqual(second['status'], 'waiting')
+        self.assertEqual(len(self.server.posts), 1)
+        self.assertEqual(self.server.lookups, [self.server.posts[0]['requestId']])
+        plan = self.server.node['planId']
+        self.assertEqual(self.run.call_args.args[3:], (plan, NEW))
+
+    def test_real_404_lookup_proves_no_plan_without_posting(self):
+        self.server.mode = 'drop'
+        self.timer_pass()
+        self.server.owned.clear()
+        self.server.node.update(state='active', planId=None, targetImage=None)
+        self.assertEqual(self.timer_pass()['status'], 'not_created')
+        self.assertEqual(len(self.server.posts), 1)
 
 
 @unittest.skipIf(os.name == 'nt', 'Installed node automation uses Linux host locks')
@@ -400,6 +581,7 @@ class AutoDeployRunnerTests(unittest.TestCase):
             plan = str(uuid.uuid4())
             node.update(state='draining', planId=plan, targetImage=payload['targetImage'], revision=2)
             return {'receipt': {'requestId': payload['requestId'], 'nodeId': 'main', 'planId': plan,
+                                'authorityId': payload['authorityId'],
                                 'expectedRevision': payload['expectedRevision'], 'targetImage': payload['targetImage']}}
         operator.json.side_effect = coordinator
         images = {OLD: image(OLD, 100), REPO + ':verified': image(NEW, 200, digests=[REPO + '@' + DIGEST]),
@@ -412,6 +594,7 @@ class AutoDeployRunnerTests(unittest.TestCase):
                 patch.object(agent, 'inspect', side_effect=lambda ref: json.loads(json.dumps(images[ref]))):
             result = agent.auto_deploy(self.root, settings, api,
                 schedule=lambda request: schedule_owned(self.root, settings, operator, request),
+                lookup=lambda request_id: None,
                 run=lambda receipt, wait, drain, plan, target: run(
                     self.root, api, operator, receipt, wait, drain, expected_plan_id=plan, expected_target=target),
                 wait_seconds=0, drain_seconds=60)

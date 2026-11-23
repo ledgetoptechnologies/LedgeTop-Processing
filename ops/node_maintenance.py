@@ -19,7 +19,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from processing.container_update import ComposeNode, execute, lock, UpdateError
 from processing.node_gate import NodeGate, GateBusy, GateError as NodeGateError
-from processing.odx_smoke_worker import Client, SmokeError
+from processing.odx_smoke_worker import Client, HTTPRefused, SmokeError
 from ops.node_ingress import Ingress, GateError, locked, save
 from ops.auto_deploy import auto_deploy, DeployError
 
@@ -152,6 +152,17 @@ def schedule_owned(root, settings, operator, request):
     return operator.json('POST', '/v1/prototype/nodes/' + settings['nodeId'] + '/schedule-owned', request)['receipt']
 
 
+def owned_receipt(settings, operator, request_id):
+    """Read-only lookup of an owned schedule receipt; None only for a definite 404."""
+    try:
+        return operator.json('GET', '/v1/prototype/nodes/' + settings['nodeId'] + '/schedule-owned/'
+                             + request_id)['receipt']
+    except HTTPRefused as error:
+        if error.status == 404:
+            return None
+        raise
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', required=True)
@@ -194,6 +205,7 @@ def main():
         elif args.action == 'auto-deploy':
             result = auto_deploy(root, settings, api,
                 schedule=lambda request: schedule_owned(root, settings, operator, request),
+                lookup=lambda request_id: owned_receipt(settings, operator, request_id),
                 run=lambda receipt, wait, drain, plan_id, target: run(
                     root, api, operator, private_directory(receipt), wait, drain,
                     expected_plan_id=plan_id, expected_target=target),
@@ -201,7 +213,7 @@ def main():
         else:
             result = run(root, api, operator, private_directory(args.receipt), args.wait_seconds, args.drain_seconds)
         print(json.dumps(result, sort_keys=True))
-        if result.get('status') in ('refused', 'stopped'):
+        if result.get('status') in ('refused', 'stopped', 'held'):
             return 2
         return 1 if result.get('status') == 'failed' else 0
     except (GateError, NodeGateError, UpdateError, SmokeError, DeployError, OSError, ValueError, KeyError):
