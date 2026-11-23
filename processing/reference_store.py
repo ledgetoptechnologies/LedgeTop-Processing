@@ -279,6 +279,8 @@ class ReferenceStore:
             self.queue._refresh_nodes(db)
             if self.queue._node(db, node_id)["state"] not in ("active", "scheduled"):
                 return None
+            if self.queue._self_update_fenced(db):
+                return None
             if db.execute("SELECT 1 FROM jobs WHERE status IN ('running','held') LIMIT 1").fetchone():
                 return None
             head = db.execute("""SELECT id,profile FROM jobs WHERE status='queued'

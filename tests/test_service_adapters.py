@@ -5,10 +5,14 @@ service, so plan, begin, finish and rollback go through the real `execute`.
 """
 from contextlib import contextmanager, ExitStack
 from datetime import datetime, timedelta, timezone
+from http.server import ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
+import sqlite3
 import subprocess
+import threading
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -21,13 +25,35 @@ from processing.app import make_handler
 from processing.config import Config
 from processing.container_update import (ComposeNode, PreflightError, UpdateError, Uncertain, execute,
                                          save, wait_healthy)
-from processing.odx_smoke_worker import Client, HTTPRefused, HTTPUncertain
+from processing.maintenance import Conflict
+from processing.odx_smoke_worker import Client, HTTPRefused, HTTPUncertain, SmokeError
+from processing import prototype
 from tests.test_service import TOKEN, start_server
 
 OLD = 'sha256:' + '1' * 64
 NEW = 'sha256:' + '2' * 64
 OPERATOR = 'maintenance-operator-private-test-credential'
 COMMIT = 'f' * 40
+
+
+def sql(path, *statements):
+    """Run statements on a coordinator database and close it (Windows locks)."""
+    db = sqlite3.connect(path)
+    try:
+        with db:
+            for statement, *args in statements:
+                db.execute(statement, *args) if not (args and isinstance(args[0], list)) else db.executemany(statement, args[0])
+        return db.execute('SELECT 1').fetchone()
+    finally:
+        db.close()
+
+
+def scalar(path, statement):
+    db = sqlite3.connect(path)
+    try:
+        return db.execute(statement).fetchone()
+    finally:
+        db.close()
 
 
 def labels(package, *, source=release_packages.SOURCE_URL, commit=COMMIT, run=200):
@@ -49,6 +75,7 @@ class FakeDocker:
         self.versions = {OLD: '0.9.0\n', NEW: '1.0.0\n'}
         self.uncertain = set()
         self.commands = []
+        self.on_up = None  # called after `compose up`, e.g. to restart the coordinator
 
     def __call__(self, command, timeout=30):
         self.commands.append(command)
@@ -63,13 +90,16 @@ class FakeDocker:
             if 'up' in command:
                 resolved = json.loads(Path(command[command.index('-f') + 1]).read_text())
                 self.current = resolved['services'][self.service]['image']
+                if self.on_up is not None:
+                    self.on_up(self.current)
                 return ''
         if command[:2] == ['docker', 'inspect'] and command[2] == 'cid':
             if self.current in self.uncertain:
                 raise Uncertain('Docker response uncertain; inspect service and receipt')
             return json.dumps([{
                 'Id': 'cid', 'Image': self.current,
-                'State': {'Running': self.running, 'Health': {'Status': self.health.get(self.current, 'healthy')}},
+                'State': {'Running': self.running, **({} if self.health.get(self.current, 'healthy') is None
+                          else {'Health': {'Status': self.health.get(self.current, 'healthy')}})},
                 'Config': {'Labels': {'com.docker.compose.project': self.project,
                                       'com.docker.compose.service': self.service}},
                 'NetworkSettings': {'Ports': {'8080/tcp': [{'HostIp': '127.0.0.1', 'HostPort': str(self.port)}]}}}])
@@ -108,9 +138,10 @@ class Coordinated(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.work = self.root / 'receipt'
         self.work.mkdir()
-        handler = make_handler(Config(TOKEN, '', '', 800, 20000,
+        self.config = Config(TOKEN, '', '', 800, 20000,
             prototype_state_dir=str(self.root / 'queue'), prototype_operator_token=OPERATOR,
-            prototype_node_ids=('cluster', 'main')))
+            prototype_node_ids=('cluster', 'main'))
+        handler = make_handler(self.config)
         self.queue = handler.prototype_queue
         self.server = start_server(handler)
         self.base = 'http://127.0.0.1:' + str(self.server.server_port)
@@ -137,6 +168,25 @@ class Coordinated(unittest.TestCase):
         made.docker = self.docker
         return made
 
+    def restart(self, image=None):
+        """Stop and start the coordinator process on the same database and port,
+        as `compose up` does when it recreates the coordinator container."""
+        port = self.server.server_port
+        self.server.shutdown()
+        self.server.server_close()
+        self.queue.close()
+        handler = make_handler(self.config)
+        self.queue = handler.prototype_queue
+        self.server = ThreadingHTTPServer(('127.0.0.1', port), handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.restarts = getattr(self, 'restarts', 0) + 1
+
+    def reserve(self):
+        node = self.plan()
+        return self.operator.json('POST', '/v1/prototype/nodes/cluster/begin',
+                                  {'planId': node['planId'], 'expectedRevision': node['revision'],
+                                   'selfUpdate': True})
+
     def plan(self, future=False):
         stamp = datetime.now(timezone.utc) + timedelta(seconds=60 if future else -1)
         return self.operator.json('POST', '/v1/prototype/nodes/cluster/schedule', {
@@ -151,6 +201,151 @@ class Coordinated(unittest.TestCase):
     def submit(self, name):
         return self.queue.submit({'requestId': name, 'environment': 'staging',
                                   'profile': 'treedar-synthetic-v1'})[0]
+
+
+class SelfUpdateQueueTests(unittest.TestCase):
+    """The coordinator's own reservation, fence and restart behaviour."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.directory = Path(self.temp.name)
+        self.queue = prototype.Queue(self.directory, node_ids=('cluster', 'main'))
+
+    def tearDown(self):
+        self.queue.close()
+        self.temp.cleanup()
+
+    def reopen(self):
+        self.queue.close()
+        self.queue = prototype.Queue(self.directory, node_ids=('cluster', 'main'))
+
+    def begin(self, **extra):
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        node = self.queue.schedule_node('cluster', {
+            'expectedRevision': self.queue.get_node('cluster')['revision'], 'drainAt': stamp,
+            'notBefore': stamp, 'afterJobId': None, 'targetImage': NEW})
+        return self.queue.begin_node_update('cluster', {'planId': node['planId'],
+                                                        'expectedRevision': node['revision'], **extra})
+
+    def submit(self, name):
+        return self.queue.submit({'requestId': name, 'environment': 'staging',
+                                  'profile': 'treedar-synthetic-v1'})[0]
+
+    def test_self_update_reservation_survives_restart_and_finishes(self):
+        begun = self.begin(selfUpdate=True)
+        self.reopen()
+        node = self.queue.get_node('cluster')
+        self.assertEqual(node['state'], 'updating')
+        self.assertTrue(self.queue.unsettled_summary()['selfUpdateFence'])
+        done = self.queue.finish_node_update('cluster', {'planId': node['planId'], 'updateToken': begun['updateToken'],
+                                                         'status': 'succeeded', 'result': {'healthy': True}})
+        self.assertEqual(done['state'], 'active')
+        self.assertFalse(self.queue.unsettled_summary()['selfUpdateFence'])
+        self.reopen()
+        self.assertEqual(self.queue.get_node('cluster')['state'], 'active')
+
+    def test_engine_update_is_still_held_on_restart(self):
+        begun = self.begin()
+        self.reopen()
+        node = self.queue.get_node('cluster')
+        self.assertEqual(node['state'], 'held')
+        with self.assertRaises(Conflict):
+            self.queue.finish_node_update('cluster', {'planId': node['planId'], 'updateToken': begun['updateToken'],
+                                                      'status': 'succeeded', 'result': {'healthy': True}})
+
+    def test_self_update_needs_no_unsettled_job_on_any_node(self):
+        job = self.submit('elsewhere')  # queued, on no node yet
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        node = self.queue.schedule_node('cluster', {
+            'expectedRevision': self.queue.get_node('cluster')['revision'], 'drainAt': stamp,
+            'notBefore': stamp, 'afterJobId': None, 'targetImage': NEW})
+        request = {'planId': node['planId'], 'expectedRevision': node['revision'], 'selfUpdate': True}
+        with self.assertRaisesRegex(Conflict, 'unsettled'):
+            self.queue.begin_node_update('cluster', request)
+        sql(self.queue.path, ("UPDATE jobs SET status='cancelled' WHERE id=?", (job['id'],)))
+        self.assertEqual(self.queue.begin_node_update('cluster', request)['node']['state'], 'updating')
+
+    def test_self_update_flag_must_be_true(self):
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        node = self.queue.schedule_node('cluster', {
+            'expectedRevision': self.queue.get_node('cluster')['revision'], 'drainAt': stamp,
+            'notBefore': stamp, 'afterJobId': None, 'targetImage': NEW})
+        for value in (False, 1, 'true'):
+            with self.assertRaises(ValueError):
+                self.queue.begin_node_update('cluster', {'planId': node['planId'],
+                                                         'expectedRevision': node['revision'], 'selfUpdate': value})
+        self.assertEqual(self.queue.get_node('cluster')['state'], 'draining')
+
+    def test_fence_blocks_claims_on_every_node_until_finish_or_hold(self):
+        begun = self.begin(selfUpdate=True)
+        self.submit('queued-during-update')
+        for node in ('main', 'cluster'):
+            self.assertIsNone(self.queue.claim({'workerId': 'w', 'nodeId': node}))
+        node = self.queue.get_node('cluster')
+        self.queue.hold_node('cluster', {'planId': node['planId'], 'expectedRevision': node['revision'],
+                                         'note': 'inspect'})
+        self.assertFalse(self.queue.unsettled_summary()['selfUpdateFence'])
+        self.assertEqual(self.queue.claim({'workerId': 'w', 'nodeId': 'main'})['requestId'], 'queued-during-update')
+        self.reopen()
+        self.assertEqual(self.queue.get_node('cluster')['state'], 'held')
+        self.assertIsNotNone(begun['updateToken'])
+
+    def test_summary_counts_only_unsettled_states(self):
+        for name in ('a', 'b', 'c'):
+            self.submit(name)
+        sql(self.queue.path, ("UPDATE jobs SET status='cancelled' WHERE request_id='a'",),
+            ("UPDATE jobs SET status='held' WHERE request_id='b'",))
+        result = self.queue.unsettled_summary()
+        self.assertEqual(result['jobs'], {'queued': 1, 'running': 0, 'held': 1})
+        self.assertEqual(result['unsettledJobs'], 2)
+
+
+class SchemaCompatibilityTests(unittest.TestCase):
+    """Rollback safety: an older coordinator never misreads a newer database."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.directory = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_floor_is_recorded_and_never_lowered(self):
+        prototype.Queue(self.directory).close()
+        path = self.directory / 'jobs.sqlite3'
+        self.assertEqual(scalar(path, 'SELECT min_reader FROM coordinator_schema')[0], prototype.SCHEMA_MIN_READER)
+        with patch.object(prototype, 'SCHEMA_READER', 2), patch.object(prototype, 'SCHEMA_MIN_READER', 2):
+            prototype.Queue(self.directory).close()
+        # An older reader now refuses instead of misreading.
+        with self.assertRaises(prototype.SchemaTooNew):
+            prototype.Queue(self.directory)
+        self.assertEqual(scalar(path, 'SELECT min_reader FROM coordinator_schema')[0], 2)
+
+    def test_current_migrations_are_additive(self):
+        """A non-additive migration must raise SCHEMA_MIN_READER (and READER)."""
+        source = Path(prototype.__file__).parent
+        risky = []
+        # Separate worker-local databases, not the coordinator's jobs.sqlite3.
+        other_databases = {'scratch_policy.py'}
+        for path in sorted(source.glob('*.py')):
+            if path.name in other_databases:
+                continue
+            text = path.read_text(encoding='utf-8')
+            for match in re.finditer(r'(?i)\b(DROP\s+(TABLE|COLUMN|INDEX)|RENAME\s+(TO|COLUMN)|ALTER\s+TABLE\s+\w+\s+(?!ADD\s+COLUMN))',
+                                     text):
+                risky.append(path.name + ': ' + match.group(0))
+        if prototype.SCHEMA_MIN_READER == 1:
+            self.assertEqual(risky, [])
+        self.assertLessEqual(prototype.SCHEMA_MIN_READER, prototype.SCHEMA_READER)
+
+    def test_self_update_column_is_additive_for_older_readers(self):
+        prototype.Queue(self.directory).close()
+        db = sqlite3.connect(self.directory / 'jobs.sqlite3')
+        try:
+            column = [row for row in db.execute('PRAGMA table_info(nodes)') if row[1] == 'self_update'][0]
+        finally:
+            db.close()
+        self.assertEqual((column[3], column[4]), (1, '0'))  # NOT NULL DEFAULT 0
 
 
 class KindTests(unittest.TestCase):
@@ -187,6 +382,11 @@ class KindTests(unittest.TestCase):
         self.assertNotIn('odx', service_adapters.ADAPTERS)
 
 
+def summary(queued=0, running=0, held=0, fence=False):
+    return {'schemaVersion': 1, 'jobs': {'queued': queued, 'running': running, 'held': held},
+            'unsettledJobs': queued + running + held, 'selfUpdateFence': fence}
+
+
 class CoordinatorAdapterTests(Coordinated):
     def test_idle_only_when_no_job_is_queued_running_or_held_on_any_node(self):
         adapter = self.adapter()
@@ -194,28 +394,63 @@ class CoordinatorAdapterTests(Coordinated):
         self.submit('queued')
         self.assertFalse(adapter.idle())
 
-    def test_running_held_unknown_or_unreadable_jobs_are_not_idle(self):
+    def test_idle_from_the_bounded_summary(self):
         adapter = self.adapter()
         adapter.api = MagicMock()
-        adapter.api.json.return_value = {'jobs': [{'status': 'succeeded', 'nodeId': 'main'},
-                                                  {'status': 'failed', 'nodeId': 'cluster'}]}
-        self.assertTrue(adapter.idle())
-        for jobs in ([{'status': 'running', 'nodeId': 'main'}], [{'status': 'held', 'nodeId': 'cluster'}],
-                     [{'status': 'paused'}], [{}], ['x'], None):
-            adapter.api.json.return_value = {'jobs': jobs}
-            self.assertFalse(adapter.idle())
+        for value, idle in ((summary(), True), (summary(running=1), False), (summary(held=1), False),
+                            (summary(queued=2), False),
+                            # Queued work cannot be claimed once the fence is up.
+                            (summary(queued=2, fence=True), True), (summary(running=1, fence=True), False)):
+            adapter.api.json.return_value = value
+            self.assertEqual(adapter.idle(), idle, value)
+
+    def test_unreadable_summary_or_old_coordinator_is_refused(self):
+        adapter = self.adapter()
+        adapter.api = MagicMock()
+        for value in ({}, {**summary(), 'schemaVersion': 2}, {**summary(), 'jobs': {'queued': '0'}},
+                      {**summary(), 'selfUpdateFence': None}):
+            adapter.api.json.return_value = value
+            with self.assertRaises(UpdateError):
+                adapter.idle()
+        adapter.api.json.side_effect = HTTPRefused('HTTP request rejected', 404, 'not_found')
+        with self.assertRaisesRegex(UpdateError, 'self-update API'):
+            adapter.idle()
+
+    def test_cancelled_and_other_settled_jobs_do_not_block(self):
+        for name in ('done', 'cancelled', 'failed'):
+            self.submit(name)
+        sql(self.queue.path, ("UPDATE jobs SET status=CASE request_id WHEN 'done' THEN 'succeeded' "
+                              "WHEN 'cancelled' THEN 'cancelled' ELSE 'failed' END",))
+        self.assertTrue(self.adapter().idle())
+
+    def test_long_history_stays_readable(self):
+        # The full /v1/prototype/jobs history outgrows the client's 64 KiB cap.
+        sql(self.queue.path, ("INSERT INTO jobs(id,request_id,environment,profile,status,result) "
+                              "VALUES(?,?,'staging','treedar-synthetic-v1','succeeded',?)",
+                              [(str(uuid.uuid4()), 'history-' + str(n), json.dumps({'note': 'x' * 64}))
+                               for n in range(999)]))
+        with self.assertRaises(SmokeError):
+            self.api.json('GET', '/v1/prototype/jobs')
+        self.assertTrue(self.adapter().idle())
+        self.submit('late')
+        self.assertFalse(self.adapter().idle())
+        self.assertEqual(self.api.json('GET', '/v1/prototype/unsettled')['jobs']['queued'], 1)
 
     def test_stopped_coordinator_is_not_an_idle_proof(self):
         self.docker.running = False
         with self.assertRaises(UpdateError):
             self.adapter().idle()
 
-    def test_healthy_requires_image_docker_health_healthz_authority_and_labels(self):
+    def test_healthy_requires_image_health_healthz_authority_fence_and_labels(self):
         adapter = self.adapter()
         self.docker.current = NEW
+        self.assertFalse(adapter.healthy(NEW))  # no reservation fence yet
+        self.reserve()
         self.assertTrue(adapter.healthy(NEW))
         self.assertFalse(adapter.healthy(OLD))  # a different image is running
         self.docker.health[NEW] = 'starting'
+        self.assertFalse(adapter.healthy(NEW))
+        self.docker.health[NEW] = None  # no HEALTHCHECK is not proof
         self.assertFalse(adapter.healthy(NEW))
         self.docker.health[NEW] = 'healthy'
         self.docker.images[NEW] = labels('treedar')
@@ -229,7 +464,19 @@ class CoordinatorAdapterTests(Coordinated):
     def test_rollback_target_needs_no_labels(self):
         # The old pin may be an adopted, unlabelled image.
         self.assertEqual(self.docker.images[OLD], {})
+        self.reserve()
         self.assertTrue(self.adapter().healthy(OLD))
+
+    def test_adoptable_needs_the_self_update_api_and_no_open_update(self):
+        adapter = self.adapter()
+        self.assertTrue(adapter.adoptable(OLD))
+        self.reserve()
+        self.assertFalse(service_adapters.safe(adapter.adoptable, OLD))
+        adapter.api = MagicMock()
+        adapter.api.json.side_effect = lambda method, path: (
+            {'status': 'ok'} if path == '/healthz' else {'authorityId': self.authority}
+            if path.endswith('/authority') else (_ for _ in ()).throw(HTTPRefused('x', 404, 'not_found')))
+        self.assertFalse(service_adapters.safe(adapter.adoptable, OLD))
 
     def test_failing_healthz_or_timeout_is_unhealthy_not_a_crash(self):
         adapter = self.adapter()
@@ -249,6 +496,55 @@ class CoordinatorAdapterTests(Coordinated):
         self.assertEqual((result['status'], result['image']), ('succeeded', NEW))
         self.assertEqual(self.docker.current, NEW)
         self.assertEqual(self.queue.get_node('cluster')['state'], 'active')
+
+    def test_update_finishes_after_the_coordinator_restarts_itself(self):
+        self.plan()
+        self.docker.on_up = self.restart
+        result = self.update(self.adapter())
+        self.assertEqual((result['status'], result['image']), ('succeeded', NEW))
+        self.assertEqual(self.restarts, 1)
+        node = self.queue.get_node('cluster')
+        self.assertEqual(node['state'], 'active')
+        self.assertFalse(self.api.json('GET', '/v1/prototype/unsettled')['selfUpdateFence'])
+        self.assertEqual(json.loads((self.work / 'update.json').read_text())['stage'], 'completed')
+
+    def test_rollback_finishes_after_both_restarts(self):
+        self.plan()
+        self.docker.on_up = self.restart
+        self.docker.health[NEW] = 'unhealthy'
+        result = self.update(self.adapter())
+        self.assertEqual((result['status'], result['restoredImage']), ('failed', OLD))
+        self.assertTrue(result['rollbackHealthy'])
+        self.assertEqual(self.restarts, 2)
+        self.assertEqual(self.docker.current, OLD)
+        self.assertEqual(self.queue.get_node('cluster')['state'], 'failed')
+        self.assertFalse(self.api.json('GET', '/v1/prototype/unsettled')['selfUpdateFence'])
+
+    def test_without_self_update_a_restart_drops_the_reservation(self):
+        # The failure the selfUpdate reservation exists to prevent.
+        self.plan()
+        self.docker.on_up = self.restart
+        adapter = self.adapter()
+        adapter.begin_fields = {}
+        with self.assertRaises(HTTPRefused):
+            self.update(adapter)
+        self.assertEqual(self.queue.get_node('cluster')['state'], 'held')
+
+    def test_no_job_is_claimed_anywhere_between_reservation_and_finish(self):
+        self.plan()
+        claims = []
+
+        def during_swap(image):
+            self.submit('arrived-during-swap')
+            claims.append(self.queue.claim({'workerId': 'main-worker', 'nodeId': 'main'}))
+            self.restart()
+            claims.append(self.queue.claim({'workerId': 'main-worker', 'nodeId': 'main'}))
+        self.docker.on_up = during_swap
+        self.assertEqual(self.update(self.adapter())['status'], 'succeeded')
+        self.assertEqual(claims, [None, None])
+        # Main may claim while cluster is updating; only the fence stopped it.
+        job = self.queue.claim({'workerId': 'cluster-worker', 'nodeId': 'cluster'})
+        self.assertEqual(job['requestId'], 'arrived-during-swap')
 
     def test_unhealthy_candidate_rolls_back_to_the_old_pin(self):
         self.plan()

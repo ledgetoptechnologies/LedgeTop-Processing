@@ -189,7 +189,7 @@ runner's own `replace(old)` plus the old image's health check. The plan,
 | kind | idle | healthy after swap | rollback |
 | --- | --- | --- | --- |
 | `odx` (default when `kind` is absent) | ingress closed and drained, host engine gate, no tasks/uploads/extra processes, engine `/info` | exact image, Docker health, engine `/info`, idle again | recreate the old pin |
-| `coordinator` | its own `GET /v1/prototype/jobs` lists no `queued`, `running` or `held` job on any node | exact container image, Docker health `healthy`, `/healthz` `ok`, unchanged authority ID, and a new image carries this repository's `coordinator` package labels | recreate the old pin (no labels needed) |
+| `coordinator` | its own `GET /v1/prototype/unsettled` counts no `queued`, `running` or `held` job on any node (`cancelled`, `succeeded`, `failed` are settled) | exact container image, Docker health present and `healthy`, `/healthz` `ok`, unchanged authority ID, its self-update reservation and fence survived the restart, and a new image carries this repository's `coordinator` package labels | recreate the old pin (no labels needed) |
 | `treedar` | no running container of the Compose service or of the pinned image | `treedar --version` succeeds in a network-less, read-only, capability-free container of that image (it imports the CLI and its native stack), and a new image carries the `treedar` package labels | keep the old pin (no container is recreated) |
 
 - `odx` is the NodeODX/NodeODM path above, byte for byte. There is no
@@ -202,12 +202,58 @@ runner's own `replace(old)` plus the old image's health check. The plan,
   (`http://127.0.0.1:18080`). `nodeId` is the coordinator node whose plan
   carries the window, normally the host's own node. The coordinator's node
   plan only fences claims on that node; the idle check waits for every job on
-  every node to finish, so a backlog or a held job delays the update
+  every node to settle, so a backlog or a held job delays the update
   (`waiting`, resumed on the next pass) rather than interrupting work. A held
-  job needs a person. The runner re-checks idleness right after `begin`; a job
-  submitted in the instant between the idle proof and that reservation stops
-  the update before any container change, leaving the node `updating` with a
-  `reserved` receipt for the existing recovery procedure.
+  job needs a person.
+
+### Coordinator self-update
+
+The coordinator restarts itself in the middle of its own update. Starting a
+coordinator normally turns an `updating` node into `held` (its update token is
+dropped) and every `running` job into `held`. A coordinator-kind update
+therefore reserves with `begin` and `"selfUpdate": true`, which:
+
+- atomically refuses (409) while any job on any node is `queued`, `running` or
+  `held`;
+- marks the reservation as a self-update. At startup such a node stays
+  `updating` with its token, so the updater's `finish` (success, or failure
+  after rollback) is accepted by the restarted coordinator. Engine updates are
+  still held at startup exactly as before;
+- fences every claim on every node (prototype and reference claims return no
+  job) while that node is `updating`. Jobs submitted meanwhile stay `queued`
+  and are claimable after `finish`, or after an operator `hold`, which also
+  lifts the fence. So no job can start between the idle proof and `compose
+  up`, and the restart has no running job to hold.
+
+After the swap, health requires the reservation and fence to still be present.
+`GET /v1/prototype/unsettled` (observer token) returns
+`{"schemaVersion": 1, "jobs": {"queued", "running", "held"}, "unsettledJobs",
+"selfUpdateFence"}`, a bounded answer independent of job history size.
+
+A coordinator image without this API (earlier than this change) cannot survive
+its own update and is refused by the idle check and by `adopt`. Install the
+first coordinator image that has it manually (idle, `compose up` of the new
+pin, update the `compose.json` pin), then adopt it. From then on, the rollback
+target is always a coordinator that supports self-update.
+
+### Coordinator database compatibility
+
+Rollback recreates the old coordinator on the same `jobs.sqlite3`; it is not
+snapshotted or restored. Instead, migrations must stay forward compatible, and
+this is enforced:
+
+- `processing/prototype.py` declares `SCHEMA_READER` (the level this code
+  reads correctly) and `SCHEMA_MIN_READER` (the oldest level that may open a
+  database this code migrated). The database keeps the highest
+  `min_reader` it has seen (`coordinator_schema`).
+- A coordinator whose `SCHEMA_READER` is below the stored `min_reader` refuses
+  to start. A rollback across a non-compatible migration therefore fails its
+  health check and stops for a person (`rollbackHealthy: false`) instead of
+  running on a database it misreads.
+- Additive migrations (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN` with a
+  default, like `nodes.self_update`) keep both at their current value. A test
+  fails on any `DROP`, `RENAME` or other `ALTER TABLE` in the coordinator's
+  modules unless both numbers were raised.
 - A TreeDar service is a Compose service that is only ever run on demand. The
   swap is the Compose pin the runner saves after the new image passed its
   self-check; containers already running keep their image.
@@ -248,7 +294,8 @@ exactly the current `compose.json` pin and a cached image; the pin is not
 labelled as the other package; the coordinator node is `active` with no plan;
 there is no `refused.json`, `schedule-intent.json` or in-progress update; the
 kind's adapter accepts the service configuration, the service runs that pin
-and passes the kind's health check (labels not required). It then writes
+and passes the kind's health check (labels not required; a coordinator must
+also serve the self-update API with no update open). It then writes
 `auto-deploy/adoption.json` (kind, package, node, project, service, image and
 the pin's publish run if it has one) and, last, adds `kind` and `autoDeploy`
 to `maintenance.json`, keeping every other setting. If it stops between the

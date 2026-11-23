@@ -283,8 +283,11 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
                'oldImage': old, 'targetImage': target, 'startedAt': datetime.now(timezone.utc).isoformat()}
     save(path, receipt)
     # Both the queue fence and private intent exist before any container mutation.
+    # A coordinator self-update adapter adds {'selfUpdate': True}; engine
+    # adapters add nothing, so their request is unchanged.
     begun = operator.json('POST', '/v1/prototype/nodes/' + node_id + '/begin',
-                          {'planId': node['planId'], 'expectedRevision': node['revision']})
+                          {'planId': node['planId'], 'expectedRevision': node['revision'],
+                           **(extra if isinstance(extra := getattr(adapter, 'begin_fields', None), dict) else {})})
     receipt.update(stage='reserved', updateToken=begun['updateToken'],reservedRevision=begun['node']['revision'])
     save(path, receipt)
     if not adapter.idle():

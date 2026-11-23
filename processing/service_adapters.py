@@ -20,11 +20,17 @@ Kinds:
   default when `maintenance.json` declares no kind, so existing hosts keep
   their behaviour. There is no published odx package, so it is never an
   auto-deploy target.
-- `coordinator`: the processing coordinator Compose service. Idle means the
-  coordinator's own read-only job list holds no queued, running or held job
-  on any node. Healthy means the exact container runs the target image, Docker
-  health is healthy, `/healthz` answers ok, the authority ID is unchanged and a
-  new image carries this repository's `coordinator` package labels.
+- `coordinator`: the processing coordinator Compose service updating itself.
+  Idle means the coordinator's own read-only `/v1/prototype/unsettled` count
+  shows no queued, running or held job on any node (queued jobs are tolerated
+  only once its self-update fence is up). `begin` carries `selfUpdate: true`,
+  which atomically re-checks that, fences every claim on every node, and keeps
+  the reservation across the coordinator's own restart so finish still works.
+  Healthy means the exact container runs the target image, Docker health is
+  present and healthy, `/healthz` answers ok, the authority ID is unchanged,
+  the reservation and fence survived the restart, and a new image carries this
+  repository's `coordinator` package labels. A coordinator without the
+  unsettled API cannot update itself and is refused.
 - `treedar`: the TreeDar CLI image, run on demand from a Compose service that
   is never left running. Idle means no running container of that service or of
   the pinned image. "Replacing" mutates no container: the swap is the pin the
@@ -42,13 +48,13 @@ from types import SimpleNamespace
 
 from . import release_packages
 from .container_update import ComposeNode, NAME, PreflightError, UpdateError, Uncertain
-from .odx_smoke_worker import SmokeError
+from .odx_smoke_worker import HTTPRefused, SmokeError
 
 KINDS = ('odx', 'coordinator', 'treedar')
 # The published package each kind may auto-deploy. odx has none.
 PACKAGES = {'coordinator': 'coordinator', 'treedar': 'treedar'}
 DEFAULT_KIND = 'odx'
-TERMINAL_JOB_STATES = ('succeeded', 'failed')
+UNSETTLED_JOB_STATES = ('queued', 'running', 'held')
 ENGINE_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9:._-]{0,127}\Z')
 COMMIT = re.compile(r'[0-9a-f]{40}\Z')
 VERSION = re.compile(r'[0-9]+(?:\.[0-9]+){1,3}(?:[-+.][0-9A-Za-z.]{1,32})?\n?\Z')
@@ -112,6 +118,8 @@ class CoordinatorService(_PackageImage, ComposeNode):
     """The coordinator Compose service on its own host."""
     package = 'coordinator'
     health_seconds = 120
+    # Sent with `begin`: fence all claims and survive this service's restart.
+    begin_fields = {'selfUpdate': True}
 
     def __init__(self, args, work, *, api=None, authority=None, baseline=None):
         # Deliberately not ComposeNode.__init__: no engine token or engine kind.
@@ -123,11 +131,31 @@ class CoordinatorService(_PackageImage, ComposeNode):
         self.api = api
         self.authority, self.baseline = authority, baseline
 
+    def unsettled(self):
+        """The coordinator's bounded unsettled-job summary.
+
+        A coordinator without this API predates self-update support: it would
+        drop the reservation on restart, so it is refused, not guessed.
+        """
+        try:
+            summary = self.api.json('GET', '/v1/prototype/unsettled')
+        except HTTPRefused as error:
+            if error.status == 404:
+                raise UpdateError('coordinator lacks the self-update API; install this version manually once') from None
+            raise
+        jobs = summary.get('jobs') if isinstance(summary, dict) else None
+        if (summary.get('schemaVersion') != 1 or not isinstance(jobs, dict)
+                or any(type(jobs.get(state)) is not int or jobs[state] < 0 for state in UNSETTLED_JOB_STATES)
+                or type(summary.get('selfUpdateFence')) is not bool):
+            raise UpdateError('unreadable coordinator unsettled-job summary')
+        return summary
+
     def jobs_drained(self):
-        jobs = self.api.json('GET', '/v1/prototype/jobs').get('jobs')
-        if not isinstance(jobs, list):
-            return False
-        return all(isinstance(job, dict) and job.get('status') in TERMINAL_JOB_STATES for job in jobs)
+        summary = self.unsettled()
+        jobs = summary['jobs']
+        # Queued work is persisted and cannot be claimed once the fence is up.
+        return (jobs['running'] == 0 and jobs['held'] == 0
+                and (jobs['queued'] == 0 or summary['selfUpdateFence']))
 
     def idle(self):
         item = self.inspect()
@@ -138,8 +166,10 @@ class CoordinatorService(_PackageImage, ComposeNode):
     def serving(self, image):
         item = self.inspect()
         state = item['State']
+        # The image declares a HEALTHCHECK; a container without one is not proof.
+        health = state.get('Health')
         if (item['Image'] != image or not state['Running'] or state.get('OOMKilled')
-                or state.get('Health', {}).get('Status', 'healthy') != 'healthy'):
+                or not isinstance(health, dict) or health.get('Status') != 'healthy'):
             return False
         health = self.api.json('GET', '/healthz')
         if not isinstance(health, dict) or health.get('status') != 'ok':
@@ -151,10 +181,14 @@ class CoordinatorService(_PackageImage, ComposeNode):
         return True
 
     def healthy(self, image):
-        return self.serving(image) and self.labelled_or_baseline(image)
+        # The restarted coordinator must still hold this update's reservation
+        # and fence, or finish would be refused.
+        return (self.serving(image) and self.unsettled()['selfUpdateFence'] is True
+                and self.labelled_or_baseline(image))
 
     def adoptable(self, image):
-        return self.serving(image)
+        # Also proves the running coordinator can survive its own update.
+        return self.serving(image) and self.unsettled()['selfUpdateFence'] is False
 
 
 class TreeDarImage(_PackageImage, ComposeNode):
