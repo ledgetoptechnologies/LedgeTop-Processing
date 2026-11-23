@@ -16,6 +16,9 @@ class Conflict(Exception):
 STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)\Z")
 IMAGE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 SCHEDULE_FIELDS = ('expectedRevision','drainAt','notBefore','afterJobId','targetImage')
+# Jobs that still own coordinator or node work. Everything else (succeeded,
+# failed, cancelled and any later terminal state) is settled.
+UNSETTLED_JOB_STATES = ('queued', 'running', 'held')
 
 
 def canonical(value):
@@ -50,10 +53,17 @@ class Maintenance:
             revision INTEGER NOT NULL DEFAULT 0, plan_id TEXT, drain_at TEXT,
             not_before TEXT, after_job_id TEXT, target_image TEXT, result TEXT,
             update_hash TEXT, finish_status TEXT)""")
+        # Additive: older coordinators ignore this column (see SCHEMA_MIN_READER).
+        if 'self_update' not in {row['name'] for row in db.execute('PRAGMA table_info(nodes)')}:
+            db.execute('ALTER TABLE nodes ADD COLUMN self_update INTEGER NOT NULL DEFAULT 0')
         for node in self.node_ids:
             db.execute("INSERT OR IGNORE INTO nodes(id) VALUES(?)", (node,))
+        # An interrupted engine update needs an operator. A coordinator
+        # self-update is expected to restart this process between begin and
+        # finish: it keeps its reservation and global claim fence so the
+        # updater can finish (or roll back and finish) with its token.
         db.execute("""UPDATE nodes SET state='held', revision=revision+1,
-            update_hash=NULL, finish_status=NULL WHERE state='updating'""")
+            update_hash=NULL, finish_status=NULL WHERE state='updating' AND self_update=0""")
         db.execute('''CREATE TABLE IF NOT EXISTS owned_maintenance_schedules (
             request_id TEXT PRIMARY KEY,node_id TEXT NOT NULL,authority_id TEXT NOT NULL,
             request_sha256 TEXT NOT NULL,request_json TEXT NOT NULL,receipt_json TEXT NOT NULL)''')
@@ -71,6 +81,24 @@ class Maintenance:
                 "notBefore": row["not_before"], "afterJobId": row["after_job_id"],
                 "targetImage": row["target_image"],
                 "result": json.loads(row["result"]) if row["result"] else None}
+
+    @staticmethod
+    def _self_update_fenced(db):
+        """A coordinator self-update is reserved: no job may be claimed anywhere."""
+        return db.execute("SELECT 1 FROM nodes WHERE state='updating' AND self_update=1 LIMIT 1").fetchone() is not None
+
+    def unsettled_summary(self):
+        """Read-only counts for a coordinator self-update idle check."""
+        with self._db() as db:
+            counts = {state: 0 for state in UNSETTLED_JOB_STATES}
+            for row in db.execute("SELECT status,COUNT(*) AS n FROM jobs WHERE status IN (?,?,?) GROUP BY status",
+                                  UNSETTLED_JOB_STATES):
+                counts[row['status']] = row['n']
+            reservations = [{'nodeId': row['id'], 'planId': row['plan_id'], 'targetImage': row['target_image'],
+                             'revision': row['revision']} for row in db.execute(
+                "SELECT id,plan_id,target_image,revision FROM nodes WHERE state='updating' AND self_update=1 ORDER BY id")]
+            return {'schemaVersion': 1, 'jobs': counts, 'unsettledJobs': sum(counts.values()),
+                    'selfUpdateFence': bool(reservations), 'selfUpdates': reservations}
 
     def _known_node(self, identifier):
         self.slug(identifier)
@@ -134,7 +162,7 @@ class Maintenance:
         state = "draining" if after is not None or drain <= self._now() else "scheduled"
         db.execute("""UPDATE nodes SET state=?,revision=revision+1,plan_id=?,drain_at=?,
             not_before=?,after_job_id=?,target_image=?,result=NULL,update_hash=NULL,
-            finish_status=NULL WHERE id=?""", (state, str(uuid.uuid4()), drain_text,
+            finish_status=NULL,self_update=0 WHERE id=?""", (state, str(uuid.uuid4()), drain_text,
             earliest_text, after, payload["targetImage"], identifier))
         return self._node_public(self._node(db, identifier))
 
@@ -292,7 +320,16 @@ class Maintenance:
             return dict(receipt, tokenValid=True, updateToken=token)
 
     def begin_node_update(self, identifier, payload):
-        self.fields(payload, ("expectedRevision", "planId"))
+        """Reserve a planned update.
+
+        `selfUpdate: true` (the coordinator updating its own container) also
+        requires no unsettled job on any node and fences every claim until
+        finish or an operator hold, and the reservation survives restart.
+        """
+        self_update = isinstance(payload, dict) and 'selfUpdate' in payload
+        self.fields(payload, ("expectedRevision", "planId", *(("selfUpdate",) if self_update else ())))
+        if self_update and payload["selfUpdate"] is not True:
+            raise ValueError("selfUpdate must be true when present")
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
             self._refresh_nodes(db)
@@ -302,9 +339,16 @@ class Maintenance:
                 raise Conflict("node is not ready for its update")
             if db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held')", (identifier,)).fetchone():
                 raise Conflict("node still owns running or held work")
+            if self_update and self._self_update_fenced(db):
+                # One coordinator, one self-update reservation at a time.
+                raise Conflict("another coordinator self-update is reserved")
+            if self_update and db.execute("SELECT 1 FROM jobs WHERE status IN (?,?,?) LIMIT 1",
+                                          UNSETTLED_JOB_STATES).fetchone():
+                raise Conflict("coordinator still owns unsettled work")
             token = secrets.token_urlsafe(32)
             db.execute("""UPDATE nodes SET state='updating',revision=revision+1,update_hash=?,
-                finish_status=NULL WHERE id=?""", (hashlib.sha256(token.encode()).hexdigest(), identifier))
+                finish_status=NULL,self_update=? WHERE id=?""",
+                (hashlib.sha256(token.encode()).hexdigest(), 1 if self_update else 0, identifier))
             return {"node": self._node_public(self._node(db, identifier)), "updateToken": token}
 
     def finish_node_update(self, identifier, payload):
@@ -330,9 +374,15 @@ class Maintenance:
                 raise Conflict("maintenance completion differs")
             if row["state"] != "updating":
                 raise Conflict("maintenance is held for operator inspection")
+            if (row["self_update"] and payload["status"] == "failed"
+                    and payload["result"].get("rollbackHealthy") is not True
+                    and payload["result"].get("rollbackPerformed") is not False):
+                # Lifting the global fence needs a coordinator proven restored
+                # (or never changed). Otherwise an operator holds it explicitly.
+                raise Conflict("self-update rollback health unproven; operator recovery required")
             state = "active" if payload["status"] == "succeeded" else "failed"
-            db.execute("""UPDATE nodes SET state=?,revision=revision+1,result=?,finish_status=?
-                WHERE id=?""", (state, result, payload["status"], identifier))
+            db.execute("""UPDATE nodes SET state=?,revision=revision+1,result=?,finish_status=?,
+                self_update=0 WHERE id=?""", (state, result, payload["status"], identifier))
             return self._node_public(self._node(db, identifier))
 
     def hold_node(self, identifier, payload):
@@ -349,7 +399,7 @@ class Maintenance:
                 raise Conflict("only an updating node can be held")
             result = json.dumps({"operatorAction": "hold", "note": payload["note"]})
             db.execute("""UPDATE nodes SET state='held',revision=revision+1,result=?,
-                update_hash=NULL,finish_status=NULL WHERE id=?""", (result, identifier))
+                update_hash=NULL,finish_status=NULL,self_update=0 WHERE id=?""", (result, identifier))
             return self._node_public(self._node(db, identifier))
 
     def resume_node(self, identifier, payload):

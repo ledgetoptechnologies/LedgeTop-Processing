@@ -283,10 +283,17 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
                'oldImage': old, 'targetImage': target, 'startedAt': datetime.now(timezone.utc).isoformat()}
     save(path, receipt)
     # Both the queue fence and private intent exist before any container mutation.
+    # A coordinator self-update adapter adds {'selfUpdate': True}; engine
+    # adapters add nothing, so their request is unchanged.
     begun = operator.json('POST', '/v1/prototype/nodes/' + node_id + '/begin',
-                          {'planId': node['planId'], 'expectedRevision': node['revision']})
+                          {'planId': node['planId'], 'expectedRevision': node['revision'],
+                           **(extra if isinstance(extra := getattr(adapter, 'begin_fields', None), dict) else {})})
     receipt.update(stage='reserved', updateToken=begun['updateToken'],reservedRevision=begun['node']['revision'])
     save(path, receipt)
+    bind = getattr(adapter, 'bind_reservation', None)
+    if callable(bind):
+        # Health of a self-updating service is bound to this exact reservation.
+        bind(node_id=node_id, plan_id=receipt['planId'], target=target, revision=receipt['reservedRevision'])
     if not adapter.idle():
         raise UpdateError('engine changed after reservation; leave gate for inspection')
     if on_reserved is not None:
@@ -319,6 +326,12 @@ def execute(coordinator, operator, adapter, node_id, root, wait_seconds=0,
         adapter.replace(old)
         restored = wait_healthy(adapter, old, health_seconds)
         status, result = 'failed', {'healthy': False, 'rollbackHealthy': restored, 'restoredImage': old}
+        if not restored and getattr(adapter, 'finish_requires_rollback_health', False) is True:
+            # Finishing would lift a coordinator-wide fence over a service that
+            # is not proven restored. Keep reservation, token and receipt.
+            receipt.update(stage='rollback_unhealthy', status='stopped', result=result)
+            save(path, receipt)
+            return {'status': 'stopped', 'reason': 'rollback_unhealthy', 'nodeId': node_id, **result}
     receipt.update(stage='finalization_pending' if status=='succeeded' and defer_finish else 'finish_pending', status=status, result=result)
     save(path, receipt)
     if status=='succeeded' and defer_finish:

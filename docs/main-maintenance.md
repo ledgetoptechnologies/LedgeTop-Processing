@@ -93,11 +93,13 @@ closed for inspection. No OS update or PC reboot is performed.
 ## Automatic updates
 
 `auto-deploy` makes a verified main merge reach a host without a manual step,
-through the same drain window. It is opt-in per host: add an `autoDeploy`
-object to `maintenance.json`, for example
-`"autoDeploy": {"package": "coordinator", "drainDelaySeconds": 0}`, and run it
-from the host's own timer (for example a systemd user timer every 10 minutes
-starting a oneshot unit):
+through the same drain window. It is opt-in per service: `maintenance.json`
+declares the service `kind` and an `autoDeploy` object naming that kind's
+package (see [service kinds](#service-kinds)), for example
+`"kind": "coordinator", "autoDeploy": {"package": "coordinator", "drainDelaySeconds": 0}`.
+The first opt-in of a service is the reviewed [first adoption](#first-adoption)
+command, not a hand edit. Run the agent from the host's own timer (for example
+a systemd user timer every 10 minutes starting a oneshot unit):
 
 ```sh
 python3 "$ROOT/source/ops/node_maintenance.py"   --root "$ROOT" --credentials "$ROOT/maintenance.env" auto-deploy --wait-seconds 3600
@@ -106,7 +108,9 @@ python3 "$ROOT/source/ops/node_maintenance.py"   --root "$ROOT" --credentials "$
 Each pass, in order:
 
 1. If `$ROOT/auto-deploy.hold` exists, it records `paused` and stops before
-   any network or Docker call. `touch` it to hold, delete it to resume. A hold
+   any network or Docker call. A `kind` that is missing, unknown or not the
+   package's own kind (`coordinator` for the coordinator package, `treedar` for
+   the TreeDar package) is `refused` before any pull. `touch` it to hold, delete it to resume. A hold
    does not cancel a window already scheduled; use the coordinator `cancel`
    action for that (the agent then records `cancelled` and never retries it).
 2. A failed, held or updating node is left alone (`not_eligible`). So is any
@@ -120,11 +124,13 @@ Each pass, in order:
    publish run. Anything else is `refused`. A non-`push` or non-main label is
    `ignored`.
 4. If that image is already the pin, `up_to_date`. The running pinned image
-   must itself carry this package's labels: the first adoption of a package on
-   a service is a reviewed manual `schedule`/`run`. The candidate's publish run
-   must be newer than the pin's and than every candidate this host already
-   tried (`highestRunId`), so it never goes backwards or retries a failure
-   (`not_newer`).
+   must itself carry this package's labels, or be the exact pin a person
+   recorded with the [first adoption](#first-adoption) command
+   (`auto-deploy/adoption.json`); otherwise `refused` ("adopt it manually
+   first"). The agent never adopts a service itself. The candidate's publish
+   run must be newer than the pin's (0 for an unlabelled adopted pin) and than
+   every candidate this host already tried (`highestRunId`), so it never goes
+   backwards or retries a failure (`not_newer`).
 5. It creates the window (`drainAt` = `notBefore` = now + `drainDelaySeconds`)
    with the coordinator's idempotent `schedule-owned` request, a compare-and-swap
    on the node revision it just read. The request, with its `requestId`, is
@@ -171,9 +177,144 @@ ID), `applied`, `failed`, `cancelled` and `highestRunId`; `last-run.json` record
 normal outcomes, 1 for a failed (rolled back) update and 2 for `refused`,
 `held` or a stop that needs inspection; existing receipts are never replayed.
 
-The runner's health and idle checks are the ODM-family engine checks above, so
-a package is only auto-deployed to a service whose current pin is already that
-package and passed this runner once.
+### Service kinds
+
+`maintenance.json` `kind` selects the runner adapter
+(`processing/service_adapters.py`). Every adapter answers the same questions
+for `processing.container_update.execute`: which image is selected, is it
+cached, is the service drained (idle), swap it, is it healthy; rollback is the
+runner's own `replace(old)` plus the old image's health check. The plan,
+`begin`, `finish`, receipts and no-replay rules are identical for all kinds.
+
+| kind | idle | healthy after swap | rollback |
+| --- | --- | --- | --- |
+| `odx` (default when `kind` is absent) | ingress closed and drained, host engine gate, no tasks/uploads/extra processes, engine `/info` | exact image, Docker health, engine `/info`, idle again | recreate the old pin |
+| `coordinator` | its own `GET /v1/prototype/unsettled` counts no `queued`, `running` or `held` job on any node (`cancelled`, `succeeded`, `failed` are settled) | exact container image, Docker health present and `healthy`, `/healthz` `ok`, unchanged authority ID, its self-update reservation and fence survived the restart, and a new image carries this repository's `coordinator` package labels | recreate the old pin (no labels needed) |
+| `treedar` | no running container of the Compose service or of the pinned image | `treedar --version` succeeds in a network-less, read-only, capability-free container of that image (it imports the CLI and its native stack), and a new image carries the `treedar` package labels | keep the old pin (no container is recreated) |
+
+- `odx` is the NodeODX/NodeODM path above, byte for byte. There is no
+  published odx package, so an odx service is never an auto-deploy target;
+  manual `schedule`/`run` are unchanged.
+- `coordinator` and `treedar` have no engine ingress or host engine gate. They
+  need `dockerEngineId` (the host's `docker info` ID) in `maintenance.json`;
+  `containerPort` (default 8080) is the coordinator's container port, which
+  Compose must publish only on `127.0.0.1` at the port of `coordinator`
+  (`http://127.0.0.1:18080`). `nodeId` is the coordinator node whose plan
+  carries the window, normally the host's own node. The coordinator's node
+  plan only fences claims on that node; the idle check waits for every job on
+  every node to settle, so a backlog or a held job delays the update
+  (`waiting`, resumed on the next pass) rather than interrupting work. A held
+  job needs a person.
+
+### Coordinator self-update
+
+The coordinator restarts itself in the middle of its own update. Starting a
+coordinator normally turns an `updating` node into `held` (its update token is
+dropped) and every `running` job into `held`. A coordinator-kind update
+therefore reserves with `begin` and `"selfUpdate": true`, which:
+
+- atomically refuses (409) while any job on any node is `queued`, `running` or
+  `held`;
+- marks the reservation as a self-update. At startup such a node stays
+  `updating` with its token, so the updater's `finish` (success, or failure
+  after rollback) is accepted by the restarted coordinator. Engine updates are
+  still held at startup exactly as before;
+- fences every claim on every node (prototype and reference claims return no
+  job) while that node is `updating`. Jobs submitted meanwhile stay `queued`
+  and are claimable after `finish`, or after an operator `hold`, which also
+  lifts the fence. So no job can start between the idle proof and `compose
+  up`, and the restart has no running job to hold;
+- is refused (409) while another self-update reservation exists.
+
+After the swap, health requires exactly this update's reservation (node, plan,
+target and reserved revision) to still be the only self-update reservation.
+A failed `finish` of a self-update is accepted only with `rollbackHealthy:
+true` (or `rollbackPerformed: false`, nothing was changed). When the rollback
+is not proven healthy, the runner does not call `finish`: it returns
+`stopped` (`rollback_unhealthy`), the receipt stays at `rollback_unhealthy`,
+and the node stays `updating` with the fence up, so no node claims work
+against an unresolved coordinator. An operator inspects the coordinator,
+then uses `hold` (which lifts the fence) and the existing recovery path.
+`GET /v1/prototype/unsettled` (observer token) returns
+`{"schemaVersion": 1, "jobs": {"queued", "running", "held"}, "unsettledJobs",
+"selfUpdateFence", "selfUpdates": [{"nodeId", "planId", "targetImage",
+"revision"}]}`, a bounded answer independent of job history size.
+
+A coordinator image without this API (earlier than this change) cannot survive
+its own update and is refused by the idle check and by `adopt`. Install the
+first coordinator image that has it manually (idle, `compose up` of the new
+pin, update the `compose.json` pin), then adopt it. From then on, the rollback
+target is always a coordinator that supports self-update.
+
+### Coordinator database compatibility
+
+Rollback recreates the old coordinator on the same `jobs.sqlite3`; it is not
+snapshotted or restored. Instead, migrations must stay forward compatible, and
+this is enforced:
+
+- `processing/prototype.py` declares `SCHEMA_READER` (the level this code
+  reads correctly) and `SCHEMA_MIN_READER` (the oldest level that may open a
+  database this code migrated). The database keeps the highest
+  `min_reader` it has seen (`coordinator_schema`).
+- A coordinator whose `SCHEMA_READER` is below the stored `min_reader` refuses
+  to start. A rollback across a non-compatible migration therefore fails its
+  health check and stops for a person (`rollbackHealthy: false`) instead of
+  running on a database it misreads.
+- Additive migrations (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN` with a
+  default, like `nodes.self_update`) keep both at their current value. A test
+  fails on any `DROP`, `RENAME` or other `ALTER TABLE` in the coordinator's
+  modules unless both numbers were raised.
+- A TreeDar service is a Compose service that is only ever run on demand. The
+  swap is the Compose pin the runner saves after the new image passed its
+  self-check; containers already running keep their image.
+- On success the runner saves the new pin to `compose.json` and records
+  `managed-update.json` with stage `completed`; on failure the old pin stays
+  and the node is left `failed` for review, as for odx.
+- Any other `kind` value is refused by `run`, `schedule`, `auto-deploy` and
+  `adopt`.
+
+### First adoption
+
+A coordinator or TreeDar service whose current pin predates the package labels
+(or was never auto-deployed) is opted in once, by a person, with `adopt`. It
+records the reviewed current pin and opts the service in; it never pulls,
+schedules or replaces anything. First, `maintenance.json` must already describe
+the service: `nodeId`, `project`, `service`, `kind`, `dockerEngineId` (and
+`containerPort` if not 8080), with `compose.json` holding the current pin.
+Then, as the operator user on that host:
+
+```sh
+ROOT=/path/to/that/service/operator-root
+touch "$ROOT/auto-deploy.hold"                     # keep the timer idle meanwhile
+python3 "$ROOT/source/ops/node_maintenance.py" \
+  --root "$ROOT" --credentials "$ROOT/maintenance.env" status
+python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["services"][sys.argv[2]]["image"])' \
+  "$ROOT/compose.json" SERVICE                       # the current pin
+docker image inspect --format '{{json .Config.Labels}}' sha256:CURRENT_PIN
+python3 "$ROOT/source/ops/node_maintenance.py" \
+  --root "$ROOT" --credentials "$ROOT/maintenance.env" adopt \
+  --kind coordinator --image sha256:CURRENT_PIN --drain-delay-seconds 0
+cat "$ROOT/auto-deploy/adoption.json" "$ROOT/maintenance.json"
+rm "$ROOT/auto-deploy.hold"                          # let the timer run
+```
+
+`adopt` refuses unless: the kind is `coordinator` or `treedar` and matches any
+kind already declared; the service is not already opted in; `--image` is
+exactly the current `compose.json` pin and a cached image; the pin is not
+labelled as the other package; the coordinator node is `active` with no plan;
+there is no `refused.json`, `schedule-intent.json` or in-progress update; the
+kind's adapter accepts the service configuration, the service runs that pin
+and passes the kind's health check (labels not required; a coordinator must
+also serve the self-update API with no update open). It then writes
+`auto-deploy/adoption.json` (kind, package, node, project, service, image and
+the pin's publish run if it has one) and, last, adds `kind` and `autoDeploy`
+to `maintenance.json`, keeping every other setting. If it stops between the
+two writes, rerunning it with the same pin completes the opt-in. The record
+applies only to that exact pin, node and service: once the agent has deployed
+a labelled image, later upgrades rely on the labels, and any other unlabelled
+pin is refused again. To undo before the first upgrade, remove `autoDeploy`
+(and `kind`, if it was added) from `maintenance.json` and delete
+`adoption.json`.
 
 ## Recovery limits
 

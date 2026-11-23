@@ -20,6 +20,12 @@ the agent did not create (even for the same image), a replaced plan, a
 failed/held node and an existing operation receipt all stop it for a person to
 inspect. It writes `auto-deploy/state.json` and
 `auto-deploy/last-run.json` under the operator root on every run.
+
+`maintenance.json` must declare the service `kind` whose package this is
+(`coordinator` or `treedar`; see processing/service_adapters.py). The agent
+upgrades only a service already running that package, or one whose exact
+current pin a person adopted with `node_maintenance.py adopt` (`adopt` below),
+which records `auto-deploy/adoption.json`. It never adopts a service itself.
 """
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -30,8 +36,8 @@ import re
 import subprocess
 import uuid
 
-from processing import release_packages
-from processing.container_update import save
+from processing import release_packages, service_adapters
+from processing.container_update import save, UpdateError
 from processing.odx_smoke_worker import HTTPRefused, SmokeError
 
 HOLD_FILE = 'auto-deploy.hold'
@@ -44,6 +50,9 @@ REFUSAL_FILE = 'refused.json'
 # is never proof (a timed-out request can still commit later), so an unresolved
 # intent stays until its receipt appears or a person deletes this file.
 INTENT_FILE = 'schedule-intent.json'
+# Written once by the operator-run `adopt` command: the reviewed, unlabelled
+# pin this service may be upgraded from. Never written by the agent.
+ADOPTION_FILE = 'adoption.json'
 DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
 COMMIT = re.compile(r'[0-9a-f]{40}\Z')
 RUN = re.compile(r'[1-9][0-9]{0,19}\Z')
@@ -197,6 +206,14 @@ def step(root, directory, settings, binding, api, *, schedule, lookup, run, wait
         release_packages.package(key)
     except ValueError:
         raise DeployError('autoDeploy.package must name a published package') from None
+    try:
+        kind = service_adapters.service_kind(settings)
+    except UpdateError:
+        raise DeployError('unknown service kind in maintenance.json; refusing') from None
+    if 'kind' not in settings or service_adapters.package_for(kind) != key:
+        # The runner's idle/health/rollback checks are per kind; a package is
+        # only ever deployed to a service declared as that package's kind.
+        raise DeployError('autoDeploy.package must match the declared service kind (coordinator or treedar)')
     delay = binding.get('drainDelaySeconds', 0)
     if type(delay) is not int or not 0 <= delay <= 86400:
         raise DeployError('autoDeploy.drainDelaySeconds must be 0..86400')
@@ -255,8 +272,11 @@ def step(root, directory, settings, binding, api, *, schedule, lookup, run, wait
         current = identity(inspect(pin), key)
         if current is None:
             # First adoption of a package on a service is a reviewed manual
-            # schedule; the agent only upgrades a service already running it.
-            raise DeployError('managed service is not running this package; adopt it manually first')
+            # step; the agent only upgrades a service already running it or
+            # the exact pin a person adopted.
+            if not adopted(directory, settings, key, pin):
+                raise DeployError('managed service is not running this package; adopt it manually first')
+            current = {'runId': 0}
         floor = max(current['runId'], state.get('highestRunId', 0))
         if candidate['runId'] <= floor:
             return {'status': 'not_newer', 'runId': candidate['runId'], 'floor': floor}
@@ -345,3 +365,85 @@ def bind(state, settings, candidate, request, receipt):
 
 def pinned(root, settings):
     return json.loads((root / 'compose.json').read_text())['services'][settings['service']]['image']
+
+
+def adopted(directory, settings, key, pin):
+    """True only for the exact pin, service and package a person adopted."""
+    record = load(directory / ADOPTION_FILE)
+    return (record.get('schemaVersion') == 1 and record.get('package') == key
+            and record.get('kind') == settings.get('kind') and record.get('image') == pin
+            and record.get('nodeId') == settings.get('nodeId') and record.get('project') == settings.get('project')
+            and record.get('service') == settings.get('service'))
+
+
+def adopt(root, settings, api, *, kind, image, drain_delay=0, make_adapter=None, now=None):
+    """Operator-run, one-time opt-in of a service whose pin lacks package labels.
+
+    The operator names the current Compose pin they reviewed. This checks that
+    it is the pin, that the service is running it and healthy by its kind's
+    adapter, that the node is active with no plan and the agent has no open
+    intent, refusal or update, then records `auto-deploy/adoption.json` and
+    finally writes `kind` and `autoDeploy` into `maintenance.json`. It never
+    pulls, schedules or replaces anything.
+    """
+    key = service_adapters.package_for(kind)
+    if key is None:
+        raise DeployError('only a coordinator or treedar service can be adopted')
+    if settings.get('autoDeploy') is not None:
+        raise DeployError('service already opted into auto-deploy; nothing to adopt')
+    if settings.get('kind', kind) != kind:
+        raise DeployError('maintenance.json declares another service kind')
+    if type(drain_delay) is not int or not 0 <= drain_delay <= 86400:
+        raise DeployError('drain delay must be 0..86400 seconds')
+    directory = state_directory(root)
+    with agent_lock(directory) as acquired:
+        if not acquired:
+            raise DeployError('an auto-deploy pass is running; retry when it ends')
+        for name in (REFUSAL_FILE, INTENT_FILE):
+            if (directory / name).exists():
+                raise DeployError('inspect and resolve ' + STATE_DIR + '/' + name + ' before adoption')
+        if load(directory / 'state.json').get('inProgress') is not None:
+            raise DeployError('an auto-deploy update is in progress; inspect it before adoption')
+        pin = pinned(root, settings)
+        if image != pin:
+            raise DeployError('--image must equal the current Compose pin exactly')
+        item = inspect(pin)
+        if item.get('Id') != pin:
+            raise DeployError('current pin is not a cached immutable image')
+        labels = (item.get('Config') or {}).get('Labels') or {}
+        if labels.get(release_packages.PACKAGE_LABEL) not in (None, key):
+            raise DeployError('current pin is labelled as another Processing package')
+        labelled = identity(item, key)
+        route = '/v1/prototype/nodes/' + settings['nodeId']
+        if api.json('GET', route)['node']['state'] != 'active':
+            raise DeployError('node must be active with no maintenance plan')
+        authority = api.json('GET', '/v1/prototype/authority')['authorityId']
+        try:
+            adapter = (make_adapter or service_adapters.adapter)(
+                kind, root, settings, directory, api=api, authority=authority, baseline=pin)
+            running = adapter.inspect()['Image']
+        except UpdateError as error:
+            raise DeployError('service configuration refused: ' + str(error)) from None
+        if running != pin:
+            raise DeployError('running service is not the Compose pin')
+        if not service_adapters.safe(adapter.adoptable, pin):
+            raise DeployError('current service is not healthy by its kind check; fix it before adoption')
+        record = {'schemaVersion': 1, 'kind': kind, 'package': key, 'nodeId': settings['nodeId'],
+                  'project': settings['project'], 'service': settings['service'], 'image': pin,
+                  'labelledRunId': labelled['runId'] if labelled else None,
+                  'adoptedAt': utc(now or datetime.now(timezone.utc))}
+        path = directory / ADOPTION_FILE
+        existing = load(path)
+        if existing and any(existing.get(name) != record[name]
+                            for name in ('kind', 'package', 'nodeId', 'project', 'service', 'image')):
+            raise DeployError('a different adoption is already recorded; inspect '
+                              + STATE_DIR + '/' + ADOPTION_FILE)
+        if not existing:
+            save(path, record)
+        else:
+            record = existing
+        # Opt in last: an interruption before this leaves the service manual.
+        save(root / 'maintenance.json',
+             {**settings, 'kind': kind, 'autoDeploy': {'package': key, 'drainDelaySeconds': drain_delay}})
+        return {'status': 'adopted', 'kind': kind, 'package': key, 'image': pin,
+                'labelledRunId': record['labelledRunId']}

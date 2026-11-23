@@ -24,8 +24,12 @@ that exact digest. Hosts never run the tag. A host with auto-deploy enabled runs
 only to learn the digest, pulls that digest with its existing read-only login,
 checks the image identity, and if the run is newer than its pin schedules the
 existing [drain-window update](docs/main-maintenance.md#automatic-updates).
-An `auto-deploy.hold` file in the host's operator root pauses it. The workflow
-itself never touches a host or node credential.
+An `auto-deploy.hold` file in the host's operator root pauses it. Each service
+declares its kind (`coordinator` or `treedar`) so the runner uses that kind's
+idle, health and rollback checks, and a service whose current pin predates the
+package labels is opted in once with the manual `adopt` command
+([service kinds and first adoption](docs/main-maintenance.md#service-kinds)).
+The workflow itself never touches a host or node credential.
 
 Private, self-hosted coordination service for LedgeTop's processing computers.
 The cluster PC is the single endpoint reached by the TrueNAS Viewer. TrueNAS is

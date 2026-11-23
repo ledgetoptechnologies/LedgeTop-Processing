@@ -27,6 +27,21 @@ VIEWER_PROFILE = "odm-viewer-v1"
 REFERENCE_PROFILE = "reference-pipeline-v1"
 
 
+# Database compatibility for rollback (docs/main-maintenance.md#coordinator-database-compatibility).
+# SCHEMA_READER is the newest compatibility level this code can read and write
+# correctly. SCHEMA_MIN_READER is the oldest coordinator that may open a
+# database after this code migrated it. Migrations must be additive (CREATE
+# TABLE IF NOT EXISTS, ADD COLUMN with a default): older coordinators then keep
+# working after a rollback. Any other migration must raise both numbers, so an
+# older coordinator refuses to start instead of misreading the database.
+SCHEMA_READER = 1
+SCHEMA_MIN_READER = 1
+
+
+class SchemaTooNew(RuntimeError):
+    """The database was migrated by a coordinator this code cannot read."""
+
+
 class Queue(Maintenance):
     def __init__(self, directory, photo_smoke_enabled=False, *, node_ids=('cluster',),
                  treedar_node_ids=None, viewer_enabled=False, reference_enabled=False, clock=None):
@@ -78,6 +93,18 @@ class Queue(Maintenance):
         # Optional recovery persists this epoch with its restart overlay.
         self.startup_id = str(uuid.uuid4())
         self.path = root / "jobs.sqlite3"
+        try:
+            with self._db() as db:
+                db.execute('CREATE TABLE IF NOT EXISTS coordinator_schema (singleton INTEGER PRIMARY KEY CHECK(singleton=1), min_reader INTEGER NOT NULL)')
+                stored = db.execute('SELECT min_reader FROM coordinator_schema WHERE singleton=1').fetchone()
+                if stored is not None and stored[0] > SCHEMA_READER:
+                    raise SchemaTooNew('coordinator database requires a newer coordinator')
+                db.execute('INSERT INTO coordinator_schema VALUES(1, ?) ON CONFLICT(singleton) DO UPDATE SET '
+                           'min_reader=MAX(min_reader, excluded.min_reader)', (SCHEMA_MIN_READER,))
+        except SchemaTooNew:
+            # Refuse to start rather than misread a database migrated by a newer coordinator.
+            self._lock.close()
+            raise
         with self._db() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS jobs (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
@@ -234,6 +261,8 @@ class Queue(Maintenance):
                     return None
             self._refresh_nodes(db)
             if self._node(db, node_id)['state'] not in ('active', 'scheduled'):
+                return None
+            if self._self_update_fenced(db):
                 return None
             if db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held') LIMIT 1",
                           (node_id,)).fetchone():

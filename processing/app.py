@@ -120,6 +120,8 @@ def make_handler(config: Config):
                     self._reply(404, {"error": "prototype_disabled"})
                 elif self.path == "/v1/prototype/authority":
                     self._reply(200, {"authorityId": queue.authority_id})
+                elif self.path == "/v1/prototype/unsettled":
+                    self._reply(200, queue.unsettled_summary())
                 elif self.path == "/v1/prototype/jobs":
                     self._reply(200, {"jobs": queue.list(), "mode": "bounded_photo_test" if config.photo_smoke_enabled else "synthetic_prototype"})
                 elif self.path == "/v1/prototype/nodes":
