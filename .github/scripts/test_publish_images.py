@@ -39,8 +39,10 @@ class PublicationBoundaryTests(unittest.TestCase):
 
     def test_publication_targets_only_fixed_private_names(self):
         self.assertEqual(publish_images.PACKAGES,
-                         ('ledgetop-processing-private-coordinator', 'ledgetop-processing-private-treedar'))
-        self.assertNotIn('ledgetop-processing-orchestrator', publish_images.PACKAGES)
+                         ('ledgetop-processing-coordinator-v2', 'ledgetop-processing-treedar-v2'))
+        for retired in ('ledgetop-processing-orchestrator', 'ledgetop-processing-private-coordinator',
+                        'ledgetop-processing-coordinator', 'ledgetop-processing-private-treedar'):
+            self.assertNotIn(retired, publish_images.PACKAGES)
 
     def test_unqualified_package_at_either_preflight_position_stops_before_build(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'public'}
@@ -86,10 +88,8 @@ class PublicationBoundaryTests(unittest.TestCase):
         def fake_command(args, **kwargs):
             commands.append(args)
             if args[:3] == ['docker', 'image', 'inspect']:
-                return json.dumps([{'Config': {'User': '10001:10001', 'Labels': {
-                    'org.opencontainers.image.source': 'https://github.com/' + REPOSITORY,
-                    'org.opencontainers.image.revision': self.env['GITHUB_SHA']}}, 'Os': 'linux',
-                                    'Architecture': 'amd64', 'Id': 'sha256:' + 'a' * 64}])
+                return json.dumps([{'Config': {'User': '10001:10001', 'Labels': self.labels_for(args[3])},
+                                    'Os': 'linux', 'Architecture': 'amd64', 'Id': 'sha256:' + 'a' * 64}])
             if args[:4] == ['docker', 'buildx', 'imagetools', 'inspect']:
                 return json.dumps({'digest': digest})
             return ''
@@ -106,7 +106,7 @@ class PublicationBoundaryTests(unittest.TestCase):
         self.assertEqual(final['images'][0]['digest'], digest)
         pushes = [args for args in commands if args[:2] == ['docker', 'push']]
         self.assertEqual(len(pushes), 1)
-        self.assertIn('ledgetop-processing-private-coordinator:', pushes[0][2])
+        self.assertIn('ledgetop-processing-coordinator-v2:', pushes[0][2])
         self.assertEqual(final['images'][1]['status'], 'built')
 
     def test_preflight_checks_both_exact_package_names_before_build(self):
@@ -120,8 +120,8 @@ class PublicationBoundaryTests(unittest.TestCase):
                 publish_images.main()
             paths = [call.args[0] for call in github.call_args_list]
             self.assertEqual(paths, ['/repos/' + REPOSITORY,
-                '/orgs/ledgetoptechnologies/packages/container/ledgetop-processing-private-coordinator',
-                '/orgs/ledgetoptechnologies/packages/container/ledgetop-processing-private-treedar'])
+                '/orgs/ledgetoptechnologies/packages/container/ledgetop-processing-coordinator-v2',
+                '/orgs/ledgetoptechnologies/packages/container/ledgetop-processing-treedar-v2'])
             self.assertEqual(command.call_count, 1)
             self.assertEqual(command.call_args.args[0][:2], ['docker', 'build'])
 
@@ -144,14 +144,20 @@ class PublicationBoundaryTests(unittest.TestCase):
             (ValueError('synthetic metadata permission failure'), 'metadata_unavailable'),
         )
 
-    def run_publication(self, metadata, *, fail_push=False, fail_smoke=False, bad_digest=False, remote_change=None):
+    @staticmethod
+    def labels_for(reference):
+        for key, package in zip(publish_images.PACKAGE_KEYS, publish_images.PACKAGES):
+            if '/' + package + ':' in reference or '/' + package + '@' in reference:
+                return publish_images.labels(key)
+        raise AssertionError('unexpected reference ' + reference)
+
+    def run_publication(self, metadata, *, fail_push=False, fail_smoke=False, bad_digest=False, remote_change=None,
+                        env=None, verified_digest=None):
         records, commands = [], []
         def fake_command(args, **kwargs):
             commands.append(args)
             if args[:3] == ['docker', 'image', 'inspect']:
-                item = {'Config': {'User': '10001:10001', 'Labels': {
-                    'org.opencontainers.image.source': 'https://github.com/' + REPOSITORY,
-                    'org.opencontainers.image.revision': self.env['GITHUB_SHA']}}, 'Os': 'linux',
+                item = {'Config': {'User': '10001:10001', 'Labels': self.labels_for(args[3])}, 'Os': 'linux',
                         'Architecture': 'amd64', 'Id': 'sha256:' + 'a' * 64}
                 if '@sha256:' in args[3] and remote_change:
                     remote_change(item)
@@ -161,9 +167,11 @@ class PublicationBoundaryTests(unittest.TestCase):
             if args[:2] == ['docker', 'push'] and fail_push:
                 raise TimeoutError('synthetic lost push response')
             if args[:4] == ['docker', 'buildx', 'imagetools', 'inspect']:
+                if args[4].endswith(':' + publish_images.VERIFIED_TAG) and verified_digest:
+                    return json.dumps({'digest': verified_digest})
                 return json.dumps({'digest': 'bad' if bad_digest else 'sha256:' + 'b' * 64})
             return ''
-        with patch.dict(publish_images.os.environ, self.env, clear=True), \
+        with patch.dict(publish_images.os.environ, env or self.env, clear=True), \
              patch.object(publish_images, 'github', side_effect=metadata), \
              patch.object(publish_images, 'receipt', side_effect=lambda x: records.append(copy.deepcopy(x))), \
              patch.object(publish_images, 'command', side_effect=fake_command):
@@ -189,10 +197,20 @@ class PublicationBoundaryTests(unittest.TestCase):
     def test_existing_private_pair_builds_and_smokes_before_first_push(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'private'}
         linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
-        records, commands = self.run_publication([repository, *([linked] * 8)])
+        records, commands = self.run_publication([repository, *([linked] * 8), self.head(), linked, linked])
         self.assertEqual(records[-1]['status'], 'succeeded')
+        self.assertEqual(records[-1]['promotion'], {'status': 'promoted', 'tag': 'verified'})
         pushes = [i for i, args in enumerate(commands) if args[:2] == ['docker', 'push']]
-        self.assertEqual(len(pushes), 2)
+        self.assertEqual(len(pushes), 4)
+        # The moving `verified` tag is written only after both immutable
+        # pushes have been pulled back by digest and identity-checked.
+        identity = [i for i, args in enumerate(commands)
+                    if args[:3] == ['docker', 'image', 'inspect'] and '@sha256:' in args[3]]
+        self.assertEqual(len(identity), 2)
+        for index in pushes[2:]:
+            self.assertTrue(commands[index][2].endswith(':verified'))
+            self.assertGreater(index, identity[-1])
+        pushes = pushes[:2]
         self.assertEqual(sum(args[:2] == ['docker', 'build'] for args in commands[:pushes[0]]), 2)
         self.assertEqual(sum(args[:2] == ['docker', 'run'] for args in commands[:pushes[0]]), 2)
         self.assertEqual([row['currentPackage'] for row in records if row['stage'] == 'prepush_pair_metadata'],
@@ -208,8 +226,67 @@ class PublicationBoundaryTests(unittest.TestCase):
             self.assertIn(['docker', 'image', 'inspect', image['immutableReference']], commands)
         effects = json.dumps([args for args in commands if args[:2] in (['docker', 'build'], ['docker', 'push'])])
         for old in ('ledgetop-processing-coordinator:', 'ledgetop-processing-treedar:',
+                    'ledgetop-processing-private-coordinator', 'ledgetop-processing-private-treedar',
                     'ledgetop-processing-orchestrator:', ':latest', '@sha256:'):
             self.assertNotIn(old, effects)
+        for image in records[-1]['images']:
+            self.assertEqual(image['promotion'], 'verified')
+            self.assertEqual(image['verifiedTag'], image['reference'].rsplit(':', 1)[0] + ':verified')
+
+    def head(self, sha=None):
+        return {'commit': {'sha': sha or self.env['GITHUB_SHA']}}
+
+    def test_manual_run_publishes_but_never_moves_verified(self):
+        repository = {'full_name': REPOSITORY, 'visibility': 'private'}
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
+        records, commands = self.run_publication([repository, *([linked] * 8)],
+                                                 env={**self.env, 'GITHUB_EVENT_NAME': 'workflow_dispatch'})
+        self.assertEqual(records[-1]['status'], 'succeeded')
+        self.assertEqual(records[-1]['promotion'], {'status': 'skipped_not_main_push'})
+        self.assertFalse(any(':verified' in ' '.join(args) for args in commands))
+
+    def test_superseded_main_commit_never_moves_verified_backwards(self):
+        repository = {'full_name': REPOSITORY, 'visibility': 'private'}
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
+        records, commands = self.run_publication([repository, *([linked] * 8), self.head('c' * 40)])
+        self.assertEqual(records[-1]['status'], 'succeeded')
+        self.assertEqual(records[-1]['promotion']['status'], 'skipped_superseded')
+        self.assertFalse(any(':verified' in ' '.join(args) for args in commands))
+
+    def test_unreadable_main_head_or_public_package_stops_before_verified_push(self):
+        repository = {'full_name': REPOSITORY, 'visibility': 'private'}
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
+        public = {'visibility': 'public', 'repository': {'full_name': REPOSITORY}}
+        for tail, code in (([None], 'promotion_main_head_unavailable'),
+                           ([self.head(), public], 'promotion_package_not_private')):
+            with self.subTest(code=code):
+                records, commands = self.run_publication([repository, *([linked] * 8), *tail])
+                self.assertEqual(records[-1]['failureCode'], code)
+                self.assertFalse(any(':verified' in ' '.join(args) for args in commands if args[:2] == ['docker', 'push']))
+
+    def test_verified_tag_naming_another_digest_fails_publication(self):
+        repository = {'full_name': REPOSITORY, 'visibility': 'private'}
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
+        records, commands = self.run_publication([repository, *([linked] * 8), self.head(), linked],
+                                                 verified_digest='sha256:' + 'd' * 64)
+        self.assertEqual(records[-1]['failureCode'], 'promotion_digest_unverified')
+        self.assertEqual(records[-1]['status'], 'failed_or_uncertain')
+        self.assertEqual(len([args for args in commands if args[:2] == ['docker', 'push']
+                              and args[2].endswith(':verified')]), 1)
+
+    def test_build_carries_identity_labels_hosts_check(self):
+        repository = {'full_name': REPOSITORY, 'visibility': 'private'}
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
+        records, commands = self.run_publication([repository, *([linked] * 8), self.head(), linked, linked])
+        builds = [args for args in commands if args[:2] == ['docker', 'build']]
+        self.assertEqual(records[-1]['status'], 'succeeded')
+        for key, build in zip(publish_images.PACKAGE_KEYS, builds):
+            text = ' '.join(build)
+            for expected in ('com.ledgetop.processing.package=' + key, 'com.ledgetop.processing.publish-run-id=123',
+                             'com.ledgetop.processing.publish-ref=refs/heads/main',
+                             'com.ledgetop.processing.publish-event=push',
+                             'org.opencontainers.image.revision=' + self.env['GITHUB_SHA']):
+                self.assertIn(expected, text)
 
     def test_pair_recheck_stops_before_first_push_if_either_package_drifted(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'private'}
@@ -301,7 +378,8 @@ class PublicationBoundaryTests(unittest.TestCase):
         self.assertEqual(len([args for args in commands if args[:2] == ['docker', 'push']]), 1)
         records, commands = self.run_publication([repository, linked, linked], fail_smoke=True)
         self.assertEqual(records[-1]['failureCode'], 'smoke_check_failed')
-        self.assertFalse(any(args[:2] == ['docker', 'push'] for args in commands))
+        self.assertNotIn('promotion', records[-1])
+        self.assertFalse(any(args[:2] in (['docker', 'push'], ['docker', 'tag']) for args in commands))
 
 
 if __name__ == '__main__':

@@ -1,8 +1,13 @@
-"""Publish two private pull-test images from main, never deploy them.
+"""Publish two private images from main and mark the verified pair.
 
 Both existing Dockerfiles are built and smoke checked before any push. Unique
 run/attempt tags avoid replacing live tags. A lost push response is recorded as
 uncertain and never automatically retried. Receipts contain no credentials.
+
+After both images are pushed and their remote identity verified, a main push
+whose commit is still the head of main moves each package's `verified` tag to
+that exact digest. Nothing here touches a host: the node-side auto-deploy step
+reads the tag, pulls by digest and updates only through its drain window.
 """
 import hashlib
 import json
@@ -11,12 +16,19 @@ from pathlib import Path
 import re
 import secrets
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 
-REPOSITORY = 'ledgetoptechnologies/LedgeTop-Processing'
-# Fixed namespaces are provisioned and verified before publication.
-PACKAGES = ('ledgetop-processing-private-coordinator', 'ledgetop-processing-private-treedar')
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from processing import release_packages  # noqa: E402
+
+REPOSITORY = release_packages.REPOSITORY
+# Fixed namespaces are provisioned private and verified before publication.
+PACKAGES = tuple(item['name'] for item in release_packages.PACKAGES)
+PACKAGE_KEYS = tuple(item['key'] for item in release_packages.PACKAGES)
+BUILD_ROOTS = tuple(item['buildRoot'] for item in release_packages.PACKAGES)
+VERIFIED_TAG = release_packages.VERIFIED_TAG
 
 
 def context(env):
@@ -94,10 +106,66 @@ def verify_package(state, package, stage):
     private_package(github('/orgs/ledgetoptechnologies/packages/container/' + package))
 
 
+def labels(key):
+    env = os.environ
+    return {release_packages.SOURCE_LABEL: release_packages.SOURCE_URL,
+            release_packages.REVISION_LABEL: env['GITHUB_SHA'],
+            release_packages.PACKAGE_LABEL: key,
+            release_packages.RUN_LABEL: env['GITHUB_RUN_ID'],
+            release_packages.REF_LABEL: env['GITHUB_REF'],
+            release_packages.EVENT_LABEL: env['GITHUB_EVENT_NAME']}
+
+
+def remote_digest(reference):
+    manifest = json.loads(command(['docker', 'buildx', 'imagetools', 'inspect',
+        reference, '--format', '{{json .Manifest}}'], capture=True))
+    digest = manifest.get('digest')
+    if not isinstance(digest, str) or not re.fullmatch('sha256:[0-9a-f]{64}', digest):
+        raise ValueError('remote manifest digest unverified')
+    return digest
+
+
+def promote(state):
+    """Move `verified` to the pair just verified, only from the head of main."""
+    if os.environ.get('GITHUB_EVENT_NAME') != 'push':
+        state['promotion'] = {'status': 'skipped_not_main_push'}
+        receipt(state)
+        return
+    if [image.get('status') for image in state['images']] != ['verified'] * len(PACKAGES):
+        raise ValueError('promotion requires the whole verified pair')
+    state['stage'] = 'promotion_main_head'
+    receipt(state)
+    branch = github('/repos/' + REPOSITORY + '/branches/main')
+    head = branch.get('commit', {}).get('sha') if isinstance(branch, dict) else None
+    if not isinstance(head, str) or not re.fullmatch('[0-9a-f]{40}', head):
+        raise ValueError('main head unavailable')
+    if head != state['sourceCommit']:
+        # A newer main commit has its own run; never point hosts backwards.
+        state['promotion'] = {'status': 'skipped_superseded', 'mainHead': head}
+        receipt(state)
+        return
+    for image in state['images']:
+        verify_package(state, image['package'], 'promotion_package_metadata')
+        verified = image['reference'].rsplit(':', 1)[0] + ':' + VERIFIED_TAG
+        image.update(verifiedTag=verified, promotion='push_response_unconfirmed')
+        state['stage'] = 'promotion_push'
+        receipt(state)
+        command(['docker', 'tag', image['reference'], verified])
+        command(['docker', 'push', verified])
+        state['stage'] = 'promotion_digest'
+        receipt(state)
+        if remote_digest(verified) != image['digest']:
+            raise ValueError('verified tag does not name the verified digest')
+        image['promotion'] = 'verified'
+        receipt(state)
+    state['promotion'] = {'status': 'promoted', 'tag': VERIFIED_TAG}
+    receipt(state)
+
+
 def main():
     tag = context(os.environ)
     state = {'repository': REPOSITORY, 'sourceCommit': os.environ['GITHUB_SHA'],
-             'tag': tag, 'deploysRuntime': False, 'stage': 'preflight', 'images': []}
+             'tag': tag, 'deploysRuntime': False, 'verifiedTag': VERIFIED_TAG, 'stage': 'preflight', 'images': []}
     receipt(state)
     try:
         state.update(stage='preflight_repository_metadata')
@@ -106,13 +174,12 @@ def main():
         state['sourceRepositoryVisibility'] = source_repository(repository)
         for package in PACKAGES:
             verify_package(state, package, 'preflight_package_metadata')
-        for package, build_root in zip(PACKAGES, ('.', 'engines/treedar')):
-            reference = 'ghcr.io/ledgetoptechnologies/' + package + ':' + tag
+        for package, key, build_root in zip(PACKAGES, PACKAGE_KEYS, BUILD_ROOTS):
+            reference = release_packages.REGISTRY + '/' + package + ':' + tag
             state.update(stage='build', currentPackage=package)
             receipt(state)
             command(['docker', 'build', '--platform', 'linux/amd64', '--pull=false',
-                '--label', 'org.opencontainers.image.source=https://github.com/' + REPOSITORY,
-                '--label', 'org.opencontainers.image.revision=' + state['sourceCommit'],
+                *[part for name, value in sorted(labels(key).items()) for part in ('--label', name + '=' + value)],
                 '--tag', reference, build_root])
             item = json.loads(command(['docker', 'image', 'inspect', reference], capture=True))[0]
             if item['Config']['User'] != '10001:10001' or item['Os'] != 'linux' or item['Architecture'] != 'amd64':
@@ -157,11 +224,7 @@ s.shutdown();s.server_close()
             receipt(state)
             state['stage'] = 'postpush_digest'
             receipt(state)
-            manifest = json.loads(command(['docker', 'buildx', 'imagetools', 'inspect',
-                image['reference'], '--format', '{{json .Manifest}}'], capture=True))
-            digest = manifest.get('digest')
-            if not isinstance(digest, str) or not re.fullmatch('sha256:[0-9a-f]{64}', digest):
-                raise ValueError('remote manifest digest unverified')
+            digest = remote_digest(image['reference'])
             image['digest'] = digest
             image['immutableReference'] = image['reference'].rsplit(':', 1)[0] + '@' + digest
             verify_package(state, image['package'], 'postpush_package_metadata')
@@ -169,15 +232,16 @@ s.shutdown();s.server_close()
             receipt(state)
             command(['docker', 'pull', '--platform', 'linux/amd64', image['immutableReference']])
             remote = json.loads(command(['docker', 'image', 'inspect', image['immutableReference']], capture=True))[0]
-            labels = remote['Config'].get('Labels') or {}
+            found = remote['Config'].get('Labels') or {}
+            expected = labels(PACKAGE_KEYS[PACKAGES.index(image['package'])])
             if (remote['Id'] != image['localImageId'] or remote['Os'] != 'linux'
                     or remote['Architecture'] != 'amd64' or remote['Config']['User'] != '10001:10001'
-                    or labels.get('org.opencontainers.image.source') != 'https://github.com/' + REPOSITORY
-                    or labels.get('org.opencontainers.image.revision') != state['sourceCommit']):
+                    or any(found.get(name) != value for name, value in expected.items())):
                 raise ValueError('remote image identity unverified')
             image.update(remoteImageId=remote['Id'], imageIdentityVerified=True,
                          status='verified', visibility='private', linkedRepository=REPOSITORY)
             receipt(state)
+        promote(state)
         state.update(stage='completed', status='succeeded')
         receipt(state)
     except Exception as error:
@@ -185,7 +249,8 @@ s.shutdown();s.server_close()
         if isinstance(error, PackageVerificationError):
             state['failureCode'] = ({'postpush_package_metadata': 'postpush_package_',
                                      'prepush_pair_metadata': 'prepush_package_',
-                                     'prepush_package_metadata': 'prepush_package_'}.get(stage, 'preflight_package_')) + error.code
+                                     'prepush_package_metadata': 'prepush_package_',
+                                     'promotion_package_metadata': 'promotion_package_'}.get(stage, 'preflight_package_')) + error.code
         else:
             state['failureCode'] = {
                 'preflight_repository_metadata': 'preflight_repository_metadata_unavailable',
@@ -199,6 +264,10 @@ s.shutdown();s.server_close()
                 'postpush_package_metadata': 'postpush_package_metadata_unavailable',
                 'build': 'build_or_image_check_failed',
                 'smoke_checks': 'smoke_check_failed',
+                'promotion_main_head': 'promotion_main_head_unavailable',
+                'promotion_package_metadata': 'promotion_package_metadata_unavailable',
+                'promotion_push': 'promotion_push_unconfirmed',
+                'promotion_digest': 'promotion_digest_unverified',
             }.get(stage, 'publication_failed')
         state['status'] = 'failed_or_uncertain'
         receipt(state)

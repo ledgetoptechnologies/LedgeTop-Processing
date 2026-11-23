@@ -1,8 +1,10 @@
-"""Schedule/run one reviewed container update on the installed main node.
+"""Schedule/run one container update on an installed processing node.
 
-Foreground automation only: stage an immutable image first, schedule a plan,
-then supervise `run` until its bounded wait ends. No moving-tag pulls, OS updates,
-process termination or automatic uncertain-operation replay.
+`schedule`/`run`: an operator stages an immutable image, schedules a plan, then
+supervises `run` until its bounded wait ends. `auto-deploy`: the host timer's
+step (ops/auto_deploy.py) pulls the newest verified main image by digest and
+uses the same schedule/run path. Neither runs a moving tag, updates the OS,
+terminates processes or replays an uncertain operation.
 """
 import argparse
 from contextlib import contextmanager
@@ -19,6 +21,7 @@ from processing.container_update import ComposeNode, execute, lock, UpdateError
 from processing.node_gate import NodeGate, GateBusy, GateError as NodeGateError
 from processing.odx_smoke_worker import Client, SmokeError
 from ops.node_ingress import Ingress, GateError, locked, save
+from ops.auto_deploy import auto_deploy, DeployError
 
 
 def private_directory(value):
@@ -112,6 +115,17 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60):
             return {**result, 'composePinUpdateRequired': False, 'ingress': 'open'}
 
 
+def schedule(root, settings, api, operator, target_image, drain_at, not_before, after_job_id=None):
+    node = api.json('GET', '/v1/prototype/nodes/' + settings['nodeId'])['node']
+    receipt_args = SimpleNamespace(project=settings['project'], service=settings['service'],
+        compose_file=str(root / 'compose.json'), node_origin='http://127.0.0.1:13004',
+        docker_engine_id=Ingress(root / 'ingress').config['engineId'], node_port=3000)
+    ComposeNode(receipt_args, root).image(target_image)
+    return operator.json('POST', '/v1/prototype/nodes/' + settings['nodeId'] + '/schedule', {
+        'expectedRevision': node['revision'], 'targetImage': target_image,
+        'drainAt': drain_at, 'notBefore': not_before, 'afterJobId': after_job_id})
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', required=True)
@@ -127,6 +141,9 @@ def main():
     runner.add_argument('--receipt', required=True)
     runner.add_argument('--wait-seconds', type=int, choices=range(0, 86401), default=86400)
     runner.add_argument('--drain-seconds', type=int, choices=range(1, 86401), default=3600)
+    agent = actions.add_parser('auto-deploy', help='host timer step: verified main image through the drain window')
+    agent.add_argument('--wait-seconds', type=int, choices=range(0, 86401), default=3600)
+    agent.add_argument('--drain-seconds', type=int, choices=range(1, 86401), default=3600)
     args = parser.parse_args()
     try:
         root = private_directory(args.root)
@@ -142,22 +159,24 @@ def main():
         if not secret or secret == env['PROCESSING_API_TOKEN']:
             raise GateError('distinct maintenance credential required')
         operator = Client(api.origin, secret)
-        node = api.json('GET', '/v1/prototype/nodes/' + settings['nodeId'])['node']
         if args.action == 'status':
+            node = api.json('GET', '/v1/prototype/nodes/' + settings['nodeId'])['node']
             result = {'node': node, 'ingressState': json.loads((root / 'ingress/state.json').read_text())['state']}
         elif args.action == 'schedule':
-            receipt_args = SimpleNamespace(project=settings['project'], service=settings['service'],
-                compose_file=str(root / 'compose.json'), node_origin='http://127.0.0.1:13004',
-                docker_engine_id=Ingress(root / 'ingress').config['engineId'], node_port=3000)
-            ComposeNode(receipt_args, root).image(args.target_image)
-            result = operator.json('POST', '/v1/prototype/nodes/' + settings['nodeId'] + '/schedule', {
-                'expectedRevision': node['revision'], 'targetImage': args.target_image,
-                'drainAt': args.drain_at, 'notBefore': args.not_before, 'afterJobId': args.after_job_id})
+            result = schedule(root, settings, api, operator, args.target_image, args.drain_at,
+                              args.not_before, args.after_job_id)
+        elif args.action == 'auto-deploy':
+            result = auto_deploy(root, settings, api,
+                schedule=lambda image, drain_at, not_before: schedule(root, settings, api, operator, image, drain_at, not_before),
+                run=lambda receipt, wait, drain: run(root, api, operator, private_directory(receipt), wait, drain),
+                wait_seconds=args.wait_seconds, drain_seconds=args.drain_seconds)
         else:
             result = run(root, api, operator, private_directory(args.receipt), args.wait_seconds, args.drain_seconds)
         print(json.dumps(result, sort_keys=True))
+        if result.get('status') in ('refused', 'stopped'):
+            return 2
         return 1 if result.get('status') == 'failed' else 0
-    except (GateError, NodeGateError, UpdateError, SmokeError, OSError, ValueError, KeyError):
+    except (GateError, NodeGateError, UpdateError, SmokeError, DeployError, OSError, ValueError, KeyError):
         print('Managed maintenance stopped. Inspect private receipt, ingress and coordinator gate; no automatic replay or reopen.')
         return 2
 

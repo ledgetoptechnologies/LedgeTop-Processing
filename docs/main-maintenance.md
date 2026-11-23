@@ -46,7 +46,8 @@ provide the maintenance diagnostics.
 ## Schedule and run
 
 Stage and inspect the intended image separately. Only cached immutable image IDs
-are accepted; this command does not pull a moving tag or decide to upgrade.
+are accepted; `schedule` and `run` never pull or decide to upgrade. Automatic
+upgrades are the separate `auto-deploy` step below, which uses this same path.
 Use the installed host command as `bkoltz`:
 
 ```sh
@@ -88,6 +89,56 @@ the immutable image pin in `compose.json`, independently verifies the private
 backend image/health, and reopens ingress. A failed candidate attempts the
 existing pinned rollback and leaves coordinator admission failed and ingress
 closed for inspection. No OS update or PC reboot is performed.
+
+## Automatic updates
+
+`auto-deploy` makes a verified main merge reach a host without a manual step,
+through the same drain window. It is opt-in per host: add an `autoDeploy`
+object to `maintenance.json`, for example
+`"autoDeploy": {"package": "coordinator", "drainDelaySeconds": 0}`, and run it
+from the host's own timer (for example a systemd user timer every 10 minutes
+starting a oneshot unit):
+
+```sh
+python3 "$ROOT/source/ops/node_maintenance.py"   --root "$ROOT" --credentials "$ROOT/maintenance.env" auto-deploy --wait-seconds 3600
+```
+
+Each pass, in order:
+
+1. If `$ROOT/auto-deploy.hold` exists, it records `paused` and stops before
+   any network or Docker call. `touch` it to hold, delete it to resume. A hold
+   does not cancel a window already scheduled; use the coordinator `cancel`
+   action for that (the agent then records `cancelled` and never retries it).
+2. A failed, held or updating node, or a plan the agent did not create, is left
+   alone (`not_eligible`).
+3. It pulls the package's `verified` tag only to learn its digest, then pulls
+   `repository@sha256:<digest>` with the host's existing read-only registry
+   login and inspects it. The image ID must match the tag's, the digest must be
+   on the pulled image, platform must be linux/amd64, user `10001:10001`, and
+   the labels must name this repository, this package, a 40-hex commit and a
+   publish run. Anything else is `refused`. A non-`push` or non-main label is
+   `ignored`.
+4. If that image is already the pin, `up_to_date`. The running pinned image
+   must itself carry this package's labels: the first adoption of a package on
+   a service is a reviewed manual `schedule`/`run`. The candidate's publish run
+   must be newer than the pin's and than every candidate this host already
+   tried (`highestRunId`), so it never goes backwards or retries a failure
+   (`not_newer`).
+5. It schedules a window (`drainAt` = `notBefore` = now + `drainDelaySeconds`)
+   and calls the normal `run` with a private receipt under
+   `$ROOT/auto-deploy/receipts/`. A `waiting` result resumes the same plan and
+   receipt on the next pass without rescheduling. A failed candidate is rolled
+   back by `run` exactly as above and recorded in `state.json` as `failed`.
+
+`$ROOT/auto-deploy/state.json` keeps `inProgress`, `applied`, `failed`,
+`cancelled` and `highestRunId`; `last-run.json` records every pass. A flock on
+`agent.lock` keeps timer passes from overlapping. The exit status is 0 for
+normal outcomes, 1 for a failed (rolled back) update and 2 for `refused` or
+a stop that needs inspection; existing receipts are never replayed.
+
+The runner's health and idle checks are the ODM-family engine checks above, so
+a package is only auto-deployed to a service whose current pin is already that
+package and passed this runner once.
 
 ## Recovery limits
 
