@@ -187,7 +187,7 @@ def run_service(root, settings, kind, api, operator, receipt, wait_seconds, *, e
         result = execute(api, operator, adapter, node_id, receipt,
             wait_seconds=max(0, deadline - time.monotonic()), health_seconds=adapter.health_seconds,
             expected_plan_id=node['planId'], expected_target=node['targetImage'])
-        if result['status'] not in ('succeeded', 'failed'):
+        if result['status'] in ('waiting', 'not_eligible'):
             # Still waiting for the adapter's idle proof: nothing was reserved.
             return result
         state = {'stage': 'update_returned', 'kind': kind, 'planId': node['planId'],

@@ -28,8 +28,10 @@ Kinds:
   the reservation across the coordinator's own restart so finish still works.
   Healthy means the exact container runs the target image, Docker health is
   present and healthy, `/healthz` answers ok, the authority ID is unchanged,
-  the reservation and fence survived the restart, and a new image carries this
-  repository's `coordinator` package labels. A coordinator without the
+  exactly this update's node/plan/revision reservation survived the restart,
+  and a new image carries this repository's `coordinator` package labels. If
+  the rollback is not proven healthy the runner stops without `finish`, so the
+  reservation and global fence stay for an operator. A coordinator without the
   unsettled API cannot update itself and is refused.
 - `treedar`: the TreeDar CLI image, run on demand from a Compose service that
   is never left running. Idle means no running container of that service or of
@@ -120,6 +122,8 @@ class CoordinatorService(_PackageImage, ComposeNode):
     health_seconds = 120
     # Sent with `begin`: fence all claims and survive this service's restart.
     begin_fields = {'selfUpdate': True}
+    # An unproven rollback keeps the reservation and fence for an operator.
+    finish_requires_rollback_health = True
 
     def __init__(self, args, work, *, api=None, authority=None, baseline=None):
         # Deliberately not ComposeNode.__init__: no engine token or engine kind.
@@ -130,6 +134,24 @@ class CoordinatorService(_PackageImage, ComposeNode):
         self.node = api
         self.api = api
         self.authority, self.baseline = authority, baseline
+        self.reservation = None
+
+    def bind_reservation(self, *, node_id, plan_id, target, revision):
+        """Called by the runner right after `begin` succeeded."""
+        self.reservation = {'nodeId': node_id, 'planId': plan_id, 'targetImage': target, 'revision': revision}
+
+    def reservation_held(self):
+        """The restarted coordinator still holds exactly this reservation."""
+        if self.reservation is None:
+            return False
+        summary = self.unsettled()
+        if summary['selfUpdates'] != [self.reservation]:
+            return False
+        node = self.api.json('GET', '/v1/prototype/nodes/' + self.reservation['nodeId']).get('node')
+        return (isinstance(node, dict) and node.get('state') == 'updating'
+                and node.get('planId') == self.reservation['planId']
+                and node.get('targetImage') == self.reservation['targetImage']
+                and node.get('revision') == self.reservation['revision'])
 
     def unsettled(self):
         """The coordinator's bounded unsettled-job summary.
@@ -146,7 +168,9 @@ class CoordinatorService(_PackageImage, ComposeNode):
         jobs = summary.get('jobs') if isinstance(summary, dict) else None
         if (summary.get('schemaVersion') != 1 or not isinstance(jobs, dict)
                 or any(type(jobs.get(state)) is not int or jobs[state] < 0 for state in UNSETTLED_JOB_STATES)
-                or type(summary.get('selfUpdateFence')) is not bool):
+                or type(summary.get('selfUpdateFence')) is not bool
+                or not isinstance(summary.get('selfUpdates'), list)
+                or summary['selfUpdateFence'] != bool(summary['selfUpdates'])):
             raise UpdateError('unreadable coordinator unsettled-job summary')
         return summary
 
@@ -181,14 +205,13 @@ class CoordinatorService(_PackageImage, ComposeNode):
         return True
 
     def healthy(self, image):
-        # The restarted coordinator must still hold this update's reservation
-        # and fence, or finish would be refused.
-        return (self.serving(image) and self.unsettled()['selfUpdateFence'] is True
-                and self.labelled_or_baseline(image))
+        # The restarted coordinator must still hold exactly this update's
+        # node/plan reservation (and so its fence), or finish would be refused.
+        return self.serving(image) and self.reservation_held() and self.labelled_or_baseline(image)
 
     def adoptable(self, image):
         # Also proves the running coordinator can survive its own update.
-        return self.serving(image) and self.unsettled()['selfUpdateFence'] is False
+        return self.serving(image) and self.unsettled()['selfUpdates'] == []
 
 
 class TreeDarImage(_PackageImage, ComposeNode):

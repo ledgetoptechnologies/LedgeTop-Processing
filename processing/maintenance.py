@@ -94,8 +94,11 @@ class Maintenance:
             for row in db.execute("SELECT status,COUNT(*) AS n FROM jobs WHERE status IN (?,?,?) GROUP BY status",
                                   UNSETTLED_JOB_STATES):
                 counts[row['status']] = row['n']
+            reservations = [{'nodeId': row['id'], 'planId': row['plan_id'], 'targetImage': row['target_image'],
+                             'revision': row['revision']} for row in db.execute(
+                "SELECT id,plan_id,target_image,revision FROM nodes WHERE state='updating' AND self_update=1 ORDER BY id")]
             return {'schemaVersion': 1, 'jobs': counts, 'unsettledJobs': sum(counts.values()),
-                    'selfUpdateFence': self._self_update_fenced(db)}
+                    'selfUpdateFence': bool(reservations), 'selfUpdates': reservations}
 
     def _known_node(self, identifier):
         self.slug(identifier)
@@ -336,6 +339,9 @@ class Maintenance:
                 raise Conflict("node is not ready for its update")
             if db.execute("SELECT 1 FROM jobs WHERE node_id=? AND status IN ('running','held')", (identifier,)).fetchone():
                 raise Conflict("node still owns running or held work")
+            if self_update and self._self_update_fenced(db):
+                # One coordinator, one self-update reservation at a time.
+                raise Conflict("another coordinator self-update is reserved")
             if self_update and db.execute("SELECT 1 FROM jobs WHERE status IN (?,?,?) LIMIT 1",
                                           UNSETTLED_JOB_STATES).fetchone():
                 raise Conflict("coordinator still owns unsettled work")
@@ -368,6 +374,12 @@ class Maintenance:
                 raise Conflict("maintenance completion differs")
             if row["state"] != "updating":
                 raise Conflict("maintenance is held for operator inspection")
+            if (row["self_update"] and payload["status"] == "failed"
+                    and payload["result"].get("rollbackHealthy") is not True
+                    and payload["result"].get("rollbackPerformed") is not False):
+                # Lifting the global fence needs a coordinator proven restored
+                # (or never changed). Otherwise an operator holds it explicitly.
+                raise Conflict("self-update rollback health unproven; operator recovery required")
             state = "active" if payload["status"] == "succeeded" else "failed"
             db.execute("""UPDATE nodes SET state=?,revision=revision+1,result=?,finish_status=?,
                 self_update=0 WHERE id=?""", (state, result, payload["status"], identifier))

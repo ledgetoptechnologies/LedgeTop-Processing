@@ -181,11 +181,16 @@ class Coordinated(unittest.TestCase):
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.restarts = getattr(self, 'restarts', 0) + 1
 
-    def reserve(self):
+    def reserve(self, adapter=None):
+        """Reserve a self-update on cluster and bind `adapter` to it."""
         node = self.plan()
-        return self.operator.json('POST', '/v1/prototype/nodes/cluster/begin',
-                                  {'planId': node['planId'], 'expectedRevision': node['revision'],
-                                   'selfUpdate': True})
+        begun = self.operator.json('POST', '/v1/prototype/nodes/cluster/begin',
+                                   {'planId': node['planId'], 'expectedRevision': node['revision'],
+                                    'selfUpdate': True})
+        if adapter is not None:
+            adapter.bind_reservation(node_id='cluster', plan_id=node['planId'], target=NEW,
+                                     revision=begun['node']['revision'])
+        return begun
 
     def plan(self, future=False):
         stamp = datetime.now(timezone.utc) + timedelta(seconds=60 if future else -1)
@@ -264,6 +269,48 @@ class SelfUpdateQueueTests(unittest.TestCase):
             self.queue.begin_node_update('cluster', request)
         sql(self.queue.path, ("UPDATE jobs SET status='cancelled' WHERE id=?", (job['id'],)))
         self.assertEqual(self.queue.begin_node_update('cluster', request)['node']['state'], 'updating')
+
+    def test_second_self_update_reservation_is_refused(self):
+        self.begin(selfUpdate=True)
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        other = self.queue.schedule_node('main', {
+            'expectedRevision': self.queue.get_node('main')['revision'], 'drainAt': stamp,
+            'notBefore': stamp, 'afterJobId': None, 'targetImage': NEW})
+        with self.assertRaisesRegex(Conflict, 'another coordinator self-update'):
+            self.queue.begin_node_update('main', {'planId': other['planId'], 'expectedRevision': other['revision'],
+                                                  'selfUpdate': True})
+        self.assertEqual(self.queue.get_node('main')['state'], 'draining')
+        self.assertEqual(len(self.queue.unsettled_summary()['selfUpdates']), 1)
+
+    def test_failed_self_update_finish_needs_proven_restoration(self):
+        begun = self.begin(selfUpdate=True)
+        node = self.queue.get_node('cluster')
+        claim = {'planId': node['planId'], 'updateToken': begun['updateToken'], 'status': 'failed'}
+        for result in ({'healthy': False}, {'healthy': False, 'rollbackHealthy': False},
+                       {'healthy': False, 'rollbackHealthy': 'true'}):
+            with self.assertRaisesRegex(Conflict, 'rollback health unproven'):
+                self.queue.finish_node_update('cluster', {**claim, 'result': result})
+        self.assertTrue(self.queue.unsettled_summary()['selfUpdateFence'])
+        done = self.queue.finish_node_update('cluster', {**claim, 'result': {
+            'healthy': False, 'rollbackHealthy': True, 'restoredImage': OLD}})
+        self.assertEqual(done['state'], 'failed')
+        self.assertFalse(self.queue.unsettled_summary()['selfUpdateFence'])
+
+    def test_unchanged_self_update_may_finish_failed(self):
+        begun = self.begin(selfUpdate=True)
+        node = self.queue.get_node('cluster')
+        done = self.queue.finish_node_update('cluster', {
+            'planId': node['planId'], 'updateToken': begun['updateToken'], 'status': 'failed',
+            'result': {'healthy': False, 'rollbackPerformed': False, 'reason': 'validation_changed_before_mutation'}})
+        self.assertEqual(done['state'], 'failed')
+
+    def test_engine_failed_finish_is_unchanged(self):
+        begun = self.begin()
+        node = self.queue.get_node('cluster')
+        done = self.queue.finish_node_update('cluster', {
+            'planId': node['planId'], 'updateToken': begun['updateToken'], 'status': 'failed',
+            'result': {'healthy': False, 'rollbackHealthy': False}})
+        self.assertEqual(done['state'], 'failed')
 
     def test_self_update_flag_must_be_true(self):
         stamp = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
@@ -348,6 +395,134 @@ class SchemaCompatibilityTests(unittest.TestCase):
         self.assertEqual((column[3], column[4]), (1, '0'))  # NOT NULL DEFAULT 0
 
 
+class DirectCoordinator:
+    """The prototype API surface `execute` uses, answered by the queue itself."""
+    origin = 'http://127.0.0.1:18080'
+
+    def __init__(self, queue):
+        self.queue = queue
+
+    def json(self, method, path, payload=None):
+        parts = path.split('/')
+        if method == 'GET' and path == '/v1/prototype/jobs':
+            return {'jobs': self.queue.list()}
+        if method == 'GET' and len(parts) == 5 and parts[3] == 'nodes':
+            return {'node': self.queue.get_node(parts[4])}
+        if method == 'POST' and parts[-1] == 'begin':
+            return self.queue.begin_node_update(parts[4], payload)
+        if method == 'POST' and parts[-1] == 'finish':
+            return {'node': self.queue.finish_node_update(parts[4], payload)}
+        raise AssertionError('unexpected coordinator call ' + method + ' ' + path)
+
+
+class StoppedSelfUpdateAdapter:
+    """A coordinator whose candidate and rollback both stay unhealthy."""
+    begin_fields = {'selfUpdate': True}
+    finish_requires_rollback_health = True
+
+    def __init__(self, during_swap):
+        self.current, self.during_swap, self.calls = OLD, during_swap, []
+
+    def inspect(self):
+        return {'Image': self.current}
+
+    def idle(self):
+        return True
+
+    def image(self, image):
+        pass
+
+    def prepare(self, image):
+        pass
+
+    def replace(self, image):
+        self.calls.append(image)
+        self.current = image
+        if image == NEW:
+            self.during_swap()
+
+    def healthy(self, image):
+        return False
+
+
+class ReferenceClaimFenceTests(unittest.TestCase):
+    """Reference claims honour the self-update fence, including after an
+    unproven rollback that leaves the reservation for an operator. The hold at
+    the end changes only the updating node, so the successful claim after it
+    shows the fence was what refused."""
+
+    def setUp(self):
+        from processing.reference_control import ReferenceControlAPI
+        from processing.reference_http import create_reference_http_server
+        from processing.reference_store import ReferenceStore, PROFILE
+        from tests.test_reference_http import STAGING, WORKER
+        self.directory = tempfile.TemporaryDirectory()
+        self.queue = prototype.Queue(self.directory.name, node_ids=('cluster', 'main'))
+        self.queue.allowed_profiles.add(PROFILE)
+        self.store = ReferenceStore(self.queue)
+        self.fixture = json.loads((Path(__file__).resolve().parents[1] /
+                                   'contracts/reference-v1.contract.json').read_text())
+        self.assertEqual(self.store._required_node(self.fixture['submission']), 'cluster')
+        api = ReferenceControlAPI(self.store, viewer_bearers={STAGING: 'staging'},
+            worker_bearers={WORKER: dict(node_id='cluster', worker_id='worker', worker_instance_id='instance')},
+            capability_fingerprint=self.fixture['capabilities']['capabilityFingerprint'],
+            options_fingerprint=self.fixture['capabilities']['engines']['odm']['optionsFingerprint'])
+        self.server = create_reference_http_server(api, request_timeout=0.2)
+        threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': 0.02}, daemon=True).start()
+        self.staging = STAGING
+        self.work = Path(self.directory.name) / 'receipt'
+        self.work.mkdir()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.queue.close()
+        self.directory.cleanup()
+
+    def submit_reference(self):
+        import http.client
+        connection = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        connection.request('POST', '/ltds/v1/jobs', body=json.dumps(self.fixture['submission']).encode(),
+                           headers={'Authorization': 'Bearer ' + self.staging})
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+        self.assertIn(response.status, (200, 201), body)
+        return body['jobId']
+
+    def reference_claim(self, job_id, request_id):
+        return self.store.claim(job_id, node_id='cluster', worker_id='worker',
+                                worker_instance_id='instance', claim_request_id=request_id)
+
+    def test_reference_and_prototype_claims_refuse_until_an_operator_releases(self):
+        jobs = []
+
+        def during_swap():
+            jobs.append(self.submit_reference())
+            self.assertIsNone(self.reference_claim(jobs[0], 'claim-during-swap'))
+        stamp = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        self.queue.schedule_node('main', {'expectedRevision': self.queue.get_node('main')['revision'],
+                                          'drainAt': stamp, 'notBefore': stamp, 'afterJobId': None,
+                                          'targetImage': NEW})
+        coordinator = DirectCoordinator(self.queue)
+        adapter = StoppedSelfUpdateAdapter(during_swap)
+        result = execute(coordinator, coordinator, adapter, 'main', self.work, health_seconds=0)
+        self.assertEqual((result['status'], result['reason']), ('stopped', 'rollback_unhealthy'))
+        self.assertEqual(adapter.calls, [NEW, OLD])
+        node = self.queue.get_node('main')
+        self.assertEqual(node['state'], 'updating')
+        # Cluster itself is active: only the coordinator-wide fence refuses.
+        self.assertEqual(self.queue.get_node('cluster')['state'], 'active')
+        # (Queue.claim after the same stop is covered by
+        # test_unhealthy_rollback_with_a_reachable_api_keeps_the_fence.)
+        self.assertIsNone(self.reference_claim(jobs[0], 'claim-after-stop'))
+        # Explicit operator recovery lifts the fence; the queued work proceeds.
+        self.queue.hold_node('main', {'planId': node['planId'], 'expectedRevision': node['revision'],
+                                      'note': 'coordinator inspected and restored by hand'})
+        claimed = self.reference_claim(jobs[0], 'claim-after-hold')
+        self.assertIsNotNone(claimed)
+
+
 class KindTests(unittest.TestCase):
     def test_missing_kind_is_the_unchanged_odx_engine(self):
         self.assertEqual(service_adapters.service_kind({}), 'odx')
@@ -383,8 +558,10 @@ class KindTests(unittest.TestCase):
 
 
 def summary(queued=0, running=0, held=0, fence=False):
+    reservations = [{'nodeId': 'cluster', 'planId': str(uuid.UUID(int=1)), 'targetImage': NEW,
+                     'revision': 3}] if fence else []
     return {'schemaVersion': 1, 'jobs': {'queued': queued, 'running': running, 'held': held},
-            'unsettledJobs': queued + running + held, 'selfUpdateFence': fence}
+            'unsettledJobs': queued + running + held, 'selfUpdateFence': fence, 'selfUpdates': reservations}
 
 
 class CoordinatorAdapterTests(Coordinated):
@@ -408,7 +585,8 @@ class CoordinatorAdapterTests(Coordinated):
         adapter = self.adapter()
         adapter.api = MagicMock()
         for value in ({}, {**summary(), 'schemaVersion': 2}, {**summary(), 'jobs': {'queued': '0'}},
-                      {**summary(), 'selfUpdateFence': None}):
+                      {**summary(), 'selfUpdateFence': None}, {**summary(), 'selfUpdates': None},
+                      {**summary(), 'selfUpdateFence': True}):
             adapter.api.json.return_value = value
             with self.assertRaises(UpdateError):
                 adapter.idle()
@@ -445,7 +623,7 @@ class CoordinatorAdapterTests(Coordinated):
         adapter = self.adapter()
         self.docker.current = NEW
         self.assertFalse(adapter.healthy(NEW))  # no reservation fence yet
-        self.reserve()
+        self.reserve(adapter)
         self.assertTrue(adapter.healthy(NEW))
         self.assertFalse(adapter.healthy(OLD))  # a different image is running
         self.docker.health[NEW] = 'starting'
@@ -458,14 +636,35 @@ class CoordinatorAdapterTests(Coordinated):
         self.docker.images[NEW] = labels('coordinator', source='https://example.invalid/other')
         self.assertFalse(adapter.healthy(NEW))
         self.docker.images[NEW] = labels('coordinator')
-        self.assertFalse(self.adapter(authority=str(uuid.UUID(int=9))).healthy(NEW))
-        self.assertFalse(self.adapter(authority=None).healthy(NEW))
+        for other in (self.adapter(authority=str(uuid.UUID(int=9))), self.adapter(authority=None)):
+            other.reservation = adapter.reservation
+            self.assertFalse(other.healthy(NEW))
+
+    def test_health_is_bound_to_the_exact_reservation(self):
+        adapter = self.adapter()
+        self.docker.current = NEW
+        self.reserve(adapter)
+        bound = dict(adapter.reservation)
+        self.assertTrue(adapter.healthy(NEW))
+        unbound = self.adapter()  # never reserved: some fence existing is not enough
+        self.assertFalse(unbound.healthy(NEW))
+        for change in ({'planId': str(uuid.UUID(int=5))}, {'revision': bound['revision'] + 1},
+                       {'nodeId': 'main'}, {'targetImage': OLD}):
+            adapter.reservation = {**bound, **change}
+            self.assertFalse(adapter.healthy(NEW), change)
+        # Once an operator holds it, it is no longer this reservation.
+        adapter.reservation = bound
+        node = self.queue.get_node('cluster')
+        self.operator.json('POST', '/v1/prototype/nodes/cluster/hold',
+                           {'planId': node['planId'], 'expectedRevision': node['revision'], 'note': 'inspect'})
+        self.assertFalse(adapter.healthy(NEW))
 
     def test_rollback_target_needs_no_labels(self):
         # The old pin may be an adopted, unlabelled image.
         self.assertEqual(self.docker.images[OLD], {})
-        self.reserve()
-        self.assertTrue(self.adapter().healthy(OLD))
+        adapter = self.adapter()
+        self.reserve(adapter)
+        self.assertTrue(adapter.healthy(OLD))
 
     def test_adoptable_needs_the_self_update_api_and_no_open_update(self):
         adapter = self.adapter()
@@ -526,9 +725,39 @@ class CoordinatorAdapterTests(Coordinated):
         self.docker.on_up = self.restart
         adapter = self.adapter()
         adapter.begin_fields = {}
-        with self.assertRaises(HTTPRefused):
-            self.update(adapter)
+        result = self.update(adapter)
+        # Neither image can prove the reservation after the restart.
+        self.assertEqual((result['status'], result['reason']), ('stopped', 'rollback_unhealthy'))
         self.assertEqual(self.queue.get_node('cluster')['state'], 'held')
+
+    def test_unhealthy_rollback_with_a_reachable_api_keeps_the_fence(self):
+        self.plan()
+        self.docker.on_up = self.restart
+        self.docker.health = {NEW: 'unhealthy', OLD: 'unhealthy'}
+        result = self.update(self.adapter())
+        self.assertEqual((result['status'], result['reason'], result['rollbackHealthy']),
+                         ('stopped', 'rollback_unhealthy', False))
+        self.assertEqual(self.restarts, 2)
+        self.assertEqual(self.docker.current, OLD)
+        # No finish: the reservation and global fence remain for an operator.
+        node = self.queue.get_node('cluster')
+        self.assertEqual(node['state'], 'updating')
+        unsettled = self.api.json('GET', '/v1/prototype/unsettled')
+        self.assertTrue(unsettled['selfUpdateFence'])
+        self.assertEqual([r['planId'] for r in unsettled['selfUpdates']], [node['planId']])
+        receipt = json.loads((self.work / 'update.json').read_text())
+        self.assertEqual((receipt['stage'], receipt['status']), ('rollback_unhealthy', 'stopped'))
+        self.submit('waiting-for-recovery')
+        self.assertIsNone(self.queue.claim({'workerId': 'w', 'nodeId': 'main'}))
+        # The coordinator itself also refuses an unproven failed finish.
+        with self.assertRaises(HTTPRefused):
+            self.operator.json('POST', '/v1/prototype/nodes/cluster/finish', {
+                'planId': node['planId'], 'updateToken': receipt['updateToken'], 'status': 'failed',
+                'result': {'healthy': False, 'rollbackHealthy': False, 'restoredImage': OLD}})
+        self.assertTrue(self.api.json('GET', '/v1/prototype/unsettled')['selfUpdateFence'])
+        # Never replayed: the receipt blocks another run.
+        with self.assertRaises(UpdateError):
+            self.update(self.adapter())
 
     def test_no_job_is_claimed_anywhere_between_reservation_and_finish(self):
         self.plan()
@@ -698,6 +927,16 @@ class ServiceRunnerTests(Coordinated):
         self.assertEqual(self.run_service()['status'], 'failed')
         self.assertEqual(self.pin(), OLD)
         self.assertEqual(self.docker.current, OLD)
+
+    def test_unproven_rollback_stops_without_finish_and_keeps_the_pin(self):
+        self.plan()
+        self.docker.health = {NEW: 'unhealthy', OLD: 'unhealthy'}
+        result = self.run_service()
+        self.assertEqual((result['status'], result['reason']), ('stopped', 'rollback_unhealthy'))
+        self.assertEqual(self.pin(), OLD)
+        receipt = json.loads((self.work / 'managed-update.json').read_text())
+        self.assertEqual((receipt['stage'], receipt['result']['status']), ('update_returned', 'stopped'))
+        self.assertEqual(self.queue.get_node('cluster')['state'], 'updating')
 
     def test_waiting_writes_no_receipt_so_the_next_pass_resumes(self):
         self.plan()

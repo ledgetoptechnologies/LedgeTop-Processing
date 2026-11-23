@@ -223,12 +223,22 @@ therefore reserves with `begin` and `"selfUpdate": true`, which:
   job) while that node is `updating`. Jobs submitted meanwhile stay `queued`
   and are claimable after `finish`, or after an operator `hold`, which also
   lifts the fence. So no job can start between the idle proof and `compose
-  up`, and the restart has no running job to hold.
+  up`, and the restart has no running job to hold;
+- is refused (409) while another self-update reservation exists.
 
-After the swap, health requires the reservation and fence to still be present.
+After the swap, health requires exactly this update's reservation (node, plan,
+target and reserved revision) to still be the only self-update reservation.
+A failed `finish` of a self-update is accepted only with `rollbackHealthy:
+true` (or `rollbackPerformed: false`, nothing was changed). When the rollback
+is not proven healthy, the runner does not call `finish`: it returns
+`stopped` (`rollback_unhealthy`), the receipt stays at `rollback_unhealthy`,
+and the node stays `updating` with the fence up, so no node claims work
+against an unresolved coordinator. An operator inspects the coordinator,
+then uses `hold` (which lifts the fence) and the existing recovery path.
 `GET /v1/prototype/unsettled` (observer token) returns
 `{"schemaVersion": 1, "jobs": {"queued", "running", "held"}, "unsettledJobs",
-"selfUpdateFence"}`, a bounded answer independent of job history size.
+"selfUpdateFence", "selfUpdates": [{"nodeId", "planId", "targetImage",
+"revision"}]}`, a bounded answer independent of job history size.
 
 A coordinator image without this API (earlier than this change) cannot survive
 its own update and is refused by the idle check and by `adopt`. Install the
