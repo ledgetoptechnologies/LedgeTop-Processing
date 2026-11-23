@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "qualifiedRuntimeCommit": "07c2e02991dd6eef7c278272743d1e827f390b13",
+  "sourceArchiveSha256": "8855a3d864c4fcb08f74ef4b86f64347982696d7d93277ca8b3dbb834cf29100",
+  "changedExecutingFile": "ops/combined_main_retention.py",
+  "changedExecutingFileSha256": "9302ff0b1a2786c12aa94c6269e915025fc0b8823e2f9875ec3f21f0c912d594",
+  "otherExecutingPythonFiles": 51,
+  "otherExecutingFilesExactPriorQualifiedLf": true,
+  "mainPcSuite": {
+    "runtimeCommit": "07c2e02991dd6eef7c278272743d1e827f390b13",
+    "sourceArchiveSha256": "8855a3d864c4fcb08f74ef4b86f64347982696d7d93277ca8b3dbb834cf29100",
+    "executionBytes": "Canonical Git LF52files:51exactprior9efLF map; only combined helper changed to9302ff0b",
+    "cases": 135,
+    "passed": 130,
+    "expectedSkips": 5,
+    "seconds": 1.736,
+    "exitCode": 0,
+    "oom": false,
+    "outputSha256": "9ce20ff2490b0abf1676500bee59a928173d320ba1913dfc64ebb56dd103158c",
+    "containerId": "805dae941dd486da8f95d7735fd62557047b74992b7c9549606f61fd905873bb",
+    "ownedContainerRemoved": true,
+    "nonceAbsent": true,
+    "observer": "Root actual main-PC qualification report; author did not execute suite",
+    "independentSourceReview": "PASS mount-order-only fingerprint fix"
+  },
+  "observerMountSerialization": "canonical-full-records-sorted-v1: sort complete mount dictionaries by canonical JSON bytes, preserving all fields and multiplicity; SHA256 canonical JSON array",
+  "installed": false,
+  "liveAcceptance": false,
+  "draftQualificationApproved": false
+}

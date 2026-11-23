@@ -1,0 +1,321 @@
+{
+  "schemaVersion": 1,
+  "draft": true,
+  "passed": false,
+  "runtimeCommit": "9022b3f9a467590c8f9a6639c8aa9eaed7941178",
+  "sourceHashes": {
+    "ops/combined_main_retention.py": "8eba25883552355f1bc7f6a837534ccb11fa7bc6bbab13702c547c869a3a156f",
+    "ops/early_intermediate_cleanup.py": "2bacf32ddaf44ca9e2816e1f8d9a862f0cc98b3345d272143067239b339da89e",
+    "ops/node_ingress.py": "4c51c04e09e7f8e211b4099c5d28ee4208298c05652a6a5f392444a41a37e853",
+    "ops/node_maintenance.py": "f8e2449918dcb6b460d94991ad5729891fa9e4a0b338a125663aecba62d02ab8",
+    "ops/processingctl.py": "71189f1653a60dc8f06e4fc59ee52cb25b9a7939ab0349fac8d007c4699ba0cf",
+    "ops/qualify_retained_small_engine_swap.py": "954ab922932a04b44fe0796753f137e5ff615cafe77f3a7fa63a4f12ab6398f2",
+    "ops/retained_main_engine_swap.py": "781eb3d5515d0fb0bb27352425d863f6b5e2792e5d9c84f5ca229d79c008de59",
+    "ops/retained_small_engine_swap.py": "1cad9575bfe86647b7db0ccb55266823450878b6eabb009ad6af9b20f7b634bf",
+    "processing/__init__.py": "f0c657d9911e3fff1b99b90e9a364e0d1b237ca8ceea939897ffc37c4931bb9a",
+    "processing/app.py": "405ec39c6c527f074bd7d8804a839b1703195a968096d88d52f2853621d694a4",
+    "processing/config.py": "f15111f8959d5bdc6fcd2a188e573020bb8796283b2e5c861a0bbaca34348cdb",
+    "processing/container_update.py": "e179e72ae607d8bf8e42404fa36069103a86f2785aa145ffdec6a4468efc0e29",
+    "processing/engine_output.py": "f721a72e726859d502eba5bce9ea9ac2380de02e2adc97a25ada80827501d703",
+    "processing/intermediate_cleanup.py": "cc34ceb181170ec2292fd68ce5aae622ff4f1fb72ce8085321e44f961cda2ef1",
+    "processing/intermediate_dependencies.py": "cc1ee27821ac69754ad4b73c37add466fb1b7f0223794159492ef516dfeaa925",
+    "processing/intermediate_mounts.py": "7628e7e83b4187e1d354195bbdac2af65eb4e4777fa973161beeab7ebb647f3a",
+    "processing/intermediate_pdf.py": "7ef2d9f2110f2a2c2bc4487163613acd6327808faeaccb7ee97c880cd13b2be2",
+    "processing/maintenance.py": "3db441879818e08a0009b052cee678d0bfad5e418be57682dc559a0c57e0e85c",
+    "processing/node_gate.py": "b40ef1f4548ce1a2cf6363b863724717e72dd271f9e551d43e1c2c5a6b7bb179",
+    "processing/odx_smoke_worker.py": "6db916ad710bbde2533c7649a5b7c65564a64a74f027ff994864f45848e193e1",
+    "processing/opensplat_trial.py": "1cfb8dcc0646f62e0110467ae39a0f14dc8fb16869e9acb947f52625ae3f5c55",
+    "processing/options.py": "1f52806917a9d99e2dfae044103e52e7c669f8c7e5cf79bf58f5bbe8792078bb",
+    "processing/policy.py": "75a4841e6ce4ccbb694bb40a241a0367971ac82c11a1639e1875a1228f7f5076",
+    "processing/prototype.py": "5cefbc7ba3e70be59666edf6a40de091265aff30c3c6cfba9d96bb2915f85a76",
+    "processing/provider.py": "6296d7142eef0f6811cfb62dcf2ec7c228c4dbc1fd2466db04b3002bb8c52d23",
+    "processing/reference_api.py": "51e2dc34a805b1d22b0c93b6cd8b220ea4aa5eed4ea00aa12e0fa86178c0f9fe",
+    "processing/reference_binary.py": "2237b8fa17c6b1612e6c680c1d9b02ad30517361baa75d62f8f2ed2edf79a40c",
+    "processing/reference_control.py": "6eececc5652c7c4ac17c916b5ba7413a82241bf87069a232194e1c8a654a7455",
+    "processing/reference_delivery.py": "5aeca43000ff3597b4c44f177fa1323e2b815cbe37b361b9dd77ea495cb74981",
+    "processing/reference_failure.py": "33a107e5557de33413743d22f01f53fb9522a7b62fa9368cdf9e3d5651b7c511",
+    "processing/reference_http.py": "b9866a36be62c57f5521a453dfd3516696054970b489dcd371f9b2d685e224a0",
+    "processing/reference_parent_guard.py": "fa745a94a19aed413a6ebd0dc509838d72edc1011ce8203b95460a277141a24c",
+    "processing/reference_pipeline.py": "cd1bebe197d6c0e0ce6d2a58cb50fba6c01251bcbdee12e45f94b668ca9941af",
+    "processing/reference_protocol.py": "facc66dac8ed5471c0da5debad98c19d4d2eb619f6be731b706dfeb486ef961d",
+    "processing/reference_recovery.py": "3a33d565e9d5b2ba1f1947e5bfd2f49fd252299594182aac48d74c9058913a33",
+    "processing/reference_result_proxy.py": "14eb1d4df05f91bb5461d46f1cf5a5185bfee236dc1f6386790e54c51eedd4a7",
+    "processing/reference_runtime.py": "2371a9ed13561812d7ee5aad0600fee4abe49f862f4fa79cbe36675e4cf25db6",
+    "processing/reference_sender.py": "299bae3a4c68c3af6d3142e5e0769e9e55dccfd821d760c7248c3d621f945b33",
+    "processing/reference_store.py": "f3f5a44f83f17d141a46c457f123a5c0f46df2d0153f639f760de9e8d260b27d",
+    "processing/reference_terminal.py": "72b61696ab76053dce1f847f0a21e9b04f5e3e3954bcd48305b3d2f4e0f08319",
+    "processing/reference_tls.py": "7e1f062afcf50b6b1f2647350976490d46f66e3cf5166b00688641f82449b612",
+    "processing/reference_transfer.py": "a066052c82d67bdfba53e96cfea70bbb6cedc6c3097d57aed7c82b7e11a4fc4b",
+    "processing/reference_worker_api.py": "8a105519a956a1b034a9d120e6142cac7c58f08ef05c0a83422a8b198b14d483",
+    "processing/reference_worker_recovery.py": "63df271ab3a0481f1e0304dbe2681c3355f82f195bb4574589aaa8a2d690012a",
+    "processing/scratch_policy.py": "6010bc7015f84b415560e20adcf32d766eecf231b7fe92f830cdbfffa5431221",
+    "processing/treedar_admission.py": "3341911ff66b94ea395dba58f26b944feb81f4f44ed514730fe5186c0bb9c6e6",
+    "processing/viewer_http.py": "2952d560adc899d92852d0409af57dfd4cbafbd4968b233d5f107d5eb747a7c1",
+    "processing/viewer_service.py": "4d8b293b774796de81a32a0029c0373d00892b76b4e7c87ebc860cdb3657489c",
+    "processing/viewer_tasks.py": "d1b686ab8b6ce9616683e8b83cd40e334e46f2aa0d35f0eb3c49c1cda50c4f98",
+    "processing/viewer_tls.py": "fce0e8661cc07a0a34379507d0a7566785f82c105e526648d402195872411c20",
+    "processing/viewer_tls_deadlines.py": "34359f44ec22562ccd3734f06ee8fe6c78fa89f951f8666d11f19935b191ec36",
+    "processing/worker_outbox.py": "7e1592b1d13c1efa3e71c02bb2b53202a8b2385142476faec43246a4fb4298cb"
+  },
+  "baseImage": "sha256:a53446d53dee7de001f6cdc0dd877fcca7844f8b31e3773f463b915f8c9ac654",
+  "targetImage": "sha256:d1b3a6af8806b867a96c75ba2b22e35c45fd937217ccb9860c3fcbe6e75499bd",
+  "tmpPreservationProfile": "root0-gid0-noattrs-v1",
+  "completedGates": [],
+  "requiredIndependentReview": [
+    "Bind each native and actual-format parser gate to exact retained evidence",
+    "Recheck sourceHashes on Linux LF checkout against complete ops/processing Python inventory",
+    "Approve exact fresh-operation inputs and commands; no consumed journals",
+    "Fresh fenced original TMP profile/hash, readers, authority and capacity proofs remain mandatory"
+  ],
+  "candidateEvidence": [
+    "main-retention-integration-qualification-20261112.json",
+    "Native restricted-profile fixture source c34e877b15bef54e469f3678f6122c3094090cbc6386072173683f15ba7a922f; negative metadata-loss fixture retained"
+  ],
+  "evidenceSha256": {
+    "8396da5dee2948b1b85ba2c0a865b911-mechanics-journal.json": "65ba0bb75d2e1b1063366232e01768c40a392a3ca0c6c5684e272edd828299ff",
+    "native_mechanics_root0.py": "c34e877b15bef54e469f3678f6122c3094090cbc6386072173683f15ba7a922f",
+    "native-result-root0.txt": "c27644ce6ebf1383fb949be5d64933b20c1f9836cb7990927aa83cd9610151d3",
+    "root0-receipt-manifest.json": "9dec95b8da9854e979d6f2addc680b0097fca7c2a15c8611fc1e2a256919750f",
+    "format741-result.txt": "673bfa4b7e917ff1530f0d6b3f129d068f0150cf2795f21694bbf6ad5eebd1c0",
+    "test741-result.txt": "d37ce35ff3a281f0c6cec65b4272f5031494f9c7a107934f75d2d093261aecad",
+    "probe741.py": "faabdaf43c594263dafe19502c1e98de0fbb8b6d28be063c6c1d5f416d65495a"
+  },
+  "proposedGateBindings": [
+    {
+      "gate": "native-bind-backup-restore-acl-xattr",
+      "evidence": "8396da5dee2948b1b85ba2c0a865b911-mechanics-journal.json",
+      "scope": "Synthetic bind GNUtar restore; 17 entries including UID1235 ownership, numeric ACL and user xattr; does not establish arbitrary rootfs/TMP attribute preservation"
+    },
+    {
+      "gate": "native-rootfs-export",
+      "evidence": "native-result-root0.txt",
+      "scope": "Actual base Docker export 10529004032 bytes, SHA a946c31c862f060738b840c0af2bcc33d9b60ed22793d6ad9bfde3af290eb9fe; 37.3688 seconds; numeric/body fidelity only"
+    },
+    {
+      "gate": "native-writable-tmp-preservation",
+      "evidence": "8396da5dee2948b1b85ba2c0a865b911-mechanics-journal.json",
+      "scope": "Independently inside-seeded UID0/GID0/noattrs fixture matched copy and target roundtrip; original live entries require fresh exact checks; negative nondefault-metadata loss remains a HOLD for other profiles"
+    },
+    {
+      "gate": "native-compose-recreation",
+      "evidence": "8396da5dee2948b1b85ba2c0a865b911-mechanics-journal.json",
+      "scope": "Synthetic native Compose recreation of cached exact base/target; no live Compose or client state modified"
+    },
+    {
+      "gate": "real-server-terminal-start-restart",
+      "evidence": "8396da5dee2948b1b85ba2c0a865b911-mechanics-journal.json",
+      "scope": "Actual target Node server terminal30/40/50 synthetic retention and startup/clean restart; no photogrammetry or live install claimed"
+    },
+    {
+      "gate": "actual-format-cleanup-parsers",
+      "evidence": "format741-result.txt",
+      "scope": "Parser741 six actual M4E/Tim probes passed unchanged using pinned CRLF source; explicit GitLF newline provenance bridge. New9c1 canonicalLF archive52hashes verified and integrated133suite128pass5expectedskip independently passed; no actual-format LF repeat. Reference counts192/732; parser58cases57pass1expectedskip"
+    }
+  ],
+  "approvalState": "Public unapproved draft only; root separately owns private qualification and fresh-operation approvals",
+  "integrationEvidence": {
+    "sourceCommit": "9022b3f9a467590c8f9a6639c8aa9eaed7941178",
+    "archiveSha256": "be68ab0686cd2792b98a17f807a5c9d83cbf9383380894f34159ecaed7453eec",
+    "helperSha256": "8eba25883552355f1bc7f6a837534ccb11fa7bc6bbab13702c547c869a3a156f",
+    "sourcePythonFiles": 52,
+    "sourceReview": "Root reports independent SOURCE PASS9022; TERM no-forcekill gap closed; previous origin claims are historical only",
+    "cases": 145,
+    "passed": 140,
+    "expectedSkips": 5,
+    "seconds": 1.755,
+    "exitCode": 0,
+    "oom": false,
+    "outputSha256": "af0d0343c23122c93570628969fb977d7a7683de23c810209c507e41d80ec215",
+    "receiptSha256": "a48dd259baa9b8b746afafdb0ca86c96d86067cce268c5ffd24b7ae8d682c912",
+    "container": "c3821a89205e71ec331e8a25f3fa6cff6322cbd6cdb9337841e88cbd53854168",
+    "removed": true,
+    "scratchRemoved": true,
+    "filesystem": "ext4",
+    "tempXattrVerified": true,
+    "resourceWarnings": 1,
+    "warningScope": "Existing test_intermediate_cleanup deliberate process-loss subprocess json.load(open(...)) unclosed-file destructor warning; test and suite pass; no warning suppression or source edit",
+    "earlierFixtureFailure": {
+      "outputSha256": "2251fe39eb2a7926ddb18e1549d48b02c39804d15dfdd9ef71de23bdd67271de",
+      "cases": 145,
+      "passed": 139,
+      "skipped": 5,
+      "errors": 1,
+      "cause": "Synthetic tmpfs did not support test xattr; source unchanged; corrected owned EXT4 TMPDIR rerun passed",
+      "containerRemoved": true,
+      "scratchRemoved": true
+    }
+  },
+  "targetGpuObservation": {
+    "observer": "Root report; no local receipt hash supplied",
+    "containerId": "2cacdf4495a592e08f22ee469b72b1e547aad636f36bffc2d1044fa2db96621c",
+    "runtime": "runc",
+    "gpus": "all",
+    "cpus": 1,
+    "memoryMiB": 512,
+    "network": "none",
+    "dataMounts": 0,
+    "devices": [
+      "5060Ti16311MiB",
+      "306012288MiB"
+    ],
+    "exitCode": 0,
+    "removed": true,
+    "nonceAbsent": true,
+    "scope": "Device query only, no GPU processing workload or live installation proof"
+  },
+  "parserSourceProvenanceBridge": {
+    "sourceCommit": "741ee197e32c6bb0fdc5af048676af5ea0e286e4",
+    "probe": "probe741.py",
+    "observedExecutionBytes": "CRLF source pinned by actual six-format probe",
+    "integrationBytes": "Canonical Git LF source exactly verified across52 members and executed in fresh9c1 archive133-case suite",
+    "mapping": [
+      {
+        "path": "processing/__init__.py",
+        "git741LfSha256": "f0c657d9911e3fff1b99b90e9a364e0d1b237ca8ceea939897ffc37c4931bb9a",
+        "actualProbe741CrlfSha256": "d7ef6a480c640c35f2de72724b4bc3504143e042b419dee1b560662a41d4ed31"
+      },
+      {
+        "path": "processing/intermediate_dependencies.py",
+        "git741LfSha256": "cc1ee27821ac69754ad4b73c37add466fb1b7f0223794159492ef516dfeaa925",
+        "actualProbe741CrlfSha256": "c4e09150e3cb4938025c7bf388b53e69805ae2b70af67774b77782038e67ec86"
+      },
+      {
+        "path": "processing/intermediate_pdf.py",
+        "git741LfSha256": "7ef2d9f2110f2a2c2bc4487163613acd6327808faeaccb7ee97c880cd13b2be2",
+        "actualProbe741CrlfSha256": "1aa37f79aefcd576006b90fdc061a3b1267046d8e14634448adc339f8b2e5726"
+      }
+    ],
+    "reviewBasis": "Independent reviewer recomputed Git741 LF to CRLF transformation and obtained exact probe741 pins for all three files",
+    "equivalenceScope": "Pure Python source differs only in line terminators and has universal-newline equivalence; no parser logic difference",
+    "limitation": "Actual-format probe used pinned CRLF, not exact LF bytes. New canonical LF integrated unit suite is separate; only reviewed universal-newline provenance bridges actual-format CRLF to LF parser source. No actual-format LF repeat claimed."
+  },
+  "byteBindingHold": {
+    "status": "RESOLVED by new canonicalLF archive verification and separate freshsuite; prior E30 claim remains historical",
+    "intendedSourceFiles": 52,
+    "priorArchive": "e30c0ff4ad90831a80e12f9d38f0d8656723057586721fe7597d2547eea29282",
+    "issue": "Many actual archive files CRLF differ from intended Git LF sourceHashes",
+    "runtimeConstructed": false,
+    "credentialsCreated": false,
+    "maintenanceMutations": 0,
+    "next": "Root issues independently reviewed private live qualification and freshstage pins; no old stage replay"
+  },
+  "historicalCrlfIntegrationEvidence": {
+    "runtimeCommit": "9ef04bafd096aa89007dc053cc4f5181537ad82c",
+    "cases": 133,
+    "passed": 128,
+    "expectedSkips": 5,
+    "outputSha256": "f3edfb0982555448dfa303c9a8a920e9054f0dcd6479ecad2dcc3d035d4fddb0",
+    "independentSourceReview": "PASS; unchanged fourteen origin blobs and thin CLI",
+    "executionByteScope": "Actual archivee30 contained many CRLF files; does not qualify intended Git LF sourceHashes"
+  },
+  "previousLfIntegrationEvidence": {
+    "runtimeCommit": "9ef04bafd096aa89007dc053cc4f5181537ad82c",
+    "sourceArchiveSha256": "9c1b16be4f4ef88528295e2c828572f64a5962a49a970a7db162d268b3782f66",
+    "executionBytes": "Canonical Git LF, all52 Python file members exactly matched intended sourceHashes; no missing/extra/diffs",
+    "cases": 133,
+    "passed": 128,
+    "expectedSkips": 5,
+    "seconds": 1.768,
+    "exitCode": 0,
+    "outputSha256": "ea1cb35fbca4f3f761af9922cb336be8ba16311cd4ad3fa731e002d66e0adb3e",
+    "containerId": "d70df0a76a38287347eaaf1ab72c33c4a0335be3cbb0392cd7871968fdf844b4",
+    "ownedContainerRemoved": true,
+    "nonceAbsent": true,
+    "observer": "Root actual main-PC qualification report; author independently verified local archive SHA only"
+  },
+  "observerMountSerialization": "canonical-full-records-sorted-v1: sort complete mount dictionaries by canonical JSON bytes, preserving all fields and multiplicity; SHA256 canonical JSON array",
+  "previous07LfIntegrationEvidence": {
+    "runtimeCommit": "07c2e02991dd6eef7c278272743d1e827f390b13",
+    "sourceArchiveSha256": "8855a3d864c4fcb08f74ef4b86f64347982696d7d93277ca8b3dbb834cf29100",
+    "executionBytes": "Canonical Git LF52files:51exactprior9efLF map; only combined helper changed to9302ff0b",
+    "cases": 135,
+    "passed": 130,
+    "expectedSkips": 5,
+    "seconds": 1.736,
+    "exitCode": 0,
+    "oom": false,
+    "outputSha256": "9ce20ff2490b0abf1676500bee59a928173d320ba1913dfc64ebb56dd103158c",
+    "containerId": "805dae941dd486da8f95d7735fd62557047b74992b7c9549606f61fd905873bb",
+    "ownedContainerRemoved": true,
+    "nonceAbsent": true,
+    "observer": "Root actual main-PC qualification report; author did not execute suite",
+    "independentSourceReview": "PASS mount-order-only fingerprint fix"
+  },
+  "historical668IntegrationEvidence": {
+    "schemaVersion": 1,
+    "runtimeCommit": "6688c17ea97229113541b1f73e3f4c65ff879314",
+    "productionRuntimeCommit": "43d40b745f6c0eb6c5736dfb57ea975ca73c7eb9",
+    "sourceArchiveSha256": "119443557b754ff6fb20dd17ed8aed9134891031cf9ac9f903bd7628876ed0f1",
+    "sourcePythonFiles": 52,
+    "changedSourceHashesVs07": {
+      "ops/combined_main_retention.py": "bc4c365d71e8a9410c5a000d2236e3728a53a1ec37c78e922c95d298d5518bbd",
+      "ops/early_intermediate_cleanup.py": "2bacf32ddaf44ca9e2816e1f8d9a862f0cc98b3345d272143067239b339da89e",
+      "processing/intermediate_mounts.py": "7628e7e83b4187e1d354195bbdac2af65eb4e4777fa973161beeab7ebb647f3a"
+    },
+    "other49FilesExact07Lf": true,
+    "mainPcSuite": {
+      "cases": 141,
+      "passed": 136,
+      "expectedSkips": 5,
+      "seconds": 1.746,
+      "exitCode": 0,
+      "outputSha256": "f94198e75f99cf9c37a9e1e21596a8d3acbadf2dc927de600e2b22511dcefaec",
+      "containerId": "83a07a2e793d4d290c9cf7dd592bbccd610178ff04cad5505074aef15581753c",
+      "removed": true,
+      "nonceAbsent": true
+    },
+    "priorFixtureFailure": {
+      "runtimeCommit": "43d40b745f6c0eb6c5736dfb57ea975ca73c7eb9",
+      "cases": 141,
+      "errors": 1,
+      "expectedSkips": 5,
+      "cause": "New test own-engine metadata used synthetic source that did not match unchanged mandatory native bind",
+      "correction": "668 changes only synthetic inspected Source to exact required path; production guard unchanged",
+      "outputSha256": "8a6594675ac5a0dc81edf34bbe3cffe205670f618bd1670ab7f261aba2a4dd06"
+    },
+    "readOnlyHostSnapshot": {
+      "result": "PASS",
+      "scope": "CombinedRuntime.snapshot against captured119LF; root observation",
+      "nodeState": "active",
+      "revision": 47,
+      "terminalTasks": 3,
+      "operationAbsent": true,
+      "containerChanges": 0,
+      "maintenanceMutations": 0,
+      "liveInstall": false
+    },
+    "observer": "Parent actual main-PC qualification report; author did not execute suite or host snapshot",
+    "installed": false,
+    "qualificationApproved": false
+  },
+  "realDaemonTermEvidence": {
+    "scope": "Actual9022 TERM method and durable checkpoint, isolated empty cachedBASE server only",
+    "probeSourceSha256": "d58e71593d6edc4dad675244369e6ab8c1fa648ba93b1d7ebaa25a71864a3fd5",
+    "receiptSha256": "a1ed22cd4369d9d25554383d0c4353a8c2a8cbb55a04465d62f898e5f9bf6a11",
+    "journalSha256": "f3a903a062d28ba194f8145319f6a6fa39ad7a80e31a8342310652a314dc461b",
+    "checkpointSha256": "38c74597844d6b5c2ba4a15f4f6c76a46744dd8dc80bc44254480517cdfe35a0",
+    "signalCount": 1,
+    "signal": "TERM",
+    "finalExitCode": 0,
+    "finalPid": 0,
+    "automaticEscalation": false,
+    "restart": "no",
+    "sentinelPreservedThroughExit": true,
+    "sourceUnchanged": true,
+    "syntheticGateOnly": true,
+    "productionMounts": 0,
+    "gpu": false,
+    "hostPorts": false,
+    "ownedResourcesRemoved": true,
+    "exportHashesVerified": true,
+    "scopeLimits": "No actual coordinator admission, live install, retained-client swap or GPU processing proof"
+  },
+  "nativeSourceByteProvenance": {
+    "nativeMechanicsRaw": "c34e877b15bef54e469f3678f6122c3094090cbc6386072173683f15ba7a922f",
+    "nativeMechanicsNormalizedLf": "d9da6f7900e3a8c57e824b1090690684444453a12d6329f4e5aa3cc6ab97c328",
+    "archiveFragmentRaw": "55ce592b76de1e4259ea7047ed75fe42a65bc5e5700e124aaac422f82f0afcb3",
+    "archiveFragmentNormalizedLf": "2df6b6d84f8ba9c346a3c8472d329e7815866b87467c24cfafd11a1e74154056",
+    "scope": "Reused exact qualified RAW CRLF mechanics files; LF hashes are explicit provenance mapping, not executed LF mechanics claims"
+  },
+  "currentSourceDerivation": "Current52map includes derived741 observer/topology privilege guards and9022TERM-only helper; unchanged14origin-blob claim applies only to initial9ef historical selection"
+}

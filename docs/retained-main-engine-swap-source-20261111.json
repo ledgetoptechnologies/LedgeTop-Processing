@@ -1,0 +1,116 @@
+{
+  "observedAt": "2026-11-11T15:12:54Z",
+  "scope": "read-only main binding metadata; no live swap or deep data walk",
+  "base": "sha256:a53446d53dee7de001f6cdc0dd877fcca7844f8b31e3773f463b915f8c9ac654",
+  "target": "sha256:d1b3a6af8806b867a96c75ba2b22e35c45fd937217ccb9860c3fcbe6e75499bd",
+  "oldContainerId": "a22ca003c7b5e9a0dafb40e4f5019df22e70dd5b5ce92a40a8224e8cae8d67fc",
+  "ingressContainerId": "7147630118a3b25c6e84317314d02ff957ff8e5b7cc523036b5fe67e16a60ac0",
+  "sourceComposeSha256": {
+    "rollback": "00ce4bb15dac8e5f66d05d7de533d9095a861c94c7606bebc7e9cc989c13372d",
+    "override": "61ddb43bb5b4e7701ce8abcf5c49c04a86e04c7a027563cb389254d1497e29e9",
+    "bootstrapRole": "235b5e192fc74c0e26dbd9fa8de55e756e9321ca9561b76cb0fa659f54161191"
+  },
+  "nginxSha256": "9a0f3baa33182de300b76fed8ab680968789b399cc8b050cdf66b9c18c36c482",
+  "docker": "29.6.2",
+  "compose": "5.3.1",
+  "smallHelperUnchanged": true,
+  "nativeSwapQualified": false,
+  "installed": false,
+  "unitTests": {
+    "runner": "python -m unittest tests.test_retained_main_engine_swap tests.test_retained_small_engine_swap",
+    "total": 45,
+    "passed": 39,
+    "skipped": 6,
+    "failed": 0,
+    "platform": "Windows"
+  },
+  "helperSha256": "a4d2f545e6dd5246480593ee7ea5a6a6747538eec2c81a79f1eef676c598c2cc",
+  "smallHelperSha256": "1cad9575bfe86647b7db0ccb55266823450878b6eabb009ad6af9b20f7b634bf",
+  "hashRepresentation": "frozen Git blob bytes (LF), not Windows checkout conversion",
+  "linuxUnitTests": {
+    "head": "a0d946d58fc6e12163737950b2cd84c0af476b4e",
+    "image": "sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1",
+    "filesVerifiedAgainstGitBlob": 80,
+    "sourceTarSha256": "8b20fba16e761eef46a1d93cba007f1028e0452ec25b53d0a185da93aabf75f9",
+    "scope": "Linux root unit tests only; no Docker socket, SSH, host data, native swap or network",
+    "capabilities": [
+      "CHOWN",
+      "DAC_OVERRIDE",
+      "FOWNER"
+    ],
+    "reason": "actual UID1000 root-owned metadata tests in isolated tmpfs",
+    "total": 45,
+    "passed": 45,
+    "skipped": 0,
+    "failed": 0,
+    "readOnlyRoot": true,
+    "readOnlySource": true,
+    "noDockerSocket": true,
+    "noHostData": true,
+    "network": "none",
+    "cpu": 1,
+    "memoryMiB": 512,
+    "tmpfsMiB": 128,
+    "pidsLimit": 64,
+    "bytecodeWritesDisabled": true,
+    "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderrSha256": "95e02749b084c94cd01abe44448797664b9072ecc204f3f2524e9976d9ecef5f",
+    "runnerExit": 0,
+    "state": {
+      "exitCode": 0,
+      "oom": false,
+      "running": false
+    },
+    "ownedContainerGone": true
+  },
+  "latestSource": {
+    "head": "662a32e2e6b8e75a27874bf1c9df76f0c59d2c48",
+    "helperSha256": "a8208f269269e4354b56ef8e6ccbcaced587ffd4d7bf9b9281db2a988b479ae6",
+    "change": "fixed-main NVIDIA Options null admission; no HostConfig equivalence relaxation",
+    "priorHelperSha256": "a4d2f545e6dd5246480593ee7ea5a6a6747538eec2c81a79f1eef676c598c2cc",
+    "nativeQualified": false
+  },
+  "latestLinuxUnitTests": {
+    "head": "662a32e2e6b8e75a27874bf1c9df76f0c59d2c48",
+    "image": "sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1",
+    "filesVerifiedAgainstGitBlob": 80,
+    "sourceTarSha256": "15ba7980caebc18943cc4409b408df4e60a9015d616df638e40d477f5b2502f8",
+    "scope": "Linux root unit tests only; no Docker socket, SSH, host data, native swap or network",
+    "capabilities": [
+      "CHOWN",
+      "DAC_OVERRIDE",
+      "FOWNER"
+    ],
+    "reason": "actual UID1000 root-owned metadata tests in isolated tmpfs",
+    "total": 46,
+    "passed": 46,
+    "skipped": 0,
+    "failed": 0,
+    "runnerExit": 0,
+    "state": {
+      "exitCode": 0,
+      "oom": false,
+      "running": false
+    },
+    "ownedContainerGone": true
+  },
+  "latestReadOnlyAdmission": {
+    "observedAt": "2026-11-11T15:29:33.038845+00:00",
+    "head": "662a32e2e6b8e75a27874bf1c9df76f0c59d2c48",
+    "scope": "one default read-only CLI inspection, negative admission only",
+    "exit": 2,
+    "busyRefusal": true,
+    "redactedCliDiagnostic": "Main-node swap held: main owns unfinished claim. No automatic rollback or replay.",
+    "sourceArchiveSha256": "d9751b253894ec4378c1d08ba4f4390da8afd44f174101aac8ba9b6af4cb56f0",
+    "readbackUnchanged": true,
+    "mainContainerId": "a22ca003c7b5e9a0dafb40e4f5019df22e70dd5b5ce92a40a8224e8cae8d67fc",
+    "mainNodeRevision": 43,
+    "originalJobNativeAndEngineIdentitiesUnchanged": true,
+    "generationWasProtocolDerivedNotDirectDatabaseField": true,
+    "noMutationReceiptsCreated": true,
+    "ownedProcessGroupExited": true,
+    "privateCredentialCopyRemoved": true,
+    "originalCredentialsUnchanged": true,
+    "nativeQualified": false
+  }
+}

@@ -164,7 +164,7 @@ class Ingress:
             raise GateError('backend health refused')
         return info
 
-    def change(self, closed, expected=None, seconds=60):
+    def change(self, closed, expected=None, seconds=60, *, writer=save):
         item = self.inspect()
         if not closed:
             state = json.loads((self.root / 'state.json').read_text())
@@ -174,8 +174,8 @@ class Ingress:
         old_workers = self.workers(item)
         state = {'state': 'closing' if closed else 'opening', 'containerId': item['Id'],
                  'oldWorkers': sorted(old_workers), 'expectedBackendImage': expected}
-        save(self.root / 'state.json', state)
-        save(self.root / 'public-config/nginx.conf',
+        writer(self.root / 'state.json', state)
+        writer(self.root / 'public-config/nginx.conf',
              configuration(self.config['listenPort'], self.config['backendPort'], closed), mode=0o644)
         self.docker(['exec', item['Id'], 'nginx', '-t', '-c', '/config/nginx.conf'])
         self.docker(['kill', '--signal', 'HUP', item['Id']])
@@ -195,7 +195,7 @@ class Ingress:
                 if not closed:
                     self.backend(expected)
                 state['state'] = 'closed' if closed else 'open'
-                save(self.root / 'state.json', state)
+                writer(self.root / 'state.json', state)
                 return {'state': state['state'], 'oldWorkersDrained': True, 'containerId': item['Id']}
             if time.monotonic() >= deadline:
                 raise GateError('drain/health unproved; ingress intent retained, do not update or replay')
