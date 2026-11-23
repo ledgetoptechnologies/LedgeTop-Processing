@@ -5,27 +5,27 @@ Pull requests and feature branch pushes do not run this repository workflow. Ord
 execution path is available. See [repository CI policy](AGENTS.md).
 
 The [package workflow](.github/workflows/processing.yml) checks the existing
-Dockerfiles and targets two private repository-linked images on main:
-`ledgetop-processing-coordinator` and `ledgetop-processing-treedar` under
-`ghcr.io/ledgetoptechnologies`. Before building or pushing, the publisher
-requires positive metadata showing both packages already exist, are private,
-and are linked to this repository. A 404 can mean absent or inaccessible and
-therefore stops publication. The legacy public
-`ledgetop-processing-orchestrator` package is not modified.
+Dockerfiles and, on main, publishes two private repository-linked images under
+`ghcr.io/ledgetoptechnologies`: `ledgetop-processing-coordinator-v2` and
+`ledgetop-processing-treedar-v2`. The names live in one place,
+[`processing/release_packages.py`](processing/release_packages.py). Before
+building or pushing, the publisher requires positive metadata showing both
+packages already exist, are private and are linked to this repository; a 404,
+public or unlinked package stops publication. Each package must be created
+private once, before its first push; see
+[private package publication](docs/private-package-publication.md). The earlier
+`ledgetop-processing-coordinator`, `-private-coordinator` and `-orchestrator`
+packages are no longer targets and are not modified.
 
-Despite GitHub's documented first-publication default, main run 43148199486
-created the new coordinator package publicly; its post-push check stopped before
-TreeDar was pushed. A safe first-private-package bootstrap remains unproven and
-must be resolved before allowing publication to an absent package. This guard
-does not change the already public package or claim to make it private.
-
-A successful publish records each verified immutable `sha256` manifest digest in
-its receipt. On a test node signed in with its read-only package credential, use
-`docker pull ghcr.io/ledgetoptechnologies/ledgetop-processing-coordinator@sha256:<digest>`
-and the corresponding `ledgetop-processing-treedar@sha256:<digest>` from that
-receipt. Neither the first private publish nor an immutable private pull has yet
-been verified. The workflow does not deploy containers, update live tags, or
-change node credentials; runtime image migration remains separate.
+A main push whose checks, smoke tests and remote identity checks all pass, and
+whose commit is still the head of main, moves each package's `verified` tag to
+that exact digest. Hosts never run the tag. A host with auto-deploy enabled runs
+`ops/node_maintenance.py auto-deploy` from its own timer: it reads `verified`
+only to learn the digest, pulls that digest with its existing read-only login,
+checks the image identity, and if the run is newer than its pin schedules the
+existing [drain-window update](docs/main-maintenance.md#automatic-updates).
+An `auto-deploy.hold` file in the host's operator root pauses it. The workflow
+itself never touches a host or node credential.
 
 Private, self-hosted coordination service for LedgeTop's processing computers.
 The cluster PC is the single endpoint reached by the TrueNAS Viewer. TrueNAS is

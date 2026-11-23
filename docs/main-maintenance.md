@@ -46,7 +46,8 @@ provide the maintenance diagnostics.
 ## Schedule and run
 
 Stage and inspect the intended image separately. Only cached immutable image IDs
-are accepted; this command does not pull a moving tag or decide to upgrade.
+are accepted; `schedule` and `run` never pull or decide to upgrade. Automatic
+upgrades are the separate `auto-deploy` step below, which uses this same path.
 Use the installed host command as `bkoltz`:
 
 ```sh
@@ -88,6 +89,91 @@ the immutable image pin in `compose.json`, independently verifies the private
 backend image/health, and reopens ingress. A failed candidate attempts the
 existing pinned rollback and leaves coordinator admission failed and ingress
 closed for inspection. No OS update or PC reboot is performed.
+
+## Automatic updates
+
+`auto-deploy` makes a verified main merge reach a host without a manual step,
+through the same drain window. It is opt-in per host: add an `autoDeploy`
+object to `maintenance.json`, for example
+`"autoDeploy": {"package": "coordinator", "drainDelaySeconds": 0}`, and run it
+from the host's own timer (for example a systemd user timer every 10 minutes
+starting a oneshot unit):
+
+```sh
+python3 "$ROOT/source/ops/node_maintenance.py"   --root "$ROOT" --credentials "$ROOT/maintenance.env" auto-deploy --wait-seconds 3600
+```
+
+Each pass, in order:
+
+1. If `$ROOT/auto-deploy.hold` exists, it records `paused` and stops before
+   any network or Docker call. `touch` it to hold, delete it to resume. A hold
+   does not cancel a window already scheduled; use the coordinator `cancel`
+   action for that (the agent then records `cancelled` and never retries it).
+2. A failed, held or updating node is left alone (`not_eligible`). So is any
+   scheduled or draining plan the agent did not create and record, even one
+   for the same image (`other_plan`).
+3. It pulls the package's `verified` tag only to learn its digest, then pulls
+   `repository@sha256:<digest>` with the host's existing read-only registry
+   login and inspects it. The image ID must match the tag's, the digest must be
+   on the pulled image, platform must be linux/amd64, user `10001:10001`, and
+   the labels must name this repository, this package, a 40-hex commit and a
+   publish run. Anything else is `refused`. A non-`push` or non-main label is
+   `ignored`.
+4. If that image is already the pin, `up_to_date`. The running pinned image
+   must itself carry this package's labels: the first adoption of a package on
+   a service is a reviewed manual `schedule`/`run`. The candidate's publish run
+   must be newer than the pin's and than every candidate this host already
+   tried (`highestRunId`), so it never goes backwards or retries a failure
+   (`not_newer`).
+5. It creates the window (`drainAt` = `notBefore` = now + `drainDelaySeconds`)
+   with the coordinator's idempotent `schedule-owned` request, a compare-and-swap
+   on the node revision it just read. The request, with its `requestId`, is
+   saved in `$ROOT/auto-deploy/schedule-intent.json` before it is sent, and that
+   file is removed only when the request's receipt is bound or the request was
+   definitely refused; on a refusal `refused.json` is written (atomic, fsynced)
+   before the intent is removed, and if that write fails the intent stays and
+   the pass returns `held`, `refusal_latch_unsaved`. The client tells a definite answer (`HTTPRefused`, an
+   HTTP status and sanitized error code) from an uncertain one (`HTTPUncertain`:
+   no complete response). A 3xx/4xx answer means nothing was created: the agent
+   writes `$ROOT/auto-deploy/refused.json` and sends no schedule request on any
+   later pass (`held`, `refusal_latched`) until a person inspects the node and
+   deletes that file. A 5xx, a lost or unreadable response is uncertain: the
+   schedule request is never sent again, and later passes only read
+   `GET .../schedule-owned/<requestId>`.
+   - A receipt binds the plan, even one that committed late; it is never
+     treated as another operator's plan.
+   - A 404 with the exact `owned_schedule_not_found` code, with the coordinator
+     authority equal to the saved request's before and after the lookup, is
+     only a point-in-time absence: a timed-out request can still commit. The
+     agent keeps the intent, marks it `unresolved` and returns `held`,
+     `schedule_unresolved`. It keeps reading on later passes and never clears
+     the intent or sends a new request itself. Before deleting
+     `auto-deploy/schedule-intent.json` to retry, an operator must confirm the
+     original request has settled (the coordinator request timeout has passed,
+     or its logs show the request finished) and that no receipt or plan exists
+     for it. A momentary absence is not enough.
+   - A generic or `prototype_disabled` 404, a 409 authority conflict, a changed
+     authority or an uncertain lookup holds (`ownership_unproven`).
+   - A receipt whose request ID, node, authority, expected revision, target or
+     plan ID does not match the saved request latches `refused.json`.
+6. It records the returned plan ID and target and calls `run` with both under a
+   private receipt in `$ROOT/auto-deploy/receipts/`. `run` then requires that
+   exact plan and target on every poll and again after closing ingress and in
+   the update itself; any other plan stops before ingress or the container is
+   touched. A `waiting` result resumes the same plan on the next pass. A plan
+   cancelled or replaced by someone else is recorded as `cancelled` and never
+   retried. A failed candidate is rolled back by `run` exactly as above and
+   recorded in `state.json` as `failed`.
+
+`$ROOT/auto-deploy/state.json` keeps `inProgress` (with its plan
+ID), `applied`, `failed`, `cancelled` and `highestRunId`; `last-run.json` records every pass. A flock on
+`agent.lock` keeps timer passes from overlapping. The exit status is 0 for
+normal outcomes, 1 for a failed (rolled back) update and 2 for `refused`,
+`held` or a stop that needs inspection; existing receipts are never replayed.
+
+The runner's health and idle checks are the ODM-family engine checks above, so
+a package is only auto-deployed to a service whose current pin is already that
+package and passed this runner once.
 
 ## Recovery limits
 
