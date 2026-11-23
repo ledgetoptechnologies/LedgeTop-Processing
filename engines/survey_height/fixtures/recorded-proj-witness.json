@@ -1,0 +1,15 @@
+{
+  "note": "Invented coordinates. Values produced earlier by the PROJ/GDAL converter; kept so the independent reference can be checked against them without PROJ.",
+  "grid_sha256": "fa9a407ac7ee3f5a3694008e4bcd09ce9cc250452f0c3b11700a4960340abce2",
+  "point": {"longitude": -88.75, "latitude": 43.1, "navd88_m": 250.0, "ellipsoidal_m": 215.44720077515785},
+  "dem": {
+    "epsg": 7541,
+    "geotransform": [265383.01200626104, 1000.0, 100.0, 180818.2584438068, 50.0, -1000.0],
+    "ellipsoidal_m": 215.44720077515785,
+    "navd88_cells": [
+      {"row": 0, "column": 1, "navd88_m": 249.991150310919},
+      {"row": 3, "column": 4, "navd88_m": 249.9421251256412},
+      {"row": 4, "column": 6, "navd88_m": 249.92658908805365}
+    ]
+  }
+}
