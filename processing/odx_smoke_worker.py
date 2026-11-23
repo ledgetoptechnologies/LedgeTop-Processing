@@ -41,13 +41,29 @@ class SmokeError(Exception):
 class HTTPRefused(SmokeError):
     """The server answered with a non-2xx status: a definite answer.
 
-    `status` is the HTTP status. A refused mutation was not applied by the
-    handler that answered; callers may rely on that, unlike HTTPUncertain.
+    `status` is the HTTP status. `code` is the JSON `error` code when the body
+    carried a short lowercase one, else None; nothing else from the body is
+    kept. A refused mutation was not applied by the handler that answered;
+    callers may rely on that, unlike HTTPUncertain.
     """
 
-    def __init__(self, message, status):
+    def __init__(self, message, status, code=None):
         super().__init__(message)
         self.status = status
+        self.code = code
+
+
+ERROR_CODE = re.compile(r'[a-z][a-z_]{0,63}\Z')
+
+
+def error_code(response):
+    """Best effort: the sanitized `error` code of a small JSON error body."""
+    try:
+        value = json.loads(response.read(4097)[:4096])
+        code = value.get('error') if isinstance(value, dict) else None
+        return code if isinstance(code, str) and ERROR_CODE.fullmatch(code) else None
+    except Exception:
+        return None
 
 
 class HTTPUncertain(SmokeError):
@@ -120,7 +136,8 @@ class Client:
                     connection.send(suffix)
             response = connection.getresponse()
             if not 200 <= response.status < 300:
-                raise HTTPRefused('HTTP request rejected or redirected; inspect private receipt', response.status)
+                raise HTTPRefused('HTTP request rejected or redirected; inspect private receipt', response.status,
+                                  error_code(response))
             declared = response.getheader('Content-Length')
             if declared is not None and (int(declared) < 0 or int(declared) > limit):
                 raise SmokeError('HTTP response exceeds limit')

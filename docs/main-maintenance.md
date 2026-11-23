@@ -135,9 +135,13 @@ Each pass, in order:
    later pass (`held`, `refusal_latched`) until a person inspects the node and
    deletes that file. A 5xx, a lost or unreadable response is uncertain: the
    schedule request is never sent again. Later passes only read
-   `GET .../schedule-owned/<requestId>`: a receipt binds the plan, a 404 proves
-   none was created (`not_created`; a later pass starts a fresh request), and an
-   uncertain lookup holds (`ownership_unproven`). A receipt whose request ID,
+   `GET .../schedule-owned/<requestId>`: a receipt binds the plan. Absence is
+   proven only by a 404 with the exact `owned_schedule_not_found` code while
+   the coordinator authority equals the saved request's authority both before
+   and after the lookup; then the intent is cleared (`not_created`) and a later
+   pass starts a fresh request. A generic or `prototype_disabled` 404, a 409
+   authority conflict, a changed authority or an uncertain lookup holds
+   (`ownership_unproven`) and keeps the intent; only reads repeat. A receipt whose request ID,
    node, authority, expected revision, target or plan ID does not match the
    saved request also latches `refused.json`.
 6. It records the returned plan ID and target and calls `run` with both under a

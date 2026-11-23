@@ -19,7 +19,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from processing.container_update import ComposeNode, execute, lock, UpdateError
 from processing.node_gate import NodeGate, GateBusy, GateError as NodeGateError
-from processing.odx_smoke_worker import Client, HTTPRefused, SmokeError
+from processing.odx_smoke_worker import Client, HTTPRefused, HTTPUncertain, SmokeError
 from ops.node_ingress import Ingress, GateError, locked, save
 from ops.auto_deploy import auto_deploy, DeployError
 
@@ -152,15 +152,33 @@ def schedule_owned(root, settings, operator, request):
     return operator.json('POST', '/v1/prototype/nodes/' + settings['nodeId'] + '/schedule-owned', request)['receipt']
 
 
-def owned_receipt(settings, operator, request_id):
-    """Read-only lookup of an owned schedule receipt; None only for a definite 404."""
+def owned_receipt(settings, api, operator, request):
+    """Read-only lookup of the owned schedule receipt for a saved request.
+
+    Returns the receipt, or None only when absence is proven: the coordinator
+    answers 404 with the exact `owned_schedule_not_found` code for this node
+    and request ID, and its authority equals the saved request's authority
+    both before and after that answer (a receipt row is only authority-checked
+    when one exists). A generic or disabled 404, an authority conflict or a
+    changed authority is unproven and raises HTTPUncertain; the caller holds.
+    """
+    route = '/v1/prototype/nodes/' + settings['nodeId'] + '/schedule-owned/' + request['requestId']
+
+    def same_authority():
+        return api.json('GET', '/v1/prototype/authority').get('authorityId') == request['authorityId']
+
+    if not same_authority():
+        raise HTTPUncertain('coordinator authority changed; ownership unproven')
     try:
-        return operator.json('GET', '/v1/prototype/nodes/' + settings['nodeId'] + '/schedule-owned/'
-                             + request_id)['receipt']
+        return operator.json('GET', route)['receipt']
     except HTTPRefused as error:
-        if error.status == 404:
-            return None
-        raise
+        if error.status == 409 or (error.status == 404 and error.code != 'owned_schedule_not_found'):
+            raise HTTPUncertain('owned schedule absence not proven') from None
+        if error.status != 404:
+            raise
+    if not same_authority():
+        raise HTTPUncertain('coordinator authority changed; ownership unproven')
+    return None
 
 
 def main():
@@ -205,7 +223,7 @@ def main():
         elif args.action == 'auto-deploy':
             result = auto_deploy(root, settings, api,
                 schedule=lambda request: schedule_owned(root, settings, operator, request),
-                lookup=lambda request_id: owned_receipt(settings, operator, request_id),
+                lookup=lambda request: owned_receipt(settings, api, operator, request),
                 run=lambda receipt, wait, drain, plan_id, target: run(
                     root, api, operator, private_directory(receipt), wait, drain,
                     expected_plan_id=plan_id, expected_target=target),

@@ -153,8 +153,9 @@ def latch(directory, state_path, state, stage, detail):
 def auto_deploy(root, settings, api, *, schedule, lookup, run, wait_seconds, drain_seconds, now=None):
     """One idempotent agent pass.
 
-    `schedule(request)` sends the owned schedule request and `lookup(requestId)`
-    reads its receipt (None when the coordinator definitely has none); `run` is
+    `schedule(request)` sends the owned schedule request and `lookup(request)`
+    reads its receipt (None only when absence is proven for the request's own
+    node, request ID and authority); `run` is
     the existing drain-window runner bound to one plan.
     """
     directory = state_directory(root)
@@ -205,15 +206,15 @@ def step(root, directory, settings, binding, api, *, schedule, lookup, run, wait
         # Reconcile it only through the read-only receipt lookup; never POST.
         request_id = intent['request']['requestId']
         try:
-            receipt = lookup(request_id)
+            receipt = lookup(intent['request'])
         except (SmokeError, OSError, ValueError, KeyError) as error:
             if definite(error):
                 return latch(directory, state_path, state, 'lookup',
                              {'httpStatus': error.status, 'requestId': request_id})
             return {'status': 'held', 'reason': 'ownership_unproven', 'requestId': request_id}
         if receipt is None:
-            # The coordinator definitely holds no plan for this request. Start
-            # afresh on a later pass, with a new request and the current revision.
+            # Proven absent at the original authority (typed 404, same authority
+            # before and after). Start afresh on a later pass.
             state['scheduling'] = None
             save(state_path, state)
             return {'status': 'not_created', 'requestId': request_id}

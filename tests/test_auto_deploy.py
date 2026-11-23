@@ -51,8 +51,8 @@ class AutoDeployTests(unittest.TestCase):
         self.publish(image(NEW, 200, digests=[REPO + '@' + DIGEST]))
         self.pulls = []
         self.schedule = MagicMock(side_effect=self.scheduled)
-        self.lookup = MagicMock(side_effect=lambda request_id: (
-            dict(self.owned[request_id][1]) if request_id in self.owned else None))
+        self.lookup = MagicMock(side_effect=lambda request: (
+            dict(self.owned[request['requestId']][1]) if request['requestId'] in self.owned else None))
         self.run = MagicMock(return_value={'status': 'succeeded', 'image': NEW})
 
     def tearDown(self):
@@ -272,10 +272,10 @@ class AutoDeployTests(unittest.TestCase):
         self.schedule.side_effect = lost
         self.assertEqual(self.deploy()['reason'], 'schedule_response_uncertain')
         self.assertIsNone(self.state().get('inProgress'))
-        request_id = self.state()['scheduling']['request']['requestId']
+        saved = self.state()['scheduling']['request']
         self.assertEqual(self.deploy()['status'], 'succeeded')
         self.schedule.assert_called_once()
-        self.lookup.assert_called_once_with(request_id)
+        self.lookup.assert_called_once_with(saved)
         self.assertEqual(self.run.call_args.args[3], created[0]['planId'])
 
     def test_uncertain_lookup_holds_without_posting(self):
@@ -400,6 +400,9 @@ class Coordinator(ThreadingHTTPServer):
         self.node = {'state': 'active', 'revision': 4, 'planId': None, 'targetImage': None,
                      'notBefore': '2020-01-01T00:00:00Z'}
         self.mode = 'conflict'
+        self.authority = AUTHORITY
+        self.lookup_answer = 'typed'
+        self.on_lookup = None
         self.posts, self.lookups, self.owned = [], [], {}
 
 
@@ -418,16 +421,23 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         server = self.server
         if self.path == '/v1/prototype/authority':
-            return self.reply(200, {'authorityId': AUTHORITY})
+            return self.reply(200, {'authorityId': server.authority})
         if self.path == '/v1/prototype/nodes/main':
             return self.reply(200, {'node': server.node})
         prefix = '/v1/prototype/nodes/main/schedule-owned/'
         if self.path.startswith(prefix):
             request_id = self.path[len(prefix):]
             server.lookups.append(request_id)
+            if server.on_lookup:
+                server.on_lookup()
             if request_id in server.owned:
+                if server.owned[request_id]['authorityId'] != server.authority:
+                    return self.reply(409, {'error': 'conflict'})
                 return self.reply(200, {'receipt': server.owned[request_id]})
-            return self.reply(404, {'error': 'owned_schedule_not_found'})
+            # The real handler's three 404 shapes; only the first proves absence.
+            code = {'typed': 'owned_schedule_not_found', 'generic': 'not_found',
+                    'disabled': 'prototype_disabled'}[server.lookup_answer]
+            return self.reply(404, {'error': code})
         self.reply(404, {'error': 'not_found'})
 
     def do_POST(self):
@@ -489,7 +499,7 @@ class RealClientTimerTests(unittest.TestCase):
                 patch('ops.node_maintenance.ComposeNode'):
             return agent.auto_deploy(self.root, self.settings, self.api,
                 schedule=lambda request: node_maintenance.schedule_owned(self.root, self.settings, self.operator, request),
-                lookup=lambda request_id: node_maintenance.owned_receipt(self.settings, self.operator, request_id),
+                lookup=lambda request: node_maintenance.owned_receipt(self.settings, self.api, self.operator, request),
                 run=self.run, wait_seconds=0, drain_seconds=60, now=NOW)
 
     def test_real_409_latches_and_the_next_timer_pass_sends_nothing(self):
@@ -512,13 +522,65 @@ class RealClientTimerTests(unittest.TestCase):
         plan = self.server.node['planId']
         self.assertEqual(self.run.call_args.args[3:], (plan, NEW))
 
-    def test_real_404_lookup_proves_no_plan_without_posting(self):
+    def lost_then_absent(self):
+        # First pass: the POST is lost. The coordinator then holds no row for it.
         self.server.mode = 'drop'
         self.timer_pass()
         self.server.owned.clear()
         self.server.node.update(state='active', planId=None, targetImage=None)
-        self.assertEqual(self.timer_pass()['status'], 'not_created')
+        return self.root / 'auto-deploy' / 'state.json'
+
+    def assert_held_with_intent(self, state_path, saved):
+        result = self.timer_pass()
+        self.assertEqual((result['status'], result['reason']), ('held', 'ownership_unproven'))
+        self.assertEqual(json.loads(state_path.read_text())['scheduling']['request'], saved)
+        self.assertFalse((self.root / 'auto-deploy' / agent.REFUSAL_FILE).exists())
         self.assertEqual(len(self.server.posts), 1)
+        self.run.assert_not_called()
+
+    def test_typed_absence_at_the_same_authority_clears_the_intent(self):
+        state_path = self.lost_then_absent()
+        self.assertEqual(self.timer_pass()['status'], 'not_created')
+        self.assertIsNone(json.loads(state_path.read_text())['scheduling'])
+        self.assertEqual(len(self.server.posts), 1)
+
+    def test_generic_404_holds_and_keeps_the_intent(self):
+        state_path = self.lost_then_absent()
+        saved = json.loads(state_path.read_text())['scheduling']['request']
+        self.server.lookup_answer = 'generic'
+        for _ in range(2):
+            self.assert_held_with_intent(state_path, saved)
+
+    def test_disabled_prototype_404_holds_and_keeps_the_intent(self):
+        state_path = self.lost_then_absent()
+        saved = json.loads(state_path.read_text())['scheduling']['request']
+        self.server.lookup_answer = 'disabled'
+        self.assert_held_with_intent(state_path, saved)
+
+    def test_changed_authority_with_no_row_holds_even_with_typed_absence(self):
+        state_path = self.lost_then_absent()
+        saved = json.loads(state_path.read_text())['scheduling']['request']
+        self.server.authority = str(uuid.UUID(int=9))
+        for _ in range(2):
+            self.assert_held_with_intent(state_path, saved)
+        # The absence answer was never even asked for under the new authority.
+        self.assertEqual(self.server.lookups, [])
+
+    def test_authority_changing_during_the_lookup_holds(self):
+        state_path = self.lost_then_absent()
+        saved = json.loads(state_path.read_text())['scheduling']['request']
+        self.server.on_lookup = lambda: setattr(self.server, 'authority', str(uuid.UUID(int=9)))
+        self.assert_held_with_intent(state_path, saved)
+        self.assertEqual(len(self.server.lookups), 1)
+
+    def test_changed_authority_with_a_row_holds(self):
+        self.server.mode = 'drop'
+        self.timer_pass()
+        state_path = self.root / 'auto-deploy' / 'state.json'
+        saved = json.loads(state_path.read_text())['scheduling']['request']
+        # The row exists but now belongs to another authority: 409 on lookup.
+        self.server.owned[saved['requestId']]['authorityId'] = str(uuid.UUID(int=9))
+        self.assert_held_with_intent(state_path, saved)
 
 
 @unittest.skipIf(os.name == 'nt', 'Installed node automation uses Linux host locks')
@@ -594,7 +656,7 @@ class AutoDeployRunnerTests(unittest.TestCase):
                 patch.object(agent, 'inspect', side_effect=lambda ref: json.loads(json.dumps(images[ref]))):
             result = agent.auto_deploy(self.root, settings, api,
                 schedule=lambda request: schedule_owned(self.root, settings, operator, request),
-                lookup=lambda request_id: None,
+                lookup=lambda request: None,
                 run=lambda receipt, wait, drain, plan, target: run(
                     self.root, api, operator, receipt, wait, drain, expected_plan_id=plan, expected_target=target),
                 wait_seconds=0, drain_seconds=60)
