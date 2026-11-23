@@ -54,7 +54,16 @@ def idle_host_gate(api, node_id, engine_id, deadline):
         time.sleep(min(2, max(0, deadline - time.monotonic())))
 
 
-def run(root, api, operator, receipt, wait_seconds, drain_seconds=60):
+def run(root, api, operator, receipt, wait_seconds, drain_seconds=60, *, expected_plan_id=None,
+        expected_target=None):
+    """Drain, replace and reopen for the eligible plan.
+
+    With `expected_plan_id`/`expected_target` (auto-deploy), every poll and
+    every later revalidation must still see exactly that plan; any other plan
+    stops before ingress or the update is touched.
+    """
+    if (expected_plan_id is None) != (expected_target is None):
+        raise GateError('expected plan and target are bound together')
     settings = json.loads((root / 'maintenance.json').read_text())
     ingress = Ingress(root / 'ingress')
     node_id = settings['nodeId']
@@ -70,6 +79,9 @@ def run(root, api, operator, receipt, wait_seconds, drain_seconds=60):
             node = api.json('GET', '/v1/prototype/nodes/' + node_id)['node']
             if node['state'] not in ('scheduled', 'draining'):
                 return {'status': 'not_eligible', 'nodeState': node['state']}
+            if expected_plan_id is not None and (node.get('planId') != expected_plan_id
+                                                 or node.get('targetImage') != expected_target):
+                raise GateError('maintenance plan is not the bound plan; no ingress or update change')
             due = datetime.fromisoformat(node['notBefore'].replace('Z', '+00:00')) <= datetime.now(timezone.utc)
             if node['state'] == 'draining' and due:
                 break
@@ -126,6 +138,20 @@ def schedule(root, settings, api, operator, target_image, drain_at, not_before, 
         'drainAt': drain_at, 'notBefore': not_before, 'afterJobId': after_job_id})
 
 
+def schedule_owned(root, settings, operator, request):
+    """Create a plan through the idempotent owned-schedule API.
+
+    The caller persists `request` (with its requestId and expectedRevision)
+    before the first attempt. Re-sending the identical request after a lost
+    response returns the original receipt; any other state is a conflict.
+    """
+    receipt_args = SimpleNamespace(project=settings['project'], service=settings['service'],
+        compose_file=str(root / 'compose.json'), node_origin='http://127.0.0.1:13004',
+        docker_engine_id=Ingress(root / 'ingress').config['engineId'], node_port=3000)
+    ComposeNode(receipt_args, root).image(request['targetImage'])
+    return operator.json('POST', '/v1/prototype/nodes/' + settings['nodeId'] + '/schedule-owned', request)['receipt']
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', required=True)
@@ -167,8 +193,10 @@ def main():
                               args.not_before, args.after_job_id)
         elif args.action == 'auto-deploy':
             result = auto_deploy(root, settings, api,
-                schedule=lambda image, drain_at, not_before: schedule(root, settings, api, operator, image, drain_at, not_before),
-                run=lambda receipt, wait, drain: run(root, api, operator, private_directory(receipt), wait, drain),
+                schedule=lambda request: schedule_owned(root, settings, operator, request),
+                run=lambda receipt, wait, drain, plan_id, target: run(
+                    root, api, operator, private_directory(receipt), wait, drain,
+                    expected_plan_id=plan_id, expected_target=target),
                 wait_seconds=args.wait_seconds, drain_seconds=args.drain_seconds)
         else:
             result = run(root, api, operator, private_directory(args.receipt), args.wait_seconds, args.drain_seconds)

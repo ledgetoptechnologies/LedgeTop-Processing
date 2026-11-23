@@ -109,8 +109,9 @@ Each pass, in order:
    any network or Docker call. `touch` it to hold, delete it to resume. A hold
    does not cancel a window already scheduled; use the coordinator `cancel`
    action for that (the agent then records `cancelled` and never retries it).
-2. A failed, held or updating node, or a plan the agent did not create, is left
-   alone (`not_eligible`).
+2. A failed, held or updating node is left alone (`not_eligible`). So is any
+   scheduled or draining plan the agent did not create and record, even one
+   for the same image (`other_plan`).
 3. It pulls the package's `verified` tag only to learn its digest, then pulls
    `repository@sha256:<digest>` with the host's existing read-only registry
    login and inspects it. The image ID must match the tag's, the digest must be
@@ -124,14 +125,24 @@ Each pass, in order:
    must be newer than the pin's and than every candidate this host already
    tried (`highestRunId`), so it never goes backwards or retries a failure
    (`not_newer`).
-5. It schedules a window (`drainAt` = `notBefore` = now + `drainDelaySeconds`)
-   and calls the normal `run` with a private receipt under
-   `$ROOT/auto-deploy/receipts/`. A `waiting` result resumes the same plan and
-   receipt on the next pass without rescheduling. A failed candidate is rolled
-   back by `run` exactly as above and recorded in `state.json` as `failed`.
+5. It creates the window (`drainAt` = `notBefore` = now + `drainDelaySeconds`)
+   with the coordinator's idempotent `schedule-owned` request, a compare-and-swap
+   on the node revision it just read. The request, with its `requestId`, is saved
+   in `state.json` before it is sent. A lost response is resolved only by
+   re-sending that identical request, which returns the original plan or is
+   refused; a refusal keeps the intent and stops every pass (`stopped`) until a
+   person inspects the node and clears `scheduling`.
+6. It records the returned plan ID and target and calls `run` with both under a
+   private receipt in `$ROOT/auto-deploy/receipts/`. `run` then requires that
+   exact plan and target on every poll and again after closing ingress and in
+   the update itself; any other plan stops before ingress or the container is
+   touched. A `waiting` result resumes the same plan on the next pass. A plan
+   cancelled or replaced by someone else is recorded as `cancelled` and never
+   retried. A failed candidate is rolled back by `run` exactly as above and
+   recorded in `state.json` as `failed`.
 
-`$ROOT/auto-deploy/state.json` keeps `inProgress`, `applied`, `failed`,
-`cancelled` and `highestRunId`; `last-run.json` records every pass. A flock on
+`$ROOT/auto-deploy/state.json` keeps `scheduling`, `inProgress` (with its plan
+ID), `applied`, `failed`, `cancelled` and `highestRunId`; `last-run.json` records every pass. A flock on
 `agent.lock` keeps timer passes from overlapping. The exit status is 0 for
 normal outcomes, 1 for a failed (rolled back) update and 2 for `refused` or
 a stop that needs inspection; existing receipts are never replayed.

@@ -125,40 +125,60 @@ def remote_digest(reference):
     return digest
 
 
+def main_head():
+    branch = github('/repos/' + REPOSITORY + '/branches/main')
+    head = branch.get('commit', {}).get('sha') if isinstance(branch, dict) else None
+    if not isinstance(head, str) or not re.fullmatch('[0-9a-f]{40}', head):
+        raise ValueError('main head unavailable')
+    return head
+
+
 def promote(state):
-    """Move `verified` to the pair just verified, only from the head of main."""
+    """Move each package's `verified` tag to its verified digest from main's head.
+
+    Packages activate independently: each tag names one image that was itself
+    built, smoke tested and identity-verified, and a host follows exactly one
+    package. A stop between the two tags (superseded head or failed push) can
+    leave only the first package promoted; the receipt says which. Hosts never
+    move backwards, so the next main run promotes both again.
+    """
     if os.environ.get('GITHUB_EVENT_NAME') != 'push':
         state['promotion'] = {'status': 'skipped_not_main_push'}
         receipt(state)
         return
     if [image.get('status') for image in state['images']] != ['verified'] * len(PACKAGES):
         raise ValueError('promotion requires the whole verified pair')
-    state['stage'] = 'promotion_main_head'
-    receipt(state)
-    branch = github('/repos/' + REPOSITORY + '/branches/main')
-    head = branch.get('commit', {}).get('sha') if isinstance(branch, dict) else None
-    if not isinstance(head, str) or not re.fullmatch('[0-9a-f]{40}', head):
-        raise ValueError('main head unavailable')
-    if head != state['sourceCommit']:
-        # A newer main commit has its own run; never point hosts backwards.
-        state['promotion'] = {'status': 'skipped_superseded', 'mainHead': head}
-        receipt(state)
-        return
-    for image in state['images']:
-        verify_package(state, image['package'], 'promotion_package_metadata')
-        verified = image['reference'].rsplit(':', 1)[0] + ':' + VERIFIED_TAG
-        image.update(verifiedTag=verified, promotion='push_response_unconfirmed')
-        state['stage'] = 'promotion_push'
-        receipt(state)
-        command(['docker', 'tag', image['reference'], verified])
-        command(['docker', 'push', verified])
-        state['stage'] = 'promotion_digest'
-        receipt(state)
-        if remote_digest(verified) != image['digest']:
-            raise ValueError('verified tag does not name the verified digest')
-        image['promotion'] = 'verified'
-        receipt(state)
-    state['promotion'] = {'status': 'promoted', 'tag': VERIFIED_TAG}
+    promoted = []
+    try:
+        for image in state['images']:
+            # Checked again per package: a newer main commit has its own run.
+            state.update(stage='promotion_main_head', currentPackage=image['package'])
+            receipt(state)
+            head = main_head()
+            if head != state['sourceCommit']:
+                image['promotion'] = 'skipped_superseded'
+                state['promotion'] = {'status': 'partial_superseded' if promoted else 'skipped_superseded',
+                                      'mainHead': head, 'promoted': promoted}
+                receipt(state)
+                return
+            verify_package(state, image['package'], 'promotion_package_metadata')
+            verified = image['reference'].rsplit(':', 1)[0] + ':' + VERIFIED_TAG
+            image.update(verifiedTag=verified, promotion='push_response_unconfirmed')
+            state['stage'] = 'promotion_push'
+            receipt(state)
+            command(['docker', 'tag', image['reference'], verified])
+            command(['docker', 'push', verified])
+            state['stage'] = 'promotion_digest'
+            receipt(state)
+            if remote_digest(verified) != image['digest']:
+                raise ValueError('verified tag does not name the verified digest')
+            image['promotion'] = 'verified'
+            promoted.append(image['package'])
+            receipt(state)
+    except Exception:
+        state['promotion'] = {'status': 'partial' if promoted else 'failed', 'promoted': promoted}
+        raise
+    state['promotion'] = {'status': 'promoted', 'tag': VERIFIED_TAG, 'promoted': promoted}
     receipt(state)
 
 

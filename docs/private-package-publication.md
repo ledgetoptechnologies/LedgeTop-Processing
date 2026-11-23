@@ -76,10 +76,21 @@ After both images are verified, the publisher promotes them only when:
 - that commit is still the head of main (otherwise `skipped_superseded`; the
   newer commit's own run promotes it, so the tag never moves backwards).
 
-For each package it re-verifies the package, tags the verified local image as
-`:verified`, pushes it, and requires the registry's digest for `:verified` to
-equal the verified digest (`promotion_digest_unverified` otherwise). The run
-receipt records `promotion.status` and each image's `verifiedTag`.
+For each package, in turn, it checks again that the commit is still main's
+head, re-verifies the package, tags the verified local image as `:verified`,
+pushes it, and requires the registry's digest for `:verified` to equal the
+verified digest (`promotion_digest_unverified` otherwise). The run receipt
+records `promotion.status`, `promotion.promoted` and each image's
+`verifiedTag`/`promotion`.
+
+The two packages activate independently; there is no pair pointer. Each
+`verified` tag names one image that was itself built, smoke tested and
+identity-verified, and each host follows exactly one package. Hosts also update
+at different times because each waits for its own drain window, so a pair
+pointer would not make activation atomic anyway. A stop between the two tags
+(main moved on, `partial_superseded`; or a failed tag push, `partial`) can
+leave only the first package promoted. That package's hosts may take it; the
+other package's hosts keep their pin until the next main run promotes both.
 
 `verified` is a moving pointer for discovery only. No host runs it: the
 [node-side auto-deploy step](main-maintenance.md#automatic-updates) resolves it

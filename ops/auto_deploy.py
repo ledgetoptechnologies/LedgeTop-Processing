@@ -10,12 +10,15 @@ Run by the host's own timer through `node_maintenance.py auto-deploy`. Each run:
 3. does nothing unless that run is newer than both the running pin and every
    candidate this host already tried, so it never goes backwards or retries a
    failed candidate;
-4. schedules a drain window and hands the update to the existing drain-window
-   runner, which drains, replaces, saves the new pin or rolls back.
+4. creates a plan with the coordinator's idempotent owned-schedule request
+   (compare-and-swap on the node revision), records that plan ID and target,
+   and hands exactly that plan to the existing drain-window runner, which
+   re-checks it on every poll, then drains, replaces, saves the pin or rolls back.
 
 The hosts still run only sha256 image IDs; the tag is never started. A plan
-the agent did not create, a failed/held node and an existing operation receipt
-all stop it for a person to inspect. It writes `auto-deploy/state.json` and
+the agent did not create (even for the same image), a replaced plan, a
+failed/held node and an existing operation receipt all stop it for a person to
+inspect. It writes `auto-deploy/state.json` and
 `auto-deploy/last-run.json` under the operator root on every run.
 """
 from contextlib import contextmanager
@@ -25,6 +28,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import uuid
 
 from processing import release_packages
 from processing.container_update import save
@@ -167,12 +171,24 @@ def step(root, directory, settings, binding, api, *, schedule, run, wait_seconds
         raise DeployError('autoDeploy.drainDelaySeconds must be 0..86400')
     state_path = directory / 'state.json'
     state = load(state_path)
-    node = api.json('GET', '/v1/prototype/nodes/' + settings['nodeId'])['node']
-    pending = state.get('inProgress')
+    route = '/v1/prototype/nodes/' + settings['nodeId']
 
+    intent = state.get('scheduling')
+    if intent is not None:
+        # An earlier pass persisted this owned request but never recorded its
+        # receipt. Only the identical request is re-sent: the coordinator either
+        # returns that request's original plan or refuses. A refusal stops here.
+        bind(state, settings, intent['candidate'], intent['request'], schedule(intent['request']))
+        save(state_path, state)
+
+    pending = state.get('inProgress')
+    node = api.json('GET', route)['node']
     if pending is None:
-        if node['state'] not in ('active', 'scheduled', 'draining'):
-            return {'status': 'not_eligible', 'nodeState': node['state']}
+        if node['state'] != 'active':
+            # Only a plan this agent created and recorded is ever run, even if
+            # another plan targets the same image.
+            return {'status': 'not_eligible', 'nodeState': node['state'],
+                    **({'reason': 'other_plan'} if node['state'] in ('scheduled', 'draining') else {})}
         candidate = resolve(key)
         if candidate['ref'] != 'refs/heads/main' or candidate['event'] != 'push':
             return {'status': 'ignored', 'reason': 'not_a_main_push', 'candidate': candidate}
@@ -187,21 +203,28 @@ def step(root, directory, settings, binding, api, *, schedule, run, wait_seconds
         floor = max(current['runId'], state.get('highestRunId', 0))
         if candidate['runId'] <= floor:
             return {'status': 'not_newer', 'runId': candidate['runId'], 'floor': floor}
-        if node['state'] == 'active':
-            drain = utc(now + timedelta(seconds=delay))
-            schedule(candidate['imageId'], drain, drain)
-            node = api.json('GET', '/v1/prototype/nodes/' + settings['nodeId'])['node']
-        elif node.get('targetImage') != candidate['imageId']:
-            # Somebody else's plan: never adopt or replace it.
-            return {'status': 'not_eligible', 'nodeState': node['state'], 'reason': 'other_plan'}
-        # Recorded after scheduling; an interrupted pass adopts its own plan above.
-        state.update(inProgress=candidate, highestRunId=candidate['runId'])
+        drain = utc(now + timedelta(seconds=delay))
+        # Compare-and-swap on the node revision just read; the request is saved
+        # before it is sent so a lost response is resolved by replaying it.
+        request = {'schemaVersion': 1, 'requestId': str(uuid.uuid4()),
+                   'authorityId': api.json('GET', '/v1/prototype/authority')['authorityId'],
+                   'expectedRevision': node['revision'], 'targetImage': candidate['imageId'],
+                   'drainAt': drain, 'notBefore': drain, 'afterJobId': None}
+        state['scheduling'] = {'candidate': candidate, 'request': request}
         save(state_path, state)
-        pending = candidate
+        bind(state, settings, candidate, request, schedule(request))
+        save(state_path, state)
+        pending = state['inProgress']
+        node = api.json('GET', route)['node']
 
-    if node['state'] not in ('scheduled', 'draining') or node.get('targetImage') != pending['imageId']:
-        if node['state'] != 'active':
-            return {'status': 'not_eligible', 'nodeState': node['state'], 'runId': pending['runId']}
+    ours = node.get('planId') == pending['planId'] and node.get('targetImage') == pending['imageId']
+    if node['state'] in ('scheduled', 'draining') and not ours:
+        # Cancelled and replaced by somebody else: leave theirs alone.
+        state.update(cancelled=pending, inProgress=None)
+        save(state_path, state)
+        return {'status': 'not_eligible', 'nodeState': node['state'], 'reason': 'plan_replaced',
+                'runId': pending['runId']}
+    if node['state'] == 'active':
         if pinned(root, settings) == pending['imageId']:
             state.update(applied=pending, inProgress=None)
             save(state_path, state)
@@ -210,12 +233,16 @@ def step(root, directory, settings, binding, api, *, schedule, run, wait_seconds
         state.update(cancelled=pending, inProgress=None)
         save(state_path, state)
         return {'status': 'cancelled', 'runId': pending['runId']}
+    if node['state'] not in ('scheduled', 'draining'):
+        return {'status': 'not_eligible', 'nodeState': node['state'], 'runId': pending['runId']}
 
     receipts = directory / 'receipts'
     receipts.mkdir(mode=0o700, exist_ok=True)
-    receipt = receipts / (str(pending['runId']) + '-' + pending['imageId'][7:19])
+    receipt = receipts / (str(pending['runId']) + '-' + pending['planId'])
     receipt.mkdir(mode=0o700, exist_ok=True)
-    result = run(receipt, wait_seconds, drain_seconds)
+    # The runner re-checks this exact plan and target on every poll and again
+    # before ingress and the update.
+    result = run(receipt, wait_seconds, drain_seconds, pending['planId'], pending['imageId'])
     if result.get('status') == 'succeeded':
         state.update(applied=pending, inProgress=None)
     elif result.get('status') == 'failed':
@@ -223,6 +250,20 @@ def step(root, directory, settings, binding, api, *, schedule, run, wait_seconds
         state.update(failed=pending, inProgress=None)
     save(state_path, state)
     return {**result, 'runId': pending['runId'], 'commit': pending['commit'], 'receipt': receipt.name}
+
+
+PLAN = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z')
+
+
+def bind(state, settings, candidate, request, receipt):
+    """Record the plan the coordinator created for exactly this request."""
+    if (not isinstance(receipt, dict) or receipt.get('requestId') != request['requestId']
+            or receipt.get('nodeId') != settings['nodeId'] or receipt.get('targetImage') != candidate['imageId']
+            or receipt.get('expectedRevision') != request['expectedRevision']
+            or not isinstance(receipt.get('planId'), str) or not PLAN.fullmatch(receipt['planId'])):
+        raise DeployError('schedule receipt does not bind this request; inspect the node plan')
+    state.update(inProgress={**candidate, 'planId': receipt['planId'], 'requestId': request['requestId']},
+                 highestRunId=candidate['runId'], scheduling=None)
 
 
 def pinned(root, settings):

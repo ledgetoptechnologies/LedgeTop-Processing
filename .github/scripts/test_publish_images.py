@@ -197,9 +197,10 @@ class PublicationBoundaryTests(unittest.TestCase):
     def test_existing_private_pair_builds_and_smokes_before_first_push(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'private'}
         linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
-        records, commands = self.run_publication([repository, *([linked] * 8), self.head(), linked, linked])
+        records, commands = self.run_publication([repository, *([linked] * 8), self.head(), linked, self.head(), linked])
         self.assertEqual(records[-1]['status'], 'succeeded')
-        self.assertEqual(records[-1]['promotion'], {'status': 'promoted', 'tag': 'verified'})
+        self.assertEqual(records[-1]['promotion'], {'status': 'promoted', 'tag': 'verified',
+                                                  'promoted': list(publish_images.PACKAGES)})
         pushes = [i for i, args in enumerate(commands) if args[:2] == ['docker', 'push']]
         self.assertEqual(len(pushes), 4)
         # The moving `verified` tag is written only after both immutable
@@ -264,6 +265,47 @@ class PublicationBoundaryTests(unittest.TestCase):
                 self.assertEqual(records[-1]['failureCode'], code)
                 self.assertFalse(any(':verified' in ' '.join(args) for args in commands if args[:2] == ['docker', 'push']))
 
+    def test_packages_activate_independently_when_main_moves_between_tags(self):
+        repository = {'full_name': REPOSITORY, 'visibility': 'private'}
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
+        records, commands = self.run_publication([repository, *([linked] * 8), self.head(), linked, self.head('c' * 40)])
+        final = records[-1]
+        self.assertEqual(final['status'], 'succeeded')
+        self.assertEqual(final['promotion']['status'], 'partial_superseded')
+        self.assertEqual(final['promotion']['promoted'], [publish_images.PACKAGES[0]])
+        self.assertEqual([image['promotion'] for image in final['images']], ['verified', 'skipped_superseded'])
+        verified = [args[2] for args in commands if args[:2] == ['docker', 'push'] and args[2].endswith(':verified')]
+        self.assertEqual(len(verified), 1)
+        self.assertIn('/' + publish_images.PACKAGES[0] + ':', verified[0])
+
+    def test_failed_second_tag_leaves_first_package_independently_promoted(self):
+        repository = {'full_name': REPOSITORY, 'visibility': 'private'}
+        linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
+        records, commands = [], []
+        def fake_command(args, **kwargs):
+            commands.append(args)
+            if args[:3] == ['docker', 'image', 'inspect']:
+                return json.dumps([{'Config': {'User': '10001:10001', 'Labels': self.labels_for(args[3])},
+                                    'Os': 'linux', 'Architecture': 'amd64', 'Id': 'sha256:' + 'a' * 64}])
+            if args[:2] == ['docker', 'push'] and args[2].endswith(publish_images.PACKAGES[1] + ':verified'):
+                raise TimeoutError('synthetic lost push response')
+            if args[:4] == ['docker', 'buildx', 'imagetools', 'inspect']:
+                return json.dumps({'digest': 'sha256:' + 'b' * 64})
+            return ''
+        metadata = [repository, *([linked] * 8), self.head(), linked, self.head(), linked]
+        with patch.dict(publish_images.os.environ, self.env, clear=True), \
+             patch.object(publish_images, 'github', side_effect=metadata), \
+             patch.object(publish_images, 'receipt', side_effect=lambda x: records.append(copy.deepcopy(x))), \
+             patch.object(publish_images, 'command', side_effect=fake_command):
+            with self.assertRaises(SystemExit):
+                publish_images.main()
+        final = records[-1]
+        self.assertEqual(final['failureCode'], 'promotion_push_unconfirmed')
+        self.assertEqual(final['promotion'], {'status': 'partial', 'promoted': [publish_images.PACKAGES[0]]})
+        self.assertEqual([image['promotion'] for image in final['images']], ['verified', 'push_response_unconfirmed'])
+        # Both images were already individually verified before any tag moved.
+        self.assertEqual([image['status'] for image in final['images']], ['verified', 'verified'])
+
     def test_verified_tag_naming_another_digest_fails_publication(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'private'}
         linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
@@ -277,7 +319,7 @@ class PublicationBoundaryTests(unittest.TestCase):
     def test_build_carries_identity_labels_hosts_check(self):
         repository = {'full_name': REPOSITORY, 'visibility': 'private'}
         linked = {'visibility': 'private', 'repository': {'full_name': REPOSITORY}}
-        records, commands = self.run_publication([repository, *([linked] * 8), self.head(), linked, linked])
+        records, commands = self.run_publication([repository, *([linked] * 8), self.head(), linked, self.head(), linked])
         builds = [args for args in commands if args[:2] == ['docker', 'build']]
         self.assertEqual(records[-1]['status'], 'succeeded')
         for key, build in zip(publish_images.PACKAGE_KEYS, builds):
