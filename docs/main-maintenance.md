@@ -130,7 +130,9 @@ Each pass, in order:
    on the node revision it just read. The request, with its `requestId`, is
    saved in `$ROOT/auto-deploy/schedule-intent.json` before it is sent, and that
    file is removed only when the request's receipt is bound or the request was
-   definitely refused. The client tells a definite answer (`HTTPRefused`, an
+   definitely refused; on a refusal `refused.json` is written (atomic, fsynced)
+   before the intent is removed, and if that write fails the intent stays and
+   the pass returns `held`, `refusal_latch_unsaved`. The client tells a definite answer (`HTTPRefused`, an
    HTTP status and sanitized error code) from an uncertain one (`HTTPUncertain`:
    no complete response). A 3xx/4xx answer means nothing was created: the agent
    writes `$ROOT/auto-deploy/refused.json` and sends no schedule request on any
@@ -144,10 +146,12 @@ Each pass, in order:
      authority equal to the saved request's before and after the lookup, is
      only a point-in-time absence: a timed-out request can still commit. The
      agent keeps the intent, marks it `unresolved` and returns `held`,
-     `schedule_unresolved` with the action "check the node has no plan from
-     this request, then delete auto-deploy/schedule-intent.json to retry". It
-     keeps reading on later passes and never clears the intent or sends a new
-     request itself.
+     `schedule_unresolved`. It keeps reading on later passes and never clears
+     the intent or sends a new request itself. Before deleting
+     `auto-deploy/schedule-intent.json` to retry, an operator must confirm the
+     original request has settled (the coordinator request timeout has passed,
+     or its logs show the request finished) and that no receipt or plan exists
+     for it. A momentary absence is not enough.
    - A generic or `prototype_disabled` 404, a 409 authority conflict, a changed
      authority or an uncertain lookup holds (`ownership_unproven`).
    - A receipt whose request ID, node, authority, expected revision, target or

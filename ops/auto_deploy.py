@@ -150,6 +150,7 @@ def definite(error):
 
 
 def latch(directory, state_path, state, stage, detail):
+    # `save` is an atomic, fsynced replace: the latch is durable once it returns.
     save(directory / REFUSAL_FILE, {'stage': stage, **detail, 'at': utc(datetime.now(timezone.utc))})
     save(state_path, state)
     return {'status': 'refused', 'reason': stage + '_refused', **detail}
@@ -222,8 +223,10 @@ def step(root, directory, settings, binding, api, *, schedule, lookup, run, wait
             # Absent right now at the original authority, but the timed-out
             # request may still commit. Keep the intent and only read again.
             unresolved = {'status': 'held', 'reason': 'schedule_unresolved', 'requestId': request_id,
-                          'action': 'unresolved: check the node has no plan from this request, then delete '
-                                    + STATE_DIR + '/' + INTENT_FILE + ' to retry'}
+                          'action': ('unresolved: before deleting ' + STATE_DIR + '/' + INTENT_FILE
+                                     + ' to retry, confirm the original request has settled (the coordinator'
+                                     ' request timeout has passed or its logs show the request finished) and'
+                                     ' that no receipt or plan exists for it; a momentary absence is not enough')}
             if intent.get('unresolved') is None:
                 intent['unresolved'] = {'since': utc(datetime.now(timezone.utc)), 'action': unresolved['action']}
                 save(intent_path, intent)
@@ -269,10 +272,16 @@ def step(root, directory, settings, binding, api, *, schedule, lookup, run, wait
             receipt = schedule(request)
         except (SmokeError, OSError, ValueError, KeyError) as error:
             if definite(error):
-                # Refused before any plan was stored: nothing was created.
+                # Refused before any plan was stored: nothing was created. The
+                # latch is saved first; the intent goes only once it is durable,
+                # so an interruption leaves at least one of them and no re-POST.
+                try:
+                    result = latch(directory, state_path, state, 'schedule',
+                                   {'httpStatus': error.status, 'requestId': request['requestId']})
+                except OSError:
+                    return {'status': 'held', 'reason': 'refusal_latch_unsaved', 'requestId': request['requestId']}
                 intent_path.unlink()
-                return latch(directory, state_path, state, 'schedule',
-                             {'httpStatus': error.status, 'requestId': request['requestId']})
+                return result
             return {'status': 'held', 'reason': 'schedule_response_uncertain', 'requestId': request['requestId']}
         try:
             bind(state, settings, candidate, request, receipt)

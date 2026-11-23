@@ -306,7 +306,8 @@ class AutoDeployTests(unittest.TestCase):
             result = self.deploy()
             self.assertEqual((result['status'], result['reason'], result['requestId']),
                              ('held', 'schedule_unresolved', first['requestId']))
-            self.assertIn('delete auto-deploy/schedule-intent.json to retry', result['action'])
+            self.assertIn('before deleting auto-deploy/schedule-intent.json to retry', result['action'])
+            self.assertIn('a momentary absence is not enough', result['action'])
             self.assertEqual(self.intent()['request'], first)
         self.assertEqual(self.last()['reason'], 'schedule_unresolved')
         self.assertIn('unresolved', self.intent())
@@ -351,6 +352,39 @@ class AutoDeployTests(unittest.TestCase):
                 latch.unlink()
                 self.schedule.side_effect = self.scheduled
                 self.assertEqual(self.deploy()['status'], 'succeeded')
+
+    def failing_save(self, name):
+        real = agent.save
+        def save_or_fail(path, value):
+            if path.name == name:
+                raise OSError('synthetic write failure')
+            return real(path, value)
+        return patch.object(agent, 'save', side_effect=save_or_fail)
+
+    def test_refusal_latch_write_failure_keeps_intent_and_never_reposts(self):
+        self.schedule.side_effect = HTTPRefused('HTTP request rejected or redirected', 409)
+        with self.failing_save(agent.REFUSAL_FILE):
+            result = self.deploy()
+        self.assertEqual((result['status'], result['reason']), ('held', 'refusal_latch_unsaved'))
+        self.assertIsNotNone(self.intent())
+        self.assertFalse((self.root / 'auto-deploy' / agent.REFUSAL_FILE).exists())
+        # Next timer pass: only the read-only lookup; the request is never re-sent.
+        for _ in range(2):
+            self.assertEqual(self.deploy()['reason'], 'schedule_unresolved')
+        self.schedule.assert_called_once()
+        self.assertEqual(self.lookup.call_count, 2)
+        self.run.assert_not_called()
+
+    def test_interruption_after_durable_latch_leaves_both_files_and_never_reposts(self):
+        # refused.json is durable, then the pass stops before removing the intent.
+        self.schedule.side_effect = HTTPRefused('HTTP request rejected or redirected', 409)
+        with self.failing_save('state.json'):
+            self.assertEqual(self.deploy()['reason'], 'refusal_latch_unsaved')
+        self.assertTrue((self.root / 'auto-deploy' / agent.REFUSAL_FILE).exists())
+        self.assertIsNotNone(self.intent())
+        self.assertEqual(self.deploy(), {'status': 'held', 'reason': 'refusal_latched'})
+        self.schedule.assert_called_once()
+        self.lookup.assert_not_called()
 
     def test_definite_lookup_refusal_latches(self):
         self.schedule.side_effect = HTTPUncertain('HTTP response uncertain; mutation must not be retried')
@@ -624,6 +658,23 @@ class RealClientTimerTests(unittest.TestCase):
         self.server.on_lookup = lambda: setattr(self.server, 'authority', str(uuid.UUID(int=9)))
         self.assert_held_with_intent(state_path, saved)
         self.assertEqual(len(self.server.lookups), 1)
+
+    def test_real_409_with_failed_latch_write_never_posts_again(self):
+        real = agent.save
+        def save_or_fail(path, value):
+            if path.name == agent.REFUSAL_FILE:
+                raise OSError('synthetic write failure')
+            return real(path, value)
+        with patch.object(agent, 'save', side_effect=save_or_fail):
+            first = self.timer_pass()
+        self.assertEqual((first['status'], first['reason']), ('held', 'refusal_latch_unsaved'))
+        intent_path = self.root / 'auto-deploy' / agent.INTENT_FILE
+        self.assertTrue(intent_path.exists())
+        second = self.timer_pass()
+        self.assertEqual((second['status'], second['reason']), ('held', 'schedule_unresolved'))
+        self.assertEqual(len(self.server.posts), 1)
+        self.assertEqual(self.server.lookups, [self.server.posts[0]['requestId']])
+        self.run.assert_not_called()
 
     def test_changed_authority_with_a_row_holds(self):
         self.server.mode = 'drop'
