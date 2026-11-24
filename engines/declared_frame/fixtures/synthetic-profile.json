@@ -1,0 +1,51 @@
+{
+ "schema": "declared-frame-profile/v1",
+ "kind": "synthetic",
+ "source": {
+  "crs": "EPSG:6525+6360",
+  "units": "ftUS,ftUS,ftUS",
+  "axes": "E,N,H",
+  "realization": "NAD83(2011)",
+  "epoch": "2010.00",
+  "geoid": "GEOID18"
+ },
+ "survey": {
+  "epsg": 6525,
+  "lat0": 42.5,
+  "lon0": -71.66666666666667,
+  "scale": 0.999966667,
+  "false_east_m": 300000.0,
+  "false_north_m": 0.0,
+  "unit_m": 0.3048006096012192
+ },
+ "output": {
+  "epsg": 6524,
+  "lat0": 42.5,
+  "lon0": -71.66666666666667,
+  "scale": 0.999966667,
+  "false_east_m": 300000.0,
+  "false_north_m": 0.0,
+  "unit_m": 1.0
+ },
+ "grid": {
+  "name": "us_noaa_g2018u0.tif",
+  "sha256": "fa9a407ac7ee3f5a3694008e4bcd09ce9cc250452f0c3b11700a4960340abce2",
+  "size": 16742155
+ },
+ "roles": {
+  "fit": [
+   "SYN-A",
+   "SYN-B",
+   "SYN-C"
+  ],
+  "marks_per_point": 3,
+  "withheld": [
+   "SYN-W"
+  ],
+  "excluded": [
+   "SYN-X"
+  ]
+ },
+ "epoch_review": "synthetic",
+ "camera_gps": "not_a_constraint"
+}
